@@ -2229,6 +2229,59 @@ mod tests {
     use crate::source::{Pin, Source};
     use std::path::PathBuf;
 
+    // ---- item-link path classification (LNK-20, WF-6) -----------------
+
+    /// Only a `.js` directly under `workflows/` is a workflow. The two
+    /// predicates pick different refusals, so the boundary between them is what
+    /// decides whether the operator is told the path names an unsupported kind
+    /// or an unlinkable file: a `lib/util.js` called a workflow would name an
+    /// item that does not exist.
+    // spec: WF-6 LNK-20
+    #[test]
+    fn only_a_js_directly_under_workflows_is_a_workflow_link_path() {
+        for path in [
+            "workflows/deploy.js",
+            "pkg/workflows/deploy.js",
+            "workflows/DEPLOY.js",
+        ] {
+            assert!(
+                is_workflow_link_path(path),
+                "'{path}' names a workflow file"
+            );
+            assert!(is_js_link_path(path), "'{path}' is also a JavaScript file");
+        }
+
+        for path in [
+            // right extension, wrong place
+            "lib/util.js",
+            "deploy.js",
+            "workflows/nested/deep.js",
+            // right place, wrong extension: the scan is `.js`-exact (WF-3)
+            "workflows/deploy.mjs",
+            "workflows/deploy.ts",
+            "workflows/deploy.js.md",
+            "workflows/deploy",
+        ] {
+            assert!(
+                !is_workflow_link_path(path),
+                "'{path}' must not be called a workflow"
+            );
+        }
+
+        for path in ["lib/util.js", "deploy.js", "workflows/nested/deep.js"] {
+            assert!(
+                is_js_link_path(path),
+                "'{path}' is a JavaScript file, refused as one"
+            );
+        }
+        for path in ["skills/review/SKILL.md", "agents/dev.md", "workflows"] {
+            assert!(
+                !is_js_link_path(path),
+                "'{path}' is not a JavaScript file at all"
+            );
+        }
+    }
+
     // ---- scan roots unit tests (DSC-50, DSC-51, DSC-52, DSC-53) -------
 
     use std::sync::atomic::{AtomicU32, Ordering};

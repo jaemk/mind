@@ -1017,6 +1017,262 @@ fn curate_does_not_stall_on_a_pathological_workflow_meta() {
     );
 }
 
+// ---- WF-55: an over-cap workflow, wherever it is declared -------------------
+//
+// The cap these use is a lowered one (`--max-metadata-size`, DSC-103) rather
+// than a real 8 MiB file: the relaxation keys on the item's KIND, not on how
+// many bytes tripped it, so the behavior is the same and the fixture costs a
+// few hundred bytes instead of eight megabytes. The default cap against a real
+// over-sized file is covered in cli_workflows_upgrade.rs. Every run is bounded,
+// since these also walk the `meta` reader.
+
+/// A workflow small enough to sit under the lowered cap, so a test can tell an
+/// over-cap sibling apart from a source-wide failure.
+const TINY_JS: &str = "export const meta={name:'fine',description:'Fine'}\n";
+
+/// Bytes of padding that put a workflow past the lowered cap without putting a
+/// `mind.toml` or a plugin manifest past it.
+fn padded_js(name: &str) -> String {
+    format!(
+        "export const meta = {{ name: '{name}', description: 'Ship it' }}\n// {}\n",
+        "p".repeat(2600)
+    )
+}
+
+/// An over-cap workflow leaves every catalog-scanning verb working, and the
+/// healthy sibling of that source keeps its description everywhere. This is the
+/// blast radius WF-55 closed: the scan builds a source's whole item list in one
+/// pass, so one unreadable file used to take the rest of the source with it.
+// spec: WF-55 WF-30
+#[test]
+fn an_over_cap_workflow_leaves_every_scanning_verb_working() {
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/fine.js", TINY_JS);
+    sb.write_and_commit("workflows/huge.js", &padded_js("huge"));
+    let cap = ["--max-metadata-size", "2KiB"];
+
+    let mut meld = vec!["meld", "--register-only"];
+    let spec = sb.source_spec();
+    meld.push(&spec);
+    meld.extend_from_slice(&cap);
+    let r = sb.mind_bounded(&meld);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    // probe sees BOTH: the over-cap one as an item with no description, the
+    // sibling with the description the cap never touched.
+    let mut probe = vec!["probe", "--no-tui"];
+    probe.extend_from_slice(&cap);
+    let r = sb.mind_bounded(&probe);
+    assert!(r.success, "probe: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("workflow:huge") && r.stdout.contains("workflow:fine"),
+        "both workflows must be offered: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("Fine"),
+        "the sibling keeps its description: {}",
+        r.stdout
+    );
+
+    for (name, unloadable) in [("workflow:fine", false), ("workflow:huge", true)] {
+        let mut learn = vec!["learn", name];
+        learn.extend_from_slice(&cap);
+        let r = sb.mind_bounded(&learn);
+        assert!(r.success, "learn {name}: {}\n{}", r.stdout, r.stderr);
+        // The warning is what proves the fixture bites: the over-cap file
+        // reaches mind as a workflow with no readable `meta`, and the sibling
+        // under the cap is untouched.
+        assert_eq!(
+            r.stderr.contains("no `meta` object mind can read"),
+            unloadable,
+            "learn {name} reported the wrong loadability: {}",
+            r.stderr
+        );
+    }
+    assert!(
+        sb.link("huge.js").symlink_metadata().is_ok(),
+        "the over-cap workflow installs like any other unloadable one (WF-31)"
+    );
+
+    for args in [
+        vec!["sync"],
+        vec!["introspect"],
+        vec!["dump"],
+        vec!["recall"],
+        vec!["recall", "--sources"],
+        vec!["recall", "workflow:huge"],
+        vec!["upgrade", "--yes"],
+        vec!["review", &spec],
+    ] {
+        let mut full = args.clone();
+        full.extend_from_slice(&cap);
+        let r = sb.mind_bounded(&full);
+        assert!(
+            r.success,
+            "`mind {}` failed: {}\n{}",
+            args.join(" "),
+            r.stdout,
+            r.stderr
+        );
+        assert!(
+            !format!("{}{}", r.stdout, r.stderr).contains("size cap"),
+            "`mind {}` must not report the cap as a failure: {}\n{}",
+            args.join(" "),
+            r.stdout,
+            r.stderr
+        );
+    }
+}
+
+/// The same through `curate`, which pulls the catalog while holding the lock
+/// for a whole reconcile, so a failure there blocks more than one verb.
+// spec: WF-55
+#[test]
+fn curate_installs_a_source_carrying_an_over_cap_workflow() {
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/huge.js", &padded_js("huge"));
+
+    let curator = sb.base.join("curator");
+    write(
+        &curator.join("mind.toml"),
+        &format!(
+            "[discover]\nsources = [\n  {{ source = \"{}\", install = true }}\n]\n",
+            sb.source_spec()
+        ),
+    );
+    git(&curator, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&curator, &["config", "user.email", "t@t"]);
+    git(&curator, &["config", "user.name", "t"]);
+    git(&curator, &["add", "-A"]);
+    git(&curator, &["commit", "-qm", "curator"]);
+
+    let spec = curator.to_string_lossy().into_owned();
+    let r = sb.mind_bounded(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(r.success, "meld curator: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["curate", "--yes", "--max-metadata-size", "2KiB"]);
+    assert!(r.success, "curate: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("huge.js").symlink_metadata().is_ok(),
+        "the curated source's over-cap workflow installs: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// The relaxation is not tied to the convention scan: a workflow declared by an
+/// authoritative `mind.toml` `[[items]]` entry, at a path the scan would never
+/// look at, behaves the same. The `mind.toml` itself is ordinary metadata and
+/// stays under the same cap, so this also pins that the relaxation is scoped to
+/// the item and does not leak to the file that declared it.
+// spec: WF-55 WF-8
+#[test]
+fn an_over_cap_workflow_declared_in_mind_toml_is_catalogued() {
+    let sb = Sandbox::new();
+    write(&sb.source.join("flows/huge.js"), &padded_js("huge"));
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"workflow\"\nname = \"huge\"\npath = \"flows/huge.js\"\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind_bounded(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["learn", "workflow:huge", "--max-metadata-size", "2KiB"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("huge.js").symlink_metadata().is_ok(),
+        "a declared over-cap workflow installs: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("no `meta` object mind can read"),
+        "it is reported as unloadable, not as a read failure: {}",
+        r.stderr
+    );
+}
+
+/// And through a plugin manifest, the third declaration site: a plugin's
+/// `workflows/` maps to the kind (WF-40), so the same relaxation has to hold
+/// for an item the manifest arm discovered.
+// spec: WF-55 WF-40
+#[test]
+fn an_over_cap_workflow_in_a_plugin_is_catalogued() {
+    let sb = Sandbox::new();
+    write(&sb.source.join("workflows/fine.js"), TINY_JS);
+    write(&sb.source.join("workflows/huge.js"), &padded_js("huge"));
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        "{\"name\":\"acme-tools\",\"description\":\"Tools\"}\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind_bounded(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["probe", "--no-tui", "--max-metadata-size", "2KiB"]);
+    assert!(r.success, "probe: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("acme-tools:huge") && r.stdout.contains("acme-tools:fine"),
+        "both of the plugin's workflows must be offered under the plugin's \
+         namespace: {}",
+        r.stdout
+    );
+}
+
+/// The relaxation is scoped to the workflow kind. Every other kind keeps
+/// DSC-91's hard refusal, which is the property that makes WF-55 a narrow
+/// exception rather than a weakening of the cap.
+// spec: WF-55 DSC-91
+#[test]
+fn an_over_cap_skill_still_fails_the_scan() {
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/huge.js", &padded_js("huge"));
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        &format!("---\ndescription: Review\n---\n{}\n", "p".repeat(2600)),
+    );
+
+    let r = sb.mind_bounded(&[
+        "meld",
+        &sb.source_spec(),
+        "--register-only",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(
+        !r.success,
+        "an over-cap SKILL.md must still fail the scan: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("SKILL.md") && combined.contains("size cap"),
+        "and must fail naming the file and the cap: {combined}"
+    );
+}
+
 /// The unguarded-reference scan covers a workflow file, as it covers every text
 /// file of an item.
 #[test]

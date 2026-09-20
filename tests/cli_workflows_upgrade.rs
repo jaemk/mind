@@ -59,6 +59,36 @@ impl Sandbox {
         }
     }
 
+    /// `mind` with a faked TTY (HOOK-109) and piped stdin, so a lifecycle hook
+    /// reaches its consent prompt instead of being skipped as it is in a
+    /// non-interactive context.
+    fn mind_interactive(&self, args: &[&str], stdin: &str) -> Run {
+        use std::io::Write as _;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &self.mind_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .env("MIND_TTY", "1")
+            .env_remove("MIND_ABSORB_TO")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn mind");
+        child
+            .stdin
+            .as_mut()
+            .expect("piped stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("wait for mind");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: out.status.success(),
+        }
+    }
+
     fn src_spec(&self) -> String {
         self.src.to_string_lossy().into_owned()
     }
@@ -625,6 +655,70 @@ fn upgrade_warns_about_a_workflow_applied_before_a_later_item_failed() {
             .contains("the harness resolves it as 'renamed-upstream'"),
         "the workflow applied before the batch failed must still be warned \
          about -- no later run will look at it again: {}",
+        up.stderr
+    );
+}
+
+/// The rename path's failure tail: `install_item` succeeded, so the new copy is
+/// live under the new name, and only the removal of the OLD item failed. The
+/// item that just landed is the one whose divergence nothing else will report,
+/// since the manifest now records it as current.
+///
+/// The other two failure tails (`link_reconciled`, and the in-place branch's
+/// removal of a link the new install no longer owns) carry the same call, but
+/// no workflow can reach either of them with one in `applied_keys`: the batch
+/// runs in manifest-key order and `workflow` sorts last of the six kinds, so
+/// nothing is applied after a workflow except another workflow, and neither
+/// tail is reachable for a workflow itself (an in-place workflow upgrade cannot
+/// change its own link set, which is `workflows/<name>.js` either way). Their
+/// calls are defensive, and this test covers the one that bites.
+// spec: WF-24 LIFE-48
+#[test]
+fn upgrade_warns_when_the_old_item_fails_to_uninstall_after_a_rename() {
+    let sb = Sandbox::new();
+    sb.write_workflow("deploy", "deploy");
+    write_file(
+        &sb.src.join("mind.toml"),
+        "[[items]]\nkind = \"workflow\"\nname = \"deploy\"\n\
+         path = \"workflows/deploy.js\"\nuninstall = \"exit 3\"\n",
+    );
+    sb.commit_src("declare the workflow with a failing uninstall hook");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    assert!(sb.mind(&["learn", "workflow:deploy"]).success);
+
+    // A new upstream prefix renames the item (workflow:deploy ->
+    // workflow:jk:deploy), which is the branch that uninstalls the old copy.
+    // `meta.name` stays the bare 'deploy', so the rename is what introduces the
+    // divergence: exactly the defect no later run would look for.
+    write_file(
+        &sb.src.join("mind.toml"),
+        "[source]\nprefix = \"jk\"\n\n\
+         [[items]]\nkind = \"workflow\"\nname = \"deploy\"\n\
+         path = \"workflows/deploy.js\"\nuninstall = \"exit 3\"\n",
+    );
+    sb.commit_src("add a prefix");
+    assert!(sb.mind(&["sync"]).success);
+
+    // The hook only runs where it can be consented to: in a non-interactive
+    // context it is skipped with a note, and the rename succeeds.
+    let up = sb.mind_interactive(&["upgrade", "--yes"], "y\n");
+    assert!(
+        !up.success,
+        "the failing uninstall hook must fail the run: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+    assert!(
+        sb.claude_home.join("workflows/jk:deploy.js").exists(),
+        "the renamed copy is live on disk before the failure: stdout={} stderr={}",
+        up.stdout,
+        up.stderr
+    );
+    assert!(
+        up.stderr.contains("the harness resolves it as 'deploy'"),
+        "the divergence the rename introduced must be reported by the run that \
+         introduced it: {}",
         up.stderr
     );
 }

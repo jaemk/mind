@@ -513,6 +513,42 @@ fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
 }
 
 #[test]
+fn the_two_js_link_refusals_carry_distinct_json_kinds() {
+    // spec: LNK-20 WF-6
+    // The distinction is only useful if a machine consumer can act on it: one
+    // path names a kind mind deliberately does not install by link, the other
+    // names a file the link form does not take at all. Same exit, different
+    // slug, and neither may collapse into the generic `link-not-a-skill`.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    sb.write_and_commit("lib/util.js", "export const x = 1;\n");
+
+    let wf = sb.mind(&["--json", "learn", &sb.link("tree/main/workflows/deploy.js")]);
+    assert!(!wf.success, "{}", wf.stdout);
+    let wf_out = format!("{}{}", wf.stdout, wf.stderr);
+    assert!(
+        wf_out.contains("link-kind-not-supported"),
+        "a workflow link must carry its own kind slug: {wf_out}"
+    );
+
+    let stray = sb.mind(&["--json", "learn", &sb.link("tree/main/lib/util.js")]);
+    assert!(!stray.success, "{}", stray.stdout);
+    let stray_out = format!("{}{}", stray.stdout, stray.stderr);
+    assert!(
+        stray_out.contains("link-not-linkable-file"),
+        "a stray `.js` must carry its own kind slug: {stray_out}"
+    );
+    assert!(
+        !stray_out.contains("link-kind-not-supported"),
+        "the two must not be reported as the same failure: {stray_out}"
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
 fn branch_link_upgrades_with_the_branch() {
     // spec: LNK-5
     // A tree/<branch> link follows that branch: sync + upgrade pick up an
