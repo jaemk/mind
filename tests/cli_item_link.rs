@@ -491,17 +491,22 @@ fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
         absent.stderr
     );
 
-    // A `.js` ANYWHERE takes the same message: the extension alone decides.
-    // (Reported, not asserted as ideal: `lib/util.js` is not a workflow, and
-    // the message calls it one.)
+    // A `.js` OUTSIDE `workflows/` is refused too, but as what it is: nothing
+    // about `lib/util.js` says workflow, so the message must not call it one
+    // (its remedy, `learn workflow:<name>`, would name no item at all).
     sb.write_and_commit("lib/util.js", "export const x = 1;\n");
     let stray = sb.mind(&["learn", &sb.link("tree/main/lib/util.js")]);
     assert!(!stray.success, "{}", stray.stdout);
     assert!(
+        !stray.stderr.contains("workflow"),
+        "a `.js` outside workflows/ must not be claimed to be a workflow: {}",
+        stray.stderr
+    );
+    assert!(
         stray
             .stderr
-            .contains("does not support installing a workflow"),
-        "a `.js` outside workflows/ takes the same refusal: {}",
+            .contains("is a JavaScript file, and mind does not install one by item link"),
+        "it is refused as a JavaScript file the link form does not take: {}",
         stray.stderr
     );
     assert_eq!(source_count(&sb), 0, "nothing registered on failure");

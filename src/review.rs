@@ -626,7 +626,7 @@ fn run_checks(
     }
 
     // --- Check 8c: workflow payload disclosure (advisory) ---
-    // spec: WF-53, CLI-237, DSC-91
+    // spec: WF-53, WF-55, CLI-237
     // The workflow counterpart of Check 8b. A workflow is not content the
     // harness offers, it is JavaScript the harness evaluates to drive subagents
     // (workflows.md WF-1, WF-5), and mind neither reads nor validates its body:
@@ -635,21 +635,16 @@ fn run_checks(
     // every workflow item is disclosed, not just one that tripped some pattern.
     // Disclosure, not a gate: WF-31/WF-32 keep every workflow check a report.
     //
-    // Read through the same size-capped path (DSC-91) the rest of this file
-    // uses -- `review` runs against an untrusted, not-yet-melded source -- and
-    // surface an over-cap file as the existing hard `metadata-too-large`
-    // finding rather than dropping the disclosure in silence.
+    // The file itself is not read here at all. The disclosure is unconditional
+    // (WF-53), so there is nothing to read it FOR, and WF-55 settled the one
+    // reason this check used to open it: an over-cap `.js` is no longer a hard
+    // `metadata-too-large` finding, it is a workflow with no readable `meta`,
+    // which Check 17 reports as `workflow-unloadable` like any other. mind's
+    // read of a workflow stays capped where it happens (the catalog scan); a
+    // second read here would only re-derive that answer.
     for item in &items {
         if item.kind != crate::error::ItemKind::Workflow {
             continue;
-        }
-        match crate::frontmatter::text_capped(&item.path) {
-            Ok(_) => {}
-            Err(err @ MindError::MetadataTooLarge { .. }) => {
-                hard.push(Finding::hard("metadata-too-large", format!("{err}")));
-                continue;
-            }
-            Err(_) => {}
         }
         // spec: CLI-224 -- the key is source-derived; sanitize before composing.
         let key = crate::sanitize::strip_ansi(item.key().as_str());

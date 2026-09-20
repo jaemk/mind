@@ -2299,6 +2299,25 @@ fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String])
     }
 }
 
+/// `upgrade`'s failure-path tail: persist what the batch applied, then warn
+/// about the workflows among them, exactly as the success path does.
+///
+/// spec: LIFE-48 -- the save must not mask the root-cause error, so a save
+/// failure is warned about rather than propagated; the caller returns the
+/// original error.
+///
+/// spec: WF-24 WF-29 WF-30 WF-31 -- the warnings run here too. An item that
+/// upgraded before a later one failed is LIVE on disk and recorded, and the
+/// next `upgrade` finds it current and never looks at it again, so skipping
+/// the warning would mean no run ever reports its defect. `learn` already
+/// warns on its own failure path for this reason.
+fn save_and_warn_workflows(paths: &Paths, manifest: &Manifest, applied_keys: &[String]) {
+    if let Err(se) = manifest.save(paths) {
+        warn_manifest_save_also_failed(&se);
+    }
+    warn_workflows(paths, manifest, applied_keys);
+}
+
 /// The set of bare item names belonging to a source, for reference validation.
 /// Every catalog item belonging to `source`, used to validate and expand an
 /// item's reference tokens at install (the `{{ns:}}` names plus the `{{self}}` /
@@ -7787,9 +7806,7 @@ fn upgrade_inner_scoped(
         let (cat, dropped_requires) = match link_reconciled(paths, &registry, &up.cat) {
             Ok(c) => c,
             Err(e) => {
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
         };
@@ -7818,9 +7835,7 @@ fn upgrade_inner_scoped(
             Err(e) => {
                 // spec: LIFE-48 -- persist what earlier items applied, but do not
                 // let a save failure mask the root cause `e`.
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
         };
@@ -7854,11 +7869,10 @@ fn upgrade_inner_scoped(
                 // (install hooks included), which is why the record is safe to
                 // leave. The old key is left in place (it was never removed), so
                 // both entries are recorded until this is resolved.
+                applied_keys.push(installed.key().into());
                 manifest.insert(installed);
                 // spec: LIFE-48 -- a save failure here must not mask `e`.
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
             manifest.items.remove(up.old.key().as_str());
@@ -7881,11 +7895,10 @@ fn upgrade_inner_scoped(
                 if !installed.links.contains(old_link)
                     && let Err(e) = install::remove_path(std::path::Path::new(old_link))
                 {
+                    applied_keys.push(installed.key().into());
                     manifest.insert(installed);
                     // spec: LIFE-48 -- a save failure here must not mask `e`.
-                    if let Err(se) = manifest.save(paths) {
-                        warn_manifest_save_also_failed(&se);
-                    }
+                    save_and_warn_workflows(paths, &manifest, &applied_keys);
                     return Err(e);
                 }
             }

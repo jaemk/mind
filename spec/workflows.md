@@ -70,6 +70,13 @@ that mind depends on is called out at the requirement that depends on it.
   refused by name, saying workflows are deliberately unsupported and pointing at
   melding the repo or `learn workflow:<name>`, rather than reporting the
   directory as unrecognized.
+
+  "Naming one" is the convention shape (WF-1): a `.js` file directly under a
+  `workflows/` directory. Any OTHER `.js` path is refused as well, since the
+  link form takes `.md` files only, but with a message that says just that and
+  does not call the file a workflow. Nothing about `lib/util.js` says workflow,
+  and the workflow message's remedy (`learn workflow:<name>`) would name an
+  item that does not exist.
 - `WF-7` The harness caps a workflow file at 524288 bytes and skips a larger one.
   mind installs it regardless and reports the overage (WF-30); see WF-32 for why
   the cap is reported rather than enforced.
@@ -261,6 +268,25 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-32` The size cap is reported, not enforced, for the same reason: DSC-90
   records that mind does not cap the size of item content it reads, and a cap
   mind enforced would be mind's cap, not the harness's.
+- `WF-55` A workflow past mind's own metadata read cap (DSC-91, 8 MiB) does not
+  fail the scan. The read stays capped, since a source is untrusted and bounding
+  it is the point of the cap, but for this kind an over-cap file reads as NO
+  readable metadata rather than as an error: the item is catalogued with no
+  description, WF-30 reports it as the unreadable `meta` it is, and it installs
+  like any other unloadable workflow (WF-31).
+
+  The kind needs the exception because a workflow's metadata IS its whole `.js`
+  body (WF-4, WF-5). For every other kind the capped read covers a small header
+  file beside the content, where an 8 MiB one is a defect worth stopping on; here
+  it covers a large program, which WF-5 forbids failing a scan over. The failure
+  was also not confined to the file: a scan builds a source's entire item list in
+  one pass, so one oversized `.js` took every other item of that source with it,
+  for `review` and for every verb that scans a catalog. A healthy sibling
+  workflow got no disclosure and no check at all.
+
+  Only the workflow kind is excepted. DSC-91's hard `metadata-too-large` stands
+  for every other kind, and for every other capped read (`mind.toml`, a plugin
+  manifest, an item link's frontmatter probe).
 - `WF-53` `review` reports EVERY workflow item as a `workflow-content` advisory
   finding, the workflow counterpart of the command disclosure (CLI-237, DSC-91).
   A workflow is not content the harness offers, it is JavaScript the harness
@@ -270,10 +296,10 @@ that mind depends on is called out at the requirement that depends on it.
   is unconditional rather than pattern-triggered, since there is no subset of a
   program that is the dangerous part. It is disclosure, not a gate: it refuses
   nothing, and like every other check here it cannot block an install (WF-31).
-  The file is read through the size-capped metadata path (DSC-91), because
-  `review`'s target is an untrusted, not-yet-melded source; an over-cap file is
-  the existing hard `metadata-too-large` finding, not a silently dropped
-  disclosure.
+  Being unconditional, the finding needs no read of the file to produce it, so
+  an over-cap `.js` is disclosed like any other (WF-55). The one read mind makes
+  of a workflow, the catalog scan's, stays size-capped where it happens
+  (DSC-91), which is what `review`'s untrusted, not-yet-melded target requires.
 - `WF-54` `review` does not emit the generic `missing-description` finding
   (CLI-132) for a workflow. A workflow's description comes from `meta` (WF-4)
   and a `.js` file has no frontmatter, so that finding's wording points the

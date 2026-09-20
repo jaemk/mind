@@ -32,6 +32,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[source].prefix` is `workflow`, or a `meld -N workflow` that worked in
   0.28.1, is now refused with `ReservedPrefix` (WF-52).
 
+### Fixed
+
+- A workflow past `mind`'s own 8 MiB metadata read cap no longer fails the scan
+  of its whole source. A workflow's metadata is its entire `.js` body, so one
+  oversized file took every other item of that source with it, for every verb
+  that scans a catalog. The read stays capped; an over-cap file now reads as no
+  readable `meta`, which is reported as unloadable and installs anyway, like any
+  other workflow the harness would skip (WF-55).
+- `upgrade` reports the workflows it applied even when a later item in the same
+  batch failed, as `learn` already did. An applied item is live on disk and
+  recorded, so the next `upgrade` finds it current and never looks at it again,
+  and a divergence introduced by the upgrade was reported by no run (WF-24,
+  WF-29, WF-30).
+
 ## [0.28.1] - 2026-09-08
 
 ### Fixed

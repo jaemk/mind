@@ -554,23 +554,33 @@ pub(crate) fn is_file_link(item_path: &str) -> bool {
     item_path.ends_with(".md")
 }
 
-/// Whether an item-link path names a workflow's own file (LNK-20): its parent
-/// directory is `workflows/`, or its extension is `.js`. A workflow is never a
-/// valid item-link target -- the blob/tree link form takes `.md` files only
-/// (LNK-20) -- so `scan_item_link` uses this to tell "the path names a
-/// deliberately unsupported kind" apart from "the path is simply wrong",
-/// raising [`MindError::LinkKindNotSupported`] instead of the generic
-/// `LinkNotASkill`.
+/// Whether an item-link path names a workflow's own file (LNK-20, WF-6): its
+/// parent directory is `workflows/` AND its extension is `.js`, the shape the
+/// convention scan calls a workflow (WF-1). A workflow is never a valid
+/// item-link target -- the blob/tree link form takes `.md` files only (LNK-20)
+/// -- so `scan_item_link` uses this to tell "the path names a deliberately
+/// unsupported kind" apart from "the path is simply wrong", raising
+/// [`MindError::LinkKindNotSupported`] instead of the generic `LinkNotASkill`.
+///
+/// The parent check is what keeps the claim true: a `.js` anywhere else
+/// (`lib/util.js`) is not a workflow and must not be called one. It is refused
+/// too, by [`is_js_link_path`], but with a message that says only what mind
+/// knows: the link form does not take a JavaScript file.
 fn is_workflow_link_path(item_path: &str) -> bool {
     let path = Path::new(item_path);
     let parent_is_workflows = path
         .parent()
         .and_then(|p| p.file_name())
         .is_some_and(|n| n == ItemKind::Workflow.dir());
-    let ext_is_js = path
+    parent_is_workflows && is_js_link_path(item_path)
+}
+
+/// Whether an item-link path names a JavaScript file (LNK-20): a `.js`
+/// extension, compared as the workflow scan compares it (WF-3).
+fn is_js_link_path(item_path: &str) -> bool {
+    Path::new(item_path)
         .extension()
-        .is_some_and(|e| e == kind_extension(ItemKind::Workflow));
-    parent_is_workflows || ext_is_js
+        .is_some_and(|e| e == kind_extension(ItemKind::Workflow))
 }
 
 /// Resolve a file link's kind (LNK-21), first hit wins: the consumer's explicit
@@ -696,6 +706,15 @@ fn scan_item_link(
         if !(target.is_dir() && skill_md.is_file()) {
             if is_workflow_link_path(item_path) {
                 return Err(MindError::LinkKindNotSupported {
+                    source_name: source.name.clone(),
+                    path: item_path.to_string(),
+                });
+            }
+            // spec: WF-6 -- a `.js` outside `workflows/` is refused as well,
+            // but as what it is: a JavaScript file the link form does not take.
+            // Calling it a workflow would be a claim the path does not support.
+            if is_js_link_path(item_path) {
+                return Err(MindError::LinkNotLinkableFile {
                     source_name: source.name.clone(),
                     path: item_path.to_string(),
                 });
@@ -1416,6 +1435,13 @@ struct ItemOverrides<'a> {
 /// `.md`) is read ONCE here, size-capped, and every frontmatter lookup below
 /// runs against that one text; an oversized meta file fails the scan with
 /// `MindError::MetadataTooLarge` instead of being read in full.
+///
+/// spec: WF-55 -- with one exception, the workflow. A workflow's "meta file" is
+/// its whole `.js` body, so the cap would make one oversized file fail the scan
+/// of the entire source. The read stays capped (a source is untrusted), but for
+/// this kind an over-cap file reads as NO readable metadata and the item is
+/// catalogued without a description, which is the WF-5 "yields nothing" case
+/// and lands in WF-30's `workflow-unloadable` report.
 fn build_item(
     source: &Source,
     prefix: &Option<String>,
@@ -1428,7 +1454,15 @@ fn build_item(
     // L14: one capped read per item per scan. Each `frontmatter::field` call
     // below parses this text rather than re-reading the file, so adding a key
     // to the set an item may declare costs no additional I/O.
-    let meta_text = frontmatter::text_capped(meta)?;
+    let meta_text = match frontmatter::text_capped(meta) {
+        Ok(text) => text,
+        // spec: WF-55 -- workflows only. Every other kind keeps DSC-91's hard
+        // failure: their meta file is a small header beside the content, and an
+        // 8 MiB one is a defect worth stopping on, not something to catalogue
+        // with a silently missing description.
+        Err(MindError::MetadataTooLarge { .. }) if kind == ItemKind::Workflow => String::new(),
+        Err(e) => return Err(e),
+    };
     // HOOK-132: exactly one declaration site supplies an item's hooks. A
     // `[[items]]` entry that declared any is authoritative and the caller passes
     // it here (`ItemDecl::resolved_item_hooks`: scalar shorthand folded ahead of

@@ -577,6 +577,18 @@ pub enum MindError {
     )]
     LinkKindNotSupported { source_name: String, path: String },
 
+    /// LNK-20 / WF-6: an item-link path naming a `.js` file that is NOT under
+    /// `workflows/`, so nothing about it says "workflow". The link form takes
+    /// `.md` files (and skill directories) only, so it is refused -- but as a
+    /// JavaScript file, not as a workflow: `LinkKindNotSupported`'s remedy
+    /// (`mind learn workflow:<name>`) would name an item that does not exist.
+    #[error(
+        "source '{source_name}': linked path '{path}' is a JavaScript file, and mind does not \
+         install one by item link (the blob/tree link form takes `.md` files only); meld the \
+         repo instead"
+    )]
+    LinkNotLinkableFile { source_name: String, path: String },
+
     /// LNK-21: a file link whose kind none of the three resolution steps
     /// answered. The message names all three so the user can pick one.
     #[error(
@@ -1471,6 +1483,7 @@ impl MindError {
             MindError::BadKindFlag { .. } => "bad-kind-flag",
             MindError::LinkNotAFile { .. } => "link-not-a-file",
             MindError::LinkKindNotSupported { .. } => "link-kind-not-supported",
+            MindError::LinkNotLinkableFile { .. } => "link-not-linkable-file",
             MindError::LinkKindUnresolved { .. } => "link-kind-unresolved",
             MindError::LinkKindMismatch { .. } => "link-kind-mismatch",
             MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",

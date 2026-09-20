@@ -323,9 +323,14 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   path into a token) is skipped, and the file is reported on instead --
   `review`'s other checks (CLI-135..139) already scan every text file regardless
   of extension, so nothing about a non-markdown file's tokens goes unreported,
-  only unrewritten. Rewriting a non-markdown file would write, or leave behind,
-  text that this file's contents never expand out of (NS-53), which is a
-  regression relative to the file's previous, unexpanded state.
+  only unrewritten. For most non-markdown files this is because the content
+  never expands out of the token form there (NS-53), so rewriting one would
+  write, or leave behind, text nothing expands -- a regression relative to the
+  file's previous, unexpanded state. A workflow's `.js` is the exception: it
+  does expand (NS-53, WF-25), yet `--fix` still leaves it alone (CLI-139),
+  because the rewrite passes match sibling names as words and a workflow file
+  is code (WF-27) -- rewriting it risks corrupting working code to silence an
+  advisory, not leaving inert text unexpanded.
 
 ### Structural scanning
 

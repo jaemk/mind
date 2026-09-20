@@ -558,27 +558,23 @@ fn an_upgrade_that_touches_no_workflow_reports_no_workflow_warning() {
     );
 }
 
-// ---- the failure path: `upgrade` is NOT `learn` here ----------------------
+// ---- the failure path: `upgrade` warns like `learn` -----------------------
 
-/// CHARACTERIZATION, not an endorsement. `learn` warns about the workflows it
-/// installed even when the batch failed part-way (`commands.rs`: the
-/// `warn_workflows` call precedes the `match failure`). `upgrade` does not: its
-/// three `return Err(e)` paths save the manifest and return without warning, so
-/// a workflow that DID upgrade earlier in the same batch upgrades silently and
-/// its new defect is reported by no run -- the next `upgrade` finds it already
-/// current and never looks at it again.
+/// A workflow that upgraded before a later item in the same batch failed is
+/// still warned about. `learn` has always done this (its `warn_workflows` call
+/// precedes the `match failure`), and `upgrade`'s early `return Err(e)` paths
+/// now do the same: the item is live on disk and recorded, and the next
+/// `upgrade` finds it current and never looks at it again, so a warning skipped
+/// here is a defect no run ever reports.
 ///
 /// The upgrade batch is ordered by manifest key (a `BTreeMap` of `kind:name`),
 /// so `workflow:alpha` is applied before `workflow:zbad` fails on an
 /// unresolvable `{{ns:}}` reference. The assertions below pin: the batch fails,
-/// alpha's new content IS live (so the silence is about a real, applied
-/// upgrade), and -- the reported defect -- nothing is said about it.
-///
-/// If this test starts failing, the asymmetry was closed; delete the last
-/// assertion and keep the rest.
+/// alpha's new content IS live (so the warning is about a real, applied
+/// upgrade), and the WF-24 divergence it introduced is reported.
 // spec: WF-24 LIFE-48
 #[test]
-fn upgrade_does_not_warn_about_a_workflow_applied_before_a_later_item_failed() {
+fn upgrade_warns_about_a_workflow_applied_before_a_later_item_failed() {
     let sb = Sandbox::new();
     sb.write_workflow("alpha", "alpha");
     sb.write_workflow("zbad", "zbad");
@@ -622,13 +618,77 @@ fn upgrade_does_not_warn_about_a_workflow_applied_before_a_later_item_failed() {
         recall.stderr
     );
 
-    // The reported defect: `learn` would have warned here; `upgrade` does not.
+    // The fix: the applied item's new divergence is reported by the run that
+    // applied it, batch failure or not.
     assert!(
-        !up.stderr
-            .contains("the harness resolves it as 'renamed-upstream'"),
-        "EXPECTED-DEFECT drifted: upgrade now reports the workflow it applied \
-         before the batch failed. That is the better behavior -- drop this \
-         assertion: {}",
         up.stderr
+            .contains("the harness resolves it as 'renamed-upstream'"),
+        "the workflow applied before the batch failed must still be warned \
+         about -- no later run will look at it again: {}",
+        up.stderr
+    );
+}
+
+// ---- WF-55: an over-cap workflow does not take the source's scan with it ----
+
+/// A workflow past mind's own metadata cap (DSC-91, 8 MiB) is catalogued with
+/// no readable metadata rather than failing the scan, so every OTHER item of
+/// that source stays reachable, and the oversized one installs like any other
+/// unloadable workflow (WF-31) with the WF-30 warning.
+///
+/// The `learn workflow:fine` step is the regression: before WF-55 the capped
+/// read ran for every item of the source in one pass, so the oversized sibling
+/// made this (and every other catalog-scanning verb) fail outright.
+// spec: WF-55 WF-30 WF-31
+#[test]
+fn an_over_cap_workflow_installs_and_leaves_its_source_scannable() {
+    let sb = Sandbox::new();
+    sb.write_workflow("fine", "fine");
+    // Valid UTF-8, a complete `meta` at the top, and padded past mind's 8 MiB
+    // read cap: mind cannot see the `meta` it does have, which is the point.
+    let mut huge = workflow_js("huge", "huge");
+    huge.push_str("// ");
+    huge.push_str(&"p".repeat(8 * 1024 * 1024));
+    huge.push('\n');
+    sb.write_workflow_raw("huge", &huge);
+    sb.commit_src("add workflows");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+
+    let fine = sb.mind(&["learn", "workflow:fine"]);
+    assert!(
+        fine.success,
+        "the healthy sibling must still be installable: stdout={} stderr={}",
+        fine.stdout, fine.stderr
+    );
+    assert!(
+        !fine.stderr.contains("8 MiB size cap"),
+        "scanning the source must not fail on the oversized sibling: {}",
+        fine.stderr
+    );
+
+    let huge_run = sb.mind(&["learn", "workflow:huge"]);
+    assert!(
+        huge_run.success,
+        "an unloadable workflow installs anyway (WF-31): stdout={} stderr={}",
+        huge_run.stdout, huge_run.stderr
+    );
+    assert!(
+        sb.claude_home.join("workflows/huge.js").exists(),
+        "the oversized workflow must be linked into the lobe"
+    );
+    assert!(
+        huge_run
+            .stderr
+            .contains("it declares no `meta` object mind can read"),
+        "mind's own cap makes the `meta` unreadable, which is the WF-30 \
+         warning, not an error: {}",
+        huge_run.stderr
+    );
+    assert!(
+        !huge_run.stderr.contains("8 MiB size cap"),
+        "the cap bounds mind's read; it is not reported as a failure: {}",
+        huge_run.stderr
     );
 }

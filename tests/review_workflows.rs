@@ -620,29 +620,22 @@ fn an_over_cap_workflow_is_reported_and_review_still_exits_zero() {
     );
 }
 
-/// CHARACTERIZATION. A workflow past mind's own metadata read cap (DSC-91,
-/// 8 MiB) does not reach any workflow check at all: the CATALOG SCAN reads
-/// every item's text through the same capped read (`catalog.rs`'s
-/// `frontmatter::text_capped(meta)?`, one read per item), and for a workflow
-/// that text IS the whole `.js`. The scan therefore fails, `review` records a
-/// hard `scan-error` and returns immediately, and every later check -- the
-/// WF-53 disclosure, the WF-30 report, and everything the source's OTHER items
-/// would have drawn -- is skipped.
+/// A workflow past mind's own metadata read cap (DSC-91, 8 MiB) reads as NO
+/// readable `meta` instead of failing the scan (WF-55). The scan is what the
+/// cap used to take down: `catalog.rs` reads every item's metadata through one
+/// capped read, and for a workflow that text IS the whole `.js`, so an oversized
+/// one aborted the scan of the SOURCE before any item existed.
 ///
-/// Two consequences this pins, both reported rather than fixed here:
-///   1. Check 8c's `metadata-too-large` arm (review.rs) is unreachable for a
-///      workflow: the scan that builds `items` hard-fails before it, so the
-///      finding the arm exists to raise can only come from a file that grew
-///      between the two reads.
-///   2. One oversized `.js` takes the whole source with it, for `review` and
-///      for every other verb that scans a catalog -- which sits oddly beside
-///      WF-32/DSC-90, where the harness's own (far smaller) 524288-byte cap is
-///      something mind reports and refuses to enforce.
-// spec: WF-30 WF-32 DSC-91
+/// So the assertions come in two halves: the healthy sibling is scanned,
+/// disclosed, and checked as if the oversized file were not there, and the
+/// oversized file is reported through the ordinary WF-30 path (no readable
+/// `meta`, plus the WF-7 overage) with no hard finding anywhere.
+// spec: WF-55 WF-30 WF-32 WF-53 DSC-91
 #[test]
-fn a_workflow_past_minds_own_read_cap_fails_the_scan_and_ends_the_review() {
+fn a_workflow_past_minds_own_read_cap_reads_as_no_meta_and_spares_the_scan() {
     let sb = Sandbox::new("wf");
-    // A perfectly ordinary second workflow: its findings are the blast radius.
+    // A perfectly ordinary second workflow: it is the blast radius the old
+    // scan failure took with it.
     write(
         &sb.source.join("workflows/fine.js"),
         "export const meta = { name: 'fine', description: 'Fine' }\n",
@@ -656,30 +649,57 @@ fn a_workflow_past_minds_own_read_cap_fails_the_scan_and_ends_the_review() {
 
     let r = sb.review();
     assert!(
-        !r.success,
-        "a hard finding fails review: stdout={} stderr={}",
+        r.success,
+        "an over-cap workflow is advisory, not a hard finding: stdout={} stderr={}",
         r.stdout, r.stderr
     );
     assert!(
-        r.stderr.contains("error [scan-error]"),
-        "the oversized read surfaces as a scan error, NOT as Check 8c's \
-         metadata-too-large finding: {}",
+        !r.stderr.contains("error ["),
+        "nothing here is hard -- no scan-error, no metadata-too-large: {}",
         r.stderr
     );
     assert!(
-        r.stderr.contains("huge.js") && r.stderr.contains("8 MiB size cap"),
-        "the error must name the offending file and the cap: {}",
+        !r.stdout.contains("metadata-too-large") && !r.stderr.contains("metadata-too-large"),
+        "the cap is mind's own read bound, not a finding about the source: {} {}",
+        r.stdout,
         r.stderr
     );
-    // The blast radius: nothing else about this source is reported.
-    assert!(
-        findings(&r.stdout, "workflow-content").is_empty(),
-        "the scan aborted, so not even the healthy workflow is disclosed: {}",
+
+    // Half one: the healthy sibling survived. Both workflows are disclosed...
+    let disclosures = findings(&r.stdout, "workflow-content");
+    assert_eq!(
+        disclosures.len(),
+        2,
+        "both workflows are scanned and disclosed: {}",
         r.stdout
     );
     assert!(
-        findings(&r.stdout, "workflow-unloadable").is_empty(),
-        "no workflow check runs after a failed scan: {}",
+        disclosures.iter().any(|d| d.contains("workflow:fine")),
+        "the healthy sibling is disclosed: {}",
+        r.stdout
+    );
+
+    // Half two: ...and only the oversized one is reported unloadable, for the
+    // two reasons mind can see -- it read no `meta`, and the file is over the
+    // harness's own cap (WF-7).
+    let unloadable = findings(&r.stdout, "workflow-unloadable");
+    assert!(
+        unloadable.iter().all(|u| u.contains("workflow:huge")),
+        "the healthy sibling draws no unloadable finding: {}",
+        r.stdout
+    );
+    assert!(
+        unloadable
+            .iter()
+            .any(|u| u.contains("it declares no `meta` object mind can read")),
+        "an over-cap file is the WF-5 'yields nothing' case: {}",
+        r.stdout
+    );
+    assert!(
+        unloadable
+            .iter()
+            .any(|u| u.contains("over the harness's 524288-byte cap")),
+        "and the WF-7 overage is reported beside it: {}",
         r.stdout
     );
 }

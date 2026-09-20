@@ -116,6 +116,11 @@ the same rule markdown items have lived under, and it has the same
 consequence: a token that resolves to no sibling is a hard install failure
 (`BadReference`), not inert text.
 
+`review` reports a bad reference in a workflow the same as in any markdown
+item, but `review --fix` will not rewrite a `.js` file: the rewrite passes
+match sibling names as words, and a workflow is code, so an automated rewrite
+risks corrupting it. Fix a flagged workflow reference by hand.
+
 ## Plugins
 
 A Claude plugin's `workflows/` directory maps to the kind the same way its
