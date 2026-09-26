@@ -362,23 +362,19 @@ fn sanitize_dep_keys(keys: Vec<String>) -> Vec<String> {
     keys.iter().map(|k| strip_ansi(k)).collect()
 }
 
-/// Read all of a catalog item's text files into one buffer, for dependency
-/// detection. Kept local so data.rs stays independent of commands.rs and
-/// avoids a cross-module dep.
-///
-/// NOT the same set of files as `commands::read_item_text`, which narrows to
+/// Read all of a catalog item's token-expanding text files into one buffer,
+/// for dependency detection. Mirrors `commands::read_item_text`: narrowed to
 /// the files install actually expands tokens in
-/// (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25). This reads EVERY
-/// text file under the item, so the TUI's dependency preview (DEP-1 edges,
-/// TUI-50) is over-inclusive relative to the CLI's: a `{{ns:sibling}}` token
-/// sitting in a non-markdown, non-`expand:`-listed file of a non-workflow item
-/// draws an edge here that install would never create. Pre-existing and
-/// display-only (nothing installs off these keys), and left as a known
-/// divergence rather than changed silently: narrowing it is a behavior change
-/// to what the TUI shows and wants its own spec decision.
+/// (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25), so a `{{ns:sibling}}`
+/// token in a file install never expands does not draw a dependency edge here
+/// that install would never create either. Kept local (rather than shared with
+/// `commands.rs`) so data.rs stays independent of that module.
 fn read_item_text(item: &catalog::CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
+        if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&file) {
             buf.push_str(&content);
             buf.push('\n');
@@ -1447,6 +1443,102 @@ mod tests {
              `whenToUse` alone, not nothing and not a dangling \" - \" \
              separator: {:?}",
             wf.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// `read_item_text` must mirror `commands::read_item_text`'s item-aware
+    /// gate (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25): a
+    /// `{{ns:sibling}}` token sitting in a non-markdown, non-`expand:`-listed
+    /// bundled file draws no TUI-50 dependency edge, since install never
+    /// expands it there either. A sibling skill whose SKILL.md carries the
+    /// same token IS an edge, so the negative case is not just an always-empty
+    /// dep list.
+    // spec: TUI-50
+    #[test]
+    fn a_token_in_an_unlisted_bundled_file_draws_no_tui_dependency_edge() {
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        let src = base.join("tui-dep-gate-source");
+        std::fs::create_dir_all(src.join("skills/review/resources")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nsee {{self}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("skills/review/resources/pr.py"),
+            "# {{ns:helper}}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/linked")).unwrap();
+        std::fs::write(
+            src.join("skills/linked/SKILL.md"),
+            "---\ndescription: linked skill, references {{ns:helper}} in prose\n---\n# linked\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/helper")).unwrap();
+        std::fs::write(
+            src.join("skills/helper/SKILL.md"),
+            "---\ndescription: helper skill\n---\n# helper\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+
+        let snap = load(&paths).expect("load should succeed");
+        let review = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Skill && a.name == "review")
+            .expect("the review skill must appear in `available`");
+        assert!(
+            !review.deps.iter().any(|d| d.contains("helper")),
+            "a {{{{ns:helper}}}} token in a non-markdown, non-expand-listed \
+             bundled file must not draw a dependency edge (install never \
+             expands it there either): {:?}",
+            review.deps
+        );
+
+        let linked = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Skill && a.name == "linked")
+            .expect("the linked skill must appear in `available`");
+        assert!(
+            linked.deps.iter().any(|d| d.contains("helper")),
+            "a {{{{ns:helper}}}} token in SKILL.md itself must still draw a \
+             dependency edge, proving the negative case above is a real gate \
+             and not an always-empty dep list: {:?}",
+            linked.deps
         );
 
         cleanup(&base);

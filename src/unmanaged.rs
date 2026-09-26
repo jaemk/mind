@@ -47,7 +47,11 @@ impl UnmanagedItem {
 /// Scan every configured agent home for unmanaged items (UNM-1): kind-dir entries
 /// whose path is not a managed link recorded in the manifest. Deduplicated by
 /// `(kind, name)` across lobes, each recording the lobe paths it occupies, sorted
-/// by `(kind, name)`.
+/// by `(kind, name)`. An entry whose derived name fails the safety check is
+/// skipped with a warning (UNM-9), not a hard failure of the whole scan: this
+/// is a passively discovered on-disk entry, the exact analog of the catalog
+/// scan's own hostile-name handling (DSC-96/DSC-102), so the same single-entry
+/// severity applies here.
 pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
     // Every managed link path, for the "is this mind's own link?" test. Install
     // records links via the same `agent_homes` paths we walk here (STO-21), so a
@@ -77,10 +81,26 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
                 if managed.contains(&path) {
                     continue; // mind's own link
                 }
-                let Some(name) = item_name(kind, &entry)? else {
-                    continue;
-                };
-                found.entry((kind, name)).or_default().push(path);
+                match item_name(kind, &entry) {
+                    Ok(Some(name)) => {
+                        found.entry((kind, name)).or_default().push(path);
+                    }
+                    Ok(None) => {}
+                    // spec: UNM-9 -- skip this one entry and keep scanning, the
+                    // same severity the catalog scan gives a hostile
+                    // source-declared name (DSC-96/DSC-102): a single hostile
+                    // lobe file must not take the rest of the listing with it.
+                    Err(MindError::UnsafeName { name }) => {
+                        crate::render::scan_warn(format!(
+                            "warning: skipping unmanaged {} '{}': unsafe item name (a control \
+                             character, a path separator, or a bidi/zero-width Unicode code \
+                             point)",
+                            kind.as_str(),
+                            crate::sanitize::strip_ansi(&name),
+                        ));
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
     }
@@ -112,8 +132,10 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
 /// predicate the catalog scan applies to a source-declared name,
 /// [`crate::catalog::is_safe_item_name`] (empty, `.`, `..`, a path separator,
 /// NUL, or a blocked Unicode code point -- DSC-96). One definition, not a
-/// mirrored copy: a name that fails it is refused via `UnsafeName` rather than
-/// surfaced as a resolvable, absorbable item (UNM-9).
+/// mirrored copy: a name that fails it is returned as `Err(UnsafeName)` rather
+/// than surfaced as a resolvable, absorbable item; the caller (`scan`) turns
+/// that into a skip-with-warning for this one entry rather than failing the
+/// whole scan (UNM-9).
 fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>> {
     let raw = entry.file_name();
     let Some(name) = raw.to_str() else {
@@ -468,12 +490,14 @@ mod tests {
     }
 
     /// A lobe file whose filename strips to an unsafe derived name (`...js` ->
-    /// `..`) is refused with `UnsafeName` rather than silently surfacing as a
-    /// scannable/absorbable item named `..`. A safe sibling in the same
-    /// directory proves the fix does not blanket-reject well-formed entries.
+    /// `..`) is skipped rather than silently surfacing as a
+    /// scannable/absorbable item named `..`. The scan itself still succeeds
+    /// (UNM-9's severity is a per-entry skip, not a whole-scan failure): a
+    /// safe sibling in the same directory proves the fix does not
+    /// blanket-reject the rest of the listing along with it.
     // spec: UNM-9
     #[test]
-    fn scan_refuses_a_workflow_whose_derived_name_is_unsafe() {
+    fn scan_skips_a_workflow_whose_derived_name_is_unsafe() {
         // SAFETY: ENV_LOCK held for the duration of the env var mutation below.
         let _guard = crate::paths::ENV_LOCK
             .lock()
@@ -498,15 +522,17 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&home);
 
-        match result {
-            Err(MindError::UnsafeName { name }) => {
-                assert_eq!(
-                    name, "..",
-                    "the unsafe derived name must be the one surfaced in the error"
-                );
-            }
-            other => panic!("expected Err(UnsafeName), got {other:?}"),
-        }
+        let items = result.expect("scan must succeed despite the one unsafe entry");
+        assert_eq!(
+            items.len(),
+            1,
+            "the unsafe entry must be skipped, not listed: {items:?}"
+        );
+        assert_eq!(items[0].kind, ItemKind::Workflow);
+        assert_eq!(
+            items[0].name, "deploy",
+            "the well-formed sibling must still be listed: {items:?}"
+        );
     }
 
     /// The `DirEntry` in `dir` whose file name is exactly `name`.

@@ -78,6 +78,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   messages accepted across encryption level boundaries). Transitive, via
   `ureq` and `rustls-platform-verifier`; a lockfile-only fix, same as the
   `lru` bump below (9fae4b0).
+- An unmanaged lobe file whose name strips to `.`, `..`, or empty (e.g. a
+  workflow literally named `...js`) is now skipped, with a warning, instead of
+  being surfaced as a resolvable item: unresolved, it let `absorb`/`forget`
+  build a destination, store, staging, or backup path that pointed at the
+  PARENT directory holding every other item of that kind (UNM-9).
 
 ## [0.28.1] - 2026-09-08
 

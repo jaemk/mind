@@ -104,7 +104,7 @@ and verified.
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
 | `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
-| An unmanaged lobe file whose derived name is unsafe (`.`, `..`, empty) is refused rather than surfaced | done | [unmanaged.md](unmanaged.md) (UNM-9) |
+| An unmanaged lobe file whose derived name is unsafe (`.`, `..`, empty) is skipped (warned about) rather than surfaced | done | [unmanaged.md](unmanaged.md) (UNM-9) |
 | `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | done | [absorb.md](absorb.md) |
 | `dump`: generate a pinned super-source `mind.toml` from the installed set (`--whole-sources`) | done | [dump.md](dump.md) |
 | `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |

@@ -1324,12 +1324,12 @@ fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
 /// pre-DSC-96 install would have left one, then drives those three surfaces.
 ///
 /// A hostile-named UNMANAGED lobe item is exercised separately below
-/// (`hostile_unmanaged_item_name_is_refused_via_unm9`): unlike a hand-edited
+/// (`hostile_unmanaged_item_name_is_skipped_via_unm9`): unlike a hand-edited
 /// manifest entry, an unmanaged item's name is derived fresh from its filename
-/// on every scan, and UNM-9 (a fix landed concurrently with this one, the
-/// unmanaged-lobe analog of DSC-96) now hard-refuses a hostile derived name at
-/// scan time rather than letting it through to UNM-5's sanitize-for-disclosure
-/// step, so that test pins a refusal rather than a disclosure.
+/// on every scan, and UNM-9 (the unmanaged-lobe analog of DSC-96) now skips a
+/// hostile derived name at scan time (with a warning) rather than letting it
+/// through to UNM-5's sanitize-for-disclosure step, so that test pins a
+/// not-found ref rather than a disclosure.
 ///
 /// Every assertion below is a PAIR: absence of the raw escape/bidi bytes, AND
 /// presence of the sanitized name ("review"/"handmade" -- both chosen so the
@@ -1540,15 +1540,16 @@ fn hostile_installed_item_name_is_sanitized_in_recall_tree() {
 /// The unmanaged-item counterpart: a hostile name that never goes through
 /// catalog scanning (DSC-96 only gates catalog items) is nonetheless caught by
 /// UNM-9's own safety check on the NAME DERIVED from an unmanaged lobe entry's
-/// filename, at scan time. That scan is what `forget` runs to resolve its ref,
-/// so `forget` of such an item now hard-refuses with `UnsafeName` before it
-/// ever reaches UNM-5's "not managed by mind" disclosure -- with or without
-/// `--yes`, since the refusal is at detection, not at confirmation. The
-/// `UnsafeName` error message is still sanitized for display (DSC-95), so that
-/// guarantee holds via the hard-refusal path now instead of a continued
-/// disclosure.
+/// filename, at scan time. UNM-9's severity is a per-entry skip (with a
+/// warning), the same as DSC-96 gives a hostile catalog-scanned name, so the
+/// entry never enters the scan's result at all: `forget` of such a ref sees no
+/// matching item (`NotInstalled`), never reaching UNM-5's "not managed by
+/// mind" disclosure for it -- with or without `--yes`, since the entry was
+/// never a candidate to begin with. The scan's own warning still names the
+/// entry with DSC-95 sanitizing applied, so the hostile bytes never reach any
+/// output either way.
 #[test]
-fn hostile_unmanaged_item_name_is_refused_via_unm9() {
+fn hostile_unmanaged_item_name_is_skipped_via_unm9() {
     // spec: UNM-9 DSC-95
     let sb = melded();
     // See the sibling managed-item test for why this avoids '[': it would
@@ -1568,41 +1569,55 @@ fn hostile_unmanaged_item_name_is_refused_via_unm9() {
     let forget_unmanaged = sb.mind(&["forget", &unmanaged_bare]);
     assert!(
         !forget_unmanaged.success,
-        "a hostile derived name must hard-refuse the scan, not merely \
-         disclose it: {}",
+        "a hostile derived name must never resolve as a forgettable item: {}",
         forget_unmanaged.stdout
     );
-    let combined = format!("{}{}", forget_unmanaged.stdout, forget_unmanaged.stderr);
+    // The scan's own warning line is source-controlled data and must stay
+    // sanitized (DSC-95); the `NotInstalled` error below it is free to echo
+    // the raw ref back, since that is the literal text the user themselves
+    // typed on the command line (the same carve-out `forget --json`'s
+    // `target` field gets elsewhere in this file), not source-controlled data
+    // newly introduced by this refusal.
+    let warning_line = forget_unmanaged
+        .stderr
+        .lines()
+        .find(|l| l.starts_with("warning:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a scan warning line: {:?}",
+                forget_unmanaged.stderr
+            )
+        });
     assert!(
-        !combined.contains('\x1b') && !combined.contains('\u{202E}'),
-        "the UnsafeName refusal must not leak raw ANSI/bidi: {:?}",
-        combined
+        !warning_line.contains('\x1b') && !warning_line.contains('\u{202E}'),
+        "the scan's own warning must not leak raw ANSI/bidi: {:?}",
+        warning_line
     );
     assert!(
-        combined.contains("unsafe"),
-        "the refusal must name the cause (UnsafeName): {:?}",
-        combined
+        warning_line.contains("unsafe") && warning_line.contains("handmade"),
+        "the scan's own warning must name the cause and the sanitized name: {:?}",
+        warning_line
     );
     assert!(
-        combined.contains("handmade"),
-        "the refusal must still show the sanitized name: {:?}",
-        combined
+        forget_unmanaged
+            .stderr
+            .to_lowercase()
+            .contains("not installed")
+            || forget_unmanaged
+                .stderr
+                .to_lowercase()
+                .contains("notinstalled"),
+        "the ref must fail to resolve, having been skipped out of the scan: {:?}",
+        forget_unmanaged.stderr
     );
-    assert!(dir.exists(), "a refused scan must leave the file in place");
+    assert!(dir.exists(), "a skipped entry must be left in place");
 
-    // `--yes` does not bypass it: the refusal happens at detection (the
-    // scan), before consent is even asked.
+    // `--yes` does not surface it either: the entry was never a candidate.
     let forget_yes = sb.mind(&["forget", &unmanaged_bare, "--yes"]);
     assert!(
         !forget_yes.success,
-        "even --yes must not bypass UNM-9's hard refusal: {}",
+        "--yes cannot forget an entry that was never a candidate: {}",
         forget_yes.stdout
-    );
-    let combined_yes = format!("{}{}", forget_yes.stdout, forget_yes.stderr);
-    assert!(
-        !combined_yes.contains('\x1b') && !combined_yes.contains('\u{202E}'),
-        "{:?}",
-        combined_yes
     );
     assert!(dir.exists(), "the unmanaged item must not be removed");
 }

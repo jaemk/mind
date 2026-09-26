@@ -26,30 +26,33 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
   records each occupied path.
 - `UNM-9` An unmanaged lobe item whose name, once derived from its filename,
   fails the standard item-name safety check (empty, `.`, `..`, or otherwise
-  unsafe) is refused rather than surfaced as an absorbable or listable item.
-  This matters because a naive suffix strip has no such check built in: a lobe
-  file literally named `...js` (or `...md`) strips to the unsafe name `..`,
-  `..js` to `.`, and `.js` to the empty name. Each of those is a string a
-  caller joins onto a directory to build the destination path (ABS-1), the
-  store path (`store/<kind>/<name>`, storage.md) and the staging/backup paths,
-  so the "item" names the directory that holds every OTHER item of its kind.
-  The check is the same predicate the catalog scan applies to a source-declared
+  unsafe) is skipped, not surfaced as an absorbable or listable item. This
+  matters because a naive suffix strip has no such check built in: a lobe file
+  literally named `...js` (or `...md`) strips to the unsafe name `..`, `..js`
+  to `.`, and `.js` to the empty name. Each of those is a string a caller joins
+  onto a directory to build the destination path (ABS-1), the store path
+  (`store/<kind>/<name>`, storage.md) and the staging/backup paths, so the
+  "item" names the directory that holds every OTHER item of its kind. The
+  check is the same predicate the catalog scan applies to a source-declared
   name (discovery.md DSC-96), applied to every kind's derived name, so a skill
-  directory whose name carries a blocked code point is refused too.
-  Detection therefore fails closed: any configured lobe holding such an entry
-  makes the whole scan refuse with `UnsafeName` rather than silently hiding the
-  entry or letting it resolve. So every verb that scans refuses (`recall`'s
-  status listing UNM-2, `probe`'s non-TUI listing including `--json` UNM-3,
-  which reports a structured `unsafe-name` error, `forget` UNM-4/UNM-7, and
-  `absorb` absorb.md ABS-1), including under `--yes`/`--force`, since the
-  refusal is at detection and not at confirmation. A verb that does not scan
-  unmanaged items is unaffected, which is what keeps the lobe diagnosable while
-  such an entry sits in it: `recall --json` lists sources only (UNM-2) and
-  `introspect` reads the manifest. The interactive `probe` TUI treats a failed
-  unmanaged scan as non-fatal like every other snapshot failure (UNM-6), so
-  there the unmanaged group is empty rather than the command refusing. Nothing
-  removes the entry: `mind` cannot name it safely, so clearing it is a manual
-  filesystem operation.
+  directory whose name carries a blocked code point is skipped too.
+  Detection reports and continues, the same per-entry severity DSC-96/DSC-102
+  give a hostile catalog-scanned name: the scan prints one warning naming the
+  kind and the sanitized derived name, then keeps going, so one hostile entry
+  never takes the rest of the listing down with it. The skipped entry is
+  simply absent from the scan's result, so a ref naming it -- `absorb <ref>`
+  (absorb.md ABS-1), `forget <ref>`, or `forget --unmanaged` with no ref
+  (UNM-4/UNM-7) -- resolves to nothing (`NotInstalled`), the same as any other
+  name nothing matches, whether or not `--yes`/`--force` is given. A verb that
+  scans is therefore unaffected in its own success (only the one entry is
+  missing from its output), and a verb that does not scan unmanaged items at
+  all keeps its stable schema untouched: `recall --json` lists sources only
+  (UNM-2) and `introspect` reads the manifest, neither one emitting the
+  warning. The interactive `probe` TUI treats a failed unmanaged scan as
+  non-fatal like every other snapshot failure (UNM-6); with UNM-9 a per-entry
+  skip rather than a whole-scan failure, that path is no longer even reached
+  for this cause. Nothing removes the entry: `mind` cannot name it safely, so
+  clearing it is a manual filesystem operation.
 
 ## recall
 
