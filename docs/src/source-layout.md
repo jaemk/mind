@@ -111,10 +111,26 @@ the name or a bundled path.
 References resolve within the same source only: ship a tool in the same source as
 the items that use it.
 
-Tokens expand only in markdown files. A token in a bundled script (a
-`resources/pr.py`) is left literal by default. To expand it there, list the file
-in the item's `expand:` frontmatter, so a script can locate its tooling without a
-language-specific self-locate; see [Tooling and shared scripts](tooling.md).
+A token expands in a file when the file has a markdown extension, or the item is
+of the `workflow` kind, or the file is on the item's NS-57 `expand:` list. A
+token in an ordinary bundled script (a `resources/pr.py`) is left literal by
+default; list the file in the item's `expand:` frontmatter to expand it there,
+so a script can locate its tooling without a language-specific self-locate; see
+[Tooling and shared scripts](tooling.md).
+
+The `workflow` kind's grant cuts both ways for an author. A workflow's `meta.name`
+is not frontmatter -- it is a plain JS object field -- so nothing stops you from
+writing it as a literal string instead of a `{{ns:}}` token; do that under a
+namespace prefix and the reference silently diverges from the installed
+effective name, rather than failing loudly, until `review`/`upgrade` catches it.
+The opposite mistake also becomes possible: a literal `{{ns:...}}`-shaped string
+elsewhere in the file's JS, written with no intention of it being a token (a
+template string, a comment, test fixture data), is now expanded and validated
+like any other reference, so an unresolvable name there is a hard `BadReference`
+install failure rather than inert text. The usual remedy for an unwanted
+expansion in a bundled non-markdown file -- omit the file from `expand:` -- does
+not apply here, since a workflow's `.js` has no frontmatter to carry an `expand:`
+key in the first place; the grant is unconditional for the whole file.
 
 ## Hardcoded paths
 

@@ -53,6 +53,10 @@ impl Sandbox {
             .args(args)
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
+            // These fixtures are sized against the DEFAULT metadata cap (the
+            // 8 MiB sparse file below sits just past it), so an exported
+            // MIND_MAX_METADATA_SIZE would change what they prove.
+            .env_remove("MIND_MAX_METADATA_SIZE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -296,16 +300,22 @@ fn a_meta_name_naming_a_sibling_agent_is_predicted_bare_under_a_prefix() {
 
     // Both workflows answer to `dev`, which only holds once the tokenized one
     // is predicted bare.
+    // spec: WF-59 -- one finding for the one shared name, naming both.
     let collisions = findings(&r.stdout, "workflow-name-collision");
     assert_eq!(
         collisions.len(),
-        2,
-        "both claimants are reported: {}",
+        1,
+        "one finding for the one shared name: {}",
         r.stdout
     );
     assert!(
-        collisions.iter().all(|l| l.contains("harness name 'dev'")),
+        collisions[0].contains("harness name 'dev'"),
         "the shared name is the bare agent name: {collisions:?}"
+    );
+    assert!(
+        collisions[0].contains("workflow:jk:tokenized")
+            && collisions[0].contains("workflow:jk:literal"),
+        "and both claimants are named in it: {collisions:?}"
     );
 }
 
@@ -435,10 +445,11 @@ fn every_workflow_is_disclosed_whatever_else_was_found_about_it() {
         "{}",
         r.stdout
     );
+    // spec: WF-59 -- one finding per colliding NAME, not per claimant.
     assert_eq!(
         findings(&r.stdout, "workflow-name-collision").len(),
-        2,
-        "both claimants: {}",
+        1,
+        "one finding for the one shared name: {}",
         r.stdout
     );
     // spec: WF-24 -- `cdup`/`ddup` diverge from their file names as well, and
@@ -564,7 +575,7 @@ fn a_non_utf8_workflow_is_still_disclosed_and_reported_unloadable() {
     let unloadable = findings(&r.stdout, "workflow-unloadable");
     assert_eq!(unloadable.len(), 1, "{}", r.stdout);
     assert!(
-        unloadable[0].contains("it declares no `meta` object mind can read"),
+        unloadable[0].contains("mind read no `name`, `description`, or `whenToUse`"),
         "an undecodable file reads as no readable meta: {}",
         unloadable[0]
     );
@@ -628,9 +639,10 @@ fn an_over_cap_workflow_is_reported_and_review_still_exits_zero() {
 ///
 /// So the assertions come in two halves: the healthy sibling is scanned,
 /// disclosed, and checked as if the oversized file were not there, and the
-/// oversized file is reported through the ordinary WF-30 path (no readable
-/// `meta`, plus the WF-7 overage) with no hard finding anywhere.
-// spec: WF-55 WF-30 WF-32 WF-53 DSC-91
+/// oversized file is reported as the file MIND did not read (WF-56, its own
+/// `workflow-unread` finding) plus the WF-7 overage, with no hard finding
+/// anywhere.
+// spec: WF-55 WF-56 WF-30 WF-32 WF-53 DSC-91
 #[test]
 fn a_workflow_past_minds_own_read_cap_reads_as_no_meta_and_spares_the_scan() {
     let sb = Sandbox::new("wf");
@@ -679,9 +691,34 @@ fn a_workflow_past_minds_own_read_cap_reads_as_no_meta_and_spares_the_scan() {
         r.stdout
     );
 
-    // Half two: ...and only the oversized one is reported unloadable, for the
-    // two reasons mind can see -- it read no `meta`, and the file is over the
-    // harness's own cap (WF-7).
+    // Half two: ...and only the oversized one is reported, on the two terms
+    // that are actually true of it -- mind read none of it (WF-56, its own
+    // finding, naming mind's cap and the flag that raises it), and the file is
+    // over the HARNESS's own cap too (WF-7, read off the size rather than the
+    // content, so it survives a read that never happened).
+    let unread = findings(&r.stdout, "workflow-unread");
+    assert_eq!(
+        unread.len(),
+        1,
+        "one unread file, one finding: {}",
+        r.stdout
+    );
+    assert!(
+        unread[0].contains("workflow:huge") && unread[0].contains("over mind's own 8 MiB"),
+        "the finding must name the item and mind's own cap: {}",
+        unread[0]
+    );
+    assert!(
+        unread[0].contains("--max-metadata-size"),
+        "and the flag that raises it: {}",
+        unread[0]
+    );
+    assert!(
+        !unread[0].contains("will not load"),
+        "mind read nothing, so it claims nothing about the harness: {}",
+        unread[0]
+    );
+
     let unloadable = findings(&r.stdout, "workflow-unloadable");
     assert!(
         unloadable.iter().all(|u| u.contains("workflow:huge")),
@@ -689,10 +726,8 @@ fn a_workflow_past_minds_own_read_cap_reads_as_no_meta_and_spares_the_scan() {
         r.stdout
     );
     assert!(
-        unloadable
-            .iter()
-            .any(|u| u.contains("it declares no `meta` object mind can read")),
-        "an over-cap file is the WF-5 'yields nothing' case: {}",
+        !unloadable.iter().any(|u| u.contains("mind read no `name`")),
+        "a file mind did not read must not be reported as one declaring nothing: {}",
         r.stdout
     );
     assert!(
@@ -701,6 +736,160 @@ fn a_workflow_past_minds_own_read_cap_reads_as_no_meta_and_spares_the_scan() {
             .any(|u| u.contains("over the harness's 524288-byte cap")),
         "and the WF-7 overage is reported beside it: {}",
         r.stdout
+    );
+}
+
+/// The `workflow-unread` finding is about MIND's cap, so a cap the operator
+/// lowered produces it for a workflow the harness loads perfectly well -- and
+/// says so, rather than passing mind's configuration off as a defect in the
+/// source. DSC-103 exists partly so an untrusted source can be scanned under a
+/// tighter cap, which is what makes the distinction load-bearing.
+// spec: WF-56 DSC-103
+#[test]
+fn a_lowered_cap_reports_minds_own_cap_and_not_the_harnesss() {
+    let sb = Sandbox::new("wf");
+    // ~2.7 KB: past a 2 KiB cap, and far under the harness's 524288 bytes.
+    let mut body = String::from("export const meta = { name: 'big', description: 'Big' }\n// ");
+    body.push_str(&"p".repeat(2600));
+    body.push('\n');
+    write(&sb.source.join("workflows/big.js"), &body);
+
+    let r = sb.review_with(&["--max-metadata-size", "2KiB"]);
+    assert!(
+        r.success,
+        "a capped read is advisory, never hard: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let unread = findings(&r.stdout, "workflow-unread");
+    assert_eq!(unread.len(), 1, "{}", r.stdout);
+    assert!(
+        unread[0].contains("over mind's own 2 KiB metadata read cap")
+            && unread[0].contains("--max-metadata-size"),
+        "the finding names the effective cap and the flag: {}",
+        unread[0]
+    );
+    // The harness's own cap is nowhere near: nothing may claim this file is
+    // unloadable, because nothing mind read says so.
+    assert!(
+        findings(&r.stdout, "workflow-unloadable").is_empty(),
+        "a file only MIND declined to read is not a file the harness skips: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("metadata-too-large") && !r.stderr.contains("metadata-too-large"),
+        "and the cap is not a hard error either: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WF-57: the declaration is matched at statement position
+// ---------------------------------------------------------------------------
+
+/// A hostile workflow whose first `export`/`const`/`meta` identifier sequence is
+/// a member expression assignment cannot choose what mind believes the workflow
+/// answers to: the decoy is not a declaration, so the real one below it is the
+/// one read, and the findings are about the real `meta.name`.
+///
+/// This is the whole exposure WF-57 closes. The scan stops at its first hit, so
+/// a matched decoy did not just add a wrong reading, it replaced the right one:
+/// both the WF-24 divergence and the WF-29 collision were computed against a
+/// name the harness never sees.
+// spec: WF-57
+#[test]
+fn a_decoy_member_expression_cannot_choose_the_harness_name() {
+    let sb = Sandbox::new("wf");
+    // `shim.export.const.meta` names `deploy`; the real declaration names
+    // `hidden`. The item's file stem is `decoy`, so whichever name mind reads
+    // shows up in a WF-24 divergence, which is how the test tells them apart.
+    write(
+        &sb.source.join("workflows/decoy.js"),
+        "const shim = {}\n\
+         shim.export.const.meta = { name: 'deploy', description: 'Decoy' };\n\
+         export const meta = { name: 'hidden', description: 'The real one' }\n",
+    );
+    // A second workflow really does claim `deploy`. If the decoy were read, the
+    // two would collide (WF-29) on a name the harness never registers.
+    write(
+        &sb.source.join("workflows/deploy.js"),
+        "export const meta = { name: 'deploy', description: 'Deploy it' }\n",
+    );
+
+    let r = sb.review();
+    assert!(r.success, "stdout={} stderr={}", r.stdout, r.stderr);
+
+    let names = findings(&r.stdout, "workflow-name");
+    let decoy = names
+        .iter()
+        .find(|l| l.contains("workflow:decoy:"))
+        .unwrap_or_else(|| panic!("the real `meta.name` diverges from `decoy`: {}", r.stdout));
+    assert!(
+        decoy.contains("resolves it as 'hidden'"),
+        "the statement-position declaration is the one read: {decoy}"
+    );
+    assert!(
+        !r.stdout.contains("'deploy', not 'decoy'"),
+        "the decoy must not be read as this workflow's name: {}",
+        r.stdout
+    );
+    assert!(
+        findings(&r.stdout, "workflow-name-collision").is_empty(),
+        "and it must not collide with the workflow that really claims `deploy`: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WF-59: one report per colliding name, whatever the claimant count
+// ---------------------------------------------------------------------------
+
+/// Three hundred workflows sharing one `meta.name` produce ONE finding with a
+/// bounded claimant list, not three hundred findings each carrying the other
+/// 299 keys. The input is a file count the source chooses, so the per-claimant
+/// shape turned a small source into megabytes of output.
+// spec: WF-59
+#[test]
+fn many_workflows_sharing_one_name_produce_one_bounded_finding() {
+    let sb = Sandbox::new("wf");
+    const N: usize = 300;
+    for i in 0..N {
+        write(
+            &sb.source.join(format!("workflows/w{i:03}.js")),
+            "export const meta = { name: 'deploy', description: 'Deploy it' }\n",
+        );
+    }
+
+    let r = sb.review();
+    assert!(r.success, "stdout={} stderr={}", r.stdout, r.stderr);
+    let collisions = findings(&r.stdout, "workflow-name-collision");
+    assert_eq!(
+        collisions.len(),
+        1,
+        "one name, one finding, whatever the claimant count: {} lines",
+        collisions.len()
+    );
+    assert!(
+        collisions[0].contains("harness name 'deploy'"),
+        "{}",
+        collisions[0]
+    );
+    assert!(
+        collisions[0].contains("and 296 more"),
+        "the claimant list must be capped and the rest counted: {}",
+        collisions[0]
+    );
+    assert!(
+        collisions[0].len() < 400,
+        "the finding must stay bounded in length: {} chars",
+        collisions[0].len()
+    );
+    // The other findings stay per-item, as they are per-item defects: each of
+    // these diverges from its own file name.
+    assert_eq!(
+        findings(&r.stdout, "workflow-name").len(),
+        N,
+        "a divergence is a property of one item, so it is still reported per item"
     );
 }
 

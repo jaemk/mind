@@ -1323,9 +1323,13 @@ fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
 /// DSC-95 requires. This test injects a hostile manifest entry the way a
 /// pre-DSC-96 install would have left one, then drives those three surfaces.
 ///
-/// A hostile-named UNMANAGED lobe item (never catalog-scanned, so DSC-96 does
-/// not apply to it at all) is exercised separately below through the real
-/// `forget` UNM-5 disclosure path.
+/// A hostile-named UNMANAGED lobe item is exercised separately below
+/// (`hostile_unmanaged_item_name_is_refused_via_unm9`): unlike a hand-edited
+/// manifest entry, an unmanaged item's name is derived fresh from its filename
+/// on every scan, and UNM-9 (a fix landed concurrently with this one, the
+/// unmanaged-lobe analog of DSC-96) now hard-refuses a hostile derived name at
+/// scan time rather than letting it through to UNM-5's sanitize-for-disclosure
+/// step, so that test pins a refusal rather than a disclosure.
 ///
 /// Every assertion below is a PAIR: absence of the raw escape/bidi bytes, AND
 /// presence of the sanitized name ("review"/"handmade" -- both chosen so the
@@ -1534,12 +1538,18 @@ fn hostile_installed_item_name_is_sanitized_in_recall_tree() {
 }
 
 /// The unmanaged-item counterpart: a hostile name that never goes through
-/// catalog scanning (DSC-96 only gates catalog items) still reaches `forget`'s
-/// UNM-5 disclosure -- the prompt immediately preceding deletion of the user's
-/// OWN file/directory -- and it must sanitize the name too.
+/// catalog scanning (DSC-96 only gates catalog items) is nonetheless caught by
+/// UNM-9's own safety check on the NAME DERIVED from an unmanaged lobe entry's
+/// filename, at scan time. That scan is what `forget` runs to resolve its ref,
+/// so `forget` of such an item now hard-refuses with `UnsafeName` before it
+/// ever reaches UNM-5's "not managed by mind" disclosure -- with or without
+/// `--yes`, since the refusal is at detection, not at confirmation. The
+/// `UnsafeName` error message is still sanitized for display (DSC-95), so that
+/// guarantee holds via the hard-refusal path now instead of a continued
+/// disclosure.
 #[test]
-fn hostile_unmanaged_item_name_is_sanitized_in_forgets_unm5_disclosure() {
-    // spec: DSC-95 UNM-5
+fn hostile_unmanaged_item_name_is_refused_via_unm9() {
+    // spec: UNM-9 DSC-95
     let sb = melded();
     // See the sibling managed-item test for why this avoids '[': it would
     // misroute `forget` through its glob-selection path (`resolve::is_glob`),
@@ -1558,45 +1568,43 @@ fn hostile_unmanaged_item_name_is_sanitized_in_forgets_unm5_disclosure() {
     let forget_unmanaged = sb.mind(&["forget", &unmanaged_bare]);
     assert!(
         !forget_unmanaged.success,
-        "no --yes in a non-TTY must refuse: {}",
+        "a hostile derived name must hard-refuse the scan, not merely \
+         disclose it: {}",
         forget_unmanaged.stdout
     );
+    let combined = format!("{}{}", forget_unmanaged.stdout, forget_unmanaged.stderr);
     assert!(
-        !forget_unmanaged.stdout.contains('\x1b') && !forget_unmanaged.stdout.contains('\u{202E}'),
-        "the UNM-5 unmanaged-item disclosure must not leak raw ANSI/bidi: {:?}",
-        forget_unmanaged.stdout
+        !combined.contains('\x1b') && !combined.contains('\u{202E}'),
+        "the UnsafeName refusal must not leak raw ANSI/bidi: {:?}",
+        combined
     );
     assert!(
-        forget_unmanaged.stdout.contains("not managed by mind"),
-        "the disclosure text must still be present: {:?}",
-        forget_unmanaged.stdout
+        combined.contains("unsafe"),
+        "the refusal must name the cause (UnsafeName): {:?}",
+        combined
     );
     assert!(
-        forget_unmanaged.stdout.contains("handmade"),
-        "the disclosure must still show the sanitized name: {:?}",
-        forget_unmanaged.stdout
+        combined.contains("handmade"),
+        "the refusal must still show the sanitized name: {:?}",
+        combined
     );
-    assert!(
-        dir.exists(),
-        "a refused removal must leave the file in place"
-    );
+    assert!(dir.exists(), "a refused scan must leave the file in place");
 
-    // With --yes, the disclosure still prints sanitized, and the file is
-    // actually removed (proving the fix did not accidentally short-circuit
-    // the real removal).
+    // `--yes` does not bypass it: the refusal happens at detection (the
+    // scan), before consent is even asked.
     let forget_yes = sb.mind(&["forget", &unmanaged_bare, "--yes"]);
-    assert!(forget_yes.success, "{}", forget_yes.stderr);
     assert!(
-        !forget_yes.stdout.contains('\x1b') && !forget_yes.stdout.contains('\u{202E}'),
-        "{:?}",
+        !forget_yes.success,
+        "even --yes must not bypass UNM-9's hard refusal: {}",
         forget_yes.stdout
     );
+    let combined_yes = format!("{}{}", forget_yes.stdout, forget_yes.stderr);
     assert!(
-        forget_yes.stdout.contains("handmade"),
+        !combined_yes.contains('\x1b') && !combined_yes.contains('\u{202E}'),
         "{:?}",
-        forget_yes.stdout
+        combined_yes
     );
-    assert!(!dir.exists(), "the unmanaged item must actually be removed");
+    assert!(dir.exists(), "the unmanaged item must not be removed");
 }
 
 // M7: `absorb`'s reported `kind:name` key (`absorb_effective_key` in
@@ -2718,6 +2726,117 @@ fn init_source_template_skips_a_bare_mention_in_a_non_markdown_file() {
         notes.contains("{{ns:dev}}"),
         "a bare mention in a recognized non-`.md` markdown extension (.markdown) \
          must still be templated: {notes}"
+    );
+}
+
+/// The cost side of WF-25's unconditional grant, which docs/src/source-layout.md
+/// now documents: a `{{ns:...}}`-shaped string anywhere in a workflow's `.js` is
+/// expanded and VALIDATED like any other reference, so one naming no sibling
+/// fails the install hard (`BadReference`, NS-12) instead of being the inert text
+/// it would be in an unlisted non-markdown file. A `.js` has no frontmatter, so
+/// there is no `expand:` key to omit and no way to opt the file back out.
+///
+/// The existing coverage for this stops at the `review` surface (which has no
+/// installed copy and expands the file itself); this drives the real install, and
+/// pins the transactional consequence too: a failed install leaves no store copy
+/// and no link, and the source's other items still install afterward.
+#[test]
+fn a_workflows_unresolvable_token_fails_the_install_and_leaves_nothing() {
+    // spec: WF-25 WF-27 NS-12 LIFE-1
+    let sb = Sandbox::new();
+    // Not a `meta.name` token, and not prose either: a template string in the
+    // body, which is the "written with no intention of it being a token" case.
+    sb.write_and_commit(
+        "workflows/stray.js",
+        "export const meta = {\n  name: 'stray',\n  description: 'Stray token',\n}\n\
+         agent(`see {{ns:nonesuch}} for the format`)\n",
+    );
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--register-only"])
+            .success
+    );
+
+    let learn = sb.mind(&["learn", "workflow:stray", "--yes"]);
+    assert!(
+        !learn.success,
+        "an unresolvable token in a workflow's .js must fail the install, not \
+         install as literal text: {}\n{}",
+        learn.stdout, learn.stderr
+    );
+    let all = format!("{}{}", learn.stdout, learn.stderr);
+    assert!(
+        all.contains("nonesuch"),
+        "the failure must name the bad referent: {all}"
+    );
+    assert!(
+        !sb.mind_home.join("store/workflow/stray").exists(),
+        "a failed install must leave no store copy"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("workflows/stray.js")).is_err(),
+        "and no link"
+    );
+    // The failure is confined to the offending item: the rest of the source is
+    // unaffected, which is what makes the hard failure safe.
+    let ok = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(
+        ok.success,
+        "a sibling item must still install after the refusal: {}\n{}",
+        ok.stdout, ok.stderr
+    );
+}
+
+/// The workflow carve-out INIT-5 now spells out: `--template`'s gate is
+/// `namespace::is_markdown`, which is NARROWER than the set install expands
+/// (install also expands a workflow's `.js`, WF-25). So a bare sibling mention
+/// inside a workflow's JavaScript is left alone, for the same reason `review
+/// --fix` leaves one alone (NS-54): word-boundary rewriting inside code can
+/// corrupt working code, and a workflow file is code.
+///
+/// Without this, the obvious "consistency fix" -- pointing `--template` at the
+/// item-aware gate, since install expands a workflow's `.js` -- breaks nothing
+/// any test asserts, while silently rewriting identifiers in a source's
+/// JavaScript. The `.md` half is the control: the same mention in the same
+/// source IS templated, so this pins a deliberate asymmetry rather than an
+/// inert file walk.
+#[test]
+fn init_source_template_leaves_a_workflows_js_alone() {
+    // spec: INIT-5 NS-54 WF-25
+    let sb = Sandbox::new();
+    let repo = sb.base.join("authoring-workflow-gate");
+    let js = "export const meta = {\n  name: 'ship-it',\n  description: 'ship',\n}\n\
+              // hand off to dev when the build is green\nagent('ask dev to review')\n";
+    write(&repo.join("workflows/ship-it.js"), js);
+    write(
+        &repo.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\nhand off to dev when done\n",
+    );
+    write(
+        &repo.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    let dir = repo.to_str().unwrap();
+
+    let t = sb.mind(&["init-source", dir, "--template"]);
+    assert!(
+        t.success,
+        "init-source --template failed: {} {}",
+        t.stdout, t.stderr
+    );
+
+    let after = std::fs::read_to_string(repo.join("workflows/ship-it.js")).unwrap();
+    assert_eq!(
+        after, js,
+        "--template must leave a workflow's .js byte-identical (INIT-5), even \
+         though install DOES expand tokens there (WF-25)"
+    );
+
+    // Control: markdown in the same source, same mention, IS templated -- so the
+    // untouched `.js` above is the gate at work, not a no-op run.
+    let skill = std::fs::read_to_string(repo.join("skills/review/SKILL.md")).unwrap();
+    assert!(
+        skill.contains("{{ns:dev}}"),
+        "the markdown control must be templated: {skill}"
     );
 }
 
@@ -9591,9 +9710,10 @@ fn example_namespacing_expands_references() {
 
 #[test]
 fn example_starter_convention_discovery() {
-    // spec: DSC-10, DSC-11, DSC-12, DSC-20, CLI-85
+    // spec: DSC-10, DSC-11, DSC-12, DSC-20, CLI-85, WF-1
     // The starter example ships no mind.toml: items are found by convention and
-    // their descriptions come from each item's frontmatter.
+    // their descriptions come from each item's frontmatter (a workflow's from
+    // its `meta` object instead, WF-4).
     let sb = Sandbox::from_example("starter");
     let meld = sb.mind(&["meld", &sb.source_spec()]);
     assert!(meld.success, "{}", meld.stderr);
@@ -9605,6 +9725,7 @@ fn example_starter_convention_discovery() {
     assert!(probe.stdout.contains("skill:greet"), "{}", probe.stdout);
     assert!(probe.stdout.contains("agent:scribe"), "{}", probe.stdout);
     assert!(probe.stdout.contains("rule:tone"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("workflow:hello"), "{}", probe.stdout);
 
     // A query that matches only a description (CLI-85): "plain" is in tone's
     // frontmatter description, not its name.
@@ -9622,6 +9743,23 @@ fn example_starter_convention_discovery() {
     assert!(
         sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
         "greet should be copied into the store"
+    );
+
+    // spec: WF-1, WF-10 -- a workflow discovered by convention (workflows/hello.js)
+    // installs to the store and links into the agent home like any other kind.
+    let learn_wf = sb.mind(&["learn", "hello"]);
+    assert!(learn_wf.success, "{}\n{}", learn_wf.stdout, learn_wf.stderr);
+    assert!(
+        sb.mind_home.join("store/workflow/hello").exists(),
+        "hello workflow should be copied into the store"
+    );
+    let wf_link = sb.claude_home.join("workflows/hello.js");
+    assert!(
+        std::fs::symlink_metadata(&wf_link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "hello workflow must be linked at workflows/hello.js: {:?}",
+        wf_link
     );
 }
 
@@ -23069,10 +23207,12 @@ fn marketplace_plugin_workflow_installs_and_links() {
 #[test]
 fn marketplace_plugin_manifest_workflows_key_is_ignored() {
     // spec: WF-41
-    // The fixture's plugin.json sets `workflows` to a path that does not exist.
-    // It is a component-path override mind ignores, as it ignores every other
-    // one (MKT-3), so the manifest still parses and the convention directory is
-    // what gets scanned.
+    // The fixture's plugin.json points `workflows` at `./elsewhere/workflows`, a
+    // real directory (with its own `release.js`) that is NOT the conventional
+    // `workflows/` directory. It is a component-path override mind ignores, as
+    // it ignores every other one (MKT-3), so the manifest still parses and the
+    // convention directory is what gets scanned -- `release` never appears,
+    // because mind never looks at the declared path at all.
     let sb = Sandbox::from_example("marketplace-plugin");
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec, "--link-only"]);
@@ -23088,12 +23228,106 @@ fn marketplace_plugin_manifest_workflows_key_is_ignored() {
         manifest.contains("\"workflows\""),
         "the fixture must actually declare the override key: {manifest}"
     );
+    assert!(
+        sb.source.join("elsewhere/workflows/release.js").is_file(),
+        "the declared path must be real, so this proves mind is choosing not \
+         to follow it rather than failing to find anything there"
+    );
 
     let probe = sb.mind(&["probe"]);
     assert!(
         probe.stdout.contains("workflow:acme-tools:deploy"),
         "the convention workflows/ dir is scanned, not the declared path: {}",
         probe.stdout
+    );
+    // Not a bare `contains("release")`: `deploy`'s own description ("Stage,
+    // verify, and cut a release") already contains that substring, so this
+    // checks the specific effective item key `release` would install under
+    // instead (MKT-5's plugin-name prefix), plus the store, which is the
+    // authoritative record of what actually got installed.
+    assert!(
+        !probe.stdout.contains("workflow:acme-tools:release")
+            && !probe.stdout.contains("workflow:release"),
+        "the workflow at the declared (but ignored) path must not appear: {}",
+        probe.stdout
+    );
+    assert!(
+        !sb.mind_home
+            .join("store/workflow/acme-tools:release")
+            .exists()
+            && !sb.mind_home.join("store/workflow/release").exists(),
+        "the ignored-path workflow must never be installed"
+    );
+    // The invisibility is total, not just absent from a listing: naming the
+    // item outright is an unresolvable ref, and nothing links for it.
+    for r#ref in ["release", "acme-tools:release", "workflow:release"] {
+        let learn = sb.mind(&["learn", r#ref, "--yes"]);
+        assert!(
+            !learn.success,
+            "`learn {ref}` must not resolve an item at the ignored path: {}\n{}",
+            learn.stdout,
+            learn.stderr,
+            r#ref = r#ref
+        );
+    }
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("workflows/release.js")).is_err()
+            && std::fs::symlink_metadata(sb.claude_home.join("workflows/acme-tools:release.js"))
+                .is_err(),
+        "nothing may link for the workflow at the declared path"
+    );
+}
+
+/// The POSITIVE CONTROL for the test above: `elsewhere/workflows/release.js` is
+/// a perfectly loadable workflow that mind installs the moment it is given a
+/// scan root that reaches it (`--add-root`, DSC-84). Without this, the negative
+/// assertions pass just as well if the fixture's `release.js` were malformed,
+/// misnamed, or an empty file -- proving nothing about WF-41, since a file mind
+/// COULD NOT have installed anyway is not evidence that mind declined to follow
+/// the manifest's `workflows` override.
+///
+/// So this pins the fixture's other half: what the harness would load from the
+/// declared path is a real item, and the ONLY thing keeping it out of mind is
+/// that mind never reads the override.
+#[test]
+fn marketplace_plugin_ignored_override_path_holds_a_real_workflow() {
+    // spec: WF-41 DSC-84 MKT-17
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    // --add-root composes with the plugin manifest rather than suppressing it,
+    // so both workflows are offered: the conventional one and the one at the
+    // path the manifest declared and mind ignored.
+    let r = sb.mind(&["meld", &spec, "--register-only", "--add-root", "elsewhere"]);
+    assert!(r.success, "meld --add-root: {}\n{}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("workflow:acme-tools:release"),
+        "the workflow at the declared path is a real, discoverable item once a \
+         scan root reaches it: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("workflow:acme-tools:deploy"),
+        "and the plugin manifest's own items survive the added root (DSC-84): {}",
+        probe.stdout
+    );
+    // Its `meta` object is readable too (WF-4), which is what makes it a
+    // loadable workflow rather than a stray `.js` file.
+    let by_desc = sb.mind(&["probe", "--no-tui", "declared"]);
+    assert!(
+        by_desc.stdout.contains("workflow:acme-tools:release"),
+        "release's meta.description must be read, so the fixture is a real \
+         workflow and not an unreadable file: {}",
+        by_desc.stdout
+    );
+
+    let learn = sb.mind(&["learn", "workflow:acme-tools:release", "--yes"]);
+    assert!(learn.success, "learn: {}\n{}", learn.stdout, learn.stderr);
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("workflows/acme-tools:release.js")).is_ok(),
+        "and it installs and links like any other workflow: {}",
+        learn.stdout
     );
 }
 

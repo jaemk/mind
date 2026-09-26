@@ -448,8 +448,9 @@ For `recall`, these filters apply to the installed-items listing only, not to
 
 ## Global flags and output
 
-`--json`, `--yes` (`-y`), and `--ascii` are global flags accepted before or after
-any verb. Position does not matter: `mind --json recall` and `mind recall --json`
+`--json`, `--yes` (`-y`), `--ascii`, `--verbose` (`-v`), and
+`--max-metadata-size <SIZE>` are global flags accepted before or after any
+verb. Position does not matter: `mind --json recall` and `mind recall --json`
 are equivalent (CLI-150).
 
 **Color and Unicode.** Output uses ANSI color and Unicode glyphs when all of the

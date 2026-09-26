@@ -1,4 +1,4 @@
-//! The `workflow` item kind (spec/workflows.md, WF-1..52): end-to-end tests that
+//! The `workflow` item kind (spec/workflows.md): end-to-end tests that
 //! drive the real `mind` binary against a hermetic, network-free fixture (a
 //! local git repo, isolated MIND_HOME/CLAUDE_HOME).
 //!
@@ -9,8 +9,12 @@
 //!   WF-10: it stores at `store/workflow/<name>` and links at `workflows/<name>.js`
 //!   WF-22: a namespace prefix gives `workflows/<prefix>:<name>.js`
 //!   WF-23/WF-25: `{{ns:}}` in `meta.name` expands at install
+//!   WF-24: the divergence warning, and that its remedy token installs
 //!   WF-50: the kind-generic machinery (upgrade, forget, unmanaged) covers it
 //!   WF-51: `probe` shows `whenToUse` beside the description
+//!   WF-56: mind's own metadata cap is reported as mind's, not as the harness's
+//!   WF-58: a `meta.name` with an invisible character is unusable, and said so
+//!   WF-60: `recall <item> --json` carries the harness name and its findings
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -90,6 +94,11 @@ impl Sandbox {
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_AGENT_HOMES")
+            // The cap tests below pass `--max-metadata-size` explicitly, and
+            // the rest depend on the default; a developer with
+            // MIND_MAX_METADATA_SIZE exported would otherwise see both sets
+            // fail for a reason that has nothing to do with the code.
+            .env_remove("MIND_MAX_METADATA_SIZE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null());
@@ -120,6 +129,7 @@ impl Sandbox {
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_AGENT_HOMES")
+            .env_remove("MIND_MAX_METADATA_SIZE")
             .stdout(Stdio::from(File::create(&out_path).unwrap()))
             .stderr(Stdio::from(File::create(&err_path).unwrap()))
             .stdin(Stdio::null())
@@ -283,6 +293,11 @@ fn the_scan_is_flat_and_js_only() {
     sb.write_and_commit("workflows/modern.mjs", REVIEW_JS);
     sb.write_and_commit("workflows/typed.ts", REVIEW_JS);
     sb.write_and_commit("workflows/notes.md", "---\ndescription: notes\n---\n");
+    // spec: WF-3 -- the extension is compared case-SENSITIVELY, as the harness
+    // compares it, so an uppercase spelling is not a workflow. Without a
+    // fixture here an `eq_ignore_ascii_case` regression would discover (and
+    // install) a file the harness would never load.
+    sb.write_and_commit("workflows/LOUD.JS", REVIEW_JS);
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
 
     let r = sb.mind(&["probe", "--no-tui"]);
@@ -292,7 +307,7 @@ fn the_scan_is_flat_and_js_only() {
         "the flat `.js` workflow is still found: {}",
         r.stdout
     );
-    for missed in ["deep", "modern", "typed", "notes"] {
+    for missed in ["deep", "modern", "typed", "notes", "LOUD"] {
         assert!(
             !r.stdout.contains(missed),
             "'{missed}' must not be discovered as an item: {}",
@@ -550,6 +565,19 @@ fn review_does_not_call_a_workflows_tokens_inert() {
     );
 
     let r = sb.mind(&["review", &sb.source_spec()]);
+    // The run has to have SUCCEEDED and reached the token checks, or the
+    // absence of `inert-token` below means only that review printed nothing.
+    assert!(
+        r.success,
+        "review must succeed on a source whose tokens all resolve: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("[workflow-content]") && r.stdout.contains("workflow:review-changes"),
+        "review must have reached the workflow checks at all: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
     assert!(
         !r.stdout.contains("inert-token") && !r.stderr.contains("inert-token"),
         "a workflow's resolving tokens are not inert: {}\n{}",
@@ -590,11 +618,27 @@ fn only_a_workflow_may_link_into_the_workflows_directory() {
     );
     sb.write_and_commit("rules/style.md", "---\ndescription: style\n---\n# style\n");
 
-    let r = sb.mind(&["meld", &sb.source_spec()]);
+    let r = sb.mind(&["meld", &sb.source_spec(), "--json"]);
     assert!(
         !r.success,
         "a rule linking into workflows/ must be refused: {}\n{}",
         r.stdout, r.stderr
+    );
+    // Refused for the RIGHT reason: a meld can fail for a dozen unrelated
+    // causes, and this test is about the confined-link-target rule.
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", r.stdout));
+    assert_eq!(
+        doc["error"]["kind"].as_str(),
+        Some("mind-toml"),
+        "the refusal must come from validating the declared link, not from some \
+         unrelated failure: {}",
+        r.stdout
+    );
+    let message = format!("{}{}", doc["error"]["message"], r.stderr);
+    assert!(
+        message.contains("workflows/deploy.js") && message.contains("link"),
+        "and must name the offending link target: {message}"
     );
     assert!(
         !sb.link("deploy.js").symlink_metadata().is_ok(),
@@ -618,12 +662,20 @@ fn review_reports_a_workflow_the_harness_will_not_load() {
         "workflows/no-description.js",
         "export const meta = {\n  name: 'no-description',\n}\n",
     );
-    // 524288 bytes is the cap; one byte past it is an overage.
-    let padded = format!(
-        "export const meta = {{\n  name: 'huge',\n  description: 'Huge',\n}}\n// {}\n",
-        "x".repeat(524_289)
-    );
-    sb.write_and_commit("workflows/huge.js", &padded);
+    // 524288 bytes is the cap and is NOT an overage; the fixture is exactly one
+    // byte past it, so a `>=` comparison in place of the `>` would fail the
+    // `at the cap` half of this test rather than pass it silently.
+    let sized = |name: &str, bytes: usize| -> String {
+        let header =
+            format!("export const meta = {{\n  name: '{name}',\n  description: 'Big',\n}}\n// ");
+        let mut s = String::with_capacity(bytes);
+        s.push_str(&header);
+        s.push_str(&"x".repeat(bytes - header.len()));
+        assert_eq!(s.len(), bytes, "the fixture size must be exact");
+        s
+    };
+    sb.write_and_commit("workflows/at-cap.js", &sized("at-cap", 524_288));
+    sb.write_and_commit("workflows/huge.js", &sized("huge", 524_289));
 
     let r = sb.mind(&["review", &sb.source_spec()]);
     assert!(
@@ -638,8 +690,9 @@ fn review_reports_a_workflow_the_harness_will_not_load() {
         .collect();
     let joined = findings.join("\n");
     assert!(
-        joined.contains("workflow:no-meta") && joined.contains("no `meta` object"),
-        "an unreadable meta must be reported: {joined}"
+        joined.contains("workflow:no-meta")
+            && joined.contains("mind read no `name`, `description`, or `whenToUse`"),
+        "an unreadable meta must be reported, in terms of what mind read: {joined}"
     );
     assert!(
         joined.contains("workflow:blank-name") && joined.contains("`meta.name` is empty"),
@@ -653,6 +706,12 @@ fn review_reports_a_workflow_the_harness_will_not_load() {
     assert!(
         joined.contains("workflow:huge") && joined.contains("524288-byte cap"),
         "a file over the cap must be reported: {joined}"
+    );
+    // spec: WF-7 -- the cap itself is not an overage: the file exactly AT it
+    // draws no finding, which is what pins the comparison as `>`.
+    assert!(
+        !joined.contains("workflow:at-cap"),
+        "a file exactly at the cap is not over it: {joined}"
     );
     assert!(
         !joined.contains("workflow:review-changes"),
@@ -772,7 +831,7 @@ fn a_tokenized_meta_name_draws_no_divergence_warning() {
         "workflows/review-changes.js",
         "export const meta = {\n  name: '{{ns:review-changes}}',\n  description: 'Review changed files',\n}\n",
     );
-    let r = sb.mind(&["review", &sb.source_spec(), "--as", "jk"]);
+    let r = sb.mind(&["review", &sb.source_spec(), "--namespace", "jk"]);
     assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
     assert!(
         !r.stdout.contains("[workflow-name]"),
@@ -791,6 +850,466 @@ fn a_tokenized_meta_name_draws_no_divergence_warning() {
         "learn must stay quiet: {}",
         r.stderr
     );
+}
+
+/// The divergence warning's remedy is FOLLOWABLE: writing the exact
+/// `{{ns:<name>}}` token it prints into `meta.name` clears the warning and the
+/// install succeeds.
+///
+/// The remedy has to name the BARE name. Under a prefix, `{{ns:}}` resolves
+/// only against bare sibling names (NS-11), so a `{{ns:jk:review-changes}}`
+/// token names no sibling and install aborts with a hard `bad-reference`
+/// (NS-12) -- mind's own advice would have traded an advisory warning for a
+/// failed install. This test takes the token straight out of the message rather
+/// than restating it, so it cannot pass against a message that suggests
+/// something else.
+// spec: WF-24 WF-23 NS-11
+#[test]
+fn the_divergence_remedy_token_is_one_that_actually_installs() {
+    let sb = Sandbox::new();
+    // A literal `meta.name` under a prefix: the item installs as
+    // `jk:review-changes` and the harness answers to `review-changes`.
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        "export const meta = {\n  name: 'review-changes',\n  description: 'Review changed files',\n}\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec(), "--namespace", "jk"]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    let finding = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("[workflow-name]"))
+        .unwrap_or_else(|| panic!("review must report the divergence: {}", r.stdout))
+        .to_string();
+    assert!(
+        finding.contains("resolves it as 'review-changes'")
+            && finding.contains("not 'jk:review-changes'"),
+        "the divergence names both spellings: {finding}"
+    );
+
+    // Pull the suggested token out of the message and write exactly that.
+    let start = finding
+        .find("{{ns:")
+        .unwrap_or_else(|| panic!("the finding must suggest a token: {finding}"));
+    let end = finding[start..]
+        .find("}}")
+        .map(|i| start + i + 2)
+        .unwrap_or_else(|| panic!("the suggested token must be terminated: {finding}"));
+    let token = &finding[start..end];
+    assert_eq!(
+        token, "{{ns:review-changes}}",
+        "the remedy must name the BARE name, the only spelling `{{{{ns:}}}}` resolves: {finding}"
+    );
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        &format!(
+            "export const meta = {{\n  name: '{token}',\n  description: 'Review changed files',\n}}\n"
+        ),
+    );
+
+    // The advice taken: review is quiet and the install succeeds.
+    let r = sb.mind(&["review", &sb.source_spec(), "--namespace", "jk"]);
+    assert!(
+        r.success,
+        "review after the fix: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stdout.contains("[workflow-name]"),
+        "following the advice must clear the divergence: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("bad-reference") && !r.stderr.contains("bad-reference"),
+        "the suggested token must resolve: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--namespace", "jk"])
+            .success
+    );
+    let r = sb.mind(&["learn", "workflow:jk:review-changes"]);
+    assert!(
+        r.success,
+        "the install must succeed with the suggested token: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stderr.contains("resolves it as"),
+        "and draw no divergence warning: {}",
+        r.stderr
+    );
+    let installed = std::fs::read_to_string(sb.link("jk:review-changes.js")).unwrap();
+    assert!(
+        installed.contains("name: 'jk:review-changes'"),
+        "the token expanded to the effective name: {installed}"
+    );
+}
+
+/// A `meta.name` carrying an invisible code point is not a usable harness name:
+/// it is reported as its own defect rather than silently accepted, and it draws
+/// neither a divergence (which would read "resolves it as 'review', not
+/// 'review'") nor a collision against the real `review`.
+// spec: WF-58
+#[test]
+fn an_invisible_character_in_a_meta_name_is_reported_not_accepted() {
+    let sb = Sandbox::new();
+    // `deploy` is an ordinary workflow claiming `deploy`. `staging` carries a
+    // zero-width space in its name, so it PRINTS as `deploy` too: accepted, it
+    // would report a collision against a name that looks identical and a
+    // divergence reading "resolves it as 'deploy', not 'staging'".
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy it',\n}\n",
+    );
+    sb.write_and_commit(
+        "workflows/staging.js",
+        "export const meta = {\n  name: 'dep\u{200B}loy',\n  description: 'Deploy to staging',\n}\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    let unloadable: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter(|l| l.contains("[workflow-unloadable]"))
+        .collect();
+    let joined = unloadable.join("\n");
+    assert!(
+        joined.contains("workflow:staging") && joined.contains("control or invisible character"),
+        "an invisible character in `meta.name` must be reported: {}",
+        r.stdout
+    );
+    assert!(
+        !joined.contains("workflow:deploy:"),
+        "the ordinary sibling draws nothing: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("[workflow-name-collision]"),
+        "an unusable name claims nothing, so it collides with nothing: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("resolves it as"),
+        "and draws no divergence, which would compare a name with itself: {}",
+        r.stdout
+    );
+
+    // spec: WF-31 -- reported, never enforced: it still installs.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:staging"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("control or invisible character"),
+        "learn warns on the same terms: {}",
+        r.stderr
+    );
+    assert!(
+        sb.link("staging.js").symlink_metadata().is_ok(),
+        "the workflow installs anyway"
+    );
+}
+
+/// The other side of WF-58: a `meta.name` written as a template literal
+/// spanning lines carries a leading and trailing newline, which is a control
+/// character the WF-58 test would flag if it ran before the trim. It must not:
+/// the name mind uses is the trimmed one, so the workflow is loadable, agrees
+/// with its file name, and draws no finding at all.
+// spec: WF-58 WF-24
+#[test]
+fn a_meta_name_padded_by_a_multiline_template_is_usable_not_a_defect() {
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/release.js",
+        "export const meta = {\n  name: `\n    release\n  `,\n  \
+         description: 'Cut a release',\n}\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("control or invisible character"),
+        "padding is not a character defect: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("[workflow-unloadable]"),
+        "a padded name is a name: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("resolves it as"),
+        "the trimmed name is the item's own name, so nothing diverges: {}",
+        r.stdout
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:release"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.contains("control or invisible character")
+            && !r.stderr.contains("resolves it as"),
+        "learn warns about nothing either: {}",
+        r.stderr
+    );
+
+    // And the name mind reports using is the trimmed one, not the padded text.
+    let r = sb.mind(&["recall", "workflow:release", "--json"]);
+    assert!(r.success, "recall --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one JSON document");
+    assert_eq!(
+        doc["harness_name"].as_str(),
+        Some("release"),
+        "the harness name is the trimmed one: {}",
+        r.stdout
+    );
+    assert_eq!(
+        doc["workflow_findings"].as_array().map(Vec::len),
+        Some(0),
+        "and there is nothing to report: {}",
+        r.stdout
+    );
+}
+
+/// One shared harness name is one warning, and its subject is an item the run
+/// touched -- not whichever claimant happens to sort first. `alpha` is installed
+/// by an earlier run and sorts before `zeta`; the run that installs `zeta` is the
+/// one that has something to say, so the warning is about `zeta`.
+// spec: WF-29 WF-59
+#[test]
+fn a_collision_warning_is_subjected_to_the_item_the_run_touched() {
+    let sb = Sandbox::new();
+    for name in ["alpha", "zeta"] {
+        sb.write_and_commit(
+            &format!("workflows/{name}.js"),
+            &format!(
+                "export const meta = {{\n  name: 'deploy',\n  \
+                 description: 'Deploy from {name}',\n}}\n"
+            ),
+        );
+    }
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let first = sb.mind(&["learn", "workflow:alpha"]);
+    assert!(
+        first.success,
+        "learn alpha: {}\n{}",
+        first.stdout, first.stderr
+    );
+    assert!(
+        !first.stderr.contains("harness name 'deploy'"),
+        "one claimant is no collision: {}",
+        first.stderr
+    );
+
+    let second = sb.mind(&["learn", "workflow:zeta"]);
+    assert!(
+        second.success,
+        "learn zeta: {}\n{}",
+        second.stdout, second.stderr
+    );
+    let lines: Vec<&str> = second
+        .stderr
+        .lines()
+        .filter(|l| l.contains("harness name 'deploy'"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one name, one warning: {lines:?}");
+    assert!(
+        lines[0].contains("warning: workflow:zeta:"),
+        "the subject is the item this run installed, not the alphabetically first \
+         claimant: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("workflow:alpha also claims"),
+        "and the untouched claimant is named as the other: {lines:?}"
+    );
+
+    assert!(
+        !lines[0].contains("workflow:zeta also"),
+        "no claimant is ever reported against itself: {lines:?}"
+    );
+
+    // The other ordering: one run that touches BOTH claimants still warns once,
+    // subjected to the first of them, and still lists only the other.
+    let sb = Sandbox::new();
+    for name in ["alpha", "zeta"] {
+        sb.write_and_commit(
+            &format!("workflows/{name}.js"),
+            &format!(
+                "export const meta = {{\n  name: 'deploy',\n  \
+                 description: 'Deploy from {name}',\n}}\n"
+            ),
+        );
+    }
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let both = sb.mind(&["learn", "--all", "agents"]);
+    assert!(both.success, "learn both: {}\n{}", both.stdout, both.stderr);
+    let lines: Vec<&str> = both
+        .stderr
+        .lines()
+        .filter(|l| l.contains("harness name 'deploy'"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one name is one warning however many of its claimants a run touched: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("warning: workflow:alpha:") && lines[0].contains("workflow:zeta also"),
+        "the first claimant is the subject when the run touched both: {lines:?}"
+    );
+    assert!(
+        !lines[0].contains("workflow:alpha also"),
+        "and it is not listed among the others: {lines:?}"
+    );
+}
+
+/// `recall <item> --json` carries the harness-facing name and the findings about
+/// it, so a scripted consumer sees the divergence and the collision the text
+/// view prints.
+// spec: WF-60
+#[test]
+fn recall_json_carries_the_harness_name_and_its_findings() {
+    let sb = Sandbox::new();
+    // `deploy-staging` answers to `deploy` (a WF-24 divergence) and shares that
+    // name with `deploy-prod` (a WF-29 collision).
+    sb.write_and_commit(
+        "workflows/deploy-staging.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy to staging',\n}\n",
+    );
+    sb.write_and_commit(
+        "workflows/deploy-prod.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy to prod',\n}\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "workflow:deploy-staging"]).success);
+    assert!(sb.mind(&["learn", "workflow:deploy-prod"]).success);
+
+    let r = sb.mind(&["recall", "workflow:deploy-staging", "--json"]);
+    assert!(r.success, "recall --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", r.stdout));
+    assert_eq!(
+        doc["harness_name"].as_str(),
+        Some("deploy"),
+        "the document must carry the name the harness answers to: {}",
+        r.stdout
+    );
+    let findings: Vec<&str> = doc["workflow_findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("workflow_findings must be an array: {}", r.stdout))
+        .iter()
+        .map(|f| f.as_str().expect("each finding is a string"))
+        .collect();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("resolves it as 'deploy'") && f.contains("not 'deploy-staging'")),
+        "the WF-24 divergence must ride the document: {findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("harness name 'deploy'") && f.contains("workflow:deploy-prod")),
+        "so must the WF-29 collision: {findings:?}"
+    );
+    // The same strings the text view prints, so the two cannot drift.
+    let text = sb.mind(&["recall", "workflow:deploy-staging"]);
+    assert!(text.success, "recall: {}\n{}", text.stdout, text.stderr);
+    for finding in &findings {
+        assert!(
+            text.stdout.contains(finding),
+            "every JSON finding must be one the text view prints: {finding}\n{}",
+            text.stdout
+        );
+    }
+
+    // A non-workflow item's document is unchanged: the fields are the kind's.
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let r = sb.mind(&["recall", "skill:review", "--json"]);
+    assert!(r.success, "recall skill --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one JSON document");
+    assert!(
+        doc.get("harness_name").is_none() && doc.get("workflow_findings").is_none(),
+        "only a workflow carries the workflow fields: {}",
+        r.stdout
+    );
+}
+
+/// `recall <item>` of a workflow whose store copy mind cannot read says nothing
+/// about the harness rather than erroring: `harness_name` is null, the findings
+/// are empty, and the text view prints no `harness` line. The read is the one
+/// thing in the detail view that touches the file system, so a store copy
+/// deleted by hand, replaced by a directory, or holding bytes that are not UTF-8
+/// must not be able to fail the command that is meant to report on it.
+///
+/// WF-56 is not in play for any of these: mind's own cap is about a file too
+/// large to read, not one it could not read at all, so no cap notice may appear.
+// spec: WF-60 WF-5 WF-56
+#[test]
+fn recall_of_a_workflow_whose_store_copy_is_unreadable_reports_no_harness_name() {
+    for (what, break_it) in [
+        ("deleted", 0u8),
+        ("a directory", 1),
+        ("not UTF-8", 2),
+        ("empty", 3),
+    ] {
+        let sb = Sandbox::new();
+        assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+        assert!(sb.mind(&["learn", "workflow:review-changes"]).success);
+        let store = sb.mind_home.join("store/workflow/review-changes");
+        assert!(store.is_file(), "the store copy is a file to begin with");
+        match break_it {
+            0 => std::fs::remove_file(&store).unwrap(),
+            1 => {
+                std::fs::remove_file(&store).unwrap();
+                std::fs::create_dir(&store).unwrap();
+            }
+            2 => std::fs::write(&store, [0xff, 0xfe, 0x00, 0x80]).unwrap(),
+            _ => std::fs::write(&store, "").unwrap(),
+        }
+
+        let r = sb.mind(&["recall", "workflow:review-changes", "--json"]);
+        assert!(
+            r.success,
+            "recall --json with a {what} store copy must still succeed: {}\n{}",
+            r.stdout, r.stderr
+        );
+        let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+            .unwrap_or_else(|e| panic!("one JSON document ({what}): {e}\n{}", r.stdout));
+        assert!(
+            doc["harness_name"].is_null(),
+            "a {what} store copy yields no harness name: {}",
+            r.stdout
+        );
+        assert_eq!(
+            doc["workflow_findings"].as_array().map(Vec::len),
+            Some(0),
+            "and no findings, since mind knows nothing about the file ({what}): {}",
+            r.stdout
+        );
+        assert!(
+            !r.stdout.contains("max-metadata-size"),
+            "an unreadable file is not an over-cap one ({what}): {}",
+            r.stdout
+        );
+
+        let text = sb.mind(&["recall", "workflow:review-changes"]);
+        assert!(
+            text.success,
+            "the text view too ({what}): {}\n{}",
+            text.stdout, text.stderr
+        );
+        assert!(
+            !text.stdout.contains("harness "),
+            "nothing to say about the harness ({what}): {}",
+            text.stdout
+        );
+    }
 }
 
 /// Two workflows whose `meta.name` agree are one workflow to the harness. mind
@@ -820,15 +1339,21 @@ fn two_workflows_sharing_a_meta_name_are_reported() {
         .lines()
         .filter(|l| l.contains("[workflow-name-collision]"))
         .collect();
+    // spec: WF-59 -- one shared name is ONE finding, naming the claimants.
     assert_eq!(
         findings.len(),
-        2,
-        "both sides of the collision are reported: {:?}",
+        1,
+        "one finding for the one shared name: {:?}",
         findings
     );
     assert!(
-        findings.iter().all(|f| f.contains("harness name 'deploy'")),
+        findings[0].contains("harness name 'deploy'"),
         "the finding names the shared harness name: {findings:?}"
+    );
+    assert!(
+        findings[0].contains("workflow:deploy-prod")
+            && findings[0].contains("workflow:deploy-staging"),
+        "and names both claimants: {findings:?}"
     );
 
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
@@ -1081,12 +1606,29 @@ fn an_over_cap_workflow_leaves_every_scanning_verb_working() {
         let r = sb.mind_bounded(&learn);
         assert!(r.success, "learn {name}: {}\n{}", r.stdout, r.stderr);
         // The warning is what proves the fixture bites: the over-cap file
-        // reaches mind as a workflow with no readable `meta`, and the sibling
+        // reaches mind as a workflow mind read nothing of, and the sibling
         // under the cap is untouched.
+        //
+        // spec: WF-56 -- and the warning names MIND's cap and the flag that
+        // raises it, rather than claiming the harness will not load a file
+        // mind never read. The cap here is a lowered one, far below the
+        // harness's own 524288 bytes, so this workflow is one the harness
+        // loads perfectly well.
         assert_eq!(
-            r.stderr.contains("no `meta` object mind can read"),
+            r.stderr.contains("over mind's own 2 KiB metadata read cap"),
             unloadable,
             "learn {name} reported the wrong loadability: {}",
+            r.stderr
+        );
+        assert_eq!(
+            r.stderr.contains("--max-metadata-size"),
+            unloadable,
+            "learn {name} must name the flag that raises the cap: {}",
+            r.stderr
+        );
+        assert!(
+            !r.stderr.contains("the harness will not load this workflow"),
+            "mind's own cap says nothing about the harness: {}",
             r.stderr
         );
     }
@@ -1200,9 +1742,11 @@ fn an_over_cap_workflow_declared_in_mind_toml_is_catalogued() {
         r.stdout,
         r.stderr
     );
+    // spec: WF-56 -- reported as mind's own unread file, not as a read failure
+    // and not as a verdict about the harness.
     assert!(
-        r.stderr.contains("no `meta` object mind can read"),
-        "it is reported as unloadable, not as a read failure: {}",
+        r.stderr.contains("over mind's own 2 KiB metadata read cap"),
+        "it is reported as mind's cap, not as a read failure: {}",
         r.stderr
     );
 }
@@ -1273,6 +1817,45 @@ fn an_over_cap_skill_still_fails_the_scan() {
     );
 }
 
+/// The gate that grants a workflow's `.js` token expansion (WF-25) is the same
+/// one that grants an NS-57 `expand:`-listed file, and the dependency scan reads
+/// it: a `{{ns:}}` in an expand-listed script is an edge install really will
+/// expand, so the closure has to bring its referent in.
+///
+/// This lives beside the workflow tests because it pins the SHARED gate: the two
+/// ways into token expansion have to be one question with one answer, or a
+/// caller that asks the narrower one silently drops real edges (the dependency
+/// scan did exactly that).
+// spec: NS-57 WF-25 DEP-1
+#[test]
+fn a_token_in_an_expand_listed_file_is_a_dependency_edge() {
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/deployer/SKILL.md",
+        "---\nname: deployer\ndescription: Deploy things\nexpand: run.sh\n---\n# deployer\n",
+    );
+    // The only reference to `review` is in the expand-listed script, where
+    // install DOES expand it, so it is a real edge and not dead text.
+    sb.write_and_commit("skills/deployer/run.sh", "#!/bin/sh\n# see {{ns:review}}\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:deployer", "--yes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the token's referent must come with the closure: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    // And the token really was expanded in the installed copy, which is what
+    // makes the edge real rather than a guess.
+    let installed = std::fs::read_to_string(sb.claude_home.join("skills/deployer/run.sh")).unwrap();
+    assert!(
+        installed.contains("# see review") && !installed.contains("{{ns:"),
+        "the expand-listed file must have been expanded: {installed}"
+    );
+}
+
 /// The unguarded-reference scan covers a workflow file, as it covers every text
 /// file of an item.
 #[test]
@@ -1285,7 +1868,7 @@ fn the_unguarded_reference_scan_covers_a_workflow_file() {
          agent('follow the review skill')\n",
     );
 
-    let r = sb.mind(&["review", &sb.source_spec(), "--as", "jk"]);
+    let r = sb.mind(&["review", &sb.source_spec(), "--namespace", "jk"]);
     assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains("[unguarded-reference]")

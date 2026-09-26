@@ -483,6 +483,487 @@ fn abs1_unresolved_ref_is_not_installed() {
     );
 }
 
+// ---- UNM-9: an unsafe derived item name is refused, not surfaced ----------
+
+/// A lobe file literally named `...js` (three dots) naively strips its `.js`
+/// suffix down to `..` -- a valid path component meaning "parent directory".
+/// Were that name ever surfaced as a resolvable item, `mind absorb
+/// workflow:..` would let `--force` reach the removal codepath with a
+/// destination path built from that name. `unmanaged::scan` must instead
+/// refuse the entry outright (UnsafeName) before absorb ever resolves a ref,
+/// copies a file, commits, or deletes anything.
+// spec: UNM-9
+#[test]
+fn unm9_absorb_refuses_unsafe_derived_workflow_name() {
+    let sb = Sandbox::new();
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(
+        &evil,
+        "export const meta = { name: 'x', phases: [{ title: 'Go' }] }\n",
+    );
+    let commit_before = last_commit_msg(&sb.dest);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:..", "--to", &dest, "--yes", "--force"]);
+
+    assert!(
+        !r.success,
+        "absorb must refuse an unsafe derived item name: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {}",
+        r.stderr
+    );
+    // Nothing must have been written or committed in the destination repo: a
+    // vulnerable build would have joined `..` onto the workflows/ kind
+    // directory and landed (or removed) content one level above it.
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        commit_before,
+        "absorb must not commit anything in the destination when the ref is refused"
+    );
+    assert!(
+        sb.dest.join("README.md").is_file(),
+        "the destination repo's own content must be untouched"
+    );
+    // The original lobe file must survive completely untouched.
+    assert!(
+        evil.is_file(),
+        "the original lobe file must be untouched after a refused absorb"
+    );
+}
+
+/// The same shape exists for every suffix-stripped kind, not just workflow
+/// (WF-50's `.js` mirrors the `.md` stripping done for agent/rule/command): a
+/// command file named `...md` strips to the same unsafe `..`.
+// spec: UNM-9
+#[test]
+fn unm9_absorb_refuses_unsafe_derived_command_name() {
+    let sb = Sandbox::new();
+    let evil = sb.claude_home.join("commands").join("...md");
+    write_file(&evil, "# not a real command\n");
+    let commit_before = last_commit_msg(&sb.dest);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "command:..", "--to", &dest, "--yes", "--force"]);
+
+    assert!(
+        !r.success,
+        "absorb must refuse an unsafe derived item name: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {}",
+        r.stderr
+    );
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        commit_before,
+        "absorb must not commit anything in the destination when the ref is refused"
+    );
+    assert!(
+        evil.is_file(),
+        "the original lobe file must be untouched after a refused absorb"
+    );
+}
+
+/// The same unsafe file must not be surfaced by `recall` either (UNM-9): it is
+/// refused, not merely hidden from `absorb` alone.
+// spec: UNM-9
+#[test]
+fn unm9_recall_also_refuses_unsafe_derived_name() {
+    let sb = Sandbox::new();
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !r.success,
+        "recall must refuse rather than silently list an unsafe-named item: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {}",
+        r.stderr
+    );
+}
+
+/// UNM-9 asserted against real installed state, which is where the traversal
+/// would do its damage. Every install path is built by joining the item name
+/// onto a directory -- `Paths::store_rel` is `store/<kind>/<name>`,
+/// `staging_path`/`backup_path` likewise -- so a derived name of `..` aims all
+/// three at the PARENT directory that holds every other item: `store/workflow/..`
+/// is `store/` itself, and an install swaps its staged copy into that path after
+/// moving aside whatever is already there. A pre-UNM-9 build resolves the ref and
+/// reaches that arithmetic (it moves the lobe file into the destination repo and
+/// commits `absorb workflow:..` before install even starts).
+///
+/// So: install a legitimate item first, then attempt the traversal with every
+/// consent flag handed over, and require that the refusal happens at the name --
+/// with the real item's store copy, its lobe symlink and its manifest entry all
+/// exactly as they were, and nothing staged.
+// spec: UNM-9
+#[test]
+fn unm9_refusal_protects_an_existing_store_from_the_traversal() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_skill("review");
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "skill:review", "--to", &dest, "--yes"]);
+    assert!(r.success, "setup absorb must succeed: stderr={}", r.stderr);
+
+    let store_item = sb.mind_home.join("store").join("skill").join("review");
+    let lobe_link = sb.claude_home.join("skills").join("review");
+    let manifest = sb.mind_home.join("manifest.json");
+    assert!(
+        store_item.join("SKILL.md").is_file(),
+        "setup: the legit item must have a store copy at {store_item:?}"
+    );
+    let manifest_before = std::fs::read_to_string(&manifest).expect("manifest after setup");
+
+    // Now the traversal attempt, with every consent flag handed over.
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [{ title: 'Go' }] }\n",
+    );
+    let evil = sb.mind(&["absorb", "workflow:..", "--to", &dest, "--yes", "--force"]);
+    assert!(
+        !evil.success,
+        "the traversal absorb must fail: stdout={} stderr={}",
+        evil.stdout, evil.stderr
+    );
+    // It must fail AT THE SCAN for the name, not incidentally later on: a
+    // failure from some downstream step would mean the unsafe name was still
+    // resolved and acted on, and the next refactor could make it succeed.
+    assert!(
+        evil.stderr.to_lowercase().contains("unsafe"),
+        "the traversal must be refused for the name itself: stdout={} stderr={}",
+        evil.stdout,
+        evil.stderr
+    );
+
+    assert!(
+        store_item.join("SKILL.md").is_file(),
+        "the existing store copy must survive a refused traversal absorb"
+    );
+    assert!(
+        is_symlink(&lobe_link),
+        "the existing managed lobe link must survive a refused traversal absorb"
+    );
+    let manifest_after = std::fs::read_to_string(&manifest).expect("manifest after refusal");
+    assert_eq!(
+        manifest_after, manifest_before,
+        "a refused absorb must not touch the manifest at all"
+    );
+    assert!(
+        !manifest_after.contains("workflow:.."),
+        "no manifest entry may be keyed on the unsafe name: {manifest_after}"
+    );
+    // The staging/backup scratch must not be left holding the store either.
+    assert!(
+        !sb.mind_home
+            .join(".tmp")
+            .join("staging")
+            .join("workflow")
+            .exists(),
+        "a refused absorb must not have staged anything"
+    );
+}
+
+/// The third unsafe derivation, and the most innocuous-looking file on disk: a
+/// lobe entry named exactly `.md` (or `.js`) strips to the EMPTY name, whose
+/// store path `store/command/` is again a directory holding other items. It is
+/// refused like the `..` case, and the error names the entry's own path or kind
+/// rather than an empty string with no context.
+// spec: UNM-9
+#[test]
+fn unm9_empty_derived_name_is_refused() {
+    let sb = Sandbox::new();
+    // A well-formed sibling, to prove the refusal is not merely "the directory
+    // could not be read".
+    sb.place_unmanaged_command("deploy");
+    let evil = sb.claude_home.join("commands").join(".md");
+    write_file(&evil, "# nothing\n");
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !r.success,
+        "an empty derived name must be refused: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {}",
+        r.stderr
+    );
+    assert!(
+        evil.is_file(),
+        "the refused entry must be left on disk untouched"
+    );
+}
+
+/// `forget --unmanaged` with no ref is the one bulk-DESTRUCTIVE consumer of the
+/// scan: it deletes every unmanaged lobe entry it resolves. With an unsafe entry
+/// present the scan refuses, so the bulk removal must abort before deleting
+/// anything -- including the well-formed entries it would otherwise have been
+/// entitled to remove. Nothing is half-deleted, even with `--yes`.
+// spec: UNM-9
+#[test]
+fn unm9_forget_unmanaged_bulk_refuses_and_removes_nothing() {
+    let sb = Sandbox::new();
+    let safe_cmd = sb.place_unmanaged_command("deploy");
+    let safe_skill = sb.place_unmanaged_skill("review");
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    let r = sb.mind(&["forget", "--unmanaged", "--yes"]);
+    assert!(
+        !r.success,
+        "bulk forget --unmanaged must refuse while an unsafe entry is present: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {}",
+        r.stderr
+    );
+    assert!(safe_cmd.is_file(), "no unmanaged entry may be deleted");
+    assert!(
+        safe_skill.join("SKILL.md").is_file(),
+        "no unmanaged entry may be deleted"
+    );
+    assert!(
+        evil.is_file(),
+        "the unsafe entry itself must not be deleted"
+    );
+}
+
+/// `probe` is the third surface UNM-9 names. Its plain listing goes through the
+/// same scan, so it refuses too rather than listing an item named `..`: with an
+/// explicit `--no-tui`, with a query, in `--json`, and as the bare `probe` that
+/// falls back to the plain listing whenever stdout is not a terminal. Only the
+/// interactive TUI differs (it treats a failed scan as non-fatal, UNM-6), and it
+/// is unreachable here because the harness pipes stdout.
+// spec: UNM-9
+#[test]
+fn unm9_probe_refuses_on_every_non_tui_surface() {
+    let sb = Sandbox::new();
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [] }\n",
+    );
+
+    for args in [
+        vec!["probe", "--no-tui"],
+        vec!["probe", "--no-tui", "deploy"],
+        vec!["probe", "--json"],
+        vec!["probe"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            !r.success,
+            "{args:?} must refuse rather than list an unsafe-named item: \
+             stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        // `--json` reports the failure as a structured error on stdout with the
+        // `unsafe-name` code (CLI-73's error envelope), every other surface as
+        // prose on stderr; require the refusal to name the reason either way,
+        // so a future exit-code-only failure cannot pass for it.
+        let said_unsafe = r.stderr.to_lowercase().contains("unsafe")
+            || r.stdout.contains("unsafe-name")
+            || r.stdout.to_lowercase().contains("unsafe");
+        assert!(
+            said_unsafe,
+            "{args:?} must report the name as unsafe: stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+    }
+}
+
+/// The exact verb surface of the refusal, pinned. UNM-9 says the whole scan
+/// refuses, so every verb that SCANS refuses -- but the verbs that never scan
+/// unmanaged items are unaffected, and that asymmetry is load-bearing (it is
+/// what keeps the lobe diagnosable at all while an unsafe entry sits in it):
+///
+/// | verb | scans unmanaged? | with an unsafe entry |
+/// |------|------------------|----------------------|
+/// | `recall` (human, no `--source`) | yes (UNM-2) | refuses |
+/// | `probe --no-tui` | yes (UNM-3) | refuses |
+/// | `forget <ref>` / `forget --unmanaged` | yes (UNM-4/7) | refuses |
+/// | `absorb <ref>` | yes (ABS-1) | refuses |
+/// | `recall --json` | no: sources-only schema (CLI-73) | succeeds |
+/// | `recall --source <name>` | no: unmanaged have no source | succeeds |
+/// | `introspect` | no: manifest/link drift only | succeeds |
+///
+/// The last three are the regression risk in both directions: a future change
+/// that routes them through `unmanaged::scan` would take the lobe's last
+/// working diagnostic surfaces down with it, and one that stops the first four
+/// from scanning would reopen UNM-9.
+// spec: UNM-9
+#[test]
+fn unm9_verb_surface_of_the_refusal_is_exactly_the_scanning_verbs() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [] }\n",
+    );
+
+    for args in [
+        vec!["recall"],
+        vec!["probe", "--no-tui"],
+        vec!["forget", "--unmanaged", "--yes"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            !r.success,
+            "{args:?} scans unmanaged items, so it must refuse: stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            r.stderr.to_lowercase().contains("unsafe"),
+            "{args:?} must say the name is unsafe: {}",
+            r.stderr
+        );
+    }
+
+    // And the verbs that do not scan keep working, so the user retains a way to
+    // inspect the lobe (and, crucially, a way to be told to `rm` the entry).
+    for args in [vec!["recall", "--json"], vec!["introspect"]] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} does not scan unmanaged items, so an unsafe entry must not \
+             break it: stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+    }
+}
+
+/// The refusal must not over-reach. Only the IMMEDIATE children of a kind dir
+/// are scanned (CMD-8), so a nested `commands/<group>/...md` never has a name
+/// derived from it at all and therefore cannot trip UNM-9: the scan still
+/// succeeds and still lists the well-formed sibling. Without this, one stray
+/// file anywhere under a grouped command tree would disable `recall` wholesale.
+// spec: UNM-9 CMD-8
+#[test]
+fn unm9_nested_unsafe_filename_does_not_trip_the_refusal() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    write_file(
+        &sb.claude_home.join("commands").join("group").join("...md"),
+        "# nested, never derived\n",
+    );
+    // The same shape one level down in a skill's own directory.
+    write_file(
+        &sb.claude_home.join("skills").join("review").join("...md"),
+        "# inside a skill dir\n",
+    );
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "a nested unsafe filename is not an item name and must not refuse: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("deploy"),
+        "the well-formed unmanaged sibling must still be listed: {}",
+        r.stdout
+    );
+}
+
+/// UNM-9 is per-LOBE-set, not per-primary-lobe: the scan walks every configured
+/// agent home (STO-14), so an unsafe entry in a secondary lobe refuses just the
+/// same. A vulnerable build that only guarded the primary home would pass the
+/// tests above and still resolve `workflow:..` out of lobe2.
+// spec: UNM-9
+#[test]
+fn unm9_unsafe_entry_in_a_secondary_lobe_is_also_refused() {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let base = std::env::temp_dir().join(format!("mind-abs-unm9ml-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("personal");
+    let mind_home = base.join("mind");
+    let lobe1 = base.join("lobe1");
+    let lobe2 = base.join("lobe2");
+    git_init(&dest);
+
+    // lobe1 is clean; only the SECONDARY lobe holds the unsafe entry.
+    write_file(&lobe1.join("commands").join("deploy.md"), "# deploy\n");
+    let evil = lobe2.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    std::fs::create_dir_all(&mind_home).unwrap();
+    let lobe1_str = lobe1.to_string_lossy();
+    let lobe2_str = lobe2.to_string_lossy();
+    std::fs::write(
+        mind_home.join("config.toml"),
+        format!("lobes = [\"{lobe1_str}\", \"{lobe2_str}\"]\n"),
+    )
+    .unwrap();
+
+    let dest_str = dest.to_string_lossy().into_owned();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &mind_home)
+            .env("CLAUDE_HOME", &lobe1)
+            .env_remove("MIND_ABSORB_TO")
+            .env_remove("MIND_AGENT_HOMES")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .output()
+            .expect("run mind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = run(&["recall"]);
+    assert!(
+        !ok,
+        "an unsafe entry in a secondary lobe must refuse the scan: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("unsafe"),
+        "error should say the name is unsafe: {stderr}"
+    );
+
+    let (ok, stdout, stderr) = run(&[
+        "absorb",
+        "workflow:..",
+        "--to",
+        &dest_str,
+        "--yes",
+        "--force",
+    ]);
+    assert!(
+        !ok,
+        "absorb must not reach an unsafe-named entry in a secondary lobe: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(
+        last_commit_msg(&dest),
+        "init",
+        "nothing may be committed for a secondary-lobe traversal attempt"
+    );
+    assert!(evil.is_file(), "the secondary-lobe entry must be untouched");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ---- ABS-2: destination precedence --to > MIND_ABSORB_TO > absorb_to -------
 
 /// `--to <path>` takes precedence over MIND_ABSORB_TO.

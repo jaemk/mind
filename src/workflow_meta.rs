@@ -70,13 +70,20 @@ impl WorkflowMeta {
 /// Read a workflow file's `meta`, size-capped like every other metadata read
 /// (DSC-91).
 ///
-/// Only the size cap is a hard error, matching [`crate::frontmatter::text_capped`].
+/// Only the size cap is an error, matching [`crate::frontmatter::text_capped`].
 /// An absent, unreadable, or non-UTF-8 file yields an empty [`WorkflowMeta`],
 /// because a reader that cannot read is exactly the "yields nothing" case WF-5
-/// describes, not a reason to fail a scan. The cap is 8 MiB against the
-/// harness's 512 KiB workflow limit (WF-7), so every loadable workflow is read
-/// whole; a file that trips it is 16x past the point where the harness would
-/// have skipped it anyway.
+/// describes, not a reason to fail a scan.
+///
+/// The cap is a *configured* value (DSC-103), defaulting to 8 MiB against the
+/// harness's 512 KiB workflow limit (WF-7): at the default every loadable
+/// workflow is read whole and a file that trips it is 16x past the point where
+/// the harness would have skipped it anyway, but an operator may lower it below
+/// the harness's own limit, where a perfectly loadable workflow trips it. That
+/// is why the error is passed up rather than folded into an empty `meta` here:
+/// the caller (`workflow_check::read`) keeps it apart from "the file declares
+/// nothing" and reports it as mind's own cap (WF-56), since only the caller
+/// knows the difference matters.
 pub fn file_meta(file: &Path) -> Result<WorkflowMeta> {
     match crate::error::read_capped_metadata(file) {
         Ok(text) => Ok(parse(&text)),
@@ -93,34 +100,55 @@ pub fn file_meta(file: &Path) -> Result<WorkflowMeta> {
 /// reader does (DSC-23).
 pub fn parse(text: &str) -> WorkflowMeta {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    let chars: Vec<char> = text.chars().collect();
-    let mut cur = Cursor { s: &chars, i: 0 };
+    let mut cur = Cursor { s: text, i: 0 };
     match cur.seek_meta_object() {
         true => cur.read_meta_object(),
         false => WorkflowMeta::default(),
     }
 }
 
-/// A character cursor over the file, with just enough JavaScript awareness to
-/// skip what must be skipped: whitespace, comments, and string literals.
+/// A cursor over the file, with just enough JavaScript awareness to skip what
+/// must be skipped: whitespace, comments, and string literals.
+///
+/// It walks the `&str` itself, holding a BYTE offset that always sits on a
+/// character boundary (every advance moves by a whole character). Collecting a
+/// `Vec<char>` first would cost four bytes per character of a file whose size
+/// is bounded only by the configured metadata cap (DSC-103), which may be
+/// `unlimited`; this way the scan allocates nothing at all.
 struct Cursor<'a> {
-    s: &'a [char],
+    s: &'a str,
     i: usize,
 }
 
-impl Cursor<'_> {
+impl<'a> Cursor<'a> {
+    fn rest(&self) -> &'a str {
+        // The offset is only ever advanced by whole characters, so this never
+        // splits one; `get` rather than indexing keeps that a `None` instead of
+        // a panic if it ever stopped being true.
+        self.s.get(self.i..).unwrap_or("")
+    }
+
     fn peek(&self) -> Option<char> {
-        self.s.get(self.i).copied()
+        self.rest().chars().next()
     }
 
     fn peek_at(&self, offset: usize) -> Option<char> {
-        self.s.get(self.i + offset).copied()
+        self.rest().chars().nth(offset)
+    }
+
+    /// Step over exactly one character, whatever its width. Every advance in
+    /// this reader goes through here (or through a reader that ends on a
+    /// boundary), which is what keeps [`Cursor::i`] on one.
+    fn advance(&mut self) {
+        if let Some(c) = self.peek() {
+            self.i += c.len_utf8();
+        }
     }
 
     fn bump(&mut self) -> Option<char> {
         let c = self.peek();
-        if c.is_some() {
-            self.i += 1;
+        if let Some(c) = c {
+            self.i += c.len_utf8();
         }
         c
     }
@@ -129,18 +157,22 @@ impl Cursor<'_> {
         self.i >= self.s.len()
     }
 
-    /// Skip whitespace and both comment forms. An unterminated `/*` runs to end
-    /// of file, which is what a JavaScript tokenizer does before erroring.
-    fn skip_trivia(&mut self) {
+    /// Skip whitespace and both comment forms, reporting whether any of it
+    /// crossed a line break (which is a statement boundary for
+    /// [`Cursor::seek_meta_object`]). An unterminated `/*` runs to end of file,
+    /// which is what a JavaScript tokenizer does before erroring.
+    fn skip_trivia(&mut self) -> bool {
+        let mut newline = false;
         loop {
             match self.peek() {
                 Some(c) if c.is_whitespace() => {
-                    self.i += 1;
+                    newline |= c == '\n';
+                    self.advance();
                 }
                 Some('/') if self.peek_at(1) == Some('/') => {
-                    while let Some(c) = self.peek() {
-                        self.i += 1;
+                    while let Some(c) = self.bump() {
                         if c == '\n' {
+                            newline = true;
                             break;
                         }
                     }
@@ -152,10 +184,11 @@ impl Cursor<'_> {
                             self.i += 2;
                             break;
                         }
-                        self.i += 1;
+                        newline |= self.peek() == Some('\n');
+                        self.advance();
                     }
                 }
-                _ => return,
+                _ => return newline,
             }
         }
     }
@@ -164,7 +197,7 @@ impl Cursor<'_> {
     /// identifiers may start with `$` or `_`; the exact Unicode identifier rules
     /// do not matter here, since the only identifiers this reader compares
     /// against are ASCII.
-    fn read_ident(&mut self) -> Option<String> {
+    fn read_ident(&mut self) -> Option<&'a str> {
         let start = self.i;
         match self.peek() {
             Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => {}
@@ -172,12 +205,12 @@ impl Cursor<'_> {
         }
         while let Some(c) = self.peek() {
             if c.is_alphanumeric() || c == '_' || c == '$' {
-                self.i += 1;
+                self.i += c.len_utf8();
             } else {
                 break;
             }
         }
-        Some(self.s[start..self.i].iter().collect())
+        self.s.get(start..self.i)
     }
 
     /// Read a string literal, consuming it either way. Yields `None` for an
@@ -189,7 +222,7 @@ impl Cursor<'_> {
             Some(c @ ('\'' | '"' | '`')) => c,
             _ => return None,
         };
-        self.i += 1;
+        self.advance();
         let mut out = String::new();
         let mut interpolated = false;
         let mut terminated = false;
@@ -227,40 +260,99 @@ impl Cursor<'_> {
     /// whitespace and comments between the tokens are immaterial and the
     /// identifier `metadata` does not match `meta`. Scanning skips strings and
     /// comments, so the same three words inside a prompt do not trip it.
+    ///
+    /// spec: WF-57 -- the triple has to be at STATEMENT POSITION: the `export`
+    /// must be the first token of a statement (start of file, or after `;`,
+    /// `}`, or a line break) at bracket depth 0, and nothing but trivia may
+    /// come between the three words. Without that, `export`, `const` and `meta`
+    /// were matched as a sequence of identifiers with all punctuation between
+    /// them skipped, so the member expression
+    ///
+    /// ```js
+    /// shim.export.const.meta = { name: 'decoy' }
+    /// ```
+    ///
+    /// matched, and matched FIRST -- the scan stops at the first hit, so a
+    /// decoy like that hid the real declaration below it and mind reported a
+    /// `meta.name` the harness never sees. Both halves of the rule are load
+    /// bearing: `.` is what a member expression has instead of a boundary, and
+    /// the depth test keeps a `meta` declared inside a block or a call from
+    /// standing in for the module-level one the harness reads.
     fn seek_meta_object(&mut self) -> bool {
-        // The two identifiers most recently read, oldest first.
-        let mut prev: [Option<String>; 2] = [None, None];
+        /// How much of `export const meta` has been matched, contiguously.
+        #[derive(PartialEq)]
+        enum Seen {
+            Nothing,
+            Export,
+            ExportConst,
+        }
+        let mut seen = Seen::Nothing;
+        // Statement position: the start of the file is one.
+        let mut at_statement = true;
+        // Bracket nesting. Saturating, so an unbalanced closer in a file mind
+        // is not parsing cannot push the scan below zero and lock it out of
+        // ever matching.
+        let mut depth: usize = 0;
         loop {
-            self.skip_trivia();
+            if self.skip_trivia() && depth == 0 {
+                // A line break at depth 0 ends a statement (JavaScript's own
+                // automatic semicolon insertion reads it the same way), but it
+                // does not interrupt the triple: `export /* c */ const\n meta`
+                // is one declaration.
+                at_statement = true;
+            }
             let Some(c) = self.peek() else { return false };
             if c == '\'' || c == '"' || c == '`' {
                 let _ = self.read_string();
+                seen = Seen::Nothing;
+                at_statement = false;
                 continue;
             }
             let Some(word) = self.read_ident() else {
-                self.i += 1;
+                match c {
+                    '(' | '[' | '{' => {
+                        depth += 1;
+                        at_statement = false;
+                    }
+                    ')' | ']' => {
+                        depth = depth.saturating_sub(1);
+                        at_statement = false;
+                    }
+                    // A closing brace ends a block or an object; either way the
+                    // next token starts a statement.
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        at_statement = depth == 0;
+                    }
+                    ';' => at_statement = depth == 0,
+                    _ => at_statement = false,
+                }
+                seen = Seen::Nothing;
+                self.advance();
                 continue;
             };
-            let matched = word == "meta"
-                && prev[1].as_deref() == Some("const")
-                && prev[0].as_deref() == Some("export");
-            if matched {
-                self.skip_trivia();
-                if self.peek() != Some('=') {
-                    return false;
+            seen = match (word, &seen) {
+                ("export", _) if at_statement && depth == 0 => Seen::Export,
+                ("const", Seen::Export) => Seen::ExportConst,
+                ("meta", Seen::ExportConst) => {
+                    self.skip_trivia();
+                    if self.peek() != Some('=') {
+                        return false;
+                    }
+                    self.advance();
+                    self.skip_trivia();
+                    if self.peek() != Some('{') {
+                        // An initializer that is not an object literal: a call,
+                        // an identifier, a spread. Nothing to read, and the
+                        // harness rejects it too.
+                        return false;
+                    }
+                    self.advance();
+                    return true;
                 }
-                self.i += 1;
-                self.skip_trivia();
-                if self.peek() != Some('{') {
-                    // An initializer that is not an object literal: a call, an
-                    // identifier, a spread. Nothing to read, and the harness
-                    // rejects it too.
-                    return false;
-                }
-                self.i += 1;
-                return true;
-            }
-            prev = [prev[1].take(), Some(word)];
+                _ => Seen::Nothing,
+            };
+            at_statement = false;
         }
     }
 
@@ -283,11 +375,11 @@ impl Cursor<'_> {
             let Some(c) = self.peek() else { return meta };
             match c {
                 '}' => {
-                    self.i += 1;
+                    self.advance();
                     return meta;
                 }
                 ',' => {
-                    self.i += 1;
+                    self.advance();
                     continue;
                 }
                 _ => {}
@@ -296,13 +388,15 @@ impl Cursor<'_> {
 
             // The key: bare, quoted, or computed. A computed key is read as no
             // key at all, so its value is skipped like any unrecognized one.
-            let key = match c {
+            let key: Option<String> = match c {
                 '\'' | '"' | '`' => self.read_string(),
                 '[' => {
                     self.skip_value();
                     None
                 }
-                _ => self.read_ident(),
+                // A bare key is a borrow of the text; the quoted form has to be
+                // unescaped into a `String`, so the two meet as one here.
+                _ => self.read_ident().map(str::to_string),
             };
 
             self.skip_trivia();
@@ -314,11 +408,11 @@ impl Cursor<'_> {
                     // Nothing here was consumable. Drop the character and carry
                     // on: the object is malformed, and the keys after it are
                     // still worth reading.
-                    self.i += 1;
+                    self.advance();
                 }
                 continue;
             }
-            self.i += 1;
+            self.advance();
             self.skip_trivia();
 
             let value = match self.peek() {
@@ -360,7 +454,7 @@ impl Cursor<'_> {
                 }
                 '{' | '[' | '(' => {
                     depth += 1;
-                    self.i += 1;
+                    self.advance();
                 }
                 '}' | ']' | ')' => {
                     if depth == 0 {
@@ -368,10 +462,10 @@ impl Cursor<'_> {
                         return;
                     }
                     depth -= 1;
-                    self.i += 1;
+                    self.advance();
                 }
                 ',' if depth == 0 => return,
-                _ => self.i += 1,
+                _ => self.advance(),
             }
         }
     }
@@ -512,6 +606,257 @@ mod tests {
                 meta(text).is_empty(),
                 "expected no fields from {text:?}, got {:?}",
                 meta(text)
+            );
+        }
+    }
+
+    // spec: WF-57 -- the triple is matched at statement position only, so a
+    // member expression spelling the same three identifiers with `.` between
+    // them is not a declaration. Before this rule the decoy matched (all
+    // punctuation between the identifiers was skipped) AND matched first, so
+    // the real declaration below it was never reached: mind reported the name
+    // the decoy chose while the harness registered the real one.
+    #[test]
+    fn a_member_expression_spelling_the_triple_is_not_a_declaration() {
+        let m = meta(
+            "shim.export.const.meta = { name: 'decoy', description: 'Decoy' };\n\
+             export const meta = { name: 'real', description: 'Real' }\n",
+        );
+        assert_eq!(m.name.as_deref(), Some("real"));
+        assert_eq!(m.description.as_deref(), Some("Real"));
+    }
+
+    // spec: WF-57 -- the same rule over the shapes that are NOT a module-level
+    // declaration: a member expression on its own, one nested in a call or a
+    // block, and a `meta` declared inside a function body. None of them is the
+    // `export const meta` the harness reads, so none of them is read here.
+    #[test]
+    fn only_a_statement_position_declaration_is_read() {
+        for text in [
+            "shim.export.const.meta = { name: 'decoy' }",
+            "x = obj.export.const.meta = { name: 'decoy' }",
+            "register(export.const.meta = { name: 'decoy' })",
+            "function f() { export const meta = { name: 'decoy' } }",
+            "if (x) { export const meta = { name: 'decoy' } }",
+            "const holder = [export, const, meta = { name: 'decoy' }]",
+        ] {
+            let m = parse_bounded(text);
+            assert!(m.is_empty(), "expected nothing from {text:?}, got {m:?}");
+        }
+    }
+
+    // spec: WF-57 -- and the statement-position rule admits every ordinary
+    // spelling of the real declaration: first in the file, after a `;`, after
+    // a closing brace, after a line break, and with comments in between.
+    #[test]
+    fn the_real_declaration_is_found_at_every_statement_boundary() {
+        for text in [
+            "export const meta = { name: 'real' }",
+            "import x from 'y';export const meta = { name: 'real' }",
+            "function f() { return 1 } export const meta = { name: 'real' }",
+            "const a = 1\nexport const meta = { name: 'real' }",
+            "// leading\n/* block */\nexport /* mid */ const // eol\n meta = { name: 'real' }",
+            "const obj = { a: 1 };\n\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- the statement-position rule has to admit the shapes a real
+    // `.js` file arrives in, not only the hand-written one. Minified output has
+    // no line breaks at all, so the `;` is the only boundary there is; a bundled
+    // file opens and closes a prologue before the declaration; and an ESM import
+    // list is a `{ ... }` the depth count has to come back out of.
+    #[test]
+    fn a_minified_or_bundled_file_still_yields_its_declaration() {
+        for text in [
+            // No whitespace anywhere: the `;` after the directive is the only
+            // statement boundary in the file.
+            "\"use strict\";export const meta={name:'min',description:'Minified'};\
+             export async function run(){await agent('go')}",
+            // A balanced IIFE prologue, as a bundler emits.
+            "(()=>{const x=1;})();export const meta={name:'min',description:'Minified'}",
+            // A named import list: braces that open and close before the
+            // declaration.
+            "import { agent, phase } from 'harness';\n\
+             export const meta = { name: 'min', description: 'Minified' }",
+            // A preceding object literal with nested brackets.
+            "const cfg={retries:3,nested:{a:[1,2]}};\
+             export const meta={name:'min',description:'Minified'}",
+            // A preceding function body with a nested block and object.
+            "function helper(){ if (true) { return {a:1} } }\n\
+             export const meta={name:'min',description:'Minified'}",
+            // A regex literal whose brackets happen to balance, and a comment
+            // holding an unbalanced one (comments are trivia, never depth).
+            "const re = /[{]}/;\n// a stray { in prose\n/* and a } in a block */\n\
+             export const meta={name:'min',description:'Minified'}",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("min"), "from {text:?}");
+            assert_eq!(m.description.as_deref(), Some("Minified"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-5 WF-57 -- the depth-0 half of the statement-position rule is a
+    // bracket count, and this reader does not model every construct a bracket
+    // can hide in (a regex character class, above all). A `{` or `[` the count
+    // never sees closed leaves it above zero for the rest of the file, so a
+    // declaration after it is not at depth 0 as far as the scan is concerned and
+    // reads as absent.
+    //
+    // That is a FALSE NEGATIVE, and it is the acceptable direction: mind reports
+    // the file as one it read no `meta` from (WF-30), the harness still loads it,
+    // and WF-5 forbids only failing on the shape of a workflow's code. The
+    // opposite error -- mind reading a `meta` the harness does not -- is what
+    // WF-57 exists to prevent, and is the one the depth test buys.
+    #[test]
+    fn an_unclosed_bracket_before_the_declaration_hides_it_rather_than_faking_one() {
+        for text in [
+            // A regex character class holding a `{`: `[` and `{` both count up,
+            // `]` brings back only one of them.
+            "const re = /[{]/\nexport const meta = { name: 'real' }",
+            "function f() {\nexport const meta = { name: 'real' }",
+            "const open = [\nexport const meta = { name: 'real' }",
+            "call(\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert!(m.is_empty(), "expected nothing from {text:?}, got {m:?}");
+        }
+    }
+
+    // spec: WF-57 -- the property that matters, over every prologue shape worth
+    // naming: whatever a source puts in front of the real declaration, the
+    // reader finds the real one or finds nothing. It must never find a DECOY,
+    // because what it reads as `meta.name` is what WF-24 compares, what WF-29
+    // groups by, and what `recall` prints as the harness-facing name.
+    #[test]
+    fn no_prologue_makes_the_reader_prefer_a_decoy() {
+        for prologue in [
+            "shim.export.const.meta = { name: 'decoy' };",
+            "x = obj.export.const.meta = { name: 'decoy' };",
+            "obj[export][const][meta] = { name: 'decoy' };",
+            "register(export.const.meta = { name: 'decoy' });",
+            "register({ export: { const: { meta: { name: 'decoy' } } } });",
+            "x = { 'export const meta': { name: 'decoy' } };",
+            "if (x) { export const meta = { name: 'decoy' } }",
+            "function f() { export const meta = { name: 'decoy' } }",
+            "const s = \"export const meta = { name: 'decoy' }\";",
+            "const t = `export const meta = { name: 'decoy' }`;",
+            "// export const meta = { name: 'decoy' }",
+            "/* export const meta = { name: 'decoy' } */",
+            "export default { name: 'decoy' };",
+            "export const metadata = { name: 'decoy' };",
+            "export const meta2 = { name: 'decoy' };",
+            "export function meta() { return { name: 'decoy' } }",
+            "export let meta = { name: 'decoy' };",
+            "export const metaX = 1, meta = { name: 'decoy' };",
+            "export const { meta } = require('x');",
+            "export\n.const.meta = { name: 'decoy' };",
+            "export const\n.meta = { name: 'decoy' };",
+            "shim\n.export.const.meta = { name: 'decoy' };",
+        ] {
+            let text = format!("{prologue}\nexport const meta = {{ name: 'real' }}\n");
+            let m = parse_bounded(&text);
+            assert_ne!(
+                m.name.as_deref(),
+                Some("decoy"),
+                "a decoy won after {prologue:?}"
+            );
+            assert!(
+                m.name.as_deref() == Some("real") || m.is_empty(),
+                "after {prologue:?} the reader must find the real name or nothing: {m:?}"
+            );
+        }
+    }
+
+    // spec: WF-57 -- the one arrangement that still fools the bracket count,
+    // recorded rather than hidden: a regex literal holding a `}` inside a block
+    // closes, for this scanner, a block the file has not closed, so a `meta`
+    // declared after it looks module-level.
+    //
+    // It is not a hijack of a workflow the harness loads. `export` is a
+    // module-level-only form: inside a function body or a block it is a
+    // SyntaxError, and the harness parses the whole module or nothing (WF-5), so
+    // a file shaped like this loads NO workflow at all and there is no
+    // harness-visible name for mind's reading to misrepresent. Fooling the count
+    // into reading a nested declaration requires exactly this -- an extra closer
+    // the scan sees and a parser does not -- which is why the class is limited to
+    // files that do not parse.
+    //
+    // The assertion pins today's reading so a future regex-aware skip shows up
+    // here as the deliberate change it would be, not as a silent one.
+    #[test]
+    fn a_regex_closer_inside_a_block_is_the_one_depth_confusion_left() {
+        let m = parse_bounded(
+            "function f() {\n  const re = /}/\n  export const meta = { name: 'nested' }\n}\n\
+             export const meta = { name: 'real' }\n",
+        );
+        assert_eq!(
+            m.name.as_deref(),
+            Some("nested"),
+            "a regex `}}` inside a block is read as the block's own closer"
+        );
+    }
+
+    // spec: WF-5 -- `skip_trivia`'s block-comment branch is the one place the
+    // reader adds a fixed 2 to the offset, so it is the one place a multi-byte
+    // character could be split. Every step inside a comment goes through
+    // `advance`, and the `*/` test is a character comparison, not a byte one: a
+    // byte-indexed regression panics here (a split code point) rather than
+    // returning a wrong value.
+    #[test]
+    fn a_block_comment_of_multibyte_text_is_skipped_whole() {
+        let m = parse_bounded(
+            "/* 説明: ✓ * ✓ / 🚀 */\nexport /* ✓*✓/✓ */ const meta = {\n  \
+             /* 名前 */ name: 'ünïcode',\n  description: '✓ 説明 🚀',\n}\n",
+        );
+        assert_eq!(m.name.as_deref(), Some("ünïcode"));
+        assert_eq!(m.description.as_deref(), Some("✓ 説明 🚀"));
+        // A comment whose last character before the closer is multi-byte.
+        assert_eq!(
+            parse_bounded("export const meta = { name: 'x' /* 🚀*/ }")
+                .name
+                .as_deref(),
+            Some("x")
+        );
+        // An unterminated comment of multi-byte text runs to end of file, and
+        // ending mid-character is not a place the cursor can stop.
+        assert!(parse_bounded("export const meta = { /* 説明 🚀 ✓").is_empty());
+        assert!(parse_bounded("/* 🚀").is_empty());
+        // A line comment of multi-byte text, terminated and not.
+        assert_eq!(
+            parse_bounded("// 説明 🚀\nexport const meta = { name: 'x' }")
+                .name
+                .as_deref(),
+            Some("x")
+        );
+        assert!(parse_bounded("export const meta = { // 説明 🚀").is_empty());
+        // And a multi-byte character where a `/` could have started a comment.
+        assert_eq!(
+            parse_bounded("const div = a /✓/ b\nexport const meta = { name: 'x' }")
+                .name
+                .as_deref(),
+            Some("x")
+        );
+    }
+
+    // spec: WF-5 -- an initializer the harness would not accept as an object
+    // literal yields nothing here too, including the JSDoc cast form a `.js`
+    // file reaches for when it wants a type without TypeScript. The reader and
+    // the harness agree: neither reads a `meta` out of it.
+    #[test]
+    fn an_initializer_that_is_not_an_object_literal_yields_nothing() {
+        for text in [
+            "export const meta = /** @type {Meta} */ ({ name: 'x' })",
+            "export const meta = Object.freeze({ name: 'x' })",
+            "export const meta = base",
+            "export const meta: Meta = { name: 'x' }",
+        ] {
+            let m = parse_bounded(text);
+            assert!(
+                m.name.is_none(),
+                "expected no name from {text:?}, got {m:?}"
             );
         }
     }
@@ -786,9 +1131,12 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
     /// Drive [`Cursor::read_string`] directly. Its "consumed either way"
     /// contract is what stops the entry loop from re-reading a literal's body
     /// as code, and `parse` shows only the half where a value comes back.
+    ///
+    /// The returned offset is a BYTE offset into `text` (the cursor walks the
+    /// `&str` itself rather than a `Vec<char>`), which equals the character
+    /// count for the ASCII inputs below.
     fn read_string_at(text: &str) -> (Option<String>, usize) {
-        let chars: Vec<char> = text.chars().collect();
-        let mut cur = Cursor { s: &chars, i: 0 };
+        let mut cur = Cursor { s: text, i: 0 };
         let value = cur.read_string();
         (value, cur.i)
     }

@@ -1,10 +1,10 @@
 # mind spec
 
 The behavioral spec for `mind`, a manager for agent tooling (skills, agents,
-rules, commands, workflows, tools) that melds arbitrary git repos and links installed
-items into `~/.claude` (a tool is store-only and reached by reference, not
-linked). This directory is the reference the implementation and tests verify
-against.
+rules, commands, workflows, tools) that melds arbitrary git repos and links
+installed items into `~/.claude` (a tool is store-only and reached by
+reference, not linked). This directory is the reference the implementation
+and tests verify against.
 
 ## Feature status
 
@@ -63,7 +63,7 @@ and verified.
 | Version pinning: single `--pin` (`HEAD`/ref freeze, `branch=`/`tag=` follow) + deprecated `--follow-branch`/`--pin-tag`/`--pin-ref` aliases + `[source]` directive + `learn <url> --pin` note when already melded | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-200, CLI-201, CLI-202, CLI-203, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites via a CommonMark parse (code spans, fences, containers, link syntax, brace spans) | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24, NS-46, NS-47, NS-48, NS-49, NS-50, NS-51, NS-52 |
-| `{{ns:}}`/path-token expansion, `review --fix`'s rewrites, and the unguarded-reference scan are markdown-file only (an extension test, `namespace::is_markdown`), reading a CommonMark structure map so code spans/blocks and link syntax are never touched; `templatize` also wraps a bare sibling mention in the frontmatter `description:` value, the one frontmatter field that is free prose | done | NS-53, NS-54, NS-55, NS-56, TOOL-19 |
+| A token expands in a file when the file has a markdown extension, or the item is of the `workflow` kind, or the file is on the item's NS-57 `expand:` list; `review --fix`'s rewrites and the unguarded-reference scan still gate on the markdown-extension test alone, reading a CommonMark structure map so code spans/blocks and link syntax are never touched; `templatize` also wraps a bare sibling mention in the frontmatter `description:` value, the one frontmatter field that is free prose | done | NS-53, NS-54, NS-55, NS-56, TOOL-19, WF-25, WF-28 |
 | `review` flags any `{{...}}` token found in a non-markdown item file (`inert-token`), resolvable or not, since none of them expand outside markdown | done | CLI-223 |
 | Opt-in token expansion in a non-markdown file: an item's `expand:` frontmatter lists item-relative files scanned like markdown, path tokens rendered absolute; a bad entry is a hard install/`review` error; convention discovery stays on | done | NS-57, TOOL-20, CLI-226 |
 | `review` finding messages are sanitized (`strip_ansi`) at construction, so both the text and `--json` output inherit it | done | CLI-224 |
@@ -104,6 +104,7 @@ and verified.
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
 | `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
+| An unmanaged lobe file whose derived name is unsafe (`.`, `..`, empty) is refused rather than surfaced | done | [unmanaged.md](unmanaged.md) (UNM-9) |
 | `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | done | [absorb.md](absorb.md) |
 | `dump`: generate a pinned super-source `mind.toml` from the installed set (`--whole-sources`) | done | [dump.md](dump.md) |
 | `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
@@ -261,8 +262,19 @@ and verified.
 | `dump` emits a file link as a `blob` URL, with `kind` when the instance recorded an explicit one | done | LNK-23 |
 | `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, reports entries the curator dropped, and offers `--adopt` to bring a pre-existing source under a curator's ownership (`--check`, `--yes`, `--prune`, `--no-sync`, `--adopt`) | done | [curate.md](curate.md) (CUR-1..21), STO-82 |
 | The `workflow` item kind: `workflows/<name>.js` discovered, stored, linked, namespaced, and upgraded like any other kind; `meta` read for the description, `{{ns:}}` expanded in the file | done | [workflows.md](workflows.md) (WF-1..6, WF-8, WF-10, WF-12, WF-21..23, WF-25..27, WF-50..52) |
-| A workflow the harness will not load, a `meta.name` that diverges from the item name, and a duplicate `meta.name` are reported by `learn`/`review`/`recall <item>`, never enforced | done | [workflows.md](workflows.md) (WF-7, WF-24, WF-28..32, WF-53..55) |
+| A workflow the harness will not load, a `meta.name` that diverges from the item name, and a duplicate `meta.name` are reported by `learn`/`review`/`recall <item>`/`upgrade`, never enforced | done | [workflows.md](workflows.md) (WF-7, WF-24, WF-29..32, WF-53..55) |
 | A plugin root's `workflows/` maps to the `workflow` kind | done | [workflows.md](workflows.md) (WF-40..42) |
+| A project lobe needs no special handling for a workflow: the harness reads project workflows from `<project>/.claude/workflows/`, exactly where a filterless project lobe already links one; `link-project` never produces such a lobe (it resolves to a skill-only preset or `--subdir` filter), so only a bare `config lobes add <project>/.claude` links a workflow | done | [workflows.md](workflows.md) (WF-13) |
+| An over-cap workflow `.js` is reported as hitting `mind`'s own metadata cap (named with `--max-metadata-size`), not asserted as a harness verdict | done | [workflows.md](workflows.md) (WF-56) |
+| `export const meta` is recognized only at statement position; a decoy like `shim.export.const.meta` does not match | done | [workflows.md](workflows.md) (WF-57) |
+| A `meta.name` carrying blocked characters yields no harness name and is a skip reason | done | [workflows.md](workflows.md) (WF-58) |
+| One collision finding per colliding harness name, claimants capped with "and N more" | done | [workflows.md](workflows.md) (WF-59) |
+| `recall <item> --json` carries the harness-facing name and divergence/collision findings | done | [workflows.md](workflows.md) (WF-60) |
+| The convention scan classifies entries with `symlink_metadata`, not `is_file` | done | [discovery.md](discovery.md) (DSC-108) |
+| A declared workflow item's path must be a file, not a directory | done | [discovery.md](discovery.md) (DSC-109) |
+| One zero/unlimited rule for the metadata cap across flag, env, config, and library | done | [discovery.md](discovery.md) (DSC-110) |
+| A present-but-undecodable `MIND_MAX_METADATA_SIZE` is a hard error, never a silent fallback | done | [discovery.md](discovery.md) (DSC-111) |
+| A registered source whose prefix is now a reserved kind word: a consumer-set prefix is warned about once per scan, a source-declared `[source].prefix` is a hard error naming `unmeld` | done | [discovery.md](discovery.md) (DSC-112) |
 
 ## Documents
 

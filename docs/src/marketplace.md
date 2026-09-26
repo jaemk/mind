@@ -8,7 +8,7 @@ re-packaging by its author.
 
 ```
 mind meld owner/claude-plugin-repo   # a repo with .claude-plugin/plugin.json
-mind probe                           # its skills, agents, and commands show up as items
+mind probe                           # its skills, agents, commands, and workflows show up as items
 mind learn <plugin-name>:<skill>     # install one, same as any source
 ```
 
@@ -29,8 +29,9 @@ that `sync`, `upgrade`, and `introspect` use.
 ## A single plugin (`plugin.json`)
 
 A plugin is a directory with `.claude-plugin/plugin.json` whose component
-directories sit at the plugin root. Claude's layout for skills, agents, commands, and
-workflows is byte-for-byte `mind`'s convention layout, so the mapping is direct:
+directories sit at the plugin root. Claude's layout for skills, agents,
+commands, and workflows is byte-for-byte `mind`'s convention layout, so the
+mapping is direct:
 
 | Plugin component | `mind` item |
 |------------------|-------------|
@@ -42,10 +43,20 @@ workflows is byte-for-byte `mind`'s convention layout, so the mapping is direct:
 
 A plugin has no `rules` or `tools` component, so nothing maps to those kinds.
 
-The projection is lossy and says so: when a plugin declares components `mind`
-cannot represent, `meld` prints a count of what it skipped, for example
-`2 hooks, 1 mcp server not installed (no mind equivalent)`. You are never left
-believing the plugin installed in full when part of it was dropped.
+The projection is lossy and says so, with one gap: when a plugin declares
+components `mind` cannot represent (`hooks/`, `.mcp.json`, and the rest of the
+table above), `meld` prints a count of what it skipped, for example
+`2 hooks, 1 mcp server not installed (no mind equivalent)`. That count only
+covers components found by the conventional directory scan, though. A
+`plugin.json` may override a component's path with a key like
+`"workflows": "./somewhere"` (or `experimental.workflows`, and likewise for
+the other components); `mind` does not read that override key at all, so a
+plugin using one contributes zero items from the declared path and produces
+no skipped-count entry for it either -- the projection silently omits the
+whole component, with no visible signal. The escape hatch is
+`meld --add-root <dir>` naming the declared parent directory, which
+convention-scans it directly (see [Installing items the manifest does not
+list](#installing-items-the-manifest-does-not-list)).
 
 ### Naming: the plugin name is the default prefix
 
@@ -111,12 +122,13 @@ mind meld owner/marketplace-repo --add-root community --add-root experimental
 ```
 
 Each added root is scanned in both skill layouts at once (the `skills/`
-container and flat bare-name directories), plus `agents/`, `rules/`, and
-`tools/`. An item both the manifest and an added root contribute is offered
-once, under the manifest's namespace. Unlike `--root` (which replaces the scan
-layout and suppresses the manifest), `--add-root` never suppresses anything; it
-also composes with an authoritative `mind.toml`. The roots persist on the
-source and apply to later scans and `sync`.
+container and flat bare-name directories), plus `agents/`, `rules/`,
+`commands/`, `workflows/`, and `tools/`. An item both the manifest and an
+added root contribute is offered once, under the manifest's namespace. Unlike
+`--root` (which replaces the scan layout and suppresses the manifest),
+`--add-root` never suppresses anything; it also composes with an
+authoritative `mind.toml`. The roots persist on the source and apply to later
+scans and `sync`.
 
 **Link one item directly.** Paste the skill's `tree`/`blob` URL (or, for an
 agent, rule, or command file, its `blob` URL); the manifest does not gate it
@@ -185,15 +197,16 @@ scan root) with `name`, and optionally `version` and `description`:
 }
 ```
 
-Lay out `skills/<name>/SKILL.md`, `agents/<name>.md`, and `commands/<name>.md`
-next to it, same as any `mind` source ([Source layout](source-layout.md)).
-`hooks/`, `.mcp.json`, and the other Claude-only component kinds are fine to
-keep in the repo for Claude users; `mind` just skips them (with a printed
-count) rather than erroring, so one repo layout serves both consumers. There
-is no plugin-level place for a `rule` or a `tool` - if you want `mind` users
-to get those, add a `mind.toml` with `[[items]]` for them; it composes with
-the plugin manifest as long as it stays metadata-only or covers different
-items ([Precedence](#precedence-when-a-plugin-manifest-is-used)).
+Lay out `skills/<name>/SKILL.md`, `agents/<name>.md`, `commands/<name>.md`,
+and `workflows/<name>.js` next to it, same as any `mind` source ([Source
+layout](source-layout.md)). `hooks/`, `.mcp.json`, and the other Claude-only
+component kinds are fine to keep in the repo for Claude users; `mind` just
+skips them (with a printed count) rather than erroring, so one repo layout
+serves both consumers. There is no plugin-level place for a `rule` or a
+`tool` - if you want `mind` users to get those, add a `mind.toml` with
+`[[items]]` for them; it composes with the plugin manifest as long as it
+stays metadata-only or covers different items
+([Precedence](#precedence-when-a-plugin-manifest-is-used)).
 
 Pick `name` deliberately: it becomes every consumer's default namespace prefix
 (`acme-tools:greet`), so treat it like a package name - short, unique enough to

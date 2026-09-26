@@ -25,6 +25,9 @@
 //!   - docs/src/configuration.md: `config lobes add` creates its target
 //!     directory immediately only on the managed (non-`--snapshot`) path
 //!     (HARN-15).
+//!   - docs/src/configuration.md: the hand-written `kinds = ["workflow"]` lobe
+//!     the workflow section tells a reader to write admits a workflow and
+//!     nothing else (WF-12).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -500,5 +503,75 @@ fn config_lobes_add_creates_target_dir_only_on_the_managed_path() {
         "--snapshot must NOT create the target directory (HARN-15 is confined \
          to the managed path): {}",
         r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// docs/src/configuration.md -- "a workflow links into ... any lobe whose
+// `kinds` names `workflow`", shown as the hand-written
+// `{ path = "./.claude", kinds = ["workflow"] }` recipe. The no-filter and
+// skills-only halves of WF-12 are covered elsewhere (cli_lobes.rs,
+// cli_workflows.rs); the recipe the docs actually tell a reader to WRITE is the
+// positive filter, which nothing exercised.
+// ---------------------------------------------------------------------------
+
+/// A hand-written `kinds = ["workflow"]` lobe receives a workflow and nothing
+/// else. Both halves matter: if the filter admitted every kind the recipe would
+/// be misleading in the other direction, and a reader copying it would fan a
+/// skill out into a directory they meant to keep workflow-only.
+#[test]
+fn a_workflow_kinds_lobe_receives_a_workflow_and_no_other_kind() {
+    // spec: WF-12 HARN-17
+    let sb = Sandbox::new("workflow-kinds-lobe");
+    let source = sb.base.join("agents");
+    write(
+        &source.join("workflows/ship.js"),
+        "export const meta = { name: 'ship', description: 'Ship it' };\n",
+    );
+    write(
+        &source.join("skills/hello/SKILL.md"),
+        "---\ndescription: say hello\n---\n# hello\n",
+    );
+    init_repo(&source);
+
+    // The docs' second snippet, verbatim in shape: the default Claude lobe plus
+    // a second lobe restricted to the workflow kind.
+    let project = sb.base.join("project/.claude");
+    std::fs::create_dir_all(&project).unwrap();
+    write(
+        &sb.mind_home.join("config.toml"),
+        &format!(
+            "[[lobes]]\npath = \"{}\"\n\n[[lobes]]\npath = \"{}\"\nkinds = [\"workflow\"]\n",
+            sb.claude_home.display(),
+            project.display(),
+        ),
+    );
+
+    assert!(
+        sb.mind(&["meld", source.to_string_lossy().as_ref(), "--register-only"])
+            .success
+    );
+    let r = sb.mind(&["learn", "workflow:ship"]);
+    assert!(r.success, "learn workflow: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["learn", "skill:hello"]);
+    assert!(r.success, "learn skill: {}\n{}", r.stdout, r.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(project.join("workflows/ship.js")).is_ok(),
+        "a lobe whose kinds names `workflow` must receive the workflow link: {}",
+        r.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(project.join("skills/hello")).is_err(),
+        "the same filter must admit NOTHING else, or the documented recipe \
+         quietly fans every kind into the project: {}",
+        r.stdout
+    );
+    // Control: the unfiltered default lobe got both, so the absence above is
+    // the filter and not a failed install.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("workflows/ship.js")).is_ok()
+            && std::fs::symlink_metadata(sb.claude_home.join("skills/hello")).is_ok(),
+        "the unfiltered lobe must receive both items"
     );
 }

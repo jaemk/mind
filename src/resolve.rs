@@ -91,6 +91,15 @@ fn split_kind(raw: &str) -> Result<(Option<ItemKind>, String)> {
     // (NS-26). Otherwise the WHOLE ref (colon and all) is the effective name with
     // kind=None, so a prefixed effective name like `jk:review` parses as a name and
     // resolves by effective-name match, while `skill:review` stays kind-qualified.
+    //
+    // spec: DSC-112 -- the set of kind words grows (`workflow` joined it with
+    // the workflow kind), and a word joining it silently re-reads every
+    // existing `<word>:<name>` ref as kind-qualified. Prefixes are guarded at
+    // their own ingress (`namespace::validate_prefix`, whose reserved list is
+    // append-only and pre-reserves plausible future kind words), plus the
+    // warning `catalog::scan_source_at` prints for a registered source whose
+    // recorded prefix the list has since caught up with. Nothing is decided
+    // here: this function reads what the vocabulary now says.
     if let Some((prefix, name)) = raw.split_once(':')
         && let Some(kind) = ItemKind::parse(prefix)
     {

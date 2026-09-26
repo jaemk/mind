@@ -1266,7 +1266,7 @@ fn meld_recursive(
             println!(
                 "  no items found by convention scanning \
                  (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
-                 commands/<name>.md, \
+                 commands/<name>.md, workflows/<name>.js, \
                  tools/<name>/); if your layout differs, use --root <dir>, \
                  --add-root <dir>, or --flat-skills"
             );
@@ -2231,7 +2231,7 @@ fn agent_collision(
 /// WF-29 comparison set would be pure cost (it reads and parses every installed
 /// workflow's store copy). Behavior is otherwise unchanged.
 ///
-/// spec: WF-24 WF-29 WF-30 WF-31
+/// spec: WF-24 WF-29 WF-30 WF-31 WF-56 WF-59
 fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String]) {
     let touches_workflow = installed_keys.iter().any(|key| {
         manifest
@@ -2243,21 +2243,29 @@ fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String])
         return;
     }
 
-    // Every installed workflow's harness-facing name, read once. The tokens in
-    // a store copy are expanded, so no prefix or sibling set is needed.
-    let no_prefix: Option<String> = None;
-    let no_siblings: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Every installed workflow, read ONCE: the tokens in a store copy are
+    // already expanded, so the harness-facing name is a trim of `meta.name`.
+    // One pass, one read per file -- the touched items' warnings below index
+    // into this map rather than re-reading and re-parsing their store copies.
+    let mut reads: std::collections::HashMap<&str, crate::workflow_check::WorkflowRead> =
+        std::collections::HashMap::new();
     let mut claimed: Vec<(String, String)> = Vec::new();
     for entry in manifest.items.values() {
         if entry.kind != ItemKind::Workflow {
             continue;
         }
-        let (meta, _) = crate::workflow_check::read(&paths.mind_home.join(&entry.store));
-        if let Some(name) = crate::workflow_check::harness_name(&meta, &no_prefix, &no_siblings) {
+        let read = crate::workflow_check::read(&paths.mind_home.join(&entry.store));
+        if let Some(name) = crate::workflow_check::harness_name(&read.meta) {
             claimed.push((name, entry.key().as_str().to_string()));
         }
+        reads.insert(entry.name.as_str(), read);
     }
+    // spec: WF-59 -- one group per colliding name, built once for the whole
+    // installed set rather than rebuilt per claimant.
+    let groups = crate::workflow_check::claim_groups(&claimed);
 
+    let touched: std::collections::HashSet<&str> =
+        installed_keys.iter().map(String::as_str).collect();
     for key in installed_keys {
         let Some(entry) = manifest.items.get(key.as_str()) else {
             continue;
@@ -2265,37 +2273,118 @@ fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String])
         if entry.kind != ItemKind::Workflow {
             continue;
         }
-        let store = paths.mind_home.join(&entry.store);
-        let (meta, size) = crate::workflow_check::read(&store);
+        let Some(read) = reads.get(entry.name.as_str()) else {
+            continue;
+        };
+        // spec: WF-56 -- mind's own metadata cap is reported as mind's, not as
+        // a verdict about the harness mind never read enough of the file to
+        // reach.
+        if let Some(notice) = crate::workflow_check::cap_notice(read) {
+            eprintln!(
+                "warning: {}: {notice} Installed anyway.",
+                entry.display_key()
+            );
+        }
         // spec: WF-31 -- warn and keep the install. The item is already on disk
         // by the time this runs, which is the point: mind's reader disagreeing
         // with the harness's must not be able to decide an install.
-        for reason in crate::workflow_check::skip_reasons(&meta, size) {
+        for reason in crate::workflow_check::skip_reasons(read) {
             eprintln!(
                 "warning: {}: the harness will not load this workflow: {reason}; installed anyway",
                 entry.display_key()
             );
         }
-        let harness = crate::workflow_check::harness_name(&meta, &no_prefix, &no_siblings);
-        // spec: WF-24
-        if let Some(msg) = crate::workflow_check::divergence(&entry.name, harness.as_deref()) {
+        // spec: WF-24 -- the remedy token in the message names the BARE name
+        // (`entry.bare_name`), the only spelling `{{ns:}}` resolves.
+        let harness = crate::workflow_check::harness_name(&read.meta);
+        if let Some(msg) =
+            crate::workflow_check::divergence(&entry.name, &entry.bare_name, harness.as_deref())
+        {
             eprintln!("warning: {}: {msg}", entry.display_key());
         }
-        // spec: WF-29
-        if let Some(harness) = harness {
-            let others: Vec<String> = claimed
-                .iter()
-                .filter(|(name, other)| *name == harness && other != key)
-                .map(|(_, other)| crate::sanitize::strip_ansi(other))
-                .collect();
-            if !others.is_empty() {
-                eprintln!(
-                    "warning: {}: {}",
-                    entry.display_key(),
-                    crate::workflow_check::collision(&harness, &others)
-                );
-            }
+    }
+    // spec: WF-29 WF-59 -- one warning per colliding NAME, not one per
+    // claimant, and only for a name this run touched: an untouched pair was
+    // reported by the run that installed it.
+    for (name, claimants) in groups {
+        // The subject is an item this run touched: the warning belongs to the
+        // install that caused it to be printed.
+        let Some(subject) = claimants.iter().find(|key| touched.contains(key.as_str())) else {
+            continue;
+        };
+        let others: Vec<String> = claimants
+            .iter()
+            .filter(|key| *key != subject)
+            .map(|key| crate::sanitize::strip_ansi(key))
+            .collect();
+        if others.is_empty() {
+            continue;
         }
+        eprintln!(
+            "warning: {}: {}",
+            crate::sanitize::strip_ansi(subject),
+            crate::workflow_check::collision(&name, &others)
+        );
+    }
+}
+
+/// What `recall <item>` has to say about an installed workflow: the name the
+/// harness answers to, and every finding about it.
+///
+/// spec: WF-60 -- one producer for both renderings. The text view prints each
+/// finding on a `harness` line and the `--json` document serializes the same
+/// strings, so a scripted consumer learns of a WF-24 divergence or a WF-29
+/// collision on the same terms a reader does. The manifest records neither the
+/// `meta.name` nor the resolved harness name, so without this the JSON document
+/// was the one surface where the divergence was invisible.
+struct WorkflowDetail {
+    /// The name the harness resolves this workflow by (WF-20), or `None` when
+    /// mind read no usable one (absent, empty, unread, or WF-58-unusable).
+    harness_name: Option<String>,
+    /// The findings, in the order the detail view prints them.
+    findings: Vec<String>,
+}
+
+fn workflow_detail(
+    paths: &Paths,
+    manifest: &Manifest,
+    found: &crate::manifest::InstalledItem,
+) -> WorkflowDetail {
+    let read = crate::workflow_check::read(&paths.mind_home.join(&found.store));
+    let harness_name = crate::workflow_check::harness_name(&read.meta);
+    let mut findings: Vec<String> = Vec::new();
+    // spec: WF-56 -- mind's own cap, reported as mind's own.
+    if let Some(notice) = crate::workflow_check::cap_notice(&read) {
+        findings.push(notice);
+    }
+    // spec: WF-24 -- the remedy names the bare name, the only spelling a
+    // `{{ns:}}` token resolves (NS-11).
+    if let Some(msg) =
+        crate::workflow_check::divergence(&found.name, &found.bare_name, harness_name.as_deref())
+    {
+        findings.push(msg);
+    }
+    // spec: WF-29 WF-59 -- one report for the name, naming the other
+    // claimants, capped in `workflow_check` rather than here.
+    if let Some(harness) = &harness_name {
+        let others: Vec<String> = manifest
+            .items
+            .values()
+            .filter(|e| e.kind == ItemKind::Workflow && e.name != found.name)
+            .filter(|e| {
+                let other = crate::workflow_check::read(&paths.mind_home.join(&e.store));
+                crate::workflow_check::harness_name(&other.meta).as_deref()
+                    == Some(harness.as_str())
+            })
+            .map(|e| e.display_key())
+            .collect();
+        if !others.is_empty() {
+            findings.push(crate::workflow_check::collision(harness, &others));
+        }
+    }
+    WorkflowDetail {
+        harness_name,
+        findings,
     }
 }
 
@@ -2551,8 +2640,10 @@ fn sibling_token_resolves_alone(r: &crate::namespace::SiblingRef, item: &Catalog
     r.name == item.name && r.kind.is_none_or(|k| k == item.kind)
 }
 
-/// The files an item's tokens are expanded in, mirroring `install::expand_references`:
-/// every markdown file (NS-53), plus any non-markdown file the item lists in its
+/// The files an item's tokens are expanded in, mirroring
+/// `install::expand_references` by asking the same gate it does
+/// (`namespace::item_expands_tokens`): every markdown file (NS-53), a
+/// workflow's own `.js` (WF-25), and any other file the item lists in its
 /// `expand:` frontmatter (NS-57). Scanning a narrower set than install expands
 /// would let a reference slip past the LNK-18 check and fail later with the
 /// blunt error LNK-18 exists to replace.
@@ -2569,22 +2660,13 @@ fn expandable_files(item: &CatalogItem) -> Result<Vec<std::path::PathBuf>> {
     } else {
         files.push(item.path.clone());
     }
-    let expand: Vec<&str> = item.expand.iter().map(String::as_str).collect();
     Ok(files
         .into_iter()
-        .filter(|file| {
-            // A single-file item (agent/rule/workflow) has no bundled files, so
-            // only its own path applies and its markdown-ness is read from that
-            // path. spec: WF-25 -- a workflow's `.js` expands too.
-            if crate::namespace::expands_tokens(file, item.kind) {
-                return true;
-            }
-            if !item.path.is_dir() {
-                return false;
-            }
-            file.strip_prefix(&item.path)
-                .is_ok_and(|rel| expand.iter().any(|e| std::path::Path::new(e) == rel))
-        })
+        // A single-file item (agent/rule/command/workflow) has no bundled
+        // files, so only its own path applies and its markdown-ness is read
+        // from that path -- which the shared gate does, given the item's root.
+        // spec: NS-53 NS-57 WF-25
+        .filter(|file| crate::namespace::item_expands_tokens(item, &item.path, file))
         .collect())
 }
 
@@ -2755,7 +2837,7 @@ pub fn init_source(
     if items.is_empty() {
         println!(
             "  no items found (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
-             commands/<name>.md)"
+             commands/<name>.md, workflows/<name>.js, tools/<name>/)"
         );
     } else {
         println!("  {} item(s):", items.len());
@@ -2909,8 +2991,16 @@ pub fn init_source(
             for file in crate::review::item_files(it) {
                 // {{ns:}} is a prose reference (NS-24); only markdown carries
                 // prose. Never templatize scripts/data, where every word is code.
-                // spec: INIT-5 -- the same extension set install expands
-                // (`namespace::is_markdown`, NS-53), not an exact-`.md` test.
+                //
+                // spec: INIT-5 NS-54 -- the gate here is prose-ness
+                // (`namespace::is_markdown`, the markdown extension set rather
+                // than an exact-`.md` test), NOT the set install expands. The
+                // two differ: install also expands a workflow's `.js` (WF-25)
+                // and an `expand:`-listed script (NS-57), and this pass must
+                // still leave both alone. It rewrites bare prose into tokens by
+                // matching sibling names as words, and in code a sibling name
+                // may be an identifier, a key, or part of one, so a rewrite
+                // there is as likely to corrupt the file as to improve it.
                 if !crate::namespace::is_markdown(&file) {
                     continue;
                 }
@@ -2934,13 +3024,17 @@ pub fn init_source(
 
 /// Read all of an item's token-expanding text files into one buffer, for
 /// `{{ns:}}` dependency-edge detection (DEP-1). Narrowed to the files install
-/// expands (`namespace::expands_tokens`, NS-53, WF-25) so a `{{ns:}}` token in a
-/// file install never expands -- and so never treats as a dependency -- does not
-/// create a phantom dependency edge here either.
+/// expands (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25) so a `{{ns:}}`
+/// token in a file install never expands -- and so never treats as a dependency
+/// -- does not create a phantom dependency edge here either.
+///
+/// It has to be the ITEM-aware gate, not the extension-and-kind half: install
+/// expands an `expand:`-listed file too (NS-57), so reading the narrower set
+/// dropped the real dependency edges a token in one of those files declares.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
-        if !crate::namespace::expands_tokens(&file, item.kind) {
+        if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&file) {
@@ -3525,12 +3619,14 @@ fn resolve_learn(
     // The `read` closure feeds each item's concatenated UTF-8 text to the
     // resolver so it can scan for `{{ns:}}` tokens (DEP-1). Mirrors
     // `read_item_text`: only the files install expands are scanned
-    // (`namespace::expands_tokens`, NS-53, WF-25), since install never expands a
-    // `{{ns:}}` token in any other file either.
+    // (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25), since install never
+    // expands a `{{ns:}}` token in any other file either -- and it DOES expand
+    // one in an `expand:`-listed file, so the gate has to be the item-aware one
+    // or this closure drops the edges those files declare.
     let read = |item: &CatalogItem| -> String {
         let mut parts: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
-            if !crate::namespace::expands_tokens(&file, item.kind) {
+            if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&file) {
@@ -8546,7 +8642,36 @@ pub fn recall(
             // source-controlled bare name; sanitize the display copy so a
             // bidi/ANSI name cannot ride the `--json` document to a terminal
             // (serde escapes ESC but not a bidi override).
-            return print_json(&found.sanitized_for_display());
+            let mut doc = serde_json::to_value(found.sanitized_for_display())
+                .map_err(|e| MindError::json("recall item", e))?;
+            // spec: WF-60 -- a workflow answers to its `meta.name`, which the
+            // manifest does not record, so a `--json` consumer had no way to
+            // learn of a WF-24 divergence or a WF-29 collision that the text
+            // view printed right below. Same findings, same wording, one
+            // serialized field each.
+            if found.kind == ItemKind::Workflow
+                && let Some(obj) = doc.as_object_mut()
+            {
+                let detail = workflow_detail(paths, &manifest, found);
+                obj.insert(
+                    "harness_name".to_string(),
+                    match &detail.harness_name {
+                        Some(name) => serde_json::Value::String(crate::sanitize::strip_ansi(name)),
+                        None => serde_json::Value::Null,
+                    },
+                );
+                obj.insert(
+                    "workflow_findings".to_string(),
+                    serde_json::Value::Array(
+                        detail
+                            .findings
+                            .iter()
+                            .map(|f| serde_json::Value::String(crate::sanitize::strip_ansi(f)))
+                            .collect(),
+                    ),
+                );
+            }
+            return print_json(&doc);
         }
         println!("{}", out.bold(&found.display_key()));
         if let Some(d) = &found.description {
@@ -8595,39 +8720,8 @@ pub fn recall(
         // repair, so it would be unactionable noise in the one command whose
         // output is meant to be acted on.
         if found.kind == ItemKind::Workflow {
-            let (meta, _) = crate::workflow_check::read(&paths.mind_home.join(&found.store));
-            let harness = crate::workflow_check::harness_name(
-                &meta,
-                &None,
-                &std::collections::HashSet::new(),
-            );
-            if let Some(msg) = crate::workflow_check::divergence(&found.name, harness.as_deref()) {
+            for msg in workflow_detail(paths, &manifest, found).findings {
                 println!("  {}{}", out.dim("harness "), out.yellow(&msg));
-            }
-            if let Some(harness) = harness {
-                let others: Vec<String> = manifest
-                    .items
-                    .values()
-                    .filter(|e| e.kind == ItemKind::Workflow && e.name != found.name)
-                    .filter(|e| {
-                        let (m, _) = crate::workflow_check::read(&paths.mind_home.join(&e.store));
-                        crate::workflow_check::harness_name(
-                            &m,
-                            &None,
-                            &std::collections::HashSet::new(),
-                        )
-                        .as_deref()
-                            == Some(harness.as_str())
-                    })
-                    .map(|e| e.display_key())
-                    .collect();
-                if !others.is_empty() {
-                    println!(
-                        "  {}{}",
-                        out.dim("harness "),
-                        out.yellow(&crate::workflow_check::collision(&harness, &others))
-                    );
-                }
             }
         }
         // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
@@ -9634,6 +9728,14 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         out.dim("·"),
         crate::error::format_metadata_size(limit)
     );
+    // spec: CLI-241 DSC-104 -- the value printed is the effective one, which
+    // the flag and the environment can outrank, so say where it came from when
+    // it is not what the config key says. Without this the line reads as a
+    // report of `config.toml` and quietly is not one, the same trap the
+    // MIND_AGENT_HOMES note below exists for.
+    if let Some(note) = metadata_cap_origin(cfg.max_metadata_size.as_deref(), limit) {
+        println!("note: {note}");
+    }
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
             "note: MIND_AGENT_HOMES is set and overrides lobes: {}",
@@ -9641,6 +9743,35 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Where `config show`'s effective metadata cap came from, when that is not the
+/// `max-metadata-size` config key it is printed beside (DSC-104).
+///
+/// `None` when the printed value IS the configured one, and when nothing is
+/// configured and nothing overrode the built-in default -- in both of those the
+/// line already tells the whole story and a note would be noise.
+fn metadata_cap_origin(configured: Option<&str>, effective: u64) -> Option<String> {
+    let config_value = configured.and_then(|raw| crate::error::parse_metadata_size(raw).ok());
+    if config_value == Some(effective) {
+        return None;
+    }
+    if configured.is_none() && effective == crate::error::METADATA_SIZE_LIMIT {
+        return None;
+    }
+    let env = std::env::var("MIND_MAX_METADATA_SIZE").ok();
+    if let Some(raw) = env.as_deref()
+        && crate::error::parse_metadata_size(raw) == Ok(effective)
+    {
+        return Some(format!(
+            "MIND_MAX_METADATA_SIZE is set and overrides the max-metadata-size config key: {raw}"
+        ));
+    }
+    Some(
+        "the max-metadata-size shown is this run's --max-metadata-size, which overrides the \
+         config key and the environment"
+            .to_string(),
+    )
 }
 
 /// Render a lobe entry for display: the path, plus its `kinds` filter in brackets
@@ -10632,6 +10763,56 @@ mod tests {
             expand: Vec::new(),
             hooks: Vec::new(),
             ignore: None,
+        }
+    }
+
+    /// `config show` prints the EFFECTIVE metadata cap, which the flag and the
+    /// environment outrank (DSC-104), so it names the origin whenever that is
+    /// not the config key beside it -- and stays silent when the printed value
+    /// needs no explanation, so an ordinary `config show` gains no noise.
+    ///
+    /// The env lock is held because this reads `MIND_MAX_METADATA_SIZE`, which
+    /// other tests in this binary mutate.
+    // spec: CLI-241 DSC-104
+    #[test]
+    fn config_show_names_where_a_non_config_metadata_cap_came_from() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let had = std::env::var("MIND_MAX_METADATA_SIZE").ok();
+        // SAFETY: the process-wide env lock is held for the whole test.
+        unsafe { std::env::remove_var("MIND_MAX_METADATA_SIZE") };
+
+        // Nothing configured and the built-in default in force: no note.
+        assert_eq!(
+            metadata_cap_origin(None, crate::error::METADATA_SIZE_LIMIT),
+            None
+        );
+        // Configured, and the configured value is what is in force: no note.
+        assert_eq!(metadata_cap_origin(Some("2MiB"), 2 * 1024 * 1024), None);
+        // Configured, but something outranked it: the flag is the only
+        // remaining origin once the environment is ruled out.
+        let note = metadata_cap_origin(Some("2MiB"), 4096).expect("an override must be named");
+        assert!(note.contains("--max-metadata-size"), "{note}");
+        // Nothing configured, but the value is not the default either.
+        assert!(metadata_cap_origin(None, 4096).is_some());
+
+        // With the environment set to the value in force, that is the origin.
+        // SAFETY: as above.
+        unsafe { std::env::set_var("MIND_MAX_METADATA_SIZE", "4KiB") };
+        let note = metadata_cap_origin(Some("2MiB"), 4096).expect("an override must be named");
+        assert!(
+            note.contains("MIND_MAX_METADATA_SIZE") && note.contains("4KiB"),
+            "{note}"
+        );
+        // And an env value that is NOT in force does not get the credit.
+        let note = metadata_cap_origin(Some("2MiB"), 8192).expect("an override must be named");
+        assert!(note.contains("--max-metadata-size"), "{note}");
+
+        // SAFETY: as above; restore whatever the environment had.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("MIND_MAX_METADATA_SIZE", v),
+                None => std::env::remove_var("MIND_MAX_METADATA_SIZE"),
+            }
         }
     }
 

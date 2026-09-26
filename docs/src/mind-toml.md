@@ -7,12 +7,13 @@ gate.
 
 There are four discovery layers, in precedence order:
 
-1. **Convention** (default, no file): the scanner finds `skills/<name>/SKILL.md`,
-   `agents/<name>.md`, `rules/<name>.md`, `commands/<name>.md`,
-   `workflows/<name>.js`, and
-   `tools/<name>/`.
-2. **Frontmatter** (always read): each item's `description` (and a tool's `bin` /
-   `build`) come from the frontmatter it already carries.
+1. **Convention** (default, no file): the scanner finds
+   `skills/<name>/SKILL.md`, `agents/<name>.md`, `rules/<name>.md`,
+   `commands/<name>.md`, `workflows/<name>.js`, and `tools/<name>/`.
+2. **Frontmatter** (always read): each item's `description` (and a tool's
+   `bin` / `build`) come from the frontmatter it already carries -- except a
+   workflow, which has no frontmatter at all; its description and
+   `whenToUse` come from its `export const meta` object instead (WF-4/WF-5).
 3. **Claude plugin manifest** (optional): a `.claude-plugin/plugin.json` or
    `.claude-plugin/marketplace.json` in the repo is read as a discovery input. It
    is authoritative for the items it declares (convention scanning is skipped for

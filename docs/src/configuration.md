@@ -53,6 +53,28 @@ presets admit skills only today. A command links into the default Claude
 lobe, into any lobe with no `kinds` filter (which receives all kinds, see
 above), and into any lobe whose `kinds` names `command`.
 
+Workflows (`workflows/<name>.js`) are Claude-only for the same reason as
+commands, and the filter rule is the same: a workflow links into the default
+Claude lobe, into any lobe with no `kinds` filter, and into any lobe whose
+`kinds` names `workflow`. Nothing else links one. In particular
+`link-project` can never produce a project lobe that links a workflow: it
+resolves to a preset (windsurf by default) or, with `--subdir`, to a
+skill-only filter, and every preset in the table above admits skills alone
+(WF-13). There is no `claude` preset, so no preset closes this. To link
+workflows into a project's `.claude/`, register the lobe directly and either
+name the kind or leave the lobe unfiltered:
+
+```
+mind config lobes add ./.claude              # no kinds filter: all kinds link
+```
+
+`config lobes add` has no flag for the filter, so a `kinds`-limited lobe is
+written by hand in `~/.mind/config.toml`:
+
+```toml
+lobes = ["~/.claude", { path = "./.claude", kinds = ["workflow"] }]
+```
+
 Per-harness path table:
 
 | Harness | Skills dir | Agents dir | mind lobe (parent) |
@@ -224,8 +246,18 @@ max-metadata-size = "32MiB"
 
 The flag outranks `MIND_MAX_METADATA_SIZE`, which outranks the config key. A
 value is a byte count (`16777216`), a binary size (`32MiB`, `512KiB`, `2GiB`, or
-the bare `32M`/`512K`/`2G`), a decimal size (`16MB` = 16000000), or `unlimited`
-for no ceiling. `mind config show` reports the cap in force.
+the bare `32M`/`512K`/`2G`), a decimal size (`16MB` = 16000000), an explicit
+`512B`, or `unlimited`, `none`, or any zero value (`0`, `0B`, `0MiB`) for no
+ceiling. Case and internal whitespace are not significant. A fractional size
+(`1.5MiB`) is refused rather than rounded; write a whole number of a smaller
+unit (`1536KiB`). `mind config show` reports the cap in force.
+
+An unparseable value is an error naming which of the three origins supplied it,
+never a silent fall back to the next one down. That includes a
+`MIND_MAX_METADATA_SIZE` whose value is not valid UTF-8; only an unset, empty,
+or whitespace-only variable reads as unset. Only the origin that wins the
+precedence above is read at all, so a bad `MIND_MAX_METADATA_SIZE` (undecodable
+or not) is ignored on a run that passes `--max-metadata-size`.
 
 Only the workflow kind treats an over-cap file as recoverable: it lists with no
 description and installs, as any workflow whose `meta` cannot be read does. For

@@ -47,6 +47,12 @@ impl Sandbox {
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_ABSORB_TO")
+            // The assertions below read lobe link paths, so a stray
+            // MIND_AGENT_HOMES would move them, and the over-cap fixture is
+            // sized against the DEFAULT metadata cap, so a stray
+            // MIND_MAX_METADATA_SIZE would change what it proves.
+            .env_remove("MIND_AGENT_HOMES")
+            .env_remove("MIND_MAX_METADATA_SIZE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -70,6 +76,8 @@ impl Sandbox {
             .env("CLAUDE_HOME", &self.claude_home)
             .env("MIND_TTY", "1")
             .env_remove("MIND_ABSORB_TO")
+            .env_remove("MIND_AGENT_HOMES")
+            .env_remove("MIND_MAX_METADATA_SIZE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
@@ -323,6 +331,23 @@ fn wf24_upgrade_reports_a_renamed_workflow_under_its_new_key() {
         "upgrade must report the divergence a prefix change introduces: {}",
         up.stderr
     );
+    // spec: WF-24 NS-11 -- the remedy token names the BARE name, which is the
+    // only spelling `{{ns:}}` resolves. This is the surface where getting it
+    // wrong is most tempting and least visible: the item is keyed, stored, and
+    // reported under `labs:alpha` by this point, so a remedy built from the
+    // name in the message would tell the author to write a token that resolves
+    // to no sibling and turns an advisory warning into a hard `bad-reference`
+    // (NS-12) on the next install.
+    assert!(
+        up.stderr.contains("`meta.name: '{{ns:alpha}}'`"),
+        "the remedy must be the token that actually resolves: {}",
+        up.stderr
+    );
+    assert!(
+        !up.stderr.contains("{{ns:labs:alpha}}"),
+        "a prefixed referent names no sibling (NS-11): {}",
+        up.stderr
+    );
 }
 
 // ---- CLI-217: the warnings survive `--json` -------------------------------
@@ -445,10 +470,10 @@ fn wf30_wf31_upgrade_warns_when_an_edit_makes_a_workflow_unloadable() {
     );
     assert!(
         up.stderr.contains(
-            "workflow:delta: the harness will not load this workflow: it declares no `meta` \
-             object mind can read; installed anyway"
+            "workflow:delta: the harness will not load this workflow: mind read no `name`, \
+             `description`, or `whenToUse` from its `meta`; installed anyway"
         ),
-        "upgrade must report the unreadable `meta`: {}",
+        "upgrade must report the unreadable `meta`, in terms of what mind read: {}",
         up.stderr
     );
     // spec: WF-24 WF-30 -- no name, so no divergence complaint on top.
@@ -733,7 +758,7 @@ fn upgrade_warns_when_the_old_item_fails_to_uninstall_after_a_rename() {
 /// The `learn workflow:fine` step is the regression: before WF-55 the capped
 /// read ran for every item of the source in one pass, so the oversized sibling
 /// made this (and every other catalog-scanning verb) fail outright.
-// spec: WF-55 WF-30 WF-31
+// spec: WF-55 WF-56 WF-31
 #[test]
 fn an_over_cap_workflow_installs_and_leaves_its_source_scannable() {
     let sb = Sandbox::new();
@@ -772,12 +797,26 @@ fn an_over_cap_workflow_installs_and_leaves_its_source_scannable() {
         sb.claude_home.join("workflows/huge.js").exists(),
         "the oversized workflow must be linked into the lobe"
     );
+    // spec: WF-56 -- mind's own cap is reported as mind's own, naming the cap
+    // and the flag that raises it, not as a verdict about the harness mind
+    // never read enough of the file to reach.
     assert!(
         huge_run
             .stderr
-            .contains("it declares no `meta` object mind can read"),
-        "mind's own cap makes the `meta` unreadable, which is the WF-30 \
-         warning, not an error: {}",
+            .contains("over mind's own 8 MiB metadata read cap"),
+        "mind's own cap is warned about as mind's own, not as an error: {}",
+        huge_run.stderr
+    );
+    assert!(
+        huge_run.stderr.contains("--max-metadata-size"),
+        "and names the flag that raises it: {}",
+        huge_run.stderr
+    );
+    assert!(
+        !huge_run
+            .stderr
+            .contains("the harness will not load this workflow: mind read no"),
+        "a file mind never read is not a file mind can call unloadable: {}",
         huge_run.stderr
     );
     assert!(

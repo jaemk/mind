@@ -1099,10 +1099,12 @@ only appear at meld or install time. It is read-only and installs nothing.
   token (CLI-136), un-wraps misplaced `{{ns:}}` tokens (CLI-139) back to the
   bare name, and templatizes bare sibling names into `{{ns:}}` (the
   `init-source --template` transform, INIT-5), then reports each file it
-  changed. A non-markdown item file is never rewritten, since its content never
-  expands out of the token form (NS-53): a finding there is still reported by
-  the CLI-135..139 checks, which scan every text file regardless of extension,
-  it is just left unrewritten (NS-54).
+  changed. A non-markdown item file is never rewritten, even one whose tokens
+  do expand (a workflow's own `.js`, WF-25): the rewrite gate stays on the
+  markdown-extension test alone, not on whether a token there would actually
+  expand (NS-54). A finding there is still reported by the CLI-135..139
+  checks, which scan every text file regardless of extension; it is just left
+  unrewritten.
 - `CLI-139` `review` flags a misplaced `{{ns:}}` token -- one in a non-prose
   context (NS-24) where name-substitution is wrong. A token inside a fenced code
   block, an inline code span, or adjacent to a path separator is an advisory
@@ -1132,7 +1134,13 @@ only appear at meld or install time. It is read-only and installs nothing.
   token(s), states that tokens expand in markdown only, and names the three
   remedies: move the reference into markdown prose, have the script
   self-locate, or list the file in the item's `expand:` frontmatter to expand
-  it there (NS-57). Never hard, and `--fix` never rewrites the file (CLI-138,
+  it there (NS-57). "Markdown only" is the message's shorthand for the full
+  rule (a token expands when the file has a markdown extension, or the item
+  is of the `workflow` kind, or the file is on the item's `expand:` list) and
+  stays accurate where it is read: the two non-markdown files a token does
+  reach are exempt from this check above, so every file that draws the finding
+  really is one where only a markdown extension would have expanded it. Never
+  hard, and `--fix` never rewrites the file (CLI-138,
   NS-54). A token this generic net
   would otherwise re-report is excluded when another check already reported
   the same span for the same file, so a single broken or dead reference draws
@@ -1242,7 +1250,15 @@ only appear at meld or install time. It is read-only and installs nothing.
   through the same size-capped path (DSC-91) every metadata read in the
   codebase uses, since `review` runs against an untrusted, not-yet-melded
   source; an over-cap file is a hard `metadata-too-large` finding rather than
-  a silently skipped disclosure.
+  a silently skipped disclosure. The `workflow` kind has its own analogous
+  set of four `review` codes, each covered in [workflows.md](workflows.md):
+  `workflow-content` (WF-53), the unconditional disclosure counterpart of
+  `command-content` above, since `mind` neither reads nor validates a
+  workflow's body either; `workflow-unloadable` (WF-30), a file the harness
+  would skip; `workflow-name` (WF-24), a `meta.name` diverging from the
+  installed name; and `workflow-name-collision` (WF-29), two workflows
+  answering to one harness name. All four are disclosure only, like
+  `command-content`.
 - `CLI-238` The `item-hook` advisory (HOOK-85) states whether each hook is
   required or optional, reusing the same `required`/`optional` composition
   as the source-hook `install-hook` advisory above it (Check 6). Without

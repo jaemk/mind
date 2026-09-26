@@ -1,11 +1,12 @@
 # Introduction
 
-`mind` is a manager for agent tooling: skills, agents, rules, commands, workflows, and
-tools. It melds arbitrary git repos and links the items they offer into one
-or more agent homes (default `~/.claude`).
+`mind` is a manager for agent tooling: skills, agents, rules, commands,
+workflows, and tools. It melds arbitrary git repos and links the items they
+offer into one or more agent homes (default `~/.claude`).
 
 - A *source* is a melded git repo (`mind meld`). It offers *items*: skills,
-  agents, rules, and tools, found by convention or declared in a `mind.toml`.
+  agents, rules, commands, workflows, and tools, found by convention or
+  declared in a `mind.toml`.
 - `mind learn <item>` copies an item into the *store* (`~/.mind/store`) and
   symlinks it into each *lobe* (agent home). A *tool* is the exception: store-only
   helper tooling reached by reference, not linked into a lobe by default. Lobes can

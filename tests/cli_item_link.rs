@@ -456,8 +456,10 @@ fn an_explicit_kind_on_a_workflow_shaped_link_is_a_mismatch() {
         "the error must name the kind that was asked for: {v}"
     );
     assert_eq!(source_count(&sb), 0, "nothing registered on failure");
-    // And `--kind workflow` is not a way in either: the flag's own value set
-    // refuses it, or the link path does.
+    // And `--kind workflow` is not a way in either: `LinkKindArg` (the item-link
+    // `--kind` flag's value set) is deliberately narrower than `KindArg` and
+    // has no `Workflow` variant at all, so clap itself rejects the value
+    // before mind ever classifies the path.
     let wf = sb.mind(&[
         "learn",
         &sb.link("tree/main/workflows/deploy.js"),
@@ -468,6 +470,17 @@ fn an_explicit_kind_on_a_workflow_shaped_link_is_a_mismatch() {
         !wf.success,
         "`--kind workflow` must not open a path WF-6 closes: {}",
         wf.stdout
+    );
+    assert!(
+        wf.stderr.contains("invalid value 'workflow'"),
+        "clap must reject `workflow` as an invalid --kind value: {}",
+        wf.stderr
+    );
+    assert!(
+        wf.stderr.contains("agent") && wf.stderr.contains("rule") && wf.stderr.contains("command"),
+        "clap's usage error must list the item-link kind's actual value set \
+         (agent, rule, command -- no workflow): {}",
+        wf.stderr
     );
     assert_eq!(source_count(&sb), 0, "nothing registered on failure");
 }
@@ -528,22 +541,20 @@ fn the_two_js_link_refusals_carry_distinct_json_kinds() {
 
     let wf = sb.mind(&["--json", "learn", &sb.link("tree/main/workflows/deploy.js")]);
     assert!(!wf.success, "{}", wf.stdout);
-    let wf_out = format!("{}{}", wf.stdout, wf.stderr);
-    assert!(
-        wf_out.contains("link-kind-not-supported"),
-        "a workflow link must carry its own kind slug: {wf_out}"
+    let wf_v: serde_json::Value = serde_json::from_str(wf.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", wf.stdout));
+    assert_eq!(
+        wf_v["error"]["kind"], "link-kind-not-supported",
+        "a workflow link must carry its own kind slug: {wf_v}"
     );
 
     let stray = sb.mind(&["--json", "learn", &sb.link("tree/main/lib/util.js")]);
     assert!(!stray.success, "{}", stray.stdout);
-    let stray_out = format!("{}{}", stray.stdout, stray.stderr);
-    assert!(
-        stray_out.contains("link-not-linkable-file"),
-        "a stray `.js` must carry its own kind slug: {stray_out}"
-    );
-    assert!(
-        !stray_out.contains("link-kind-not-supported"),
-        "the two must not be reported as the same failure: {stray_out}"
+    let stray_v: serde_json::Value = serde_json::from_str(stray.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", stray.stdout));
+    assert_eq!(
+        stray_v["error"]["kind"], "link-not-linkable-file",
+        "a stray `.js` must carry its own kind slug: {stray_v}"
     );
     assert_eq!(source_count(&sb), 0, "nothing registered on failure");
 }
@@ -2280,6 +2291,67 @@ fn an_unknown_kind_value_is_refused() {
         "the error must name the legal set: {}",
         r.stderr
     );
+}
+
+/// The `[possible values: ...]` line out of a clap usage error. A test asserts
+/// on that line rather than on the whole message because the rejected value's
+/// own name appears elsewhere in the message ("invalid value 'skill'"), which
+/// would defeat a negative match against the set.
+fn possible_values_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|l| l.contains("possible values:"))
+        .unwrap_or_else(|| panic!("clap must print the legal value set: {stderr}"))
+        .to_string()
+}
+
+#[test]
+fn the_link_kind_value_set_excludes_every_non_file_kind() {
+    // spec: LNK-21 CLI-239
+    // LNK-21 is normative that `meld`/`learn --kind` is "typed to accept only
+    // `agent`, `rule`, or `command` in the first place ... so `skill`/`tool`
+    // there is refused before any clone rather than reaching this mismatch".
+    // `kind_agent_rule_command_are_the_only_cli_kind_flag_values` pins one
+    // corner of that (`learn --kind skill`, asserted by the PRESENCE of a
+    // "possible values" list); this pins the set itself, from the other side:
+    // every kind that must NOT be in it (`skill`, `tool`, `workflow`), on BOTH
+    // verbs that take the flag (two separate `#[arg]` sites), asserting the
+    // rejected kind is absent from the advertised list rather than only that
+    // some list was printed -- a variant added to `LinkKindArg` would still
+    // print a list, and would still name `agent`.
+    let sb = file_item_sandbox();
+    let url = sb.link("blob/main/agents/dev.md");
+    for verb in ["learn", "meld"] {
+        for bad in ["skill", "tool", "workflow"] {
+            let r = sb.mind(&[verb, &url, "--kind", bad]);
+            assert!(
+                !r.success,
+                "`{verb} --kind {bad}` must be a usage error: {}",
+                r.stdout
+            );
+            assert!(
+                r.stderr.contains(&format!("invalid value '{bad}'")),
+                "clap must reject `{bad}` by name on `{verb}`: {}",
+                r.stderr
+            );
+            let values = possible_values_line(&r.stderr);
+            assert!(
+                values.contains("agent") && values.contains("rule") && values.contains("command"),
+                "the file-link kinds stay in the set on `{verb}`: {values}"
+            );
+            assert!(
+                !values.contains(bad),
+                "`{bad}` must not be offered as a `{verb} --kind` value: {values}"
+            );
+            // "Refused before any clone": no registration and no fetch, so the
+            // rejection cannot have cost a network round trip.
+            assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+            let cloned = std::fs::read_dir(sb.mind_home.join("sources"))
+                .map(|d| d.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(cloned, 0, "`{verb} --kind {bad}` must not clone anything");
+        }
+    }
 }
 
 #[test]

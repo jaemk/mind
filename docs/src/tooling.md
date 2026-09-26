@@ -105,13 +105,16 @@ so a bad reference fails before the live install is touched. The recorded conten
 hash is of the token (source) form, so drift detection compares source with
 source (TOOL-13).
 
-Tokens expand only in markdown files (an extension of `md`, `markdown`, `mdown`,
-or `mkd`), whatever the item kind (TOOL-14, TOOL-19). A token in a non-markdown
-bundled file -- a script, data -- is left exactly as written; the designed use
-of a path token is prose, e.g. a skill telling Claude to run
-`{{tools:detect}}`. Inner whitespace is trimmed (`{{ path:x }}` works); an
-unterminated token (no closing `}}`) is left verbatim; non-UTF-8 files are not
-scanned. To expand tokens in a specific script, list it in `expand:` (below).
+A token expands in a file when the file has a markdown extension, or the item
+is of the `workflow` kind, or the file is on the item's NS-57 `expand:` list
+(TOOL-14, TOOL-19). "Markdown extension" means `md`, `markdown`, `mdown`, or
+`mkd`, case-insensitively. A token in an ordinary non-markdown bundled file --
+a script, data -- is left exactly as written unless the item is a workflow or
+the file is `expand:`-listed; the designed use of a path token is prose, e.g. a
+skill telling Claude to run `{{tools:detect}}`. Inner whitespace is trimmed
+(`{{ path:x }}` works); an unterminated token (no closing `}}`) is left
+verbatim; non-UTF-8 files are not scanned. To expand tokens in a specific
+script, list it in `expand:` (below).
 
 References resolve within the same source only: ship a tool in the same source
 as the items that use it (TOOL-15).

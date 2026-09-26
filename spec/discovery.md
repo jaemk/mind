@@ -37,6 +37,47 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   The scan is flat, as for agents and rules (commands.md CMD-1, CMD-2).
 - `DSC-13` A missing `skills/`, `agents/`, `rules/`, `commands/`, `workflows/`,
   or `tools/` directory yields no items (not an error).
+- `DSC-108` The scan classifies every entry by symlink metadata, not by
+  following the link, so a symlink cannot make an absent file appear present, an
+  unrelated file's size be reported, or an unrelated file's metadata be
+  republished. A symlinked entry is not discovered as an item, whatever it points
+  at. The rule covers every classification the scan makes, not one kind's:
+
+  - a single-file kind's entry (`agents/<name>.md`, `rules/<name>.md`,
+    `commands/<name>.md`, `workflows/<name>.js`);
+  - both halves of the skill shape: the `skills/<name>/` directory AND its
+    `SKILL.md` anchor;
+  - a `tools/<name>/` directory, which has no anchor file, so its own
+    classification is the whole test of whether the item exists;
+  - the same components read from a Claude plugin or a marketplace entry's
+    in-repo plugin (marketplace.md MKT-3, MKT-14, MKT-18, workflows.md WF-40),
+    including a leaf skill directory an entry's `skills` array names directly;
+  - a `[discover]` glob match (DSC-80), which matches by name and so would
+    otherwise be a second route to the same answers. Such a match is dropped
+    silently, as the convention scan drops such an entry; a match whose link
+    resolves outside the repo root remains DSC-81's hard error, which takes
+    precedence.
+
+  A symlinked entry that is therefore not an item is also not counted as a
+  mapped plugin component: it is reported among the unmapped entries (MKT-4),
+  since what the scan leaves behind must not be described as installed.
+
+  This matters because the scan runs over a tree the source controls entirely.
+  Following links would let a repo of `workflows/<probe>.js` symlinks aimed at
+  absolute paths on the consumer's machine answer "does this path exist" per
+  entry through the item listing, and would let `review`'s workflow size report
+  print the byte count of a file outside the repo. A symlinked `SKILL.md` is
+  worse than an existence bit: the anchor is the file whose frontmatter becomes
+  the item's description, so following it republishes a linked-to file's
+  `description:` through `recall` and `probe`. It also matches what install would
+  do with such an entry: the copy walk rejects a symlink at or inside an item
+  tree outright (lifecycle.md LIFE-42), so an item the scan declines to offer
+  here was never installable, and discovering one could only ever produce an
+  offer `mind` cannot honor.
+
+  The rule is about DISCOVERY. An explicit `[[items]]` entry names its own path,
+  and a declared path that is a symlink is not refused at scan time (the author
+  wrote it); it fails at install, where LIFE-42 names the symlink.
 
 ## Frontmatter
 
@@ -116,6 +157,15 @@ run = "make build"
 
 - `DSC-30` Unknown top-level or table fields are rejected (the file is strict).
 - `DSC-31` A `[[items]]` entry with an unknown `kind` is an error (`MindToml`).
+- `DSC-109` A declared `workflow` item's path must name a file, not a directory;
+  a directory-shaped workflow entry is refused at scan time. The refusal is a
+  `MindToml` error naming the item and its path. A workflow is exactly one `.js`
+  file (workflows.md WF-1), and that file is also the metadata the scan reads
+  (WF-4), so a directory has nothing to read, would install a whole tree at a
+  link target the harness tries to load as a script, and would report a
+  directory's size in `review`. The author wrote the path, so this is a hard
+  error rather than a skipped item, matching DSC-31's treatment of a declared
+  entry that cannot be honored.
 - `DSC-71` A `[[items]]` `name` must be a single safe path component: it is
   rejected (`MindToml`) when empty, equal to `.` or `..`, or containing a path
   separator (`/` or `\`) or a NUL byte. The name indexes the store
@@ -858,15 +908,51 @@ field lets the curator opt in to named handling.
 - `DSC-105` An accepted size is a whole number of bytes (`16777216`), a
   binary-suffixed size (`32MiB`, `512KiB`, `2GiB`, and the bare `32M`/`512K`/
   `2G` spellings, which are binary), a decimal-suffixed size (`16MB` =
-  16000000), an explicit `512B`, or one of `unlimited`, `none`, or `0` for no
-  ceiling. Case and internal whitespace are not significant. A fraction
-  (`1.5MiB`) is refused rather than rounded, so a value that cannot be
-  represented exactly is never silently changed to a different one.
+  16000000), an explicit `512B`, or one of `unlimited`, `none`, or a zero value
+  for no ceiling (DSC-110). Case and internal whitespace are not significant. A
+  fraction (`1.5MiB`) is refused rather than rounded, so a value that cannot be
+  represented exactly is never silently changed to a different one. The refusal
+  says the value is fractional and names a whole-unit equivalent, rather than
+  reporting the text after the decimal point as an unknown unit.
 
   A value that is present but unparseable is a hard `MindError::BadMetadataSize`
   before any other work, naming which of the three origins supplied it. It is
   never a fallback to the default: an operator who typed a cap and silently got
   the default instead would have no way to tell.
+
+- `DSC-110` Every zero-valued spelling of the cap means "unlimited", whatever
+  unit it carries: `0`, `00`, `0B`, `0KiB`, `0MiB`, `0GB`, and the same with
+  internal whitespace or different case all resolve to no ceiling, identically
+  to `unlimited` and `none`. A cap of literally zero bytes would refuse every
+  metadata file, including the source's own `mind.toml`, so it is not a value
+  an operator can mean.
+
+  The rule lives in the one size parser, so every origin (the flag,
+  `MIND_MAX_METADATA_SIZE`, the config key) and every caller of it agree on
+  what a zero means. It is not a rescue applied by one caller after the fact:
+  that split gave a direct caller "refuse everything" for `0B` while the CLI
+  read the same text as "unlimited". The accepted-spellings list in
+  `--max-metadata-size --help` and in the configuration docs names this same
+  set.
+
+- `DSC-111` `MIND_MAX_METADATA_SIZE` is distinguished from unset by presence,
+  not by decodability. A variable that is set but is not valid UTF-8 is a
+  present-and-unparseable value: it is a hard `MindError::BadMetadataSize`
+  naming `MIND_MAX_METADATA_SIZE` as the origin, per DSC-105, not a silent
+  fall-through to the config key or the default. Only an absent variable, or
+  one whose value is empty or whitespace-only (DSC-104), reads as unset.
+
+  The refusal is subject to precedence (DSC-104), not ahead of it: it applies
+  when the environment is the origin the run would have used. An explicit
+  `--max-metadata-size` outranks the variable, and the undecodable value is then
+  dropped without being examined, exactly as a junk-but-decodable one is (only
+  the winning origin is ever parsed). Otherwise the flag would override the
+  variable or not depending on which bytes it happened to hold.
+
+  Under `--json` the refusal is the CLI-181 error envelope on stdout
+  (`"kind": "bad-metadata-size"`), like any other error: it is raised before
+  dispatch, which is where a bare text line on stdout would otherwise break
+  CLI-217's one-document contract.
 
 - `DSC-106` The cap in effect appears in `MindError::MetadataTooLarge` (so the
   refusal names the ceiling the operator can change, and its remedy names the
@@ -919,3 +1005,24 @@ field lets the curator opt in to named handling.
   accepted indefinitely as a deprecated parse alias. When a `mind.toml` carries
   `prefix =` and is rewritten by `init-source`, the `prefix =` line is replaced
   with `namespace =` so only one key is present after the update.
+
+- `DSC-112` The reserved-prefix list (namespacing.md NS-25, NS-29) is
+  append-only and grows when a word becomes an item kind, so a source can be
+  melded under a prefix that is legal at meld time and reserved afterwards
+  (`workflow`, once the workflow kind shipped). What the melded source then
+  meets depends on which of the two ingresses set the prefix:
+
+  - A consumer-set prefix (`meld --namespace`, recorded as the registry entry's
+    alias) is never re-validated, so it stays in effect. The scan warns once
+    per source that the prefix is now a reserved word and that `<prefix>:<name>`
+    reads as a kind-qualified ref, and names re-melding with `--namespace
+    <other>` as the fix. It is advisory: the items are already installed under
+    that prefix, and failing every scanning verb over a naming problem would
+    take the whole lobe down.
+  - A source-declared `[source].prefix` is validated at every `mind.toml` load
+    (NS-25), so the refusal is a hard error on any verb that scans the source
+    (`recall`, `probe`, `learn`, `upgrade`, `introspect`). For a source that is
+    already melded, that error names the source and `mind unmeld <source>` as
+    the remedy, rather than the pre-meld wording that the prefix "cannot be
+    used": the value is the source's own declaration, so no consumer-side flag
+    overrides it and the only action available is to drop the source.

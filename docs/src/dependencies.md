@@ -11,13 +11,19 @@ one.
 A dependency is an intra-source reference. There are two ways to declare one,
 and the closure that `learn` installs is their union.
 
-**`{{ns:name}}` tokens** -- a token appearing in one of the item's markdown files
-(the whole skill directory's `.md`/`.markdown`/`.mdown`/`.mkd` files, or the
-agent/rule file) names a sibling as a dependency. A token in a non-markdown
-bundled file (a shell script, a data file) forms no dependency edge. This is
-the inline form: the reference lives in the prose and is also rewritten to the
-effective name on install. See [Namespacing](namespacing.md) for token expansion
-rules.
+**`{{ns:name}}` tokens** -- a token appearing in a file where it expands names a
+sibling as a dependency. A token expands in a file when the file has a markdown
+extension, or the item is of the `workflow` kind, or the file is on the item's
+NS-57 `expand:` list. In practice that means the whole skill directory's
+`.md`/`.markdown`/`.mdown`/`.mkd` files, or the agent/rule file, as before, plus
+a workflow's own `.js` file: a `{{ns:}}` token there forms a dependency edge the
+same as one in markdown does, because the dependency scan reads exactly the files
+install expands, and install expands a workflow's `.js`. A token in an ordinary
+non-markdown
+bundled file (a shell script, a data file) still forms no dependency edge. This
+is the inline form: the reference lives in the prose (or, for a workflow, the
+`meta.name` field or body) and is also rewritten to the effective name on
+install. See [Namespacing](namespacing.md) for token expansion rules.
 
 **`requires:` frontmatter key** -- a top-level scalar in the item's frontmatter
 (`SKILL.md` for a skill, the `.md` for an agent or rule), listing

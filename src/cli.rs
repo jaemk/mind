@@ -117,9 +117,10 @@ pub struct Cli {
     /// `meta` (default 8MiB).
     ///
     /// Takes a byte count (`16777216`), a suffixed size (`32MiB`, `512KiB`,
-    /// `16MB`), or `unlimited` for no ceiling. Raise it for a source with a
-    /// legitimately large metadata file; lower it to bound how much a source you
-    /// do not trust can make `mind` allocate while scanning it. Also settable as
+    /// `16MB`), or `unlimited`, `none`, or any zero value (`0`, `0B`, `0MiB`)
+    /// for no ceiling. Raise it for a source with a legitimately large metadata
+    /// file; lower it to bound how much a source you do not trust can make
+    /// `mind` allocate while scanning it. Also settable as
     /// `MIND_MAX_METADATA_SIZE` or the `max-metadata-size` config key, which
     /// this flag outranks.
     // spec: CLI-240

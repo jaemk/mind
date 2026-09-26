@@ -77,7 +77,7 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
                 if managed.contains(&path) {
                     continue; // mind's own link
                 }
-                let Some(name) = item_name(kind, &entry) else {
+                let Some(name) = item_name(kind, &entry)? else {
                     continue;
                 };
                 found.entry((kind, name)).or_default().push(path);
@@ -94,17 +94,32 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
         .collect())
 }
 
-/// The item name for a kind-dir entry, or `None` when the entry is not a
-/// well-formed item of that kind. A skill is the directory `skills/<name>`; an
+/// The item name for a kind-dir entry, `Ok(None)` when the entry is not a
+/// well-formed item of that kind, or `Err(UnsafeName)` when a name derives but
+/// fails the safety check (UNM-9). A skill is the directory `skills/<name>`; an
 /// agent/rule/command is the file `<name>.md`; a workflow the file `<name>.js`
 /// (WF-50). Only the immediate children of
 /// the kind directory are scanned (CMD-8): a nested `commands/<group>/<name>.md`
 /// (the grouped layout mirrored on the source side) is not walked into and so
 /// is neither surfaced by `recall`/`probe` nor reachable by `absorb`.
-fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Option<String> {
+///
+/// A naive `strip_suffix` on the filename, with no validation of what it
+/// leaves behind, would let a lobe file literally named `...js` (or `...md`)
+/// derive the name `..` -- a valid path component that later gets joined onto
+/// a kind directory to build a destination path (e.g. in `absorb`), a store
+/// path (`Paths::store_rel`), and a staging/backup path, escaping every one of
+/// them. So every derived name, regardless of kind, goes through the very same
+/// predicate the catalog scan applies to a source-declared name,
+/// [`crate::catalog::is_safe_item_name`] (empty, `.`, `..`, a path separator,
+/// NUL, or a blocked Unicode code point -- DSC-96). One definition, not a
+/// mirrored copy: a name that fails it is refused via `UnsafeName` rather than
+/// surfaced as a resolvable, absorbable item (UNM-9).
+fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>> {
     let raw = entry.file_name();
-    let name = raw.to_str()?;
-    match kind {
+    let Some(name) = raw.to_str() else {
+        return Ok(None);
+    };
+    let derived = match kind {
         ItemKind::Skill => Some(name.to_string()),
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
             name.strip_suffix(".md").map(str::to_string)
@@ -114,6 +129,15 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Option<String> {
         // convention scan (WF-2).
         ItemKind::Workflow => name.strip_suffix(".js").map(str::to_string),
         ItemKind::Tool => None,
+    };
+    let Some(derived) = derived else {
+        return Ok(None);
+    };
+    if crate::catalog::is_safe_item_name(&derived) {
+        Ok(Some(derived))
+    } else {
+        // spec: UNM-9
+        Err(MindError::UnsafeName { name: derived })
     }
 }
 
@@ -185,6 +209,9 @@ pub fn resolve<'a>(items: &'a [UnmanagedItem], r: &ItemRef) -> Result<&'a Unmana
 mod tests {
     use super::*;
     use crate::resolve::parse_item_ref;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     fn make_items() -> Vec<UnmanagedItem> {
         vec![
@@ -438,5 +465,163 @@ mod tests {
             resolve(&items, &parse_item_ref("nope").unwrap()),
             Err(MindError::NotInstalled { .. })
         ));
+    }
+
+    /// A lobe file whose filename strips to an unsafe derived name (`...js` ->
+    /// `..`) is refused with `UnsafeName` rather than silently surfacing as a
+    /// scannable/absorbable item named `..`. A safe sibling in the same
+    /// directory proves the fix does not blanket-reject well-formed entries.
+    // spec: UNM-9
+    #[test]
+    fn scan_refuses_a_workflow_whose_derived_name_is_unsafe() {
+        // SAFETY: ENV_LOCK held for the duration of the env var mutation below.
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let home = std::env::temp_dir().join(format!("mind-unm-unsafe-{}-{n}", std::process::id()));
+        let workflows = home.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("...js"), b"export const meta = {};").unwrap();
+        std::fs::write(workflows.join("deploy.js"), b"export const meta = {};").unwrap();
+
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", home.to_str().unwrap());
+        }
+        let paths = Paths {
+            mind_home: home.join("mind-home-unused"),
+            claude_home: home.clone(),
+        };
+        let result = scan(&paths, &Manifest::default());
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        match result {
+            Err(MindError::UnsafeName { name }) => {
+                assert_eq!(
+                    name, "..",
+                    "the unsafe derived name must be the one surfaced in the error"
+                );
+            }
+            other => panic!("expected Err(UnsafeName), got {other:?}"),
+        }
+    }
+
+    /// The `DirEntry` in `dir` whose file name is exactly `name`.
+    fn entry_named(dir: &std::path::Path, name: &str) -> std::fs::DirEntry {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_str() == Some(name))
+            .unwrap_or_else(|| panic!("no dir entry named {name:?} in {dir:?}"))
+    }
+
+    /// `item_name` validates the derived name for EVERY suffix-stripped kind,
+    /// not just workflow's, and each of the three unsafe derivations a bare
+    /// suffix strip can produce is refused:
+    ///
+    /// | filename | derives | as a path component |
+    /// |----------|---------|---------------------|
+    /// | `...md`  | `..`    | the kind dir's PARENT (`store/agent/..` -> `store`) |
+    /// | `..md`   | `.`     | the kind dir ITSELF (`store/agent/.` -> `store/agent`) |
+    /// | `.md`    | `` (empty) | the kind dir itself, with a trailing separator |
+    ///
+    /// All three would make `Paths::store_rel`/`staging_path`/`backup_path`
+    /// name a directory that holds OTHER items, so an install swap or an
+    /// uninstall keyed on the recorded path would clobber them. A well-formed
+    /// sibling in the same directory still derives normally, and an entry that
+    /// is not an item of the kind at all stays `Ok(None)` rather than becoming
+    /// an error.
+    // spec: UNM-9
+    #[test]
+    fn item_name_refuses_every_unsafe_derivation_for_every_kind() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-unm-derive-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in [
+            "...md",
+            "..md",
+            ".md",
+            "...js",
+            "..js",
+            ".js",
+            "ok.md",
+            "ok.js",
+            "plain.txt",
+        ] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        // A skill is directory-shaped, so its name is the entry name verbatim:
+        // a `.`/`..` name is unrepresentable on disk, but a blocked Unicode
+        // code point (here a RIGHT-TO-LEFT OVERRIDE) is not.
+        std::fs::create_dir(dir.join("okdir")).unwrap();
+        std::fs::create_dir(dir.join("ha\u{202E}ck")).unwrap();
+
+        let unsafe_name = |kind: ItemKind, file: &str, want: &str| {
+            let entry = entry_named(&dir, file);
+            match item_name(kind, &entry) {
+                Err(MindError::UnsafeName { name }) => assert_eq!(
+                    name, want,
+                    "{kind:?} {file:?} must be refused with the derived name {want:?}"
+                ),
+                other => panic!("{kind:?} {file:?}: expected Err(UnsafeName), got {other:?}"),
+            }
+        };
+
+        // Every `.md` kind shares one arm; assert each so a future per-kind
+        // split cannot drop the check from one of them silently.
+        for kind in [ItemKind::Agent, ItemKind::Rule, ItemKind::Command] {
+            unsafe_name(kind, "...md", "..");
+            unsafe_name(kind, "..md", ".");
+            unsafe_name(kind, ".md", "");
+            assert_eq!(
+                item_name(kind, &entry_named(&dir, "ok.md")).unwrap(),
+                Some("ok".to_string()),
+                "{kind:?}: a well-formed sibling must still derive its name"
+            );
+            // Not an item of this kind at all: skipped, not an error.
+            assert_eq!(
+                item_name(kind, &entry_named(&dir, "plain.txt")).unwrap(),
+                None,
+                "{kind:?}: a non-matching suffix must be skipped, not refused"
+            );
+        }
+
+        // spec: WF-50 -- the `.js` strip has the identical three-way failure.
+        unsafe_name(ItemKind::Workflow, "...js", "..");
+        unsafe_name(ItemKind::Workflow, "..js", ".");
+        unsafe_name(ItemKind::Workflow, ".js", "");
+        assert_eq!(
+            item_name(ItemKind::Workflow, &entry_named(&dir, "ok.js")).unwrap(),
+            Some("ok".to_string())
+        );
+        // A `.md` file is not a workflow, and a `.js` file is not an agent:
+        // the wrong-suffix entry is skipped by both, never cross-derived.
+        assert_eq!(
+            item_name(ItemKind::Workflow, &entry_named(&dir, "...md")).unwrap(),
+            None
+        );
+        assert_eq!(
+            item_name(ItemKind::Agent, &entry_named(&dir, "...js")).unwrap(),
+            None
+        );
+
+        // Skill: the verbatim entry name, checked by the same predicate.
+        assert_eq!(
+            item_name(ItemKind::Skill, &entry_named(&dir, "okdir")).unwrap(),
+            Some("okdir".to_string())
+        );
+        unsafe_name(ItemKind::Skill, "ha\u{202E}ck", "ha\u{202E}ck");
+        // A tool is never linked into a lobe (TOOL-3), so it never derives a
+        // name -- and so never errors either, for any entry.
+        assert_eq!(
+            item_name(ItemKind::Tool, &entry_named(&dir, "...md")).unwrap(),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

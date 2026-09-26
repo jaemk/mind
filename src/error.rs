@@ -34,8 +34,9 @@ pub type Result<T> = std::result::Result<T, MindError>;
 pub const METADATA_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// The sentinel [`EFFECTIVE_METADATA_LIMIT`] holds while unresolved. `0` cannot
-/// collide with a real limit: an explicit "no ceiling" resolves to [`u64::MAX`]
-/// (see [`parse_metadata_size`]), never to zero.
+/// collide with a real limit: every zero-valued spelling of "no ceiling"
+/// resolves to [`u64::MAX`] (see [`parse_metadata_size`], DSC-110), never to
+/// zero.
 const METADATA_LIMIT_UNSET: u64 = 0;
 
 /// The process-wide metadata cap, resolved once at startup from the flag, the
@@ -48,9 +49,14 @@ static EFFECTIVE_METADATA_LIMIT: AtomicU64 = AtomicU64::new(METADATA_LIMIT_UNSET
 /// Install the resolved metadata cap for the rest of the process (DSC-103).
 ///
 /// Called once from `main::run` before any dispatch, so every metadata read in
-/// the run sees the same ceiling. `0` is accepted and stored as [`u64::MAX`],
-/// matching [`parse_metadata_size`]'s reading of `0` as "no ceiling", so the
-/// sentinel can never be set by a caller.
+/// the run sees the same ceiling.
+///
+/// The `0` mapping here is sentinel protection, NOT the zero-means-unlimited
+/// rule: that rule lives in [`parse_metadata_size`] alone (DSC-110), which
+/// never hands this function a zero. [`METADATA_LIMIT_UNSET`] IS zero, so a
+/// caller passing a literal `0` (only reachable by calling this function
+/// directly, not through a parsed cap) would otherwise re-arm the sentinel and
+/// silently restore the default rather than setting anything.
 pub fn set_metadata_size_limit(limit: u64) {
     let limit = if limit == METADATA_LIMIT_UNSET {
         u64::MAX
@@ -74,10 +80,20 @@ pub fn metadata_size_limit() -> u64 {
 ///
 /// Accepts a bare byte count (`16777216`), a binary-suffixed size (`16MiB`,
 /// and the bare `16M`/`16K`/`16G` spellings, which are binary), a
-/// decimal-suffixed size (`16MB` = 16_000_000), an explicit `512B`, or one of
-/// `unlimited`/`none`/`0` for no ceiling at all. Case and internal whitespace
-/// are not significant. A fraction (`1.5MiB`) is refused rather than rounded,
-/// so a value that cannot be represented exactly is never silently changed.
+/// decimal-suffixed size (`16MB` = 16_000_000), an explicit `512B`, `unlimited`
+/// or `none`, or ANY zero-valued size (`0`, `00`, `0B`, `0MiB`, ...) for no
+/// ceiling at all. Case and internal whitespace are not significant. A fraction
+/// (`1.5MiB`) is refused rather than rounded, so a value that cannot be
+/// represented exactly is never silently changed.
+///
+/// spec: DSC-110 -- zero means "unlimited" HERE, once, for every spelling of
+/// it. A cap of literally zero bytes would refuse every metadata file including
+/// the source's own `mind.toml`, so no operator can mean it; reading only the
+/// bare `0` that way and letting `0B`/`0MiB` through as a real zero split the
+/// rule between this parser and whoever installed the result, so a library
+/// caller and the CLI disagreed on what `0B` meant. Every origin (flag,
+/// environment, config key) resolves through this one function, so folding the
+/// rule in here is what makes them agree.
 ///
 /// Returns the byte count, with "no ceiling" as [`u64::MAX`]. The error is a
 /// bare message: the caller knows which of the three origins it came from and
@@ -91,7 +107,7 @@ pub fn parse_metadata_size(raw: &str) -> std::result::Result<u64, String> {
     if cleaned.is_empty() {
         return Err("the value is empty".to_string());
     }
-    if matches!(cleaned.as_str(), "unlimited" | "none" | "0") {
+    if matches!(cleaned.as_str(), "unlimited" | "none") {
         return Ok(u64::MAX);
     }
 
@@ -101,6 +117,16 @@ pub fn parse_metadata_size(raw: &str) -> std::result::Result<u64, String> {
     let (digits, suffix) = cleaned.split_at(digits_end);
     if digits.is_empty() {
         return Err(format!("'{raw}' does not start with a number"));
+    }
+    // A fractional size stops the digit scan at the `.`, leaving a suffix like
+    // `.5mib` that is not a unit at all. Naming it as an unknown unit sent the
+    // operator looking for a unit they never wrote, so say what is actually
+    // wrong.
+    if suffix.starts_with('.') {
+        return Err(format!(
+            "'{raw}' is a fractional size, which is not accepted (write a whole number of a \
+             smaller unit instead, e.g. 1536KiB rather than 1.5MiB)"
+        ));
     }
     let multiplier: u64 = match suffix {
         "" | "b" => 1,
@@ -120,6 +146,11 @@ pub fn parse_metadata_size(raw: &str) -> std::result::Result<u64, String> {
     let count: u64 = digits
         .parse()
         .map_err(|_| format!("'{digits}' is not a whole number of units"))?;
+    // spec: DSC-110 -- every zero-valued spelling, with or without a unit, is
+    // "no ceiling", exactly as the bare `0` and the words are.
+    if count == 0 {
+        return Ok(u64::MAX);
+    }
     count
         .checked_mul(multiplier)
         .ok_or_else(|| format!("'{raw}' overflows a 64-bit byte count"))
@@ -509,6 +540,23 @@ pub enum MindError {
     )]
     ReservedPrefix { prefix: String },
 
+    /// DSC-112: the same refusal, but for a source that is ALREADY melded --
+    /// registered (and possibly installed from) before the word its
+    /// `[source].prefix` names became reserved. `ReservedPrefix`'s wording is
+    /// written for a meld that has not happened yet ("cannot be used as a
+    /// namespace prefix"), so an existing user meets it on every scanning verb
+    /// with no stated way out: the value is in the SOURCE's `mind.toml`, so
+    /// nothing they can pass on the command line changes it. This variant names
+    /// the source and the one command that ends the condition.
+    #[error(
+        "melded source '{source_name}': its mind.toml declares the namespace prefix '{prefix}', \
+         which mind reserves as an item-kind word (a prefixed name would be indistinguishable \
+         from a kind-qualified ref like '{prefix}:<name>'); the prefix is the source's own \
+         declaration, so --namespace cannot override the refusal -- run `mind unmeld \
+         {source_name}` to drop the source, then re-meld it once its author renames the prefix"
+    )]
+    MeldedSourceReservedPrefix { source_name: String, prefix: String },
+
     /// NS-28/NS-72: prefix contains a path-unsafe character or structure. A
     /// melded repo's `[source].prefix` reaches this variant, so the offending
     /// value is sanitized before display (`unsafe_prefix_message`) rather than
@@ -709,10 +757,13 @@ pub enum MindError {
     /// this path is understood fine, it is just a kind the link form refuses.
     /// The message names the kind and the remedy instead of claiming the path
     /// is unrecognized.
+    // The remedy is ONE ordered sequence, not a choice: the user is here
+    // because the repo is not melded, so `mind learn workflow:<name>` has no
+    // source to resolve the workflow from until the meld has happened.
     #[error(
         "source '{source_name}': linked path '{path}' names a workflow, and mind does not \
          support installing a workflow by item link (the blob/tree link form takes `.md` \
-         files only); meld the repo instead, or run `mind learn workflow:<name>`"
+         files only); meld the repo, then run `mind learn workflow:<name>`"
     )]
     LinkKindNotSupported { source_name: String, path: String },
 
@@ -1598,6 +1649,7 @@ impl MindError {
             MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",
+            MindError::MeldedSourceReservedPrefix { .. } => "melded-source-reserved-prefix",
             MindError::UnsafePrefix { .. } => "unsafe-prefix",
             MindError::NamespaceLocked { .. } => "namespace-locked",
             MindError::SourceExists { .. } => "source-exists",
@@ -3487,7 +3539,9 @@ mod tests {
     // limit: every test in this binary shares that one atomic, so a test that
     // set it would change the cap under whatever else is running concurrently.
     // The wiring from flag/env/config into the atomic is covered end-to-end
-    // through the real binary in tests/cli_metadata_cap.rs.
+    // through the real binary in tests/cli_install_items.rs (the metadata-cap
+    // cluster: the flag, `MIND_MAX_METADATA_SIZE`, the config key, their
+    // precedence, and the zero/unlimited spellings).
 
     #[test]
     fn a_raised_cap_admits_a_file_the_default_refuses() {
@@ -3572,6 +3626,13 @@ mod tests {
             ("unlimited", u64::MAX),
             ("none", u64::MAX),
             ("0", u64::MAX),
+            // spec: DSC-110 -- and every other spelling of zero, unit or not
+            ("00", u64::MAX),
+            ("0B", u64::MAX),
+            ("0KiB", u64::MAX),
+            ("0MiB", u64::MAX),
+            ("0GB", u64::MAX),
+            ("0 mib", u64::MAX),
         ] {
             assert_eq!(
                 parse_metadata_size(raw),
@@ -3595,6 +3656,45 @@ mod tests {
         let err = parse_metadata_size("18446744073709551615GiB")
             .expect_err("an overflowing size must be refused, not wrapped");
         assert!(err.contains("overflow"), "message must say why: {err}");
+    }
+
+    #[test]
+    fn parse_metadata_size_names_a_fraction_as_a_fraction() {
+        // spec: DSC-105 -- the digit scan stops at the `.`, which used to leave
+        // the refusal blaming `.5mib` as an unknown *unit*: a token the
+        // operator never wrote, sending them to the unit table instead of to
+        // the decimal point. Say what is actually wrong and what to write.
+        let err = parse_metadata_size("1.5MiB").expect_err("a fraction must be refused");
+        assert!(
+            err.contains("fractional"),
+            "the message must name the fraction as the problem: {err}"
+        );
+        assert!(
+            !err.contains("is not a known size unit"),
+            "the message must not blame an invented unit token: {err}"
+        );
+        assert!(
+            err.contains("1536KiB"),
+            "the message must show the whole-unit equivalent to write: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_metadata_size_reads_every_zero_spelling_as_unlimited() {
+        // spec: DSC-110 -- the rule is the parser's, not a caller's: a library
+        // caller and the CLI both get "no ceiling" for `0B`, where previously
+        // only the CLI did (its setter rescued the literal 0) and a direct
+        // caller got a cap of zero bytes, which refuses every metadata file.
+        for raw in ["0", "00", "0b", "0B", "0KiB", "0MiB", "0GB", " 0 mib "] {
+            assert_eq!(
+                parse_metadata_size(raw),
+                Ok(u64::MAX),
+                "'{raw}' must read as unlimited"
+            );
+        }
+        // A non-zero count is unaffected: the fold-in is about zero alone.
+        assert_eq!(parse_metadata_size("1B"), Ok(1));
+        assert_eq!(parse_metadata_size("10MiB"), Ok(10 * 1024 * 1024));
     }
 
     #[test]

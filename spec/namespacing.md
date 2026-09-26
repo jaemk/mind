@@ -60,7 +60,10 @@ The rest of this document states these rules normatively.
 - `NS-25` A prefix may not be a reserved kind word (`skill`, `agent`, `rule`,
   `tool`). `meld --as <prefix>` and a `mind.toml` `[source].prefix` declaring
   such a value are rejected, since the resulting `skill:foo` effective name would
-  be indistinguishable from a kind-qualified ref (NS-26).
+  be indistinguishable from a kind-qualified ref (NS-26). The check runs at every
+  `mind.toml` load, not only at `meld`: a reserved-word prefix found in an
+  already-registered source's `mind.toml` aborts the scan on that violation
+  rather than being accepted because the source predates the check.
 - `NS-26` An item ref's pre-colon token is read as a kind only when it is a
   reserved kind word; otherwise the whole ref is an effective name. So
   `jk:review` resolves by effective name while `skill:review` stays
@@ -210,9 +213,9 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 
 - `NS-10` An intra-source reference is written `{{ns:name}}`, where `name` is a
   sibling's bare name.
-- `NS-11` At install, each `{{ns:name}}` token in an item file NS-53 admits: a
-  markdown file, or a workflow's own `.js` (workflows.md WF-25) is
-  expanded to the effective name: `name` when unprefixed, `p:name` when prefixed.
+- `NS-11` At install, each `{{ns:name}}` token in a file NS-53 admits -- a
+  markdown file, or a workflow's own `.js` (workflows.md WF-25) -- is expanded
+  to the effective name: `name` when unprefixed, `p:name` when prefixed.
 - `NS-12` A token whose `name` is not a sibling in the same source is an error
   (`BadReference`), naming the referencing item and the bad referent. Applies within
   any file NS-53 admits (a markdown file, or a workflow's `.js`): a token with no
@@ -228,31 +231,32 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 - `NS-15` Token edge cases: whitespace inside a token (`{{ns: name }}`) is
   trimmed before the sibling lookup; an unterminated token (`{{ns:` with no
   closing `}}`) is left verbatim rather than treated as a reference or an error.
-- `NS-53` All four token families -- `{{ns:}}` (this doc), `{{path:}}`,
-  `{{tools:}}`, and `{{self}}` (tooling.md, TOOL-19) -- expand only in a markdown
-  file: one whose extension, case-insensitively, is `md`, `markdown`, `mdown`, or
-  `mkd`. `install` skips any other file before expansion, leaving its content --
-  including any token in it, resolvable or not -- exactly as written (NS-12,
-  NS-13). This is a deliberate narrowing, not an oversight: the designed use of
-  a path token is prose (a skill telling Claude to run `{{tools:detect}}`), and
+- `NS-53` A token expands in a file when the file has a markdown extension, or
+  the item is of the `workflow` kind, or the file is on the item's NS-57
+  `expand:` list. All four token families -- `{{ns:}}` (this doc), `{{path:}}`,
+  `{{tools:}}`, and `{{self}}` (tooling.md, TOOL-19) -- share this gate. The
+  markdown branch matches by extension, case-insensitively: `md`, `markdown`,
+  `mdown`, or `mkd`. `install` skips a file the gate does not admit before
+  expansion, leaving its content -- including any token in it, resolvable or
+  not -- exactly as written (NS-12, NS-13).
+
+  The markdown narrowing is deliberate, not an oversight: the designed use of a
+  path token is prose (a skill telling Claude to run `{{tools:detect}}`), and
   templating a file written in a language with its own `{{ }}` convention
   (Jinja, Handlebars, Go templates) is a liability with no offsetting benefit.
-  The rule is judged by extension and never by content: an agent or a rule item
-  is always a single markdown file by discovery convention and so is unaffected
-  in practice, but a `mind.toml`-declared item is free to point at any path, and
-  this still governs it. Widening later (an opt-in `mind.toml` glob naming
-  additional files to scan) stays backward-compatible; narrowing later would
-  not, which is why it is done now, pre-1.0. The widening is NS-57.
+  An agent or a rule item is always a single markdown file by discovery
+  convention and so is unaffected in practice, but a `mind.toml`-declared item
+  is free to point at any path, and the markdown branch still governs it.
+  Widening later (an opt-in `mind.toml` glob naming additional files to scan)
+  stays backward-compatible; narrowing later would not, which is why it was
+  done pre-1.0. The widening is NS-57.
 
-  Item kind is the one other thing the gate reads, and it grants rather than
-  denies: a `workflow` item's file expands whatever its extension
-  (workflows.md, WF-25). The rationale above is what admits it -- a workflow is
-  JavaScript, a language with no `{{ }}` convention of its own to fight, and its
-  strings are agent prompts, which is the prose case the token families were
-  designed for. So the gate is: a markdown extension, or the `workflow` kind, or
-  a file on an item's NS-57 `expand:` list. It remains one chokepoint; a caller
-  asking "does a token expand here" answers it in one place, now with the item's
-  kind in hand as well as its path.
+  The `workflow` kind is admitted for a different reason than the markdown
+  branch's liability concern: a workflow's file is JavaScript, a language with
+  no `{{ }}` convention of its own to fight, and its strings are agent prompts,
+  the prose case the token families were designed for. So the gate is item-kind-
+  aware as well as extension-aware, and it takes the item, not just the path, so
+  a caller asking "does a token expand here" answers it in one place.
 - `NS-57` An item may opt specific non-markdown files into expansion with an
   `expand:` frontmatter key: a whitespace-separated list of item-relative file
   paths (the same scalar form `requires:` uses, DEP-4). At install, each listed

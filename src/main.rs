@@ -38,7 +38,7 @@ use clap::{CommandFactory, Parser};
 
 use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
 use config::MAX_METADATA_SIZE_ENV;
-use error::Result;
+use error::{MindError, Result};
 use paths::Paths;
 
 /// CLI-217's enforcement mechanism: under `--json`, stdout is RESERVED for the
@@ -442,14 +442,43 @@ fn run(cli: Cli) -> Result<()> {
     // The config file is consulted only when neither the flag nor the
     // environment supplied a value, and a config that will not parse falls back
     // to the default rather than failing here: verbs that never read config
-    // (`completions`, `man`, `recall`) must not start failing on a malformed
-    // one, and the verbs that do read it report the parse error themselves,
-    // with the context this early in the run does not have.
+    // (`completions`, `man`) must not start failing on a malformed one, and the
+    // verbs that do read it report the parse error themselves, with the context
+    // this early in the run does not have. (`recall` is NOT in that list: it
+    // reads config through `unmanaged::scan` -> `Paths::agent_homes` ->
+    // `Config::load`.)
+    //
     // An empty `MIND_MAX_METADATA_SIZE=` reads as unset, the shell convention,
-    // rather than as an unparseable value.
-    let env = std::env::var(MAX_METADATA_SIZE_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty());
+    // rather than as an unparseable value. A value that is PRESENT but not
+    // valid UTF-8 is neither unset nor a size, so it is reported rather than
+    // collapsed into "absent" by `env::var`'s single `Err` for both -- silently
+    // applying the default cap under a value the operator did set is exactly
+    // the failure DSC-105 refuses (spec: DSC-111).
+    //
+    // The report waits for precedence, though (spec: DSC-104): an undecodable
+    // value is refused only when the environment is the origin that would have
+    // been USED. A junk-but-decodable value is never even parsed when the flag
+    // is present (`config::resolve_metadata_limit` picks one origin and parses
+    // only that), so refusing the undecodable one earlier would make the
+    // flag-outranks-the-environment rule depend on which bytes happen to be in
+    // a variable the flag was supposed to override.
+    let env_raw = std::env::var_os(MAX_METADATA_SIZE_ENV);
+    let env = match &env_raw {
+        None => None,
+        Some(raw) => match raw.to_str() {
+            Some(text) => Some(text.to_string()).filter(|v| !v.trim().is_empty()),
+            // Undecodable and the environment IS the origin (no flag): refuse,
+            // naming it. With a flag present it is overridden and dropped, the
+            // same fate a junk-but-decodable value meets.
+            None if cli.max_metadata_size.is_none() => {
+                return Err(MindError::BadMetadataSize {
+                    origin: MAX_METADATA_SIZE_ENV.to_string(),
+                    msg: "the value is not valid UTF-8".to_string(),
+                });
+            }
+            None => None,
+        },
+    };
     let configured = if cli.max_metadata_size.is_none() && env.is_none() {
         config::Config::load(&paths)
             .ok()

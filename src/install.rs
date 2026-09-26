@@ -550,14 +550,14 @@ pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
 }
 
 /// Rewrite reference tokens in every file under the staged copy that expands
-/// them (`namespace::expands_tokens`, NS-53: a markdown file, or a workflow's
-/// own `.js` per WF-25; a token anywhere else is left literal): the
-/// `{{ns:name}}` name tokens, then the `{{self}}` /
-/// `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve against
-/// `siblings` (every item in the same source) and a bad reference in either
-/// pass aborts the staged install.
-/// A non-markdown file the item lists in `expand:` is expanded too (NS-57), with
-/// path tokens rendered absolute rather than the TOOL-16 `~` form (TOOL-20).
+/// them (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25: a markdown file,
+/// a workflow's own `.js`, or a file the item lists in `expand:`; a token
+/// anywhere else is left literal): the `{{ns:name}}` name tokens, then the
+/// `{{self}}` / `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve
+/// against `siblings` (every item in the same source) and a bad reference in
+/// either pass aborts the staged install.
+/// An `expand:`-listed file renders path tokens absolute rather than in the
+/// TOOL-16 `~` form (TOOL-20); the other two keep `~`.
 /// Also validates the `requires` frontmatter entries (DEP-6): each must resolve
 /// to exactly one sibling (not source-qualified, not ambiguous, not missing);
 /// and each `expand:` entry must be a safe relative path naming a shipped file.
@@ -669,8 +669,6 @@ fn expand_references(
         let entry = crate::sanitize::strip_ansi(entry);
         bad_ref(format!("expand: {entry}"), reason)
     };
-    let mut expand_set: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
     for entry in &item.expand {
         // spec: NS-57
         use crate::error::BadRefReason::InvalidRef;
@@ -691,7 +689,6 @@ fn expand_references(
         if !(root.is_dir() && root.join(rel).is_file()) {
             return Err(bad_expand(entry, NoMatch));
         }
-        expand_set.insert(rel.to_path_buf());
     }
 
     let mut files = Vec::new();
@@ -701,17 +698,23 @@ fn expand_references(
         files.push(root.to_path_buf());
     }
     for file in files {
-        // NS-53: all four token families expand only in a markdown file. A
-        // token in any other file (a script, data) is left exactly as written
-        // -- including one that would not resolve, which retires the
-        // BadReference this loop used to raise for it (NS-11/NS-12 are scoped
-        // to markdown accordingly).
+        // NS-53: all four token families expand only in a file the gate admits
+        // -- a markdown one, a workflow's own `.js` (WF-25), or one the item
+        // lists in `expand:` (NS-57). A token in any other file (a script,
+        // data) is left exactly as written -- including one that would not
+        // resolve, which retires the BadReference this loop used to raise for
+        // it (NS-11/NS-12 are scoped accordingly).
+        //
+        // `namespace::item_expands_tokens` is that gate, and it is the same
+        // one `review` and the dependency scan ask, so what install expands
+        // and what they predict install expands cannot drift apart.
         //
         // A directory item (skill/tool) stages every file under its original
         // name, so `file` itself carries the right extension to check. A
-        // single-file item (agent/rule/workflow) stages as a bare name with no
-        // extension at all (matching its store form), so its markdown-ness is
-        // read from the source path instead.
+        // single-file item (agent/rule/command/workflow) stages as a bare name
+        // with no extension at all (matching its store form), so its
+        // markdown-ness is read from the source path instead -- which the gate
+        // does, given the staging `root`.
         //
         // spec: WF-25 -- and a workflow's own `.js` expands whatever its
         // extension, which is what makes the `{{ns:}}` in its `meta.name`
@@ -721,13 +724,11 @@ fn expand_references(
         // NS-57: a file listed in `expand:` is expanded like markdown even
         // though its extension is not, so a bundled script can reference a
         // sibling tool. Its relative path (under the staged dir) is what the
-        // validated `expand_set` holds.
-        let is_listed = root.is_dir()
-            && file
-                .strip_prefix(root)
-                .map(|rel| expand_set.contains(rel))
-                .unwrap_or(false);
-        if !expands && !is_listed {
+        // item's validated `expand:` list holds. Asked separately from
+        // `expands` because the TOOL-20 path rendering below turns on the
+        // difference between the two, not on the combined answer.
+        let is_listed = namespace::item_lists_file(item, root, &file);
+        if !namespace::item_expands_tokens(item, root, &file) {
             continue;
         }
         // Skip anything that is not valid UTF-8 text.
@@ -738,7 +739,11 @@ fn expand_references(
             continue;
         }
         // TOOL-20: a listed non-markdown file renders path tokens absolute; a
-        // markdown file keeps the TOOL-16 `~` form.
+        // markdown file keeps the TOOL-16 `~` form, and so does a workflow's
+        // own `.js` (WF-26) -- it reaches here on its kind rather than on the
+        // `expand:` list, so `expands` is true for it and the `~` branch is
+        // the one it takes. A workflow never executes a path; its strings are
+        // prompts, which is the reader the `~` form is for.
         let path_ctx = if is_listed && !expands {
             &ctx_abs
         } else {

@@ -7,9 +7,9 @@
 
 Skills, agents, and rules get copy-pasted between repos and machines, drift
 silently against their source, and have no install/upgrade/uninstall story.
-`mind` is a package manager for agent tooling, modeled on Homebrew: it melds a
-git repo of skills, agents, rules, commands, workflows, and tools and links its items
-into your agent homes (lobes; default `~/.claude`).
+`mind` is a package manager for agent tooling, modeled on Homebrew: it melds
+a git repo of skills, agents, rules, commands, workflows, and tools and links
+its items into your agent homes (lobes; default `~/.claude`).
 
 ```
 mind meld jaemk/mind

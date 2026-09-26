@@ -4373,9 +4373,10 @@ fn learn_into_a_lobe_whose_directory_is_a_dangling_symlink_names_the_broken_link
 // for a workflow -- the harness reads project workflows from
 // `<project>/.claude/workflows/`, exactly where such a lobe already links one
 // by WF-10. The failure mode this closes is a project lobe that DOES carry a
-// kinds filter: `--subdir` and every harness preset (windsurf included,
-// cli.rs:969/987) admit skills only, and `a_skills_only_lobe_admits_no_workflows`
-// (tests/cli_workflows.rs) proves that filter is live. `link-project`'s own
+// kinds filter: `--subdir` and every harness preset (windsurf included, per
+// the preset table in paths.rs) admit skills only, and
+// `a_skills_only_lobe_admits_no_workflows` (tests/cli_workflows.rs) proves
+// that filter is live. `link-project`'s own
 // default (the windsurf preset) and its `--subdir` form are both skill-only,
 // so neither exercises the no-filter path; the bare `config lobes add <path>`
 // form is the one with no kinds restriction (`Lobe::all_kinds`, paths.rs),

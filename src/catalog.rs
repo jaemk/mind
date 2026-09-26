@@ -264,9 +264,15 @@ impl CatalogItem {
     /// `whenToUse` -- every item of every other kind -- reads exactly as
     /// `description` does.
     ///
-    /// The probe TUI's installed-item rows are the one surface NOT reached: they
-    /// read the manifest (`src/tui/data.rs`), which never records `whenToUse`,
-    /// so an installed workflow shows there with its bare description.
+    /// What is NOT reached is every MANIFEST-derived surface, not one of them:
+    /// `recall`, `recall --json`, and the probe TUI's installed-item rows all
+    /// read the manifest (`src/manifest.rs`, `src/tui/data.rs`), which never
+    /// records `whenToUse`, so an installed workflow shows its bare description
+    /// there. The split is by data source, not by surface: `probe --json` is
+    /// catalog-derived and so DOES show the joined `<description> - <whenToUse>`
+    /// string, while `recall --json` shows the description alone. Recording
+    /// `whenToUse` in the manifest (or emitting it as its own JSON key rather
+    /// than joined into `description`) is deliberately deferred.
     ///
     /// spec: WF-51
     pub fn display_description(&self) -> Option<String> {
@@ -381,7 +387,11 @@ pub(crate) fn scan_source_at(
             path: clone_root.display().to_string(),
         });
     }
-    let mindfile = MindToml::load(clone_root)?;
+    // spec: DSC-112 -- a source melded before a prefix word became reserved
+    // still fails `MindToml::load`'s NS-25 check on every scan, and the bare
+    // `ReservedPrefix` message is written for a meld that has not happened yet.
+    // Re-point it at the one thing an already-melded user can do.
+    let mindfile = MindToml::load(clone_root).map_err(|e| melded_prefix_error(source, e))?;
 
     // Reject a source that requires a newer `mind` than the one running, rather
     // than scanning it against a format this version may predate (DSC-40).
@@ -400,14 +410,32 @@ pub(crate) fn scan_source_at(
     // Effective prefix: consumer alias wins over the repo's own declaration. An
     // empty alias (`--as ''`, or the meld prompt's "no prefix" choice) is the
     // explicit "no prefix" override and suppresses a declared `[source].prefix`.
-    // No NS-25 guard is needed here: both inputs are validated upstream where they
-    // are set (the `--as` alias in commands.rs, the `[source].prefix` at mindfile
-    // load), so a reserved-kind-word prefix can never reach this resolution.
+    // Both inputs are validated where they are SET (the `--as`/`--namespace`
+    // alias in commands.rs, the `[source].prefix` at mindfile load) -- but a
+    // registry entry is never re-validated, and the reserved list grows: an
+    // alias recorded before `workflow` (or any future kind word) joined it is
+    // still in `sources.json` and still in effect here.
     let prefix = source
         .alias
         .clone()
         .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()))
         .filter(|p| !p.is_empty());
+    // spec: DSC-112 -- advisory, not a gate: the items are installed under this
+    // prefix already, and failing every scanning verb would take the user's
+    // whole lobe down over a naming problem. Warn and carry on, the way the
+    // unguarded-reference and vanished-source paths do.
+    if let Some(p) = &prefix
+        && namespace::validate_prefix(p).is_err()
+    {
+        crate::render::scan_warn(format!(
+            "warning: source '{}': its namespace prefix '{}' is a word mind now reserves, so \
+             '{}:<name>' reads as a kind-qualified ref rather than a namespaced item; re-meld \
+             with `--namespace <other>` to rename it",
+            crate::sanitize::strip_ansi(&source.name),
+            crate::sanitize::strip_ansi(p),
+            crate::sanitize::strip_ansi(p),
+        ));
+    }
 
     // spec: IGN-1 -- the source-level list every item falls back to when it
     // declared none of its own. Captured before the branches below so both the
@@ -439,6 +467,27 @@ pub(crate) fn scan_source_at(
     // whatever discovery layer found it (convention, an authoritative
     // mind.toml, a plugin manifest, or an added root).
     resolve_ignores(&mut out[scan_start..], &source_ignore)
+}
+
+/// Re-word a `MindToml::load` failure that refused the source's declared
+/// `[source].prefix` as a reserved word, for a source that is already melded.
+///
+/// Every other load failure passes through untouched. `ReservedPrefix` alone is
+/// re-pointed: it is the one refusal that can appear for a source the user
+/// already melded successfully (the reserved list is append-only, so a word can
+/// become reserved under a registered source), and its own message tells the
+/// user only that the prefix "cannot be used" -- advice for a meld they already
+/// did, with no mention of the source or of `unmeld`.
+///
+/// spec: DSC-112
+fn melded_prefix_error(source: &Source, e: MindError) -> MindError {
+    match e {
+        MindError::ReservedPrefix { prefix } => MindError::MeldedSourceReservedPrefix {
+            source_name: crate::sanitize::strip_ansi(&source.name),
+            prefix: crate::sanitize::strip_ansi(&prefix),
+        },
+        other => other,
+    }
 }
 
 /// Fill in each item's effective ignore list and validate it (IGN-1/4/5/12).
@@ -1136,6 +1185,26 @@ fn from_decl(
         });
     }
     let path = root.join(&decl.path);
+    // spec: DSC-109 -- a workflow IS one `.js` file (WF-1), and its own file is
+    // the metadata file the scan reads (`meta_file`). A declared entry whose
+    // path names a directory therefore has no `meta` to read, installs a whole
+    // tree at a link target the harness tries to load as a script, and reports
+    // a directory's size in `review`. The author wrote this path, so it is a
+    // hard refusal here rather than a warn-and-skip. Classified no-follow
+    // (DSC-108): a symlink is not a directory to this check, and the install
+    // copy walk rejects it outright (LIFE-42).
+    if kind == ItemKind::Workflow
+        && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir())
+    {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "workflow item '{safe_name}' has a path '{}' that is a directory; a workflow is a \
+                 single .js file, so the path must name that file",
+                crate::sanitize::strip_ansi(&decl.path)
+            ),
+        });
+    }
     let meta = meta_file(kind, &path);
     // HOOK-86: resolve the item's full lifecycle hook list (scalar shorthand
     // folded ahead of the `[[items.hooks]]` array, validated).
@@ -1185,7 +1254,7 @@ fn from_decl(
 /// human-facing surface while installing as a distinct item, defeating both
 /// the visual comparison a user makes before approving an install and the
 /// collision check that would otherwise warn them.
-fn is_safe_item_name(name: &str) -> bool {
+pub(crate) fn is_safe_item_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;
     }
@@ -1649,8 +1718,13 @@ fn scan_convention(
     };
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
-        if entry.is_dir()
-            && skill_md.is_file()
+        // spec: DSC-108 -- no-follow for BOTH halves of the skill shape. A
+        // symlinked anchor is the worse of the two: `SKILL.md` is the file whose
+        // frontmatter becomes the item's description, so following it would
+        // republish a linked-to file's `description:` into the catalog on top of
+        // answering whether the path exists.
+        if is_dir_nofollow(&entry)
+            && is_regular_file_nofollow(&skill_md)
             && let Some(item) = make_item(root, source, prefix, ItemKind::Skill, entry, &skill_md)?
         {
             out.push(item);
@@ -1672,7 +1746,9 @@ fn scan_convention(
         let ext = kind_extension(kind);
         let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
-            if entry.is_file()
+            // spec: DSC-108 -- no-follow classification, so a symlink here is
+            // not an item whatever it points at.
+            if is_regular_file_nofollow(&entry)
                 && entry.extension().is_some_and(|e| e == ext)
                 && let Some(item) = make_item(root, source, prefix, kind, entry.clone(), &entry)?
             {
@@ -1686,7 +1762,10 @@ fn scan_convention(
     // optional `TOOL.md` carries `description`/`bin`/`build` (read in make_item).
     let tools_dir = root.join(ItemKind::Tool.dir());
     for entry in read_dir_opt(&tools_dir)? {
-        if entry.is_dir() {
+        // spec: DSC-108 -- a tool needs no anchor file, so the directory
+        // classification is the entire test of whether the item exists; a
+        // symlink there is the oracle in its purest form.
+        if is_dir_nofollow(&entry) {
             let meta = entry.join("TOOL.md");
             if let Some(item) = make_item(root, source, prefix, ItemKind::Tool, entry, &meta)? {
                 out.push(item);
@@ -1778,8 +1857,10 @@ fn scan_plugin_components(
     let skills_dir = plugin_root.join(ItemKind::Skill.dir());
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
-        if entry.is_dir()
-            && skill_md.is_file()
+        // spec: DSC-108 -- classified exactly as the convention scan's skills
+        // are: the rule is the scan's, not one layout's.
+        if is_dir_nofollow(&entry)
+            && is_regular_file_nofollow(&skill_md)
             && let Some(item) = make_item(
                 plugin_root,
                 source,
@@ -1796,7 +1877,10 @@ fn scan_plugin_components(
     // NS-40: agent_harness_name reads frontmatter `name:` just as convention does.
     let agents_dir = plugin_root.join(ItemKind::Agent.dir());
     for entry in read_dir_opt(&agents_dir)? {
-        if entry.is_file()
+        // spec: DSC-108 -- an `agents/<name>.md` is classified the same way here
+        // as in the convention scan; a plugin layout is not a second answer to
+        // whether a symlink is an item.
+        if is_regular_file_nofollow(&entry)
             && entry.extension().is_some_and(|e| e == "md")
             && let Some(item) = make_item(
                 plugin_root,
@@ -1836,7 +1920,9 @@ fn scan_plugin_flat_items(
         let ext = kind_extension(kind);
         let kind_dir = plugin_root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
-            if entry.is_file()
+            // spec: DSC-108 -- a plugin's flat components are classified the
+            // same no-follow way as the convention scan's.
+            if is_regular_file_nofollow(&entry)
                 && entry.extension().is_some_and(|e| e == ext)
                 && let Some(item) =
                     make_item(plugin_root, source, prefix, kind, entry.clone(), &entry)?
@@ -1957,8 +2043,9 @@ fn scan_marketplace_in_repo_plugins(
             for skill_path in &entry.skills {
                 let skill_dir = plugin_root.join(skill_path);
                 let skill_md = skill_dir.join("SKILL.md");
-                if skill_dir.is_dir()
-                    && skill_md.is_file()
+                // spec: DSC-108 -- no-follow, as in every other scan route.
+                if is_dir_nofollow(&skill_dir)
+                    && is_regular_file_nofollow(&skill_md)
                     && let Some(item) = make_item(
                         &plugin_root,
                         source,
@@ -1976,8 +2063,9 @@ fn scan_marketplace_in_repo_plugins(
             let skills_dir = plugin_root.join(ItemKind::Skill.dir());
             for entry_path in read_dir_opt(&skills_dir)? {
                 let skill_md = entry_path.join("SKILL.md");
-                if entry_path.is_dir()
-                    && skill_md.is_file()
+                // spec: DSC-108
+                if is_dir_nofollow(&entry_path)
+                    && is_regular_file_nofollow(&skill_md)
                     && let Some(item) = make_item(
                         &plugin_root,
                         source,
@@ -1998,7 +2086,8 @@ fn scan_marketplace_in_repo_plugins(
         //    list, which only ever names skill directories.
         let agents_dir = plugin_root.join(ItemKind::Agent.dir());
         for agent_path in read_dir_opt(&agents_dir)? {
-            if agent_path.is_file()
+            // spec: DSC-108
+            if is_regular_file_nofollow(&agent_path)
                 && agent_path.extension().is_some_and(|e| e == "md")
                 && let Some(item) = make_item(
                     &plugin_root,
@@ -2076,7 +2165,11 @@ fn unmapped_flat_entries(dir: &Path, ext: &str) -> u32 {
         if file_name(&path).starts_with('.') {
             continue;
         }
-        let mapped = path.is_file() && path.extension().is_some_and(|e| e == ext);
+        // spec: DSC-108 MKT-4 -- "mapped" must mean exactly what the scan maps,
+        // classified the same no-follow way. A symlinked `workflows/x.js` is not
+        // an item (DSC-108), so counting it as mapped here would make it the one
+        // thing MKT-4 exists to prevent: a component dropped in silence.
+        let mapped = is_regular_file_nofollow(&path) && path.extension().is_some_and(|e| e == ext);
         if !mapped {
             n += 1;
         }
@@ -2186,6 +2279,21 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                         ),
                     });
                 }
+                // spec: DSC-108 -- a glob matches by NAME, so without this the
+                // authoritative layer is a second route to the very oracle the
+                // convention scan's no-follow classification closes. Dropped
+                // silently (as the convention scan drops such an entry) rather
+                // than refused: a pattern matching a stray link is not an
+                // authoring error the way an escaping or unsafely-named match
+                // is. Placed AFTER the DSC-81 escape check on purpose, so a link
+                // resolving outside the root stays the hard error it was.
+                // For a skill glob the match is the anchor and the ITEM is its
+                // parent directory, so both have to be the repo's own entries.
+                let linked = is_symlink(&p)
+                    || (kind == ItemKind::Skill && p.parent().is_some_and(is_symlink));
+                if linked {
+                    continue;
+                }
                 out.push(p);
             }
             Err(e) => {
@@ -2196,6 +2304,47 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
     }
     out.sort();
     Ok(out)
+}
+
+/// True when `path` is a REGULAR file, classified WITHOUT following a symlink.
+///
+/// The scan runs over a tree the source controls entirely, so `Path::is_file`
+/// (which follows) would answer about whatever a symlink points
+/// at: a repo full of `workflows/<probe>.js` symlinks aimed at absolute paths on
+/// the machine running the scan turns the item listing into a file-existence
+/// oracle, and `review`'s size report would print a linked-to file's byte count.
+/// Classifying by symlink metadata keeps every answer about the repo's own
+/// entries. It also matches the install copy walk, which rejects a symlink
+/// inside an item tree outright (LIFE-42, `install::copy_recursive_at`), so a
+/// symlink that is not discovered here was never installable anyway.
+///
+/// spec: DSC-108
+fn is_regular_file_nofollow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// True when `path` is a directory, classified WITHOUT following a symlink.
+///
+/// The companion to [`is_regular_file_nofollow`] for the directory-shaped kinds.
+/// A skill is a directory plus a `SKILL.md` anchor and a tool is a bare
+/// directory, so without this the oracle the flat kinds close stays open one
+/// kind over -- and for a skill it is worse than an existence bit, since the
+/// anchor's frontmatter `description:` is read into the catalog and shown by
+/// `recall`/`probe`. An item found through a link could not be installed anyway
+/// (LIFE-42 refuses a symlinked item root in `install::copy_recursive_at`), so
+/// discovering one only ever produces an offer `mind` cannot honor.
+///
+/// spec: DSC-108
+fn is_dir_nofollow(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// True when `path` is itself a symlink (its LAST component; an intermediate
+/// link is resolved, as everywhere else in the scan).
+///
+/// spec: DSC-108
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Read a directory's entries, treating "not found" as empty.
@@ -5029,6 +5178,157 @@ mod plugin_tests {
         assert!(
             summary.contains("2 unmapped workflows/ entries"),
             "the summary must name what was left behind: {summary}"
+        );
+    }
+
+    // A symlinked `workflows/<name>.js` is NOT mapped (DSC-108), so it has to be
+    // counted as an unmapped entry. Otherwise the one message whose job is to
+    // say what was dropped calls it installed, and the entry vanishes in
+    // silence -- the failure mode MKT-4 exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_skipped_components_counts_a_symlinked_workflow_as_unmapped() {
+        // spec: MKT-4 DSC-108
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let plugin_root = base.join("my-plugin");
+
+        // A real `.js` OUTSIDE the plugin, linked to from inside it: following
+        // the link would call this mapped while the scan drops it.
+        write_file(
+            &base.join("outside/private.js"),
+            "export const meta = { name: 'private', description: 'd' }\n",
+        );
+        std::fs::create_dir_all(plugin_root.join("workflows")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside/private.js"),
+            plugin_root.join("workflows/leak.js"),
+        )
+        .unwrap();
+
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert_eq!(
+            skipped.workflows, 1,
+            "a symlinked workflow entry is not installed, so it must be reported \
+             as an unmapped entry rather than counted as mapped: {skipped:?}"
+        );
+
+        // And the two halves agree: the scan does not offer it either.
+        let source = make_plugin_source(&plugin_root);
+        let mut items = Vec::new();
+        scan_plugin_components(&plugin_root, &source, &None, &mut items).unwrap();
+        assert!(
+            items.is_empty(),
+            "the symlinked entry must not be discovered: {items:?}"
+        );
+    }
+
+    // The plugin layout is not a second answer to "is a symlink an item": a
+    // plugin's `skills/<name>/SKILL.md` and `agents/<name>.md` are classified
+    // exactly as the convention scan's are.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_component_scan_classifies_symlinks_no_follow() {
+        // spec: DSC-108 MKT-3
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let plugin_root = base.join("my-plugin");
+
+        // Real components outside the plugin, reachable only by link.
+        write_file(
+            &base.join("outside/realskill/SKILL.md"),
+            "---\ndescription: outside skill\n---\n",
+        );
+        write_file(
+            &base.join("outside/agent.md"),
+            "---\ndescription: outside agent\n---\n",
+        );
+        write_file(
+            &base.join("outside/anchor.md"),
+            "---\ndescription: outside anchor\n---\n",
+        );
+        // A linked skill DIRECTORY, a real skill dir with a linked ANCHOR, and a
+        // linked agent file.
+        std::fs::create_dir_all(plugin_root.join("skills/anchored")).unwrap();
+        std::fs::create_dir_all(plugin_root.join("agents")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside/realskill"),
+            plugin_root.join("skills/linked-dir"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside/anchor.md"),
+            plugin_root.join("skills/anchored/SKILL.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            base.join("outside/agent.md"),
+            plugin_root.join("agents/linked.md"),
+        )
+        .unwrap();
+        // One genuine component, so an empty result cannot pass by accident.
+        write_file(
+            &plugin_root.join("skills/real/SKILL.md"),
+            "---\ndescription: the plugin's own skill\n---\n",
+        );
+
+        let source = make_plugin_source(&plugin_root);
+        let mut items = Vec::new();
+        scan_plugin_components(&plugin_root, &source, &None, &mut items).unwrap();
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["real"],
+            "only the plugin's own non-symlinked component may be discovered: {items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.description.as_deref().unwrap_or("").contains("outside")),
+            "no linked-to file's description may reach the catalog: {items:?}"
+        );
+    }
+
+    // The marketplace in-repo route reaches the same shapes through a third
+    // scan function, including the `skills` array that names leaf dirs
+    // directly rather than reading a directory.
+    #[cfg(unix)]
+    #[test]
+    fn marketplace_in_repo_scan_classifies_symlinks_no_follow() {
+        // spec: DSC-108 MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+        write_file(
+            &base.join("outside/realskill/SKILL.md"),
+            "---\ndescription: outside skill\n---\n",
+        );
+        std::fs::create_dir_all(clone.join("plug/skills")).unwrap();
+        // A linked leaf skill dir named by the entry's `skills` array...
+        std::os::unix::fs::symlink(
+            base.join("outside/realskill"),
+            clone.join("plug/skills/listed"),
+        )
+        .unwrap();
+        // ...and the same shape found by the conventional branch of the scan.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Market",
+                "plugins": [
+                    {"name": "listedplug", "source": "./plug", "skills": ["./skills/listed"]},
+                    {"name": "scannedplug", "source": "./plug"}
+                ]
+            }"#,
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).expect("the scan must not fail");
+        assert!(
+            items.is_empty(),
+            "neither marketplace branch may discover a symlinked skill dir: {items:?}"
         );
     }
 

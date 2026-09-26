@@ -646,25 +646,31 @@ fn run_checks(
         if item.kind != crate::error::ItemKind::Workflow {
             continue;
         }
-        // spec: CLI-224 -- the key is source-derived; sanitize before composing.
-        let key = crate::sanitize::strip_ansi(item.key().as_str());
+        // The key rides in raw, as it does in every other check here (Check
+        // 8b's command disclosure, Check 17's workflow findings):
+        // `Finding::advisory` sanitizes the composed message, so stripping it
+        // again first would be a second pass over the same bytes and an
+        // inconsistency inside one file about where that happens.
         advisory.push(Finding::advisory(
             "workflow-content",
             format!(
-                "{key}: this is JavaScript the harness evaluates to drive subagents -- mind \
-                 neither reads nor validates a workflow's body (spec/workflows.md WF-53)"
+                "{}: this is JavaScript the harness evaluates to drive subagents -- mind \
+                 neither reads nor validates a workflow's body (spec/workflows.md WF-53)",
+                item.key().as_str()
             ),
         ));
     }
 
-    // --- Check 5: {{ns:}} token resolution (hard in markdown, advisory
-    // otherwise) ---
+    // --- Check 5: {{ns:}} token resolution (hard where tokens expand,
+    // advisory otherwise) ---
     // An unresolved {{ns:}} token would be a BadReference at install time --
-    // but only in a markdown file: install expands `{{ns:}}` in markdown only
-    // (NS-53), same as the path-token family Check 8 handles below. So an
-    // unresolved `{{ns:}}` in a non-markdown file is dead text install will
-    // never touch, not a defect that would break an install -- advisory,
-    // mirroring Check 8's non-markdown downgrade.
+    // but only in a file install expands: a markdown one, a workflow's own
+    // `.js` (WF-25), or a file the item lists in `expand:` (NS-57). That is
+    // `namespace::item_expands_tokens`, the same gate install itself reads,
+    // and the same one the path-token family Check 8 handles below. So an
+    // unresolved `{{ns:}}` anywhere else is dead text install will never
+    // touch, not a defect that would break an install -- advisory, mirroring
+    // Check 8's downgrade.
     // spec: CLI-132
     let source_name = source.name.clone();
     let siblings = siblings_of_source(&items, &source_name);
@@ -684,9 +690,8 @@ fn run_checks(
             // NS-57/CLI-226: an `expand:`-listed file expands like markdown, so
             // an unresolved token in it is a real install failure (hard), not the
             // dead text a plain non-markdown file gets. WF-25/WF-27: so does a
-            // workflow's own `.js`, which `expands_tokens` grants on the kind.
-            let expands = crate::namespace::expands_tokens(&file, item.kind)
-                || item_expands_file(item, &file);
+            // workflow's own `.js`, which the gate grants on the kind.
+            let expands = crate::namespace::item_expands_tokens(item, &item.path, &file);
             // The bare_names set is empty here: review validates token resolution
             // (whether the name exists), not the expansion form, so bare vs.
             // prefixed output is irrelevant for this check.
@@ -859,9 +864,9 @@ fn run_checks(
             // expansion with `expand:` (NS-57, CLI-226), or it is a workflow's
             // own `.js`, which expands on its kind (WF-25). Either makes the
             // file behave like markdown for every token check below, WF-27's
-            // exemption from the inert-token net included.
-            let expands = crate::namespace::expands_tokens(&file, item.kind)
-                || item_expands_file(item, &file);
+            // exemption from the inert-token net included. One gate answers
+            // all three (`namespace::item_expands_tokens`).
+            let expands = crate::namespace::item_expands_tokens(item, &item.path, &file);
             // The one path token Check 8 (below) reports as `bad-reference` for
             // this file, if any, so Check 14 does not re-report the same span
             // (CLI-223). `expand_paths` stops at the first bad token, so this is
@@ -1310,8 +1315,20 @@ fn run_checks(
             if item.kind != crate::error::ItemKind::Workflow {
                 continue;
             }
-            let (meta, size) = crate::workflow_check::read(&item.path);
-            for reason in crate::workflow_check::skip_reasons(&meta, size) {
+            let read = crate::workflow_check::read(&item.path);
+            // spec: WF-56 -- mind's own metadata cap is not a defect in the
+            // source and not a claim about the harness. It is reported as what
+            // it is, under its own code, and never as "the harness will not
+            // load this": DSC-103 exists so a cautious operator can lower that
+            // cap, and a lowered cap must not make mind libel every workflow
+            // past it.
+            if let Some(notice) = crate::workflow_check::cap_notice(&read) {
+                advisory.push(Finding::advisory(
+                    "workflow-unread",
+                    format!("{}: {notice}", item.key().as_str()),
+                ));
+            }
+            for reason in crate::workflow_check::skip_reasons(&read) {
                 advisory.push(Finding::advisory(
                     "workflow-unloadable",
                     format!(
@@ -1320,6 +1337,7 @@ fn run_checks(
                     ),
                 ));
             }
+            let meta = &read.meta;
             // The prefix and sibling set are the same ones Check 5 validated
             // tokens against, so a `{{ns:}}` in `meta.name` (WF-23) is compared
             // in its expanded form, exactly as installed.
@@ -1330,16 +1348,22 @@ fn run_checks(
             // would raise a WF-24 divergence against a name the store never
             // holds, so this call is the bare-aware form.
             let Some(harness) = crate::workflow_check::harness_name_with_bare(
-                &meta,
+                meta,
                 &prefix,
                 &siblings,
                 &bare_names,
             ) else {
                 continue;
             };
-            if let Some(msg) =
-                crate::workflow_check::divergence(&item.effective_name(), Some(&harness))
-            {
+            // spec: WF-24 -- the remedy token names the BARE name: `{{ns:}}`
+            // resolves against bare sibling names, so the prefixed spelling
+            // would be a token naming nothing and following mind's advice
+            // would break the install.
+            if let Some(msg) = crate::workflow_check::divergence(
+                &item.effective_name(),
+                &item.name,
+                Some(&harness),
+            ) {
                 advisory.push(Finding::advisory(
                     "workflow-name",
                     format!("{}: {msg}", item.key().as_str()),
@@ -1347,24 +1371,13 @@ fn run_checks(
             }
             claims.push((harness, item.key().as_str().to_string()));
         }
-        // spec: WF-29 -- two workflows answering to one harness name.
-        for (i, (harness, _)) in claims.iter().enumerate() {
-            let others: Vec<String> = claims
-                .iter()
-                .enumerate()
-                .filter(|(j, (other, _))| *j != i && other == harness)
-                .map(|(_, (_, key))| key.clone())
-                .collect();
-            if others.is_empty() {
-                continue;
-            }
+        // spec: WF-29 WF-59 -- two workflows answering to one harness name.
+        // One name is one defect, so one finding, whatever the number of
+        // claimants: grouping happens once, in `workflow_check`.
+        for (subject, msg) in crate::workflow_check::collisions(&claims) {
             advisory.push(Finding::advisory(
                 "workflow-name-collision",
-                format!(
-                    "{}: {}",
-                    claims[i].1,
-                    crate::workflow_check::collision(harness, &others)
-                ),
+                format!("{subject}: {msg}"),
             ));
         }
     }
@@ -1556,18 +1569,6 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
 
 /// All text files for an item: every file under a skill dir, or the single
 /// agent/rule file.
-/// Whether `file` (a path under the item's dir) is opted into token expansion by
-/// the item's `expand:` frontmatter (NS-57), so every token check treats it as
-/// markdown (CLI-226). A single-file item has no bundled files to list, so this
-/// is always false for it.
-fn item_expands_file(item: &CatalogItem, file: &Path) -> bool {
-    item.path.is_dir()
-        && file
-            .strip_prefix(&item.path)
-            .ok()
-            .is_some_and(|rel| item.expand.iter().any(|e| Path::new(e) == rel))
-}
-
 pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     if item.path.is_dir() {
         let mut files = Vec::new();

@@ -49,6 +49,10 @@ that mind depends on is called out at the requirement that depends on it.
   and the item lists without a description; it never fails a scan, an install, or
   a meld on the shape of a workflow's code.
 
+  The declaration is recognized at STATEMENT POSITION only (WF-57): the reader
+  is a token scanner rather than a parser, so that rule is what keeps it from
+  mistaking a member expression for a declaration.
+
   The harness's own reader is stricter and is the authority on what loads: it
   parses the file to an AST and requires a single `const` declarator named `meta`
   whose initializer is an object literal, admitting only literals, arrays, nested
@@ -190,6 +194,13 @@ that mind depends on is called out at the requirement that depends on it.
   against the prefix and sibling set it already validated the file's other tokens
   with. The `review` finding is tagged `workflow-name`, and WF-29's
   `workflow-name-collision`.
+
+  The warning carries the remedy as a token to write, and that token names the
+  item's BARE name: `{{ns:}}` resolves against bare sibling names (NS-11), so
+  the prefixed spelling would name no sibling and an author who followed the
+  advice would trade an advisory warning for a hard `bad-reference` that fails
+  the install (NS-12). The token renders as the effective name once expanded,
+  which is what makes it the fix.
 - `WF-25` All four token families expand in a workflow file: `{{ns:}}`,
   `{{path:}}`, `{{tools:}}`, and `{{self}}`, over the whole file, with the same
   resolver and the same hard bad-reference failure as a markdown file (NS-11,
@@ -248,12 +259,16 @@ that mind depends on is called out at the requirement that depends on it.
   `review` was not asked. Two workflows in one source that already share a name
   are a defect in the source, which is exactly what `review` is for.
 
+  One shared name is ONE report, naming the claimants, not one report per
+  claimant (WF-59).
+
 ## Reporting a workflow the harness will not load
 
 - `WF-30` `review` reports a workflow the harness would skip, as a
   `workflow-unloadable` advisory finding alongside its existing hook and
   reference findings: no readable `meta`, a missing or empty `name` or
-  `description`, or a file over the WF-7 size cap. Such a workflow does not exist
+  `description`, a `meta.name` mind cannot use (WF-58), or a file over the WF-7
+  size cap. Such a workflow does not exist
   as far as the harness is concerned, and nothing else in mind's model would say
   so. Each condition is its own finding, except an unreadable `meta`, which is
   one finding and not also a missing `name` and a missing `description`.
@@ -261,6 +276,12 @@ that mind depends on is called out at the requirement that depends on it.
   An empty finding list is not a promise the file loads. The harness's reader is
   stricter than mind's and is the authority (WF-5), so this reports what mind can
   see and no more. That asymmetry is why it is a report and not a gate.
+
+  Each reason says what MIND read, not what the file contains. An unreadable
+  `meta` reports that mind read no `name`, `description`, or `whenToUse` from
+  it, rather than that the file declares no `meta` object: `export const meta =
+  {}` does declare one, and a file mind did not read at all is WF-56's case, not
+  this one.
 - `WF-31` `learn` warns on the same condition and installs anyway. mind does not
   gatekeep the validity of item content for any other kind, and the harness's own
   reader is the authority (WF-5); a reader disagreement must not be able to
@@ -268,11 +289,12 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-32` The size cap is reported, not enforced, for the same reason: DSC-90
   records that mind does not cap the size of item content it reads, and a cap
   mind enforced would be mind's cap, not the harness's.
-- `WF-55` A workflow past mind's own metadata read cap (DSC-91, 8 MiB) does not
+- `WF-55` A workflow past mind's own metadata read cap (DSC-91, 8 MiB by
+  default) does not
   fail the scan. The read stays capped, since a source is untrusted and bounding
   it is the point of the cap, but for this kind an over-cap file reads as NO
   readable metadata rather than as an error: the item is catalogued with no
-  description, WF-30 reports it as the unreadable `meta` it is, and it installs
+  description, it is reported as the unread file it is (WF-56), and it installs
   like any other unloadable workflow (WF-31).
 
   The kind needs the exception because a workflow's metadata IS its whole `.js`
@@ -287,6 +309,92 @@ that mind depends on is called out at the requirement that depends on it.
   Only the workflow kind is excepted. DSC-91's hard `metadata-too-large` stands
   for every other kind, and for every other capped read (`mind.toml`, a plugin
   manifest, an item link's frontmatter probe).
+- `WF-56` An over-cap read (WF-55) is reported as MIND's cap, separately from
+  every WF-30 reason and never as one of them. `review` emits it as its own
+  `workflow-unread` advisory finding and `learn`/`upgrade`/`recall <item>` say
+  it in their own words; the message names the effective cap and the
+  `--max-metadata-size` flag that raises it, and asserts nothing about whether
+  the harness would load the file.
+
+  The distinction is not cosmetic. The cap is configurable and DSC-103 exists
+  partly so a cautious operator can LOWER it for untrusted sources, including
+  below the harness's own 524288-byte limit (WF-7). Under a lowered cap a
+  perfectly loadable workflow is unread, and reporting "the harness will not
+  load this workflow: it declares no `meta`" would be mind stating, as a fact
+  about someone else's file, a consequence of mind's own configuration. What
+  mind can honestly say is that it read nothing.
+
+  The WF-7 overage still reports beside it when the file is also over the
+  harness's cap: that reason is read off the file's size, not its content, so it
+  survives a read that never happened. The other WF-30 reasons do not: mind read
+  no `meta`, so it knows nothing about the `name` or `description` in it.
+- `WF-57` mind's `meta` reader recognizes the `export const meta` declaration at
+  STATEMENT POSITION only: the `export` must be the first token of a statement
+  (start of file, or after `;`, `}`, or a line break) at bracket-nesting depth
+  0, and nothing but whitespace and comments may separate the three words.
+
+  The reader is a token scanner, not a parser (WF-5), so without this rule it
+  matched the three identifiers with any punctuation between them skipped, and
+  a member expression assignment matched:
+
+  ```js
+  shim.export.const.meta = { name: 'decoy', description: 'x' }
+  export const meta = { name: 'real', description: 'y' }   // never reached
+  ```
+
+  The scan stops at its first hit, so the decoy did not merely add a wrong
+  reading, it replaced the right one: mind reported `decoy` and checked WF-24
+  and WF-29 against it while the harness registered the workflow as `real`. A
+  hostile source could therefore choose what mind believes a workflow answers
+  to. The depth-0 half of the rule carries the same weight in the other
+  direction: a `meta` declared inside a block or a call argument is not the
+  module-level declaration the harness reads, so it must not stand in for one.
+
+  The depth half is a bracket count, and the reader does not model every
+  construct a bracket can hide in (a regex character class, above all), so a
+  bracket it never sees closed leaves the count above zero and a declaration
+  after it reads as absent. That is the tolerable direction of error, and the
+  one WF-5 already admits: mind reports the file as one it read no `meta` from
+  (WF-30), the harness loads it regardless, and nothing fails. The error this
+  rule prevents is the other one, where mind reports a name the harness does not
+  use.
+- `WF-58` A `meta.name` carrying a control or invisible code point is not a
+  usable harness name: mind treats it as absent (no WF-24 divergence, no WF-29
+  claim) and WF-30 reports it as its own reason.
+
+  This is the same rule `catalog.rs` already applies to an item name (DSC-95's
+  character class), applied at the one other place a source-controlled name
+  enters mind's model. It has to be, because the WF-29 comparison is exact while
+  every message prints the name sanitized: `revi<U+200B>ew` prints as `review`,
+  collides with nothing, and composes the self-contradicting "the harness
+  resolves it as 'review', not 'review'". Reporting it as unusable says what is
+  actually wrong.
+
+  The test applies to the name mind would USE, which is the trimmed one (WF-20):
+  surrounding whitespace is not part of the name, and a `meta.name` written as a
+  template literal spanning lines carries a leading and trailing newline as a
+  matter of course. Reporting one of those as a name mind cannot use, while mind
+  goes on using its trimmed form, would be the same kind of self-contradiction
+  this requirement exists to remove.
+- `WF-59` One shared harness name produces ONE report, whatever the number of
+  claimants: the report names the colliding name, a bounded list of the
+  claimants, and a count of any it did not name.
+
+  The alternative reports each claimant separately, so n workflows sharing a
+  name cost n findings each carrying the other n-1 keys: quadratic output from
+  linear input, in a check whose input is a file count an untrusted source
+  chooses. One name is one defect, and a reader acts on the first few claimants.
+- `WF-60` `recall <item> --json` carries the workflow's harness-facing name and
+  the findings about it: `harness_name` (null when mind read no usable one) and
+  `workflow_findings`, an array of the same message strings the text view
+  prints on its `harness` lines.
+
+  The manifest records neither `meta.name` nor the resolved harness name
+  (WF-51's reasoning about `whenToUse` applies: a display string for one kind is
+  not persisted state), and the `--json` document is built from the manifest
+  entry. Without these fields the machine-readable surface was the one place a
+  WF-24 divergence and a WF-29 collision were invisible, which is backwards: a
+  scripted consumer is exactly who cannot notice a warning it was never sent.
 - `WF-53` `review` reports EVERY workflow item as a `workflow-content` advisory
   finding, the workflow counterpart of the command disclosure (CLI-237, DSC-91).
   A workflow is not content the harness offers, it is JavaScript the harness
@@ -359,6 +467,10 @@ posture: state the assumption, do not defend it.
   commands (CMD-8), `absorb` and unmanaged detection see only the immediate
   `.js` children of a lobe's `workflows/` directory, matching the flat convention
   scan (WF-2).
+
+  This section holds only IDs in the WF-50 range. The reporting requirements
+  continue at WF-53 under "Reporting a workflow the harness will not load"
+  above, which is where WF-53..WF-60 live.
 
   A workflow's hooks can come only from a root `mind.toml` `[[items]]` entry.
   The frontmatter scalars (HOOK-130) need frontmatter, which a `.js` file has

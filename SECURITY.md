@@ -24,6 +24,14 @@ meld a source you do not control:
   `--dangerously-skip-*` flag); there is no sandbox around a hook once
   consent is given. Only meld and consent to hooks from sources you trust,
   the same way you would before running their code directly.
+- **A workflow's body is code `mind` neither reads nor gates.** A workflow
+  (`workflows/<name>.js`) is JavaScript that the harness, not `mind`,
+  evaluates to drive subagents. `mind` parses only the `export const meta`
+  object literal out of it (WF-4/WF-5); the rest of the file is never read or
+  validated. Installing a workflow links that file into every admitting agent
+  home with no consent prompt distinct from any other item -- unlike a hook,
+  there is no `--dangerously-skip-*` gate to decline. `review`'s unconditional
+  `workflow-content` finding is the disclosure mechanism for this, not a gate.
 - **Managed policy is the enterprise control.** An organization can lock a
   `mind` client to a trusted-source allowlist, require every source to be
   pinned, and control self-update, via a managed policy file the user cannot
@@ -37,28 +45,39 @@ meld a source you do not control:
   instead of pulling in roughly 80 transitive crates of an HTTP stack, for a
   tool whose entire risk surface is supply chain.
 - **Discovery metadata reads are size-capped.** `mind.toml`, item frontmatter
-  (`SKILL.md`/`TOOL.md`, agent and rule `.md` files), and Claude plugin and
-  marketplace manifests are capped at 8 MiB. An oversized file is refused,
-  naming the file and the limit, and is never fully read into memory: the
-  reader takes at most cap-plus-one bytes, so the cost of an oversized file is
-  bounded by the cap rather than by the file itself. Recorded as `DSC-91` in
+  (`SKILL.md`/`TOOL.md`, agent, rule, and `commands/<name>.md` files), a
+  workflow's `.js` body (`workflows/<name>.js` -- there is no frontmatter to
+  separate out, so the whole file is read as the capped metadata read, per the
+  `--max-metadata-size` help text), and Claude plugin and marketplace
+  manifests are capped at 8 MiB. An oversized file is refused, naming the file
+  and the limit, and is never fully read into memory: the reader takes at most
+  cap-plus-one bytes, so the cost of an oversized file is bounded by the cap
+  rather than by the file itself. Recorded as `DSC-91` in
   [spec/discovery.md](spec/discovery.md).
+
+  The workflow kind is a deliberate exception to the "refused" guarantee
+  above: an over-cap workflow `.js` is read as having no metadata and the scan
+  continues past it rather than refusing, per `WF-55` in
+  [spec/workflows.md](spec/workflows.md).
 
   The 8 MiB is a default: `--max-metadata-size` (or `MIND_MAX_METADATA_SIZE`, or
   the `max-metadata-size` config key) sets it per invocation, and accepts
   `unlimited`. Lowering it tightens the bound; `unlimited` removes it, which
   puts metadata reads back under the accepted risk below. The bounded-read
   guarantee holds at every other setting. Recorded as `DSC-103`..`DSC-107`.
-- **Item content reads are not size-capped.** Beyond the metadata cap above, no
-  other read of source-controlled content has a size or nesting-depth limit:
-  every file in an item tree during `{{ns:}}` expansion at install, the
-  reference scan, `review`, the TUI preview, and content hashing. A source
-  could ship an oversized or deeply nested file to make `mind` allocate
-  heavily while scanning or installing it. This is self-inflicted (you chose
-  to meld that source) and bounded to the current invocation; the reasoning is
-  recorded as `DSC-90` in
+- **Item content reads are not size-capped, with one exception.** Beyond the
+  metadata cap above, no other read of source-controlled content has a size or
+  nesting-depth limit: every file in an item tree during `{{ns:}}` expansion at
+  install, the reference scan, `review`, the TUI preview, and content hashing.
+  A source could ship an oversized or deeply nested file to make `mind`
+  allocate heavily while scanning or installing it. This is self-inflicted
+  (you chose to meld that source) and bounded to the current invocation; the
+  reasoning is recorded as `DSC-90` in
   [spec/discovery.md](spec/discovery.md#accepted-risks). Reports on this are
-  welcome but will likely be closed as accepted risk.
+  welcome but will likely be closed as accepted risk. The workflow kind is the
+  one exception: its content read IS the capped metadata read above (a
+  workflow has no separate frontmatter to read), so it is size-capped like any
+  other discovery metadata, not uncapped like the other kinds' content.
 
 ## Supported versions
 

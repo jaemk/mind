@@ -363,8 +363,19 @@ fn sanitize_dep_keys(keys: Vec<String>) -> Vec<String> {
 }
 
 /// Read all of a catalog item's text files into one buffer, for dependency
-/// detection (mirrors `commands::read_item_text`, kept local so data.rs stays
-/// independent of commands.rs and avoids a cross-module dep).
+/// detection. Kept local so data.rs stays independent of commands.rs and
+/// avoids a cross-module dep.
+///
+/// NOT the same set of files as `commands::read_item_text`, which narrows to
+/// the files install actually expands tokens in
+/// (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25). This reads EVERY
+/// text file under the item, so the TUI's dependency preview (DEP-1 edges,
+/// TUI-50) is over-inclusive relative to the CLI's: a `{{ns:sibling}}` token
+/// sitting in a non-markdown, non-`expand:`-listed file of a non-workflow item
+/// draws an edge here that install would never create. Pre-existing and
+/// display-only (nothing installs off these keys), and left as a known
+/// divergence rather than changed silently: narrowing it is a behavior change
+/// to what the TUI shows and wants its own spec decision.
 fn read_item_text(item: &catalog::CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
@@ -1197,6 +1208,245 @@ mod tests {
         assert!(
             snap2.installed[0].stale,
             "an in-place content edit must mark the item stale (TUI-63)"
+        );
+
+        cleanup(&base);
+    }
+
+    /// `load_inner`'s `available` list must read a workflow's description
+    /// through `CatalogItem::display_description` (WF-51: `<description> -
+    /// <whenToUse>`), not the bare `description` field. This regresses
+    /// silently if line ~496's `it.display_description()` is ever swapped
+    /// back for `it.description`, since both are `Option<String>` and the
+    /// code still compiles either way.
+    #[test]
+    fn available_workflow_description_is_composed_with_when_to_use() {
+        // spec: WF-51
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        let src = base.join("workflow-source");
+        std::fs::create_dir_all(src.join("workflows")).unwrap();
+        std::fs::write(
+            src.join("workflows/review.js"),
+            "export const meta = {\n  name: 'review-changes',\n  \
+             description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+
+        let snap = load(&paths).expect("load should succeed");
+        let wf = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the melded workflow item must appear in `available`");
+        assert_eq!(
+            wf.description.as_deref(),
+            Some("Review changed files - before a PR"),
+            "an available workflow's description must be the composed \
+             \"description - whenToUse\" pair (display_description, WF-51), \
+             not the bare `meta.description` alone: {:?}",
+            wf.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// The WF-51 split is by DATA SOURCE, not by surface, and both halves of it
+    /// are visible in one snapshot: the `available` row is catalog-derived and
+    /// so carries the composed `<description> - <whenToUse>` pair, while the
+    /// `installed` row for that same workflow is manifest-derived
+    /// (`install.rs` records `item.description`, never `when_to_use`) and so
+    /// carries the bare description. Documented on
+    /// `CatalogItem::display_description`, but nothing pinned it: the
+    /// installed row reads `it.description` (line ~458) where the available
+    /// row reads `it.display_description()` (line ~496), and "fixing" the
+    /// inconsistency in either direction compiles clean. Recording
+    /// `whenToUse` in the manifest is a deliberate deferral, so this test is
+    /// the one that should fail and be rewritten when that changes.
+    #[test]
+    fn an_installed_workflow_row_is_bare_where_the_available_row_composes() {
+        // spec: WF-51
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("installed-workflow-source");
+        std::fs::create_dir_all(src.join("workflows")).unwrap();
+        std::fs::write(
+            src.join("workflows/review.js"),
+            "export const meta = {\n  name: 'review',\n  \
+             description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+        crate::commands::learn(
+            &paths,
+            "workflow:review",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        let snap = load(&paths).expect("load should succeed");
+        let installed = snap
+            .installed
+            .iter()
+            .find(|i| i.kind == ItemKind::Workflow)
+            .expect("the learned workflow must appear in `installed`");
+        assert_eq!(
+            installed.description.as_deref(),
+            Some("Review changed files"),
+            "an INSTALLED workflow row is manifest-derived, and the manifest \
+             never records `whenToUse` (WF-51), so its description must be the \
+             bare one: {:?}",
+            installed.description
+        );
+        let available = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the same workflow must still appear in `available`");
+        assert_eq!(
+            available.description.as_deref(),
+            Some("Review changed files - before a PR"),
+            "the AVAILABLE row for the same workflow is catalog-derived, so it \
+             must still compose the pair even once the item is installed: {:?}",
+            available.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// A workflow whose `meta` gives a `whenToUse` and no `description` is
+    /// malformed by the harness's own rules (WF-30 reports it), but the TUI
+    /// still shows what it has: `display_description`'s `(None, Some(w))` arm
+    /// returns the `whenToUse` alone rather than `None`. That arm had no test
+    /// at any layer -- only the `(Some, Some)` and `(None, None)` pairs did --
+    /// so collapsing it to `None` (an easy "simplify the match" edit) would
+    /// have silently blanked the row and left search with nothing to match on.
+    #[test]
+    fn an_available_workflow_with_only_when_to_use_shows_it_as_the_description() {
+        // spec: WF-51
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        let src = base.join("when-to-use-only-source");
+        std::fs::create_dir_all(src.join("workflows")).unwrap();
+        std::fs::write(
+            src.join("workflows/review.js"),
+            "export const meta = {\n  name: 'review',\n  whenToUse: 'before a PR',\n}\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+
+        let snap = load(&paths).expect("load should succeed");
+        let wf = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the melded workflow item must appear in `available`");
+        assert_eq!(
+            wf.description.as_deref(),
+            Some("before a PR"),
+            "a workflow with a `whenToUse` and no `description` must show the \
+             `whenToUse` alone, not nothing and not a dangling \" - \" \
+             separator: {:?}",
+            wf.description
         );
 
         cleanup(&base);

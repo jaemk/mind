@@ -47,12 +47,61 @@ pub fn is_markdown(path: &std::path::Path) -> bool {
 /// where a `.js` file bundled inside some other item is ordinary code whose
 /// `{{ }}` is more likely a templating language's than a mind token.
 ///
-/// The third way in, an item's NS-57 `expand:` list, is per-item rather than
-/// per-kind and stays with the callers that hold the item (`item_expands_file`).
+/// This is the KIND-and-extension half only. The third way in, an item's NS-57
+/// `expand:` list, is per-item, so a caller that holds the item must ask
+/// [`item_expands_tokens`] instead: this alone answers "would a token expand in
+/// a file of this kind", not "does a token expand in this item's file", and
+/// callers that confused the two silently skipped `expand:`-listed files.
 ///
 /// spec: NS-53 WF-25
 pub fn expands_tokens(path: &std::path::Path, kind: crate::error::ItemKind) -> bool {
     is_markdown(path) || kind == crate::error::ItemKind::Workflow
+}
+
+/// Whether `file`, a file of `item` rooted at `root`, is on the item's NS-57
+/// `expand:` list: a non-markdown file the item opts into token expansion
+/// (CLI-226). A single-file item has no bundled files to list, so this is
+/// always false for one.
+///
+/// `root` is the directory the item's files are laid out under -- `item.path`
+/// for a source-side caller, the staging directory for `install.rs` -- since
+/// the list is written relative to the item's own root.
+///
+/// spec: NS-57
+pub fn item_lists_file(
+    item: &crate::catalog::CatalogItem,
+    root: &std::path::Path,
+    file: &std::path::Path,
+) -> bool {
+    root.is_dir()
+        && file
+            .strip_prefix(root)
+            .is_ok_and(|rel| item.expand.iter().any(|e| std::path::Path::new(e) == rel))
+}
+
+/// Whether a token expands in `file`, a file of `item` rooted at `root`.
+///
+/// THE chokepoint for "does a token expand here": a token expands in a file
+/// when the file has a markdown extension, or the item is of the `workflow`
+/// kind, or the file is on the item's NS-57 `expand:` list. The gate takes the
+/// item, not just the path, so a caller asking the question answers it in one
+/// place -- `install.rs` (which decides what to expand), `review` (which
+/// decides whether an unresolved token is a hard failure or dead text), and the
+/// dependency scan (which reads a `{{ns:}}` as an edge only where install would
+/// expand it) all read the same rule.
+///
+/// A single-file item stages under a bare name with no extension, so its
+/// markdown-ness is read from `item.path` rather than from the staged file;
+/// that is what `root.is_dir()` distinguishes.
+///
+/// spec: NS-53 NS-57 WF-25
+pub fn item_expands_tokens(
+    item: &crate::catalog::CatalogItem,
+    root: &std::path::Path,
+    file: &std::path::Path,
+) -> bool {
+    let source_like: &std::path::Path = if root.is_dir() { file } else { &item.path };
+    expands_tokens(source_like, item.kind) || item_lists_file(item, root, file)
 }
 
 /// Render `{{ns:name}}` tokens in `text` as their bare `name`, for a display
