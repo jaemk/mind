@@ -2233,8 +2233,16 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
         }
     }
 
+    // Canonicalize the root FIRST and glob from that (rather than globbing from
+    // `root` and canonicalizing each match) so a match that is a dangling
+    // symlink -- whose own canonicalize() fails and falls back to the matched
+    // path verbatim -- still falls back to a path under `canonical_root`: on a
+    // host where the temp root itself is behind a symlink (e.g. macOS's `/tmp`
+    // -> `/private/tmp`), the fallback path failed `starts_with` against the
+    // resolved root below and misreported a merely-dangling link as an
+    // escaping one, before DSC-108's symlink filter ever got a look at it.
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let joined = root.join(pattern);
+    let joined = canonical_root.join(pattern);
     let full = joined.to_string_lossy();
     let paths = glob::glob(&full).map_err(|e| MindError::MindToml {
         path: root.join("mind.toml"),
