@@ -129,7 +129,9 @@ impl CatalogItem {
         if self.kind != ItemKind::Agent {
             return None;
         }
-        if let Some(fm_name) = frontmatter::file_field(&self.path, "name") {
+        if let Ok(text) = frontmatter::text_capped(&self.path)
+            && let Some(fm_name) = frontmatter::field(&text, "name")
+        {
             let trimmed = fm_name.trim().to_string();
             if !trimmed.is_empty() && is_safe_item_name(&trimmed) {
                 return Some(trimmed);
@@ -665,9 +667,8 @@ fn resolve_file_link_kind(source: &Source, item_path: &str, file: &Path) -> Resu
         return Ok(kind);
     }
     // spec: LNK-21 step 3 -- the file's own frontmatter `kind:`. DSC-91: read
-    // through the size-capped text reader rather than `file_field`'s uncapped
-    // `read_to_string`, so a link to a huge attacker-hosted file cannot force
-    // an unbounded read here.
+    // through the size-capped text reader, not a raw `read_to_string`, so a
+    // link to a huge attacker-hosted file cannot force an unbounded read here.
     let text = crate::frontmatter::text_capped(file)?;
     if let Some(declared) = crate::frontmatter::field(&text, "kind") {
         let kind = ItemKind::parse(declared.trim()).ok_or_else(|| MindError::LinkKindMismatch {
@@ -4151,6 +4152,23 @@ mod tests {
         std::fs::write(&p, "---\nname: ../evil\ndescription: d\n---\n# coder\n").unwrap();
         let item = agent_item(p, "coder");
         // unsafe name is rejected; falls back to catalog name.
+        assert_eq!(item.agent_harness_name(), Some("coder".to_string()));
+    }
+
+    #[test]
+    fn agent_harness_name_falls_back_when_frontmatter_is_oversized() {
+        // spec: NS-40 DSC-91 -- this read goes through the same size-capped
+        // helper every other metadata read uses; an oversized frontmatter file
+        // must not be read in full, and must be treated like an unreadable one:
+        // fall back to the bare catalog name rather than error out (the method
+        // returns `Option`, not `Result`).
+        let dir = TmpDir::new();
+        let p = dir.path().join("agents/coder.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&p).unwrap();
+        file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let item = agent_item(p, "coder");
         assert_eq!(item.agent_harness_name(), Some("coder".to_string()));
     }
 

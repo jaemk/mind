@@ -2696,6 +2696,35 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
 }
 
 #[test]
+fn init_source_oversized_pre_existing_mind_toml_is_refused() {
+    // spec: DSC-91 -- init-source's own read of a pre-existing mind.toml (for
+    // the scaffold-patching step) goes through the same size-capped helper as
+    // every other metadata read, not a raw unbounded `read_to_string`. Proven
+    // with a lowered cap rather than an 8 MiB fixture: a 1-byte cap must
+    // refuse even a tiny mind.toml, which only holds if the read honors the
+    // cap at all.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("authoring");
+    write(
+        &repo.join("mind.toml"),
+        "[source]\ndescription = \"small\"\n",
+    );
+    let dir = repo.to_str().unwrap();
+
+    let r = sb.mind(&["init-source", dir, "--max-metadata-size", "1"]);
+    assert!(
+        !r.success,
+        "a 1-byte cap must refuse init-source's read of an existing mind.toml: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("mind.toml"),
+        "error must name mind.toml: {combined}"
+    );
+}
+
+#[test]
 fn init_source_template_skips_a_bare_mention_in_a_non_markdown_file() {
     // spec: INIT-5
     // --template's file gate is `namespace::is_markdown` (the same extension

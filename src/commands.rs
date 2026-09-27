@@ -2817,7 +2817,7 @@ pub fn init_source(
     // Read the pre-existing mind.toml content (if any) for the scaffold patching
     // step and for extracting description/prefix for the marketplace manifest.
     let pre_toml = if toml_path.exists() {
-        Some(std::fs::read_to_string(&toml_path).map_err(|e| MindError::io(&toml_path, e))?)
+        Some(crate::error::read_capped_metadata(&toml_path)?)
     } else {
         None
     };
