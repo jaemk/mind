@@ -725,11 +725,19 @@ fn scan_item_link(
     if !plugin_manifest::is_safe_manifest_path(item_path) {
         return Err(bad_target());
     }
-    let target = clone_root.join(item_path);
-    let canon = target.canonicalize().unwrap_or_else(|_| target.clone());
+    // Canonicalize the root FIRST and join onto that (rather than joining onto
+    // `clone_root` and canonicalizing the result) so a non-existent `target`
+    // still falls back to a path under `canon_root`: on a host where the temp
+    // root itself is behind a symlink (e.g. macOS's `/tmp` -> `/private/tmp`),
+    // canonicalizing only the existing side left a non-existent target's
+    // fallback un-resolved, so it failed `starts_with` against the resolved
+    // root and misreported as `LinkNotASkill`/`LinkNotAFile` instead of
+    // reaching the shape-specific checks below.
     let canon_root = clone_root
         .canonicalize()
         .unwrap_or_else(|_| clone_root.to_path_buf());
+    let target = canon_root.join(item_path);
+    let canon = target.canonicalize().unwrap_or_else(|_| target.clone());
     if !canon.starts_with(&canon_root) {
         return Err(bad_target());
     }
