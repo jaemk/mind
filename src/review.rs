@@ -1593,6 +1593,13 @@ pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
             !ignore.is_under_ignored(rel)
         });
         files
+    } else if item.kind == crate::error::ItemKind::Workflow
+        && std::fs::metadata(&item.path)
+            .is_ok_and(|m| m.len() > crate::error::metadata_size_limit())
+    {
+        // spec: WF-55 -- a workflow past the metadata cap reads as no `meta`
+        // (Check 17 reports it); its body is never read by a later check either.
+        Vec::new()
     } else {
         vec![item.path.clone()]
     }

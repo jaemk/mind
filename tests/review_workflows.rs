@@ -783,6 +783,34 @@ fn a_lowered_cap_reports_minds_own_cap_and_not_the_harnesss() {
     );
 }
 
+/// The body checks (`{{ns:}}` resolution and the rest) read every item file, so
+/// a workflow past mind's cap must be skipped by them too, not just by the
+/// catalog scan: a token sitting in the unread body draws no finding.
+// spec: WF-55 DSC-103
+#[test]
+fn an_over_cap_workflow_body_is_not_read_by_the_body_checks() {
+    let sb = Sandbox::new("wf");
+    let mut body = String::from(
+        "export const meta = { name: 'big', description: 'Big' }\n// {{ns:no-such-sibling}} ",
+    );
+    body.push_str(&"p".repeat(2600));
+    body.push('\n');
+    write(&sb.source.join("workflows/big.js"), &body);
+
+    let r = sb.review_with(&["--max-metadata-size", "2KiB"]);
+    assert!(
+        r.success,
+        "a capped read is advisory, never hard: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stdout.contains("no-such-sibling") && !r.stderr.contains("no-such-sibling"),
+        "the body of an over-cap workflow must not be read by a later check: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // WF-57: the declaration is matched at statement position
 // ---------------------------------------------------------------------------
