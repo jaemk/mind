@@ -49,6 +49,9 @@ super-source on top of the manifest (MKT-15, MKT-16). See
     `SKILL.md` anchor;
   - a `tools/<name>/` directory, which has no anchor file, so its own
     classification is the whole test of whether the item exists;
+  - the kind container itself (`skills/`, `agents/`, `workflows/`, ...): a
+    container that is a symlink is not listed, so the scan never walks a
+    directory outside the source;
   - the same components read from a Claude plugin or a marketplace entry's
     in-repo plugin (marketplace.md MKT-3, MKT-14, MKT-18, workflows.md WF-40),
     including a leaf skill directory an entry's `skills` array names directly;

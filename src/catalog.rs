@@ -1050,7 +1050,7 @@ fn scan_add_roots(
         // `skills` child dir is only a flat skill if it holds a direct
         // SKILL.md, in which case it has no skill subdirs of its own.
         let skills_dir = root.join(ItemKind::Skill.dir());
-        for entry in read_dir_opt(&skills_dir)? {
+        for entry in read_container_opt(&skills_dir)? {
             let skill_md = entry.join("SKILL.md");
             if entry.is_dir()
                 && skill_md.is_file()
@@ -1725,7 +1725,12 @@ fn scan_convention(
     } else {
         root.join(ItemKind::Skill.dir())
     };
-    for entry in read_dir_opt(&skills_dir)? {
+    let skill_entries = if flat_skills {
+        read_dir_opt(&skills_dir)?
+    } else {
+        read_container_opt(&skills_dir)?
+    };
+    for entry in skill_entries {
         let skill_md = entry.join("SKILL.md");
         // spec: DSC-108 -- no-follow for BOTH halves of the skill shape. A
         // symlinked anchor is the worse of the two: `SKILL.md` is the file whose
@@ -1754,7 +1759,7 @@ fn scan_convention(
     ] {
         let ext = kind_extension(kind);
         let kind_dir = root.join(kind.dir());
-        for entry in read_dir_opt(&kind_dir)? {
+        for entry in read_container_opt(&kind_dir)? {
             // spec: DSC-108 -- no-follow classification, so a symlink here is
             // not an item whatever it points at.
             if is_regular_file_nofollow(&entry)
@@ -1770,7 +1775,7 @@ fn scan_convention(
     // a tool needs no anchor file; its directory contents are the tool. An
     // optional `TOOL.md` carries `description`/`bin`/`build` (read in make_item).
     let tools_dir = root.join(ItemKind::Tool.dir());
-    for entry in read_dir_opt(&tools_dir)? {
+    for entry in read_container_opt(&tools_dir)? {
         // spec: DSC-108 -- a tool needs no anchor file, so the directory
         // classification is the entire test of whether the item exists; a
         // symlink there is the oracle in its purest form.
@@ -1864,7 +1869,7 @@ fn scan_plugin_components(
 ) -> Result<()> {
     // Skills: skills/<name>/SKILL.md at the plugin root (DSC-10, MKT-3).
     let skills_dir = plugin_root.join(ItemKind::Skill.dir());
-    for entry in read_dir_opt(&skills_dir)? {
+    for entry in read_container_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
         // spec: DSC-108 -- classified exactly as the convention scan's skills
         // are: the rule is the scan's, not one layout's.
@@ -1885,7 +1890,7 @@ fn scan_plugin_components(
     // Agents: agents/<name>.md at the plugin root (DSC-11, MKT-3).
     // NS-40: agent_harness_name reads frontmatter `name:` just as convention does.
     let agents_dir = plugin_root.join(ItemKind::Agent.dir());
-    for entry in read_dir_opt(&agents_dir)? {
+    for entry in read_container_opt(&agents_dir)? {
         // spec: DSC-108 -- an `agents/<name>.md` is classified the same way here
         // as in the convention scan; a plugin layout is not a second answer to
         // whether a symlink is an item.
@@ -1928,7 +1933,7 @@ fn scan_plugin_flat_items(
     for kind in [ItemKind::Command, ItemKind::Workflow] {
         let ext = kind_extension(kind);
         let kind_dir = plugin_root.join(kind.dir());
-        for entry in read_dir_opt(&kind_dir)? {
+        for entry in read_container_opt(&kind_dir)? {
             // spec: DSC-108 -- a plugin's flat components are classified the
             // same no-follow way as the convention scan's.
             if is_regular_file_nofollow(&entry)
@@ -2070,7 +2075,7 @@ fn scan_marketplace_in_repo_plugins(
         } else {
             // No explicit skills array: scan plugin_root/skills/ conventionally.
             let skills_dir = plugin_root.join(ItemKind::Skill.dir());
-            for entry_path in read_dir_opt(&skills_dir)? {
+            for entry_path in read_container_opt(&skills_dir)? {
                 let skill_md = entry_path.join("SKILL.md");
                 // spec: DSC-108
                 if is_dir_nofollow(&entry_path)
@@ -2094,7 +2099,7 @@ fn scan_marketplace_in_repo_plugins(
         //    MKT-18). Neither is ever narrowed by the entry's explicit `skills`
         //    list, which only ever names skill directories.
         let agents_dir = plugin_root.join(ItemKind::Agent.dir());
-        for agent_path in read_dir_opt(&agents_dir)? {
+        for agent_path in read_container_opt(&agents_dir)? {
             // spec: DSC-108
             if is_regular_file_nofollow(&agent_path)
                 && agent_path.extension().is_some_and(|e| e == "md")
@@ -2365,6 +2370,19 @@ fn is_symlink(path: &Path) -> bool {
 }
 
 /// Read a directory's entries, treating "not found" as empty.
+/// [`read_dir_opt`] for a kind container (`skills/`, `agents/`, `workflows/`,
+/// ...): a container that is itself a symlink yields nothing, since listing it
+/// would walk a directory outside the source before the per-entry no-follow
+/// checks ever ran.
+///
+/// spec: DSC-108
+fn read_container_opt(dir: &Path) -> Result<Vec<PathBuf>> {
+    if is_symlink(dir) {
+        return Ok(Vec::new());
+    }
+    read_dir_opt(dir)
+}
+
 fn read_dir_opt(dir: &Path) -> Result<Vec<PathBuf>> {
     match std::fs::read_dir(dir) {
         Ok(rd) => {

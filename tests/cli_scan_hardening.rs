@@ -191,6 +191,36 @@ fn a_symlinked_skill_directory_is_not_an_item() {
 // spec: DSC-108
 #[cfg(unix)]
 #[test]
+fn a_symlinked_kind_container_is_not_listed() {
+    // The per-entry no-follow check runs only after the container is listed, so
+    // a `workflows/` that is itself a link would walk a directory outside the
+    // source and offer its files as items.
+    let sb = Sandbox::new("agents");
+    write(
+        &sb.base.join("outside/wf/leak.js"),
+        "export const meta = { name: 'leak', description: 'SECRETDESCRIPTION' };\n",
+    );
+    std::fs::remove_dir_all(sb.source.join("workflows")).unwrap();
+    std::os::unix::fs::symlink(sb.base.join("outside/wf"), sb.source.join("workflows")).unwrap();
+    sb.commit();
+
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
+    assert!(
+        meld.success,
+        "a source with a symlinked container must still meld: {} {}",
+        meld.stdout, meld.stderr
+    );
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    let listing = format!("{}{}", probe.stdout, probe.stderr);
+    assert!(
+        !listing.contains("leak") && !listing.contains("SECRETDESCRIPTION"),
+        "a symlinked workflows/ container must not be listed: {listing}"
+    );
+}
+
+// spec: DSC-108
+#[cfg(unix)]
+#[test]
 fn a_symlinked_tool_directory_is_not_an_item() {
     // A tool needs no anchor file at all: the directory IS the item, so the
     // directory classification is the whole test of whether it exists. Same
