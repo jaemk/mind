@@ -2140,7 +2140,7 @@ fn dsc105_an_unparseable_cap_is_a_hard_error_naming_its_origin() {
 }
 
 /// `config show` reports the cap in force, not the config key's value.
-// spec: CLI-241
+// spec: CLI-241 CLI-242
 #[test]
 fn cli241_config_show_reports_the_effective_cap() {
     let registry = Sandbox::bare("cli241-show");
@@ -2184,9 +2184,12 @@ fn cli241_config_show_reports_the_effective_cap() {
         "--json must carry the rendered cap: {}",
         json.stdout
     );
+    // spec: CLI-242 -- the unlimited cap (held as u64::MAX) is emitted as
+    // i64::MAX, so a consumer parsing signed 64-bit integers does not overflow.
     assert!(
-        json.stdout.contains("18446744073709551615"),
-        "--json must carry the byte count a consumer compares: {}",
+        json.stdout.contains("9223372036854775807")
+            && !json.stdout.contains("18446744073709551615"),
+        "--json must carry the byte count a consumer compares, capped at i64::MAX: {}",
         json.stdout
     );
 }
@@ -2205,6 +2208,160 @@ fn dsc104_a_malformed_config_does_not_break_a_verb_that_never_reads_it() {
         r.success,
         "resolving the cap must not make `completions` read the config: {} {}",
         r.stdout, r.stderr
+    );
+}
+
+/// `completions` and `man` read no metadata, so a malformed cap from ANY of the
+/// three origins does not fail them; every other verb keeps DSC-105's hard
+/// error, so `recall` under the same config still fails naming the key.
+// spec: DSC-113 DSC-105
+#[test]
+fn dsc113_completions_and_man_ignore_a_malformed_cap() {
+    let registry = Sandbox::bare("dsc113-skip");
+    std::fs::create_dir_all(&registry.mind_home).unwrap();
+    std::fs::write(
+        registry.mind_home.join("config.toml"),
+        "max-metadata-size = \"junk\"\n",
+    )
+    .unwrap();
+
+    for args in [vec!["completions", "bash"], vec!["man"]] {
+        let r = registry.mind(&args);
+        assert!(
+            r.success,
+            "`mind {}` must not resolve the cap: {} {}",
+            args.join(" "),
+            r.stdout,
+            r.stderr
+        );
+        assert!(
+            !r.stdout.trim().is_empty(),
+            "`mind {}` must still print its output",
+            args.join(" ")
+        );
+    }
+    // The flag and the environment are skipped too.
+    let flag = registry.mind(&["completions", "bash", "--max-metadata-size", "1.5MiB"]);
+    assert!(
+        flag.success,
+        "a bad flag must not fail completions: {}",
+        flag.stderr
+    );
+    let env = registry.mind_env(&["man"], &[("MIND_MAX_METADATA_SIZE", "nope")], None);
+    assert!(
+        env.success,
+        "a bad env value must not fail man: {}",
+        env.stderr
+    );
+
+    let recall = registry.mind(&["recall"]);
+    assert!(
+        !recall.success,
+        "every other verb keeps the hard error: {} {}",
+        recall.stdout, recall.stderr
+    );
+    assert!(
+        format!("{}{}", recall.stdout, recall.stderr).contains("max-metadata-size"),
+        "and names the config key: {} {}",
+        recall.stdout,
+        recall.stderr
+    );
+}
+
+/// A zero-valued cap turns the ceiling off with a stderr warning naming its
+/// origin (a zero is the likelier typo for a small cap); `unlimited` says so
+/// on purpose and stays silent. Under `--json` the warning stays on stderr so
+/// stdout is still one document.
+// spec: DSC-110
+#[test]
+fn dsc110_a_zero_cap_warns_and_unlimited_does_not() {
+    let registry = Sandbox::bare("dsc110-warn");
+
+    let zero = registry.mind(&["recall", "--max-metadata-size", "0"]);
+    assert!(zero.success, "a zero cap still runs: {}", zero.stderr);
+    assert!(
+        zero.stderr
+            .contains("warning: --max-metadata-size value '0' is zero")
+            && zero.stderr.contains("turns mind's metadata cap off"),
+        "a zero flag must warn, naming the flag: {}",
+        zero.stderr
+    );
+
+    for word in ["unlimited", "none"] {
+        let r = registry.mind(&["recall", "--max-metadata-size", word]);
+        assert!(r.success, "'{word}': {}", r.stderr);
+        assert!(
+            !r.stderr.contains("is zero"),
+            "'{word}' turns the cap off on purpose and must not warn: {}",
+            r.stderr
+        );
+    }
+
+    let env = registry.mind_env(&["recall"], &[("MIND_MAX_METADATA_SIZE", "0MiB")], None);
+    assert!(env.success, "env zero still runs: {}", env.stderr);
+    assert!(
+        env.stderr
+            .contains("warning: MIND_MAX_METADATA_SIZE value '0MiB' is zero"),
+        "a zero env value must warn naming the variable: {}",
+        env.stderr
+    );
+
+    let json = registry.mind(&["--json", "config", "show", "--max-metadata-size", "0"]);
+    assert!(json.success, "--json with a zero cap: {}", json.stderr);
+    assert!(
+        json.stderr.contains("is zero"),
+        "the warning goes to stderr under --json: {}",
+        json.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", json.stdout));
+    assert_eq!(doc["max_metadata_size"], "unlimited", "{doc}");
+}
+
+/// `config show` credits the flag whenever it was given, even when its value
+/// equals the config key or the default (the flag still won), and a finite
+/// cap's byte count in `--json` is emitted unchanged.
+// spec: CLI-241 CLI-242
+#[test]
+fn cli241_config_show_credits_the_flag_even_at_the_default_value() {
+    let registry = Sandbox::bare("cli241-flag-note");
+    let r = registry.mind(&["config", "show", "--max-metadata-size", "8MiB"]);
+    assert!(r.success, "config show: {}", r.stderr);
+    assert!(
+        r.stdout.contains("max-metadata-size = 8 MiB")
+            && r.stdout.contains(
+                "note: the max-metadata-size shown is this run's --max-metadata-size (8MiB)"
+            ),
+        "the flag must be credited even at the default value: {}",
+        r.stdout
+    );
+
+    let plain = registry.mind(&["config", "show"]);
+    assert!(
+        !plain.stdout.contains("note: the max-metadata-size shown"),
+        "no flag, no note: {}",
+        plain.stdout
+    );
+
+    let env = registry.mind_env(
+        &["config", "show"],
+        &[("MIND_MAX_METADATA_SIZE", "4KiB")],
+        None,
+    );
+    assert!(
+        env.stdout
+            .contains("note: MIND_MAX_METADATA_SIZE is set and overrides the max-metadata-size config key: 4KiB"),
+        "the environment must be credited: {}",
+        env.stdout
+    );
+
+    let json = registry.mind(&["--json", "config", "show", "--max-metadata-size", "32MiB"]);
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", json.stdout));
+    assert_eq!(
+        doc["max_metadata_size_bytes"].as_i64(),
+        Some(32 * 1024 * 1024),
+        "a finite cap is emitted unchanged: {doc}"
     );
 }
 
@@ -2417,7 +2574,7 @@ fn dsc111_the_non_unicode_env_refusal_is_a_json_error_envelope_under_json() {
 /// documented unlimited pair, and must produce the SAME pair `unlimited` does,
 /// or a consumer comparing `max_metadata_size_bytes` sees a cap of zero bytes
 /// where the human-readable key says there is none.
-// spec: DSC-110 CLI-241
+// spec: DSC-110 CLI-241 CLI-242
 #[test]
 fn dsc110_config_show_json_reports_a_zero_cap_as_the_documented_unlimited_pair() {
     let registry = Sandbox::bare("dsc110-json");
@@ -2435,12 +2592,13 @@ fn dsc110_config_show_json_reports_a_zero_cap_as_the_documented_unlimited_pair()
             doc["max_metadata_size"], "unlimited",
             "'{value}' must render as the string `unlimited`: {doc}"
         );
-        // CLI-241 fixes the byte count for an unlimited cap at u64::MAX, so a
-        // zero spelling must carry that and never 0 -- a consumer that compares
-        // a file size against it would refuse everything.
+        // CLI-242 fixes the byte count for an unlimited cap at i64::MAX (the
+        // largest integer mind emits), so a zero spelling must carry that and
+        // never 0 -- a consumer that compares a file size against it would
+        // refuse everything.
         assert_eq!(
-            doc["max_metadata_size_bytes"].as_u64(),
-            Some(u64::MAX),
+            doc["max_metadata_size_bytes"].as_i64(),
+            Some(i64::MAX),
             "'{value}' must carry the documented unlimited byte count: {doc}"
         );
         seen.push(doc["max_metadata_size_bytes"].clone());

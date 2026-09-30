@@ -14,7 +14,10 @@
 //!   WF-51: `probe` shows `whenToUse` beside the description
 //!   WF-56: mind's own metadata cap is reported as mind's, not as the harness's
 //!   WF-58: a `meta.name` with an invisible character is unusable, and said so
-//!   WF-60: `recall <item> --json` carries the harness name and its findings
+//!   WF-60: `recall <item> --json` carries the harness name and its findings,
+//!     including the WF-30 unloadable reasons
+//!   WF-61: an unmanaged lobe workflow is a WF-29 collision claimant
+//!   WF-62: `--json` carries `description` and `when_to_use` separately
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -257,7 +260,7 @@ fn probe_shows_when_to_use_beside_the_description() {
     let sb = Sandbox::new();
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
 
-    let r = sb.mind(&["probe", "--no-tui", "--json"]);
+    let r = sb.mind(&["probe", "--no-tui"]);
     assert!(r.success, "probe: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout
@@ -266,7 +269,7 @@ fn probe_shows_when_to_use_beside_the_description() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("\"Review the diff\""),
+        r.stdout.contains("Review the diff") && !r.stdout.contains("Review the diff -"),
         "a skill's description must be untouched: {}",
         r.stdout
     );
@@ -595,9 +598,18 @@ fn review_does_not_call_a_workflows_tokens_inert() {
     );
     let r = sb.mind(&["review", &sb.source_spec()]);
     let all = format!("{}{}", r.stdout, r.stderr);
+    // A hard finding fails the run and prints as `error [kind]:` on stderr;
+    // an advisory would leave the run green and print `advisory [kind]:`.
     assert!(
-        all.contains("bad-reference") && all.contains("nonesuch"),
-        "an unresolvable token in a workflow is a real defect: {all}"
+        !r.success,
+        "a hard bad-reference must fail the review: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr
+            .lines()
+            .any(|l| l.starts_with("error [bad-reference]:") && l.contains("nonesuch")),
+        "an unresolvable token in a workflow is a hard defect: {all}"
     );
     assert!(
         !all.contains("dead text"),
@@ -1249,15 +1261,13 @@ fn recall_json_carries_the_harness_name_and_its_findings() {
 ///
 /// WF-56 is not in play for any of these: mind's own cap is about a file too
 /// large to read, not one it could not read at all, so no cap notice may appear.
+/// An EMPTY store copy is not in this list: mind reads it fine and it declares
+/// no `meta`, which is a WF-30 finding (see
+/// `recall_reports_why_the_harness_will_not_load_an_installed_workflow`).
 // spec: WF-60 WF-5 WF-56
 #[test]
 fn recall_of_a_workflow_whose_store_copy_is_unreadable_reports_no_harness_name() {
-    for (what, break_it) in [
-        ("deleted", 0u8),
-        ("a directory", 1),
-        ("not UTF-8", 2),
-        ("empty", 3),
-    ] {
+    for (what, break_it) in [("deleted", 0u8), ("a directory", 1), ("not UTF-8", 2)] {
         let sb = Sandbox::new();
         assert!(sb.mind(&["meld", &sb.source_spec()]).success);
         assert!(sb.mind(&["learn", "workflow:review-changes"]).success);
@@ -1269,8 +1279,7 @@ fn recall_of_a_workflow_whose_store_copy_is_unreadable_reports_no_harness_name()
                 std::fs::remove_file(&store).unwrap();
                 std::fs::create_dir(&store).unwrap();
             }
-            2 => std::fs::write(&store, [0xff, 0xfe, 0x00, 0x80]).unwrap(),
-            _ => std::fs::write(&store, "").unwrap(),
+            _ => std::fs::write(&store, [0xff, 0xfe, 0x00, 0x80]).unwrap(),
         }
 
         let r = sb.mind(&["recall", "workflow:review-changes", "--json"]);
@@ -1875,5 +1884,285 @@ fn the_unguarded_reference_scan_covers_a_workflow_file() {
             && r.stdout.contains("workflow:jk:review-changes"),
         "a bare sibling name in a workflow's prompt must be reported: {}",
         r.stdout
+    );
+}
+
+/// A `{{ns:}}` token in a workflow's body is a dependency edge: learning the
+/// workflow brings the skill it names.
+// spec: DEP-1 WF-25
+#[test]
+fn a_token_in_a_workflow_body_is_a_dependency_edge() {
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        "export const meta = {\n  name: 'review-changes',\n  description: 'Review changed files',\n}\n\
+         agent(`run {{ns:review}} on the diff`)\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:review-changes", "--yes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the token's referent must come with the closure: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// The same edge from a workflow past a lowered metadata cap: the dependency
+/// scan reads the whole file, like install does (DSC-90), so mind's own cap on
+/// the `meta` read (WF-55) must not drop the edge.
+// spec: DEP-1 WF-55
+#[test]
+fn an_over_cap_workflows_token_is_still_a_dependency_edge() {
+    let sb = Sandbox::new();
+    let body = format!(
+        "{}agent(`run {{{{ns:review}}}} on the diff`)\n",
+        padded_js("review-changes")
+    );
+    sb.write_and_commit("workflows/review-changes.js", &body);
+    let spec = sb.source_spec();
+    let r = sb.mind_bounded(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind_bounded(&[
+        "learn",
+        "workflow:review-changes",
+        "--yes",
+        "--max-metadata-size",
+        "2KiB",
+    ]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("over mind's own 2 KiB metadata read cap"),
+        "the fixture must really be over the cap: {}",
+        r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "an over-cap workflow's token must still pull its referent: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// An UNMANAGED lobe workflow claims its harness name like any other: `learn`
+/// warns once about the shared name, naming the unmanaged file as one of the
+/// others (never as the subject), and `recall <item>` (text and `--json`)
+/// reports it too. The item still installs.
+// spec: WF-61 WF-29
+#[test]
+fn an_unmanaged_workflow_is_a_collision_claimant() {
+    let sb = Sandbox::new();
+    write(
+        &sb.claude_home.join("workflows/hand.js"),
+        "export const meta = { name: 'deploy', description: 'Hand-written deploy' }\n",
+    );
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' }\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:deploy", "--yes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("deploy.js").symlink_metadata().is_ok(),
+        "the item still installs"
+    );
+    let warnings: Vec<&str> = r
+        .stderr
+        .lines()
+        .filter(|l| l.contains("workflow:hand (unmanaged)"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one collision warning names the unmanaged claimant: {}",
+        r.stderr
+    );
+    assert!(
+        warnings[0].starts_with("warning: workflow:deploy:")
+            && warnings[0].contains("harness name 'deploy'"),
+        "the installed item is the subject: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("warning: workflow:hand"),
+        "an unmanaged claimant is never the subject: {}",
+        r.stderr
+    );
+
+    let text = sb.mind(&["recall", "workflow:deploy"]);
+    assert!(text.success, "recall: {}\n{}", text.stdout, text.stderr);
+    assert!(
+        text.stdout.contains("workflow:hand (unmanaged)"),
+        "recall <item> must report the unmanaged claimant: {}",
+        text.stdout
+    );
+    let json = sb.mind(&["recall", "workflow:deploy", "--json"]);
+    assert!(
+        json.success,
+        "recall --json: {}\n{}",
+        json.stdout, json.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).expect("one document");
+    let findings = doc["workflow_findings"].as_array().expect("findings array");
+    assert!(
+        findings.iter().any(|f| f
+            .as_str()
+            .is_some_and(|s| s.contains("workflow:hand (unmanaged)"))),
+        "the --json findings carry it too: {doc}"
+    );
+}
+
+/// `--json` carries a workflow's `description` unchanged and its `whenToUse`
+/// as a separate `when_to_use` key, in `probe --json` and `recall --json`
+/// (list and item). Other kinds never carry the key. The joined form stays
+/// human output (`probe --no-tui`).
+// spec: WF-62 WF-51
+#[test]
+fn json_carries_when_to_use_separately_from_the_description() {
+    let sb = Sandbox::new();
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["probe", "--no-tui", "--json"]);
+    assert!(r.success, "probe --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one document");
+    let rows = doc["items"].as_array().expect("items array");
+    let wf = rows
+        .iter()
+        .find(|row| row["kind"] == "workflow" && row["name"] == "review-changes")
+        .unwrap_or_else(|| panic!("a workflow row: {doc}"));
+    assert_eq!(wf["description"], "Review changed files", "{wf}");
+    assert_eq!(wf["when_to_use"], "before opening a PR", "{wf}");
+    let skill = rows
+        .iter()
+        .find(|row| row["kind"] == "skill" && row["name"] == "review")
+        .unwrap_or_else(|| panic!("a skill row: {doc}"));
+    assert!(
+        skill.get("when_to_use").is_none(),
+        "a skill has no key: {skill}"
+    );
+
+    let human = sb.mind(&["probe", "--no-tui"]);
+    assert!(
+        human
+            .stdout
+            .contains("Review changed files - before opening a PR"),
+        "human output keeps the join: {}",
+        human.stdout
+    );
+
+    assert!(
+        sb.mind(&["learn", "workflow:review-changes", "--yes"])
+            .success
+    );
+    assert!(sb.mind(&["learn", "skill:review", "--yes"]).success);
+
+    let r = sb.mind(&["recall", "workflow:review-changes", "--json"]);
+    assert!(r.success, "recall item --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one document");
+    assert_eq!(doc["description"], "Review changed files", "{doc}");
+    assert_eq!(doc["when_to_use"], "before opening a PR", "{doc}");
+    let r = sb.mind(&["recall", "skill:review", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one document");
+    assert!(
+        doc.get("when_to_use").is_none(),
+        "a skill has no key: {doc}"
+    );
+
+    let r = sb.mind(&["recall", "--json"]);
+    assert!(r.success, "recall --json: {}\n{}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).expect("one document");
+    let rows: Vec<&serde_json::Value> = doc["items"]
+        .as_array()
+        .expect("sources array")
+        .iter()
+        .flat_map(|s| s["items"].as_array().expect("item rows").iter())
+        .collect();
+    let wf = rows
+        .iter()
+        .find(|row| row["key"] == "workflow:review-changes")
+        .unwrap_or_else(|| panic!("a workflow row: {doc}"));
+    assert_eq!(wf["when_to_use"], "before opening a PR", "{wf}");
+    let skill = rows
+        .iter()
+        .find(|row| row["key"] == "skill:review")
+        .unwrap_or_else(|| panic!("a skill row: {doc}"));
+    assert!(
+        skill.get("when_to_use").is_none(),
+        "a skill has no key: {skill}"
+    );
+}
+
+/// `recall <item>` reports why the harness would not load an installed
+/// workflow, the same WF-30 reasons `learn` warns with, in the text view and
+/// the `--json` findings: a `meta` missing its description, and an empty store
+/// copy (which mind reads fine and finds no `meta` in). A store copy mind
+/// cannot read at all stays finding-free (see
+/// `recall_of_a_workflow_whose_store_copy_is_unreadable_reports_no_harness_name`).
+// spec: WF-30 WF-60
+#[test]
+fn recall_reports_why_the_harness_will_not_load_an_installed_workflow() {
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/bare.js",
+        "export const meta = { name: 'bare' }\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "workflow:bare", "--yes"]).success);
+
+    let text = sb.mind(&["recall", "workflow:bare"]);
+    assert!(text.success, "recall: {}\n{}", text.stdout, text.stderr);
+    assert!(
+        text.stdout.lines().any(|l| l.contains("harness")
+            && l.contains("the harness will not load this workflow")
+            && l.contains("`meta.description` is missing")),
+        "the text view must print the unloadable reason: {}",
+        text.stdout
+    );
+    let json = sb.mind(&["recall", "workflow:bare", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).expect("one document");
+    let findings: Vec<&str> = doc["workflow_findings"]
+        .as_array()
+        .expect("findings array")
+        .iter()
+        .filter_map(|f| f.as_str())
+        .collect();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("`meta.description` is missing")),
+        "the --json findings carry it: {doc}"
+    );
+
+    // An empty store copy is readable and declares nothing.
+    assert!(
+        sb.mind(&["learn", "workflow:review-changes", "--yes"])
+            .success
+    );
+    std::fs::write(sb.mind_home.join("store/workflow/review-changes"), "").unwrap();
+    let json = sb.mind(&["recall", "workflow:review-changes", "--json"]);
+    assert!(
+        json.success,
+        "recall --json: {}\n{}",
+        json.stdout, json.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).expect("one document");
+    assert!(doc["harness_name"].is_null(), "{doc}");
+    assert!(
+        doc["workflow_findings"]
+            .as_array()
+            .expect("findings array")
+            .iter()
+            .any(|f| f
+                .as_str()
+                .is_some_and(|s| s.contains("mind read no `name`"))),
+        "an empty store copy is a WF-30 finding: {doc}"
     );
 }

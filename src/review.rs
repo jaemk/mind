@@ -629,8 +629,9 @@ fn run_checks(
     // spec: WF-53, WF-55, CLI-237
     // The workflow counterpart of Check 8b. A workflow is not content the
     // harness offers, it is JavaScript the harness evaluates to drive subagents
-    // (workflows.md WF-1, WF-5), and mind neither reads nor validates its body:
-    // the `meta` reader looks at one object literal and nothing else. So a
+    // (workflows.md WF-1, WF-5), and mind does not evaluate its program logic:
+    // it parses only the `meta` object (one object literal) and expands
+    // `{{ns:}}` tokens at install. So a
     // source shipping workflows must not review as a clean bill of health, and
     // every workflow item is disclosed, not just one that tripped some pattern.
     // Disclosure, not a gate: WF-31/WF-32 keep every workflow check a report.
@@ -638,10 +639,10 @@ fn run_checks(
     // The file itself is not read here at all. The disclosure is unconditional
     // (WF-53), so there is nothing to read it FOR, and WF-55 settled the one
     // reason this check used to open it: an over-cap `.js` is no longer a hard
-    // `metadata-too-large` finding, it is a workflow with no readable `meta`,
-    // which Check 17 reports as `workflow-unloadable` like any other. mind's
-    // read of a workflow stays capped where it happens (the catalog scan); a
-    // second read here would only re-derive that answer.
+    // `metadata-too-large` finding, it is a workflow mind did not read, which
+    // Check 17 reports as `workflow-unread` (WF-56), not `workflow-unloadable`.
+    // mind's read of a workflow stays capped where it happens (the catalog
+    // scan); a second read here would only re-derive that answer.
     for item in &items {
         if item.kind != crate::error::ItemKind::Workflow {
             continue;
@@ -682,7 +683,7 @@ fn run_checks(
         .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()));
 
     for item in &items {
-        for file in item_files(item) {
+        for file in review_item_files(item) {
             let content = match std::fs::read_to_string(&file) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -797,7 +798,7 @@ fn run_checks(
     if prefix.is_some() {
         for item in &items {
             let mut refs: Vec<String> = Vec::new();
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -854,7 +855,7 @@ fn run_checks(
             siblings: &path_siblings,
         };
         let mut bare_tools: Vec<String> = Vec::new();
-        for file in item_files(item) {
+        for file in review_item_files(item) {
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue;
             };
@@ -1188,7 +1189,7 @@ fn run_checks(
             items.iter().filter(|it| it.source == source_name).collect();
         let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
         for item in &items {
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -1247,7 +1248,7 @@ fn run_checks(
             items.iter().filter(|it| it.source == source_name).collect();
         for item in &items {
             let mut flagged: HashSet<String> = HashSet::new();
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -1325,7 +1326,10 @@ fn run_checks(
             if let Some(notice) = crate::workflow_check::cap_notice(&read) {
                 advisory.push(Finding::advisory(
                     "workflow-unread",
-                    format!("{}: {notice}", item.key().as_str()),
+                    format!(
+                        "{}: {notice} mind's token and reference checks were skipped for this file.",
+                        item.key().as_str()
+                    ),
                 ));
             }
             for reason in crate::workflow_check::skip_reasons(&read) {
@@ -1402,7 +1406,7 @@ fn run_checks(
                     self_name: &item.name,
                     siblings: &path_siblings,
                 };
-                for file in item_files(item) {
+                for file in review_item_files(item) {
                     // NS-54: a token expands only in markdown (NS-53), so a
                     // non-markdown file is reported (Checks 8-11 above already
                     // do so) and never rewritten -- turning a hardcoded path
@@ -1497,17 +1501,12 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
 /// one of these expands bare even under a prefix, and a name held by both an
 /// agent and another kind keeps the prefix (the cross-kind shadow rule).
 fn bare_names_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
-    let agents: HashSet<String> = items
-        .iter()
-        .filter(|it| it.source == source && it.kind == crate::error::ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    let others: HashSet<String> = items
-        .iter()
-        .filter(|it| it.source == source && it.kind != crate::error::ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    agents.difference(&others).cloned().collect()
+    crate::namespace::bare_agent_names(
+        items
+            .iter()
+            .filter(|it| it.source == source)
+            .map(|it| (it.kind, it.name.as_str())),
+    )
 }
 
 /// Detect helper files duplicated byte-for-byte across two or more items, which
@@ -1568,7 +1567,8 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
 }
 
 /// All text files for an item: every file under a skill dir, or the single
-/// agent/rule file.
+/// agent/rule/command/workflow file. The full list for every kind, including an
+/// over-cap workflow; `review`'s own content checks use [`review_item_files`].
 pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     if item.path.is_dir() {
         let mut files = Vec::new();
@@ -1593,16 +1593,29 @@ pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
             !ignore.is_under_ignored(rel)
         });
         files
-    } else if item.kind == crate::error::ItemKind::Workflow
-        && std::fs::metadata(&item.path)
-            .is_ok_and(|m| m.len() > crate::error::metadata_size_limit())
-    {
-        // spec: WF-55 -- a workflow past the metadata cap reads as no `meta`
-        // (Check 17 reports it); its body is never read by a later check either.
-        Vec::new()
     } else {
         vec![item.path.clone()]
     }
+}
+
+/// [`item_files`] as `review`'s content checks read it: the same list, minus a
+/// workflow past mind's metadata cap.
+///
+/// spec: WF-55 -- the exclusion is review-only. `review` reports such a file as
+/// `workflow-unread` (WF-56) and skips its token and reference checks, but the
+/// other callers of [`item_files`] (install, the DEP-1 dependency scan, meld's
+/// unguarded-reference scan) read the whole file under DSC-90's uncapped content
+/// semantics, so an over-cap workflow's `{{ns:}}` references still pull their
+/// referents.
+fn review_item_files(item: &CatalogItem) -> Vec<PathBuf> {
+    if item.kind == crate::error::ItemKind::Workflow
+        && !item.path.is_dir()
+        && std::fs::metadata(&item.path)
+            .is_ok_and(|m| m.len() > crate::error::metadata_size_limit())
+    {
+        return Vec::new();
+    }
+    item_files(item)
 }
 
 /// The path remainder that follows a closing `}}` in text, as an item-relative
@@ -1762,6 +1775,64 @@ mod tests {
             install_hook: None,
             install_hook_commit: None,
         }
+    }
+
+    // --- review_item_files: the over-cap workflow exclusion is review-only ---
+
+    fn file_item(kind: crate::error::ItemKind, path: PathBuf) -> CatalogItem {
+        CatalogItem {
+            kind,
+            name: "x".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path,
+            description: None,
+            when_to_use: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            requires: Vec::new(),
+            expand: Vec::new(),
+            hooks: Vec::new(),
+            ignore: None,
+        }
+    }
+
+    /// A sparse file `len` bytes long (no real allocation).
+    fn sparse(path: &Path, len: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(path).unwrap();
+        f.set_len(len).unwrap();
+    }
+
+    /// `item_files` is the full list (hashing callers rely on it); only
+    /// `review_item_files` drops a workflow strictly past the cap.
+    /// spec: WF-55
+    #[test]
+    fn review_item_files_drops_only_a_workflow_strictly_over_the_cap() {
+        use crate::error::{ItemKind, METADATA_SIZE_LIMIT};
+        let tmp = TmpDir::new();
+        let over = tmp.path().join("over.js");
+        sparse(&over, METADATA_SIZE_LIMIT + 1);
+        let at = tmp.path().join("at.js");
+        sparse(&at, METADATA_SIZE_LIMIT);
+        let rule = tmp.path().join("rule.md");
+        sparse(&rule, METADATA_SIZE_LIMIT + 1);
+
+        let wf_over = file_item(ItemKind::Workflow, over.clone());
+        assert_eq!(item_files(&wf_over), vec![over]);
+        assert!(review_item_files(&wf_over).is_empty());
+
+        let wf_at = file_item(ItemKind::Workflow, at.clone());
+        assert_eq!(review_item_files(&wf_at), vec![at]);
+
+        // The cap is a workflow rule: another kind's file is still listed.
+        let r = file_item(ItemKind::Rule, rule.clone());
+        assert_eq!(review_item_files(&r), vec![rule]);
+
+        // A missing workflow file is not "over the cap".
+        let gone = file_item(ItemKind::Workflow, tmp.path().join("gone.js"));
+        assert_eq!(review_item_files(&gone).len(), 1);
     }
 
     // --- target resolution precedence (CLI-130) ---

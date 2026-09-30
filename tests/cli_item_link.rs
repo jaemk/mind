@@ -371,9 +371,13 @@ fn link_to_a_workflow_names_it_as_unsupported() {
         r.stderr
     );
     assert!(
-        r.stderr.contains("mind learn workflow:") || r.stderr.contains("meld"),
-        "the error must point at melding the repo or `learn workflow:<name>` \
-         instead: {}",
+        r.stderr.contains("mind probe <name>"),
+        "the error must say how to find the workflow's ref after melding: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("--add-root"),
+        "the error must name --add-root for a workflow the inventory leaves out: {}",
         r.stderr
     );
     assert!(
@@ -411,7 +415,7 @@ fn a_blob_link_to_a_workflow_fails_at_parse_not_at_scan() {
         r.stderr
     );
     assert!(
-        !r.stderr.contains("does not support installing a workflow"),
+        !r.stderr.contains("does not install a workflow"),
         "the blob form must NOT borrow the WF-6 wording -- it never gets far \
          enough to classify the path: {}",
         r.stderr
@@ -496,9 +500,7 @@ fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
     let absent = sb.mind(&["learn", &sb.link("tree/main/workflows/absent.js")]);
     assert!(!absent.success, "{}", absent.stdout);
     assert!(
-        absent
-            .stderr
-            .contains("does not support installing a workflow"),
+        absent.stderr.contains("does not install a workflow"),
         "a workflow-shaped path that is not in the repo still gets the WF-6 \
          message: {}",
         absent.stderr
@@ -513,6 +515,11 @@ fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
     assert!(
         !stray.stderr.contains("workflow"),
         "a `.js` outside workflows/ must not be claimed to be a workflow: {}",
+        stray.stderr
+    );
+    assert!(
+        stray.stderr.contains("meld the repo instead"),
+        "the remedy is to meld the repo: {}",
         stray.stderr
     );
     assert!(

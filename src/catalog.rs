@@ -259,22 +259,14 @@ impl CatalogItem {
     /// with a workflow's `whenToUse` appended as `<description> - <whenToUse>`,
     /// the way the harness's own workflow list renders the pair (WF-51).
     ///
-    /// Every CATALOG-derived surface that shows a description goes through
-    /// here, `--json` included: `when_to_use` is not recorded in the manifest
-    /// and `dump` does not emit it, so a JSON consumer reading the raw
-    /// description alone would have no way left to see it. An item with no
-    /// `whenToUse` -- every item of every other kind -- reads exactly as
-    /// `description` does.
+    /// This is the HUMAN display join: `probe --no-tui`, the probe TUI's
+    /// catalog rows, and query matching ([`matches_query`]) go through here.
+    /// An item with no `whenToUse` -- every item of every other kind -- reads
+    /// exactly as `description` does.
     ///
-    /// What is NOT reached is every MANIFEST-derived surface, not one of them:
-    /// `recall`, `recall --json`, and the probe TUI's installed-item rows all
-    /// read the manifest (`src/manifest.rs`, `src/tui/data.rs`), which never
-    /// records `whenToUse`, so an installed workflow shows its bare description
-    /// there. The split is by data source, not by surface: `probe --json` is
-    /// catalog-derived and so DOES show the joined `<description> - <whenToUse>`
-    /// string, while `recall --json` shows the description alone. Recording
-    /// `whenToUse` in the manifest (or emitting it as its own JSON key rather
-    /// than joined into `description`) is deliberately deferred.
+    /// The `--json` surfaces do NOT use it: `probe --json` and `recall --json`
+    /// emit `description` unchanged and `whenToUse` as its own `when_to_use`
+    /// key (WF-62), so a JSON consumer never has to split the joined string.
     ///
     /// spec: WF-51
     pub fn display_description(&self) -> Option<String> {
@@ -361,6 +353,23 @@ pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     Ok(items)
 }
 
+/// Source names already warned about a reserved-word prefix in this process
+/// (DSC-112), so the warning prints once per source however many scans a verb
+/// runs.
+static WARNED_RESERVED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// True the first time it is called for `source_name` in this process.
+///
+/// spec: DSC-112
+fn first_reserved_warning(source_name: &str) -> bool {
+    let set = WARNED_RESERVED.get_or_init(Default::default);
+    // A poisoned lock only means another thread panicked mid-insert; the set
+    // is still usable, and a duplicate warning beats none.
+    let mut guard = set.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(source_name.to_string())
+}
+
 pub(crate) fn scan_source(
     paths: &Paths,
     source: &Source,
@@ -426,13 +435,16 @@ pub(crate) fn scan_source_at(
     // prefix already, and failing every scanning verb would take the user's
     // whole lobe down over a naming problem. Warn and carry on, the way the
     // unguarded-reference and vanished-source paths do.
+    // A verb can scan the same source several times in one run (upgrade syncs,
+    // then rescans), so the warning is printed once per source per process.
     if let Some(p) = &prefix
         && namespace::validate_prefix(p).is_err()
+        && first_reserved_warning(&source.name)
     {
         crate::render::scan_warn(format!(
             "warning: source '{}': its namespace prefix '{}' is a word mind now reserves, so \
-             '{}:<name>' reads as a kind-qualified ref rather than a namespaced item; re-meld \
-             with `--namespace <other>` to rename it",
+             '{}:<name>' reads as a kind-qualified ref rather than a namespaced item; unmeld \
+             it, then re-meld with `--namespace <other>` to rename it",
             crate::sanitize::strip_ansi(&source.name),
             crate::sanitize::strip_ansi(p),
             crate::sanitize::strip_ansi(p),
@@ -608,7 +620,8 @@ pub(crate) fn is_file_link(item_path: &str) -> bool {
 /// Whether an item-link path names a workflow's own file (LNK-20, WF-6): its
 /// parent directory is `workflows/` AND its extension is `.js`, the shape the
 /// convention scan calls a workflow (WF-1). A workflow is never a valid
-/// item-link target -- the blob/tree link form takes `.md` files only (LNK-20)
+/// item-link target -- a blob link takes a `.md` file, a tree link a skill
+/// directory (LNK-20)
 /// -- so `scan_item_link` uses this to tell "the path names a deliberately
 /// unsupported kind" apart from "the path is simply wrong", raising
 /// [`MindError::LinkKindNotSupported`] instead of the generic `LinkNotASkill`.
@@ -742,13 +755,18 @@ fn scan_item_link(
     if !canon.starts_with(&canon_root) {
         return Err(bad_target());
     }
+    // The checks run on the canonical `target`; the item itself carries the
+    // path under the clone root as the caller named it, like every other scan
+    // path, so a symlinked temp root does not leak its resolved form into the
+    // catalog.
+    let item_path_abs = clone_root.join(item_path);
     let (kind, path, meta) = if file_link {
         if !target.is_file() {
             return Err(bad_target());
         }
         // spec: LNK-21 -- a file item is its own metadata anchor.
         let kind = resolve_file_link_kind(source, item_path, &target)?;
-        (kind, target.clone(), target)
+        (kind, item_path_abs.clone(), item_path_abs)
     } else {
         // spec: LNK-21 -- a directory link is always the skill reading, so an
         // explicit kind naming anything else is a mismatch.
@@ -779,7 +797,8 @@ fn scan_item_link(
             }
             return Err(bad_target());
         }
-        (ItemKind::Skill, target, skill_md)
+        let meta = item_path_abs.join("SKILL.md");
+        (ItemKind::Skill, item_path_abs, meta)
     };
     if let Some(item) = make_item(clone_root, source, prefix, kind, path, &meta)? {
         out.push(item);
@@ -1052,8 +1071,11 @@ fn scan_add_roots(
         let skills_dir = root.join(ItemKind::Skill.dir());
         for entry in read_container_opt(&skills_dir)? {
             let skill_md = entry.join("SKILL.md");
-            if entry.is_dir()
-                && skill_md.is_file()
+            // spec: DSC-108 -- classified no-follow, as the convention scan
+            // does: a symlinked skill dir or anchor would read a file outside
+            // the clone into the catalog.
+            if is_dir_nofollow(&entry)
+                && is_regular_file_nofollow(&skill_md)
                 && let Some(item) = make_item(
                     clone_root,
                     source,
@@ -1103,6 +1125,75 @@ fn scan_add_roots(
         }
     }
     Ok(())
+}
+
+/// Classify an `[[items]]` declared path WITHOUT following or opening it
+/// (DSC-108, DSC-73). `Ok(true)` keeps the item; `Ok(false)` drops it after a
+/// warning (DSC-98 style): the final component, or a skill/tool anchor file,
+/// is a symlink or not a regular file (a fifo, socket, or device would hang or
+/// stream on read). A path whose canonical form leaves the clone (reached
+/// through a symlinked parent directory) is a hard error, the way an escaping
+/// `[discover]` glob match is (DSC-81).
+///
+/// spec: DSC-108 DSC-73
+fn declared_path_is_own(
+    root: &Path,
+    source: &Source,
+    kind: ItemKind,
+    rel: &str,
+    path: &Path,
+    safe_name: &str,
+) -> Result<bool> {
+    let drop_with = |shown: &str, what: &str| {
+        crate::render::scan_warn(format!(
+            "warning: source '{}': [[items]] entry '{safe_name}' path '{}' {what}; a declared \
+             item must be the repo's own file or directory, so it is not offered",
+            crate::sanitize::strip_ansi(&source.name),
+            crate::sanitize::strip_ansi(shown),
+        ));
+        Ok(false)
+    };
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        // Absent: nothing to classify; later stages report it as they did.
+        return Ok(true);
+    };
+    if md.file_type().is_symlink() {
+        return drop_with(rel, "is a symlink");
+    }
+    // The final component is the repo's own entry; an intermediate symlinked
+    // directory can still carry it outside the clone.
+    let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canon.starts_with(&canon_root) {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "item '{safe_name}' path '{}' resolves outside the repo root",
+                crate::sanitize::strip_ansi(rel)
+            ),
+        });
+    }
+    match kind {
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => {
+            let ft = md.file_type();
+            if !ft.is_file() && !ft.is_dir() {
+                return drop_with(rel, "is not a regular file");
+            }
+        }
+        ItemKind::Skill | ItemKind::Tool => {
+            let anchor = meta_file(kind, path);
+            if let Ok(am) = std::fs::symlink_metadata(&anchor) {
+                let anchor_rel = format!("{}/{}", rel.trim_end_matches('/'), file_name(&anchor));
+                if am.file_type().is_symlink() {
+                    return drop_with(&anchor_rel, "is a symlink");
+                }
+                if !am.file_type().is_file() {
+                    return drop_with(&anchor_rel, "is not a regular file");
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Build a catalog item from an explicit `[[items]]` declaration.
@@ -1160,10 +1251,11 @@ fn from_decl(
                 path: root.join("mind.toml"),
                 msg: format!(
                     "item '{safe_name}' has a link '{}' outside a kind directory: it must begin \
-                     with 'skills/', 'agents/', 'rules/', or 'tools/' (a link cannot place a file \
-                     at the agent-home root or inside a harness's own config, e.g. \
-                     'settings.json'), and only a command may link into 'commands/', where a file \
-                     becomes the slash command '/<name>'",
+                     with 'skills/', 'agents/', 'rules/', 'commands/', 'workflows/', or 'tools/' (a \
+                     link cannot place a file at the agent-home root or inside a harness's own \
+                     config, e.g. 'settings.json'), and only a command may link into \
+                     'commands/' and only a workflow into 'workflows/', since the harness offers \
+                     or runs what it finds there",
                     crate::sanitize::strip_ansi(link)
                 ),
             });
@@ -1200,8 +1292,8 @@ fn from_decl(
     // tree at a link target the harness tries to load as a script, and reports
     // a directory's size in `review`. The author wrote this path, so it is a
     // hard refusal here rather than a warn-and-skip. Classified no-follow
-    // (DSC-108): a symlink is not a directory to this check, and the install
-    // copy walk rejects it outright (LIFE-42).
+    // (DSC-108): a symlink is not a directory to this check; it is dropped at
+    // scan by the DSC-108 guard below, never offered.
     if kind == ItemKind::Workflow
         && std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir())
     {
@@ -1213,6 +1305,11 @@ fn from_decl(
                 crate::sanitize::strip_ansi(&decl.path)
             ),
         });
+    }
+    // spec: DSC-108 DSC-73 -- a declared path is classified no-follow, like
+    // every convention and glob match, before anything opens it.
+    if !declared_path_is_own(root, source, kind, &decl.path, &path, &safe_name)? {
+        return Ok(None);
     }
     let meta = meta_file(kind, &path);
     // HOOK-86: resolve the item's full lifecycle hook list (scalar shorthand
@@ -2170,6 +2267,12 @@ pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::Skipped
 /// failed meld.
 // spec: MKT-4
 fn unmapped_flat_entries(dir: &Path, ext: &str) -> u32 {
+    // spec: MKT-4 DSC-108 -- a symlinked `commands/`/`workflows/` folder is
+    // never scanned (`read_container_opt`), so it is one unmapped entry; it is
+    // not listed, since listing it would walk a directory outside the source.
+    if is_symlink(dir) {
+        return 1;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
@@ -2316,7 +2419,10 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                 if linked {
                     continue;
                 }
-                out.push(p);
+                // The glob ran under the canonical root; hand back the match
+                // under the root the caller named, so the item's path keeps the
+                // non-canonical form every other scan path carries (DSC-81).
+                out.push(root.join(p.strip_prefix(&canonical_root).unwrap_or(&p)));
             }
             Err(e) => {
                 let path = e.path().to_path_buf();
@@ -4175,15 +4281,19 @@ mod tests {
 
     #[test]
     fn agent_harness_name_falls_back_when_frontmatter_is_oversized() {
-        // spec: NS-40 DSC-91 -- this read goes through the same size-capped
+        // spec: DSC-91 NS-40 -- this read goes through the same size-capped
         // helper every other metadata read uses; an oversized frontmatter file
         // must not be read in full, and must be treated like an unreadable one:
         // fall back to the bare catalog name rather than error out (the method
-        // returns `Option`, not `Result`).
+        // returns `Option`, not `Result`). The file STARTS with a valid header
+        // naming `other`, so an uncapped read would return `other`: only the
+        // cap makes this fall back to the bare name.
+        use std::io::Write as _;
         let dir = TmpDir::new();
         let p = dir.path().join("agents/coder.md");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        let file = std::fs::File::create(&p).unwrap();
+        let mut file = std::fs::File::create(&p).unwrap();
+        file.write_all(b"---\nname: other\n---\n").unwrap();
         file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
         drop(file);
         let item = agent_item(p, "coder");
@@ -4200,6 +4310,162 @@ mod tests {
         let mut item = agent_item(p, "review");
         item.kind = ItemKind::Skill;
         assert_eq!(item.agent_harness_name(), None);
+    }
+
+    #[test]
+    fn the_reserved_prefix_warning_is_owed_once_per_source() {
+        // spec: DSC-112 -- the gate the scan consults before warning: true the
+        // first time a source is seen in this process, false after, and
+        // independent per source.
+        let a = format!("local/test/dsc112-a-{}", std::process::id());
+        let b = format!("local/test/dsc112-b-{}", std::process::id());
+        assert!(first_reserved_warning(&a), "first sighting warns");
+        assert!(!first_reserved_warning(&a), "a repeat sighting does not");
+        assert!(first_reserved_warning(&b), "another source still warns");
+        assert!(!first_reserved_warning(&b));
+    }
+
+    /// An `ItemDecl` with only kind, name, path, and link set.
+    fn bare_decl(kind: &str, name: &str, path: &str, link: Option<&str>) -> ItemDecl {
+        ItemDecl {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            path: path.to_string(),
+            link: link.map(str::to_string),
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            update: None,
+            uninstall: None,
+            hooks: Vec::new(),
+            ignore: None,
+        }
+    }
+
+    #[test]
+    fn from_decl_link_refusal_names_the_workflow_only_rule() {
+        // spec: WF-8 DSC-97 -- a non-workflow linking into `workflows/` is
+        // refused, and the message states the own-kind-only rule for both
+        // invocable directories.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("rules/style.md"), "---\ndescription: d\n---\n");
+        let source = make_source_for(root);
+        let decl = bare_decl(
+            "rule",
+            "style",
+            "rules/style.md",
+            Some("workflows/deploy.js"),
+        );
+        match from_decl(root, &source, &None, &decl) {
+            Err(MindError::MindToml { msg, .. }) => {
+                assert!(
+                    msg.contains("only a workflow into 'workflows/'"),
+                    "the message must state the workflow-only rule: {msg}"
+                );
+                assert!(
+                    msg.contains("'commands/', 'workflows/', or 'tools/'"),
+                    "the message must list every kind directory: {msg}"
+                );
+            }
+            other => panic!("expected a MindToml schema error, got: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_decl_drops_a_declared_fifo_without_opening_it() {
+        // spec: DSC-108 -- a fifo at a declared workflow path would block the
+        // first read forever; the scan classifies it no-follow and drops it
+        // without opening it.
+        let tmp = TmpDir::new();
+        let root = tmp.path().to_path_buf();
+        std::fs::create_dir_all(root.join("workflows")).unwrap();
+        let fifo = root.join("workflows/pipe.js");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            // No `mkfifo` on this host: nothing to exercise.
+            return;
+        }
+        let source = make_source_for(&root);
+        let decl = bare_decl("workflow", "pipe", "workflows/pipe.js", None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_root = root.clone();
+        std::thread::spawn(move || {
+            let r = from_decl(&thread_root, &source, &None, &decl).map(|o| o.is_none());
+            let _ = tx.send(r);
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("from_decl must not hang on a fifo");
+        assert!(
+            matches!(got, Ok(true)),
+            "a declared fifo must be dropped (Ok(None)): {got:?}"
+        );
+        // Unblock a leaked reader, should one exist, before the dir is removed.
+        let _ = std::fs::remove_file(&fifo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_match_path_keeps_the_non_canonical_root() {
+        // spec: DSC-81 -- the glob runs under the canonical root, but the item
+        // carries its path under the root the scan was given, as every other
+        // scan path does, so a symlinked root does not leak its resolved form.
+        let tmp = TmpDir::new();
+        let real = tmp.path().join("real");
+        write_file(
+            &real.join("agents/coder.md"),
+            "---\ndescription: coder\n---\n",
+        );
+        write_file(
+            &real.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n",
+        );
+        write_file(
+            &real.join("mind.toml"),
+            "[discover]\nagents = { include = [\"agents/*.md\"] }\n\
+             skills = { include = [\"skills/*/SKILL.md\"] }\n",
+        );
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let source = make_source_for(&link);
+        let mut items = Vec::new();
+        scan_source_at(&link, &source, &mut items).unwrap();
+        assert_eq!(items.len(), 2, "both matches are offered: {items:?}");
+        for it in &items {
+            assert!(
+                it.path.starts_with(&link),
+                "the item path must be under the non-canonical root {}: {}",
+                link.display(),
+                it.path.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn item_link_path_keeps_the_non_canonical_root() {
+        // spec: LNK-7 DSC-81 -- the confinement check runs on the canonical
+        // target, but the item carries its path under the clone root.
+        let tmp = TmpDir::new();
+        let real = tmp.path().join("real");
+        write_file(
+            &real.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n",
+        );
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut source = make_source_for(&link);
+        source.item_path = Some("skills/review".to_string());
+        let mut items = Vec::new();
+        scan_source_at(&link, &source, &mut items).unwrap();
+        assert_eq!(items.len(), 1, "the linked skill is offered: {items:?}");
+        assert_eq!(items[0].path, link.join("skills/review"));
     }
 
     // ---- DSC-81: [discover] glob confinement --------------------------------
@@ -5272,6 +5538,43 @@ mod plugin_tests {
         assert!(
             items.is_empty(),
             "the symlinked entry must not be discovered: {items:?}"
+        );
+    }
+
+    // A plugin whose whole `workflows/` folder is a symlink is never scanned
+    // (the container is refused), so the report counts the folder as ONE
+    // unmapped entry rather than listing the outside directory it points at.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_skipped_components_counts_a_symlinked_workflows_dir_once() {
+        // spec: MKT-4 DSC-108
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let plugin_root = base.join("my-plugin");
+        write_file(
+            &base.join("outside/a.js"),
+            "export const meta = { name: 'a', description: 'd' }\n",
+        );
+        write_file(
+            &base.join("outside/b.js"),
+            "export const meta = { name: 'b', description: 'd' }\n",
+        );
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), plugin_root.join("workflows")).unwrap();
+
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert_eq!(
+            skipped.workflows, 1,
+            "a symlinked workflows/ folder is one unmapped entry, not a listing of \
+             the directory it points at: {skipped:?}"
+        );
+
+        let source = make_plugin_source(&plugin_root);
+        let mut items = Vec::new();
+        scan_plugin_components(&plugin_root, &source, &None, &mut items).unwrap();
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::Workflow),
+            "no workflow may be discovered through a symlinked folder: {items:?}"
         );
     }
 

@@ -278,6 +278,24 @@ impl<'a> Cursor<'a> {
     /// bearing: `.` is what a member expression has instead of a boundary, and
     /// the depth test keeps a `meta` declared inside a block or a call from
     /// standing in for the module-level one the harness reads.
+    ///
+    /// spec: WF-57 -- regex literals are skipped whole, so their contents never
+    /// move the bracket count or open a string. A `/` is a regex opener only in
+    /// EXPRESSION-START position, the place a JavaScript tokenizer expects an
+    /// operand: the start of the file, after a line break at depth 0, after one
+    /// of the punctuators `= ( , : [ ! & | ? ; { } ~ + - * % < > ^ /`, a prefix
+    /// `++`/`--`, or after one of the keywords `return typeof instanceof in of
+    /// new delete void throw case do else yield await`. After any other
+    /// identifier, a number, a string or template, `)`, `]`, or a postfix
+    /// `++`/`--`, a `/` is the division operator. Inside the literal a
+    /// backslash escapes the next character and a `[ ... ]` class hides a `/`;
+    /// an unescaped `/` outside a class closes it and its flags are skipped. An
+    /// unterminated literal stops at the line break (or end of file) that ends
+    /// it. Without this, `/[{]/` left the count one bracket high for the rest
+    /// of the file (hiding the real declaration), `/}/` inside a block closed
+    /// the block early (exposing a nested one), and `` /`/ `` opened a template
+    /// that swallowed the real declaration while a decoy spelled inside the
+    /// "template" text was read as code.
     fn seek_meta_object(&mut self) -> bool {
         /// How much of `export const meta` has been matched, contiguously.
         #[derive(PartialEq)]
@@ -293,6 +311,12 @@ impl<'a> Cursor<'a> {
         // is not parsing cannot push the scan below zero and lock it out of
         // ever matching.
         let mut depth: usize = 0;
+        // Expression-start position: whether a `/` here opens a regex literal
+        // rather than dividing. The start of the file is one.
+        let mut expr_start = true;
+        // Whether the previous token was a `.`: the word after it is a property
+        // name, never a keyword, so `obj.return / 2` still divides.
+        let mut after_dot = false;
         loop {
             if self.skip_trivia() && depth == 0 {
                 // A line break at depth 0 ends a statement (JavaScript's own
@@ -300,15 +324,61 @@ impl<'a> Cursor<'a> {
                 // does not interrupt the triple: `export /* c */ const\n meta`
                 // is one declaration.
                 at_statement = true;
+                expr_start = true;
             }
             let Some(c) = self.peek() else { return false };
+            let was_dot = std::mem::take(&mut after_dot);
             if c == '\'' || c == '"' || c == '`' {
                 let _ = self.read_string();
+                seen = Seen::Nothing;
+                at_statement = false;
+                expr_start = false;
+                continue;
+            }
+            // Comments were consumed by `skip_trivia`, so a `/` here is either
+            // a regex opener or the division operator.
+            if c == '/' && expr_start {
+                self.skip_regex();
+                seen = Seen::Nothing;
+                at_statement = false;
+                expr_start = false;
+                continue;
+            }
+            // `++` / `--` leave the position as it was: prefix (at expression
+            // start) is followed by an operand, postfix (after one) by an
+            // operator. Read singly, the second `+` would flag a postfix
+            // `a++ / b` as a regex opener.
+            if (c == '+' || c == '-') && self.peek_at(1) == Some(c) {
+                self.advance();
+                self.advance();
                 seen = Seen::Nothing;
                 at_statement = false;
                 continue;
             }
             let Some(word) = self.read_ident() else {
+                expr_start = matches!(
+                    c,
+                    '=' | '('
+                        | ','
+                        | ':'
+                        | '['
+                        | '!'
+                        | '&'
+                        | '|'
+                        | '?'
+                        | ';'
+                        | '{'
+                        | '}'
+                        | '~'
+                        | '+'
+                        | '-'
+                        | '*'
+                        | '%'
+                        | '<'
+                        | '>'
+                        | '^'
+                        | '/'
+                );
                 match c {
                     '(' | '[' | '{' => {
                         depth += 1;
@@ -328,9 +398,29 @@ impl<'a> Cursor<'a> {
                     _ => at_statement = false,
                 }
                 seen = Seen::Nothing;
+                after_dot = c == '.';
                 self.advance();
                 continue;
             };
+            // A number reads as an identifier here too, and is an operand.
+            expr_start = !was_dot
+                && matches!(
+                    word,
+                    "return"
+                        | "typeof"
+                        | "instanceof"
+                        | "in"
+                        | "of"
+                        | "new"
+                        | "delete"
+                        | "void"
+                        | "throw"
+                        | "case"
+                        | "do"
+                        | "else"
+                        | "yield"
+                        | "await"
+                );
             seen = match (word, &seen) {
                 ("export", _) if at_statement && depth == 0 => Seen::Export,
                 ("const", Seen::Export) => Seen::ExportConst,
@@ -353,6 +443,49 @@ impl<'a> Cursor<'a> {
                 _ => Seen::Nothing,
             };
             at_statement = false;
+        }
+    }
+
+    /// Skip a regex literal, the cursor sitting on its opening `/` (WF-57).
+    /// A backslash escapes the next character, a `[ ... ]` class hides a `/`,
+    /// and an unescaped `/` outside a class closes the literal, after which its
+    /// flags are skipped. An unterminated literal stops, unconsumed, at the
+    /// line terminator (or end of file) that ends it, so the caller still sees
+    /// the line break as a statement boundary. Every step is a whole character.
+    fn skip_regex(&mut self) {
+        fn line_end(c: Option<char>) -> bool {
+            matches!(c, None | Some('\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        }
+        self.advance();
+        let mut in_class = false;
+        loop {
+            let c = self.peek();
+            if line_end(c) {
+                return;
+            }
+            match c {
+                Some('\\') => {
+                    self.advance();
+                    if line_end(self.peek()) {
+                        return;
+                    }
+                    self.advance();
+                }
+                Some('[') => {
+                    in_class = true;
+                    self.advance();
+                }
+                Some(']') => {
+                    in_class = false;
+                    self.advance();
+                }
+                Some('/') if !in_class => {
+                    self.advance();
+                    let _ = self.read_ident();
+                    return;
+                }
+                _ => self.advance(),
+            }
         }
     }
 
@@ -699,11 +832,9 @@ mod tests {
     }
 
     // spec: WF-5 WF-57 -- the depth-0 half of the statement-position rule is a
-    // bracket count, and this reader does not model every construct a bracket
-    // can hide in (a regex character class, above all). A `{` or `[` the count
-    // never sees closed leaves it above zero for the rest of the file, so a
-    // declaration after it is not at depth 0 as far as the scan is concerned and
-    // reads as absent.
+    // bracket count. A `{` or `[` the count never sees closed leaves it above
+    // zero for the rest of the file, so a declaration after it is not at depth
+    // 0 as far as the scan is concerned and reads as absent.
     //
     // That is a FALSE NEGATIVE, and it is the acceptable direction: mind reports
     // the file as one it read no `meta` from (WF-30), the harness still loads it,
@@ -713,9 +844,6 @@ mod tests {
     #[test]
     fn an_unclosed_bracket_before_the_declaration_hides_it_rather_than_faking_one() {
         for text in [
-            // A regex character class holding a `{`: `[` and `{` both count up,
-            // `]` brings back only one of them.
-            "const re = /[{]/\nexport const meta = { name: 'real' }",
             "function f() {\nexport const meta = { name: 'real' }",
             "const open = [\nexport const meta = { name: 'real' }",
             "call(\nexport const meta = { name: 'real' }",
@@ -755,6 +883,8 @@ mod tests {
             "export\n.const.meta = { name: 'decoy' };",
             "export const\n.meta = { name: 'decoy' };",
             "shim\n.export.const.meta = { name: 'decoy' };",
+            "const q = /`/\nconst t = `\nexport const meta = { name: 'decoy' }\n`;",
+            "const q = /\\/\\// + `\nexport const meta = { name: 'decoy' }\n`;",
         ] {
             let text = format!("{prologue}\nexport const meta = {{ name: 'real' }}\n");
             let m = parse_bounded(&text);
@@ -770,33 +900,293 @@ mod tests {
         }
     }
 
-    // spec: WF-57 -- the one arrangement that still fools the bracket count,
-    // recorded rather than hidden: a regex literal holding a `}` inside a block
-    // closes, for this scanner, a block the file has not closed, so a `meta`
-    // declared after it looks module-level.
-    //
-    // It is not a hijack of a workflow the harness loads. `export` is a
-    // module-level-only form: inside a function body or a block it is a
-    // SyntaxError, and the harness parses the whole module or nothing (WF-5), so
-    // a file shaped like this loads NO workflow at all and there is no
-    // harness-visible name for mind's reading to misrepresent. Fooling the count
-    // into reading a nested declaration requires exactly this -- an extra closer
-    // the scan sees and a parser does not -- which is why the class is limited to
-    // files that do not parse.
-    //
-    // The assertion pins today's reading so a future regex-aware skip shows up
-    // here as the deliberate change it would be, not as a silent one.
+    // spec: WF-57 -- a regex literal in expression-start position is skipped
+    // whole, so a `}` inside one no longer closes, for this scanner, a block
+    // the file has not closed. Before the regex skip this read `nested`: the
+    // `/}/` brought the count back to 0 and the `meta` declared inside the
+    // function looked module-level. Now the block stays open until its own
+    // `}`, the nested declaration is at depth 1 and ignored, and the real one
+    // below the block is read.
     #[test]
-    fn a_regex_closer_inside_a_block_is_the_one_depth_confusion_left() {
+    fn a_regex_closer_inside_a_block_does_not_close_the_block() {
         let m = parse_bounded(
             "function f() {\n  const re = /}/\n  export const meta = { name: 'nested' }\n}\n\
              export const meta = { name: 'real' }\n",
         );
-        assert_eq!(
-            m.name.as_deref(),
-            Some("nested"),
-            "a regex `}}` inside a block is read as the block's own closer"
-        );
+        assert_eq!(m.name.as_deref(), Some("real"));
+    }
+
+    // spec: WF-57 -- a regex character class holding a bracket is skipped with
+    // the literal, so the count is not left one high for the rest of the file.
+    // Before the regex skip `[` and `{` both counted up, `]` brought back only
+    // one of them, and the declaration below read as absent.
+    #[test]
+    fn a_bracket_in_a_regex_class_does_not_hide_the_declaration() {
+        for text in [
+            "const re = /[{]/\nexport const meta = { name: 'real' }",
+            "const re = /[/{]/g\nexport const meta = { name: 'real' }",
+            "const re = /\\{/\nexport const meta = { name: 'real' }",
+            "if (ok) { return /[(]/.test(x) }\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- a regex literal holding a quote character does not open a
+    // string or template. Before the regex skip the backtick in `/`/` opened a
+    // template that ran to the next backtick, so the "template" below (whose
+    // text spells a decoy declaration) was read as code and the decoy won. The
+    // generic prologue property allows "nothing"; these two must read `real`.
+    #[test]
+    fn a_quote_inside_a_regex_literal_does_not_let_a_decoy_win() {
+        for text in [
+            "const q = /`/\nconst t = `\nexport const meta = { name: 'decoy' }\n`;\n\
+             export const meta = { name: 'real' }\n",
+            "const q = /\\/\\// + `\nexport const meta = { name: 'decoy' }\n`;\n\
+             export const meta = { name: 'real' }\n",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- a `/` after an operand is the division operator, not a
+    // regex opener: after an identifier, a number, `)` or `]`, and a postfix
+    // `++`/`--`. Read as regex openers, each of these would swallow the rest
+    // of its line, and in the `'/'` cases the quote after it, which then
+    // opens a string that hides the declaration.
+    #[test]
+    fn division_is_not_read_as_a_regex_literal() {
+        for text in [
+            "const x = a / b / c\nexport const meta = { name: 'real' }",
+            "const x = (a) / 2 // c\nexport const meta = { name: 'real' }",
+            "const x = a[0] / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = 10 / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = a++ / b; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = a-- / b; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = 'a' / b; const y = '/'\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- the punctuators outside the expression-start set leave the
+    // position false, so a `/` after them divides: `.` (a number like `1.`),
+    // `@` (a decorator), `#` (a private name), and a non-ASCII character that is
+    // not an identifier character. Read as a regex opener, each would swallow
+    // `/ 2; y = '/` and flip the parity of the quote after it, hiding the
+    // declaration.
+    #[test]
+    fn division_after_dot_at_hash_or_non_ascii_is_not_a_regex() {
+        for text in [
+            "const x = 1. / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = @dec / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = # / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = this.#a / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = ✓ / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = 🚀 / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = 日本 / 2; const y = '/'\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- an identifier that merely STARTS with (or ends in, or
+    // wraps) an operand-expecting keyword is an ordinary identifier: the word is
+    // read whole, so `returnValue / x` divides.
+    #[test]
+    fn a_keyword_prefixed_identifier_is_an_operand() {
+        for word in [
+            "returnValue",
+            "typeofx",
+            "instanceofx",
+            "index",
+            "offset",
+            "newer",
+            "deleted",
+            "voidable",
+            "throwable",
+            "casey",
+            "double",
+            "elsewhere",
+            "yielded",
+            "awaiting",
+            "$return",
+            "_in",
+            "return$",
+            "return2",
+        ] {
+            let text = format!(
+                "const x = {word} / 2; const y = '/'\nexport const meta = {{ name: 'real' }}"
+            );
+            let m = parse_bounded(&text);
+            assert_eq!(m.name.as_deref(), Some("real"), "after {word:?}");
+        }
+    }
+
+    // spec: WF-57 -- a keyword spelled as a PROPERTY name (after `.`) is not a
+    // keyword: `obj.return / 2` divides. Without the after-dot rule the word
+    // `return` set expression-start and the `/` swallowed `/ 2; y = '/`.
+    #[test]
+    fn a_keyword_after_a_dot_is_a_property_name() {
+        for kw in [
+            "return", "typeof", "in", "of", "new", "delete", "void", "case", "await",
+        ] {
+            for dot in [".", "?."] {
+                let text = format!(
+                    "const x = obj{dot}{kw} / 2; const y = '/'\nexport const meta = {{ name: 'real' }}"
+                );
+                let m = parse_bounded(&text);
+                assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+            }
+        }
+        // The dot only governs the word right after it: a keyword later on
+        // still opens a regex.
+        let m = parse_bounded("x = a.b; return /[}']/\nexport const meta = { name: 'real' }");
+        assert_eq!(m.name.as_deref(), Some("real"));
+    }
+
+    // spec: WF-57 -- every punctuator of the expression-start set puts a `/`
+    // that follows it in regex position, so the class `[}']` (a closer and a
+    // quote) is skipped with the literal. Read as division, the `}` would close
+    // the function body early or the `'` would open a string.
+    #[test]
+    fn a_regex_after_each_expression_start_punctuator_is_skipped() {
+        for (open, close) in [
+            ("=", ""),
+            ("(", ")"),
+            (",", ""),
+            (":", ""),
+            ("[", "]"),
+            ("!", ""),
+            ("&", ""),
+            ("&&", ""),
+            ("|", ""),
+            ("||", ""),
+            ("?", ""),
+            (";", ""),
+            ("{", "}"),
+            ("~", ""),
+            ("+", ""),
+            ("-", ""),
+            ("*", ""),
+            ("%", ""),
+            ("<", ""),
+            (">", ""),
+            ("=>", ""),
+            ("^", ""),
+            ("/", ""),
+        ] {
+            let text = format!(
+                "function f() {{ x {open} /[}}']/ {close} }}\nexport const meta = {{ name: 'real' }}\n"
+            );
+            let m = parse_bounded(&text);
+            assert_eq!(m.name.as_deref(), Some("real"), "after {open:?}");
+        }
+    }
+
+    // spec: WF-57 -- `)` and `]` end an operand, so a `/` after them divides.
+    #[test]
+    fn division_after_a_closing_bracket_stays_division() {
+        for text in [
+            "const x = f(a) / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = f(a)[0] / 2; const y = '/'\nexport const meta = { name: 'real' }",
+            "const x = a[i] / b[j] / c; const y = '/'\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-57 -- a `/` right after `}` is ALWAYS read as a regex opener: the
+    // scanner cannot tell a block (`}` then a regex) from an object literal
+    // (`}` then division) without a parser. That is a known, accepted
+    // misreading of `x = {} / 2`, pinned here so a change is deliberate. For the
+    // ordinary shapes it errs toward a false negative: an unterminated "regex"
+    // stops at the line end, so nothing is lost when the division is alone on
+    // its line; when a later `'/'` on the same line lets the "regex" close, the
+    // quote parity flips and the declaration reads as absent (WF-30), not as
+    // something else. A deliberately adversarial file can still steer the
+    // flipped parity, as it can steer the line-break rule; closing that takes a
+    // JavaScript parser.
+    #[test]
+    fn a_slash_after_a_closing_brace_is_read_as_a_regex_opener() {
+        // Division alone on its line: the "regex" is unterminated and ends at
+        // the line break, so the real declaration is found.
+        let m = parse_bounded("const x = {} / 2\nexport const meta = { name: 'real' }");
+        assert_eq!(m.name.as_deref(), Some("real"));
+        // A regex after a block closer on the same line is skipped correctly.
+        let m = parse_bounded("if (a) { b() } /[{]/.test(c)\nexport const meta = { name: 'real' }");
+        assert_eq!(m.name.as_deref(), Some("real"));
+        // A closing `/` on the line lets the misread literal end early; the
+        // pinned result is "nothing", not a wrong name.
+        let m =
+            parse_bounded("const x = {} / 2; const y = '/'\nexport const meta = { name: 'real' }");
+        assert!(m.is_empty(), "pinned misread of `{{}} / 2`: {m:?}");
+    }
+
+    // spec: WF-57 -- the keyword half of expression-start position: after
+    // `return`, `typeof`, and the other operand-expecting keywords a `/` opens
+    // a regex, so its brackets and quotes are skipped with it. And a prefix
+    // `++`/`--` keeps the position it was in.
+    #[test]
+    fn a_regex_after_an_operand_expecting_keyword_is_skipped() {
+        for kw in [
+            "return",
+            "typeof",
+            "instanceof",
+            "in",
+            "of",
+            "new",
+            "delete",
+            "void",
+            "throw",
+            "case",
+            "do",
+            "else",
+            "yield",
+            "await",
+        ] {
+            let text = format!(
+                "function f() {{ {kw} /[}}']/ }}\nexport const meta = {{ name: 'real' }}\n"
+            );
+            let m = parse_bounded(&text);
+            assert_eq!(m.name.as_deref(), Some("real"), "after {kw:?}");
+        }
+        let m = parse_bounded("x = ++/[{]/.lastIndex\nexport const meta = { name: 'real' }");
+        assert_eq!(m.name.as_deref(), Some("real"));
+    }
+
+    // spec: WF-5 WF-57 -- an unterminated regex literal stops at the line
+    // break (or end of file) that ends it, without stalling or panicking, and
+    // the line break still counts as a statement boundary. Escapes and classes
+    // that run into the line end are unterminated the same way, and multi-byte
+    // text inside a literal is stepped a whole character at a time.
+    #[test]
+    fn an_unterminated_regex_literal_stops_at_the_line_end() {
+        for text in [
+            "const re = /abc\nexport const meta = { name: 'real' }",
+            "const re = /[abc\nexport const meta = { name: 'real' }",
+            "const re = /abc\\\nexport const meta = { name: 'real' }",
+            "const re = /[/]\\/🚀✓/u\nexport const meta = { name: 'real' }",
+            "const re = /説明\r\nexport const meta = { name: 'real' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), Some("real"), "from {text:?}");
+        }
+        for text in [
+            "/",
+            "x = /",
+            "x = /[",
+            "x = /\\",
+            "x = /🚀",
+            "x = /a/gimsuy",
+        ] {
+            assert!(parse_bounded(text).is_empty(), "from {text:?}");
+        }
     }
 
     // spec: WF-5 -- `skip_trivia`'s block-comment branch is the one place the
@@ -1190,14 +1580,28 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
         assert_eq!(at, 0);
     }
 
-    // spec: WF-5 -- a randomized sweep over the tokens an object literal is
+    // spec: WF-5 WF-57 -- a randomized sweep over the tokens an object literal is
     // made of. The reader must return on every arrangement of them, balanced or
     // not; the seed is fixed, so any failure reproduces exactly. This is the
     // general form of the hang: a character that no reader in the loop will
     // consume, reached in a position nobody wrote a case for.
     #[test]
     fn a_randomized_sweep_of_object_bodies_always_returns() {
-        const TOKENS: [&str; 28] = [
+        const TOKENS: [&str; 41] = [
+            // Regex-shaped and expression-position tokens (WF-57).
+            "/[",
+            "\\/",
+            "/}/",
+            "/[{]/g",
+            "return",
+            "=",
+            "++",
+            "--",
+            ".",
+            "#",
+            "@",
+            "✓",
+            "🚀",
             "{",
             "}",
             "[",

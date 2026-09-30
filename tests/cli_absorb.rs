@@ -879,7 +879,11 @@ fn unm9_verb_surface_of_the_skip_is_exactly_the_scanning_verbs() {
     // And the verbs that do not scan keep working with no warning at all, so
     // the user retains a way to inspect the lobe with a stable, unaffected
     // schema (and, crucially, a way to be told to `rm` the entry).
-    for args in [vec!["recall", "--json"], vec!["introspect"]] {
+    for args in [
+        vec!["recall", "--json"],
+        vec!["recall", "--source", "agents"],
+        vec!["introspect"],
+    ] {
         let r = sb.mind(&args);
         assert!(
             r.success,

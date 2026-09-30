@@ -250,7 +250,23 @@ pub fn divergence(
 /// spec: WF-59 -- at most [`MAX_NAMED_CLAIMANTS`] are named and the rest are
 /// counted, so the message stays bounded however many workflows pile onto one
 /// name.
+///
+/// This is the installed-site wording (`learn`, `upgrade`, `recall <item>`);
+/// `review` says the same thing about what it would install ([`collisions`]).
 pub fn collision(harness_name: &str, others: &[String]) -> String {
+    collision_at(harness_name, others, Site::Installed)
+}
+
+/// Where a collision message is read, which decides only its tail.
+#[derive(Clone, Copy)]
+enum Site {
+    /// The workflows are (or are being) installed.
+    Installed,
+    /// `review` of an uninstalled source: nothing is installed yet.
+    Review,
+}
+
+fn collision_at(harness_name: &str, others: &[String], site: Site) -> String {
     debug_assert!(
         !others.is_empty(),
         "collision() takes the OTHER claimants of a shared name; there is always at least one"
@@ -263,9 +279,21 @@ pub fn collision(harness_name: &str, others: &[String]) -> String {
         ),
         false => others.join(", "),
     };
+    let total = others.len() + 1;
+    let q = match total {
+        2 => "both".to_string(),
+        n => format!("all {n}"),
+    };
+    let tail = match site {
+        Site::Installed => {
+            format!("the harness sees one workflow under that name, and {q} are installed")
+        }
+        Site::Review => format!(
+            "the harness would see one workflow under that name, and mind would install {q}"
+        ),
+    };
     format!(
-        "it answers to the harness name '{}', which {listed} also claim{}: the harness sees one \
-         workflow under that name and mind installed both",
+        "it answers to the harness name '{}', which {listed} also claim{}: {tail}",
         strip_ansi(harness_name),
         match others.len() {
             1 => "s",
@@ -317,7 +345,10 @@ pub fn collisions(claims: &[(String, String)]) -> Vec<(String, String)> {
         .into_iter()
         .map(|(name, claimants)| {
             let others: Vec<String> = claimants[1..].iter().map(|k| strip_ansi(k)).collect();
-            (claimants[0].clone(), collision(&name, &others))
+            (
+                claimants[0].clone(),
+                collision_at(&name, &others, Site::Review),
+            )
         })
         .collect()
 }
@@ -796,6 +827,58 @@ mod tests {
             "{}",
             reports[1].1
         );
+    }
+
+    /// The tail counts the claimants: "both" for two, "all N" beyond, and the
+    /// review wording speaks of what mind WOULD install, never "are installed".
+    // spec: WF-29 WF-59
+    #[test]
+    fn the_collision_tail_is_count_aware_and_site_aware() {
+        let one = collision("d", &["workflow:a".to_string()]);
+        assert!(one.ends_with("and both are installed"), "{one}");
+        let three: Vec<String> = (0..3).map(|i| format!("workflow:w{i}")).collect();
+        let four = collision("d", &three);
+        assert!(four.ends_with("and all 4 are installed"), "{four}");
+        assert!(!four.contains("both"), "{four}");
+
+        let claims2: Vec<(String, String)> = vec![
+            ("d".into(), "workflow:a".into()),
+            ("d".into(), "workflow:b".into()),
+        ];
+        let r2 = &collisions(&claims2)[0].1;
+        assert!(
+            r2.ends_with("and mind would install both"),
+            "review wording: {r2}"
+        );
+        assert!(r2.contains("the harness would see one"), "{r2}");
+        assert!(!r2.contains("are installed"), "{r2}");
+        let claims4: Vec<(String, String)> = (0..4)
+            .map(|i| ("d".to_string(), format!("workflow:w{i}")))
+            .collect();
+        let r4 = &collisions(&claims4)[0].1;
+        assert!(r4.ends_with("and mind would install all 4"), "{r4}");
+        assert!(!r4.contains("are installed"), "{r4}");
+    }
+
+    /// The 2/3 claimant boundary: two is "both", three is already "all 3" at both
+    /// sites, and the head is byte-identical between them.
+    // spec: WF-29 WF-59
+    #[test]
+    fn three_claimants_say_all_3_not_both_at_either_site() {
+        let others = vec!["workflow:a".to_string(), "workflow:b".to_string()];
+        let inst = collision("d", &others);
+        assert!(inst.ends_with("and all 3 are installed"), "{inst}");
+        assert!(!inst.contains("both"), "{inst}");
+        let claims: Vec<(String, String)> = ["workflow:x", "workflow:a", "workflow:b"]
+            .iter()
+            .map(|k| ("d".to_string(), k.to_string()))
+            .collect();
+        let rev = &collisions(&claims)[0].1;
+        assert!(rev.ends_with("and mind would install all 3"), "{rev}");
+        assert!(!rev.contains("both"), "{rev}");
+        let head = |s: &str| s.split(": ").next().unwrap().to_string();
+        assert!(head(&inst).starts_with("it answers to the harness name 'd'"));
+        assert!(rev.starts_with("it answers to the harness name 'd', which"));
     }
 
     /// Source-controlled text is stripped as it is composed, at this boundary,

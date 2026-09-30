@@ -584,6 +584,46 @@ mod tests {
         (paths, base)
     }
 
+    /// Write `files` (relative path, content) into a fresh git repo under
+    /// `base`, commit it, and meld it into `paths`. Returns the repo dir.
+    fn meld_fixture(paths: &Paths, base: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
+        use std::process::Command;
+
+        let src = base.join("fixture-source");
+        for (rel, content) in files {
+            let file = src.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, content).unwrap();
+        }
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+        src
+    }
+
     fn cleanup(base: &std::path::Path) {
         let _ = std::fs::remove_dir_all(base);
     }
@@ -1212,51 +1252,26 @@ mod tests {
     /// `load_inner`'s `available` list must read a workflow's description
     /// through `CatalogItem::display_description` (WF-51: `<description> -
     /// <whenToUse>`), not the bare `description` field. This regresses
-    /// silently if line ~496's `it.display_description()` is ever swapped
-    /// back for `it.description`, since both are `Option<String>` and the
-    /// code still compiles either way.
+    /// silently if the `available` row built in `load_inner` from
+    /// `display_description()` is ever swapped back for `it.description`,
+    /// since both are `Option<String>` and the code still compiles either
+    /// way. The TUI keeps the joined human form (WF-51); `--json` emits the
+    /// pair separately (WF-62).
     #[test]
     fn available_workflow_description_is_composed_with_when_to_use() {
         // spec: WF-51
-        use std::process::Command;
-
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
-        let src = base.join("workflow-source");
-        std::fs::create_dir_all(src.join("workflows")).unwrap();
-        std::fs::write(
-            src.join("workflows/review.js"),
-            "export const meta = {\n  name: 'review-changes',\n  \
-             description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
-        )
-        .unwrap();
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(&src)
-                .output()
-                .expect("git");
-        };
-        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "initial"]);
-
-        crate::commands::meld(
+        meld_fixture(
             &paths,
-            src.to_str().unwrap(),
-            None,
-            vec![],
-            vec![],
-            false,
-            crate::commands::PinRequest::None,
-            None,
-            false,
-            None,
-        )
-        .expect("meld");
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review-changes',\n  \
+                 description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
 
         let snap = load(&paths).expect("load should succeed");
         let wf = snap
@@ -1283,16 +1298,16 @@ mod tests {
     /// (`install.rs` records `item.description`, never `when_to_use`) and so
     /// carries the bare description. Documented on
     /// `CatalogItem::display_description`, but nothing pinned it: the
-    /// installed row reads `it.description` (line ~458) where the available
-    /// row reads `it.display_description()` (line ~496), and "fixing" the
-    /// inconsistency in either direction compiles clean. Recording
+    /// `installed` row is built from the manifest's `description` where the
+    /// `available` row is built in `load_inner` from `display_description()`,
+    /// and "fixing" the inconsistency in either direction compiles clean.
+    /// The TUI keeps the joined human form (WF-51) while `--json` emits the
+    /// pair separately (WF-62). Recording
     /// `whenToUse` in the manifest is a deliberate deferral, so this test is
     /// the one that should fail and be rewritten when that changes.
     #[test]
     fn an_installed_workflow_row_is_bare_where_the_available_row_composes() {
         // spec: WF-51
-        use std::process::Command;
-
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
@@ -1304,40 +1319,15 @@ mod tests {
         .save(&paths)
         .unwrap();
 
-        let src = base.join("installed-workflow-source");
-        std::fs::create_dir_all(src.join("workflows")).unwrap();
-        std::fs::write(
-            src.join("workflows/review.js"),
-            "export const meta = {\n  name: 'review',\n  \
-             description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
-        )
-        .unwrap();
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(&src)
-                .output()
-                .expect("git");
-        };
-        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "initial"]);
-
-        crate::commands::meld(
+        meld_fixture(
             &paths,
-            src.to_str().unwrap(),
-            None,
-            vec![],
-            vec![],
-            false,
-            crate::commands::PinRequest::None,
-            None,
-            false,
-            None,
-        )
-        .expect("meld");
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review',\n  \
+                 description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
         crate::commands::learn(
             &paths,
             "workflow:review",
@@ -1391,44 +1381,17 @@ mod tests {
     #[test]
     fn an_available_workflow_with_only_when_to_use_shows_it_as_the_description() {
         // spec: WF-51
-        use std::process::Command;
-
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
-        let src = base.join("when-to-use-only-source");
-        std::fs::create_dir_all(src.join("workflows")).unwrap();
-        std::fs::write(
-            src.join("workflows/review.js"),
-            "export const meta = {\n  name: 'review',\n  whenToUse: 'before a PR',\n}\n",
-        )
-        .unwrap();
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(&src)
-                .output()
-                .expect("git");
-        };
-        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "initial"]);
-
-        crate::commands::meld(
+        meld_fixture(
             &paths,
-            src.to_str().unwrap(),
-            None,
-            vec![],
-            vec![],
-            false,
-            crate::commands::PinRequest::None,
-            None,
-            false,
-            None,
-        )
-        .expect("meld");
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
 
         let snap = load(&paths).expect("load should succeed");
         let wf = snap
@@ -1458,61 +1421,28 @@ mod tests {
     // spec: TUI-50
     #[test]
     fn a_token_in_an_unlisted_bundled_file_draws_no_tui_dependency_edge() {
-        use std::process::Command;
-
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
-        let src = base.join("tui-dep-gate-source");
-        std::fs::create_dir_all(src.join("skills/review/resources")).unwrap();
-        std::fs::write(
-            src.join("skills/review/SKILL.md"),
-            "---\ndescription: review skill\n---\n# review\nsee {{self}}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            src.join("skills/review/resources/pr.py"),
-            "# {{ns:helper}}\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(src.join("skills/linked")).unwrap();
-        std::fs::write(
-            src.join("skills/linked/SKILL.md"),
-            "---\ndescription: linked skill, references {{ns:helper}} in prose\n---\n# linked\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(src.join("skills/helper")).unwrap();
-        std::fs::write(
-            src.join("skills/helper/SKILL.md"),
-            "---\ndescription: helper skill\n---\n# helper\n",
-        )
-        .unwrap();
-        let git = |args: &[&str]| {
-            Command::new("git")
-                .args(args)
-                .current_dir(&src)
-                .output()
-                .expect("git");
-        };
-        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        git(&["add", "-A"]);
-        git(&["commit", "-qm", "initial"]);
-
-        crate::commands::meld(
+        meld_fixture(
             &paths,
-            src.to_str().unwrap(),
-            None,
-            vec![],
-            vec![],
-            false,
-            crate::commands::PinRequest::None,
-            None,
-            false,
-            None,
-        )
-        .expect("meld");
+            &base,
+            &[
+                (
+                    "skills/review/SKILL.md",
+                    "---\ndescription: review skill\n---\n# review\nsee {{self}}\n",
+                ),
+                ("skills/review/resources/pr.py", "# {{ns:helper}}\n"),
+                (
+                    "skills/linked/SKILL.md",
+                    "---\ndescription: linked skill, references {{ns:helper}} in prose\n---\n# linked\n",
+                ),
+                (
+                    "skills/helper/SKILL.md",
+                    "---\ndescription: helper skill\n---\n# helper\n",
+                ),
+            ],
+        );
 
         let snap = load(&paths).expect("load should succeed");
         let review = snap

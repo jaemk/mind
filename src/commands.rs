@@ -2041,32 +2041,24 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
     // spec: NS-42 -- exclude pure-agent names from the warning scan: a bare prose
     // reference to a sibling agent resolves correctly even under a prefix (because
     // agents link under their bare harness name, NS-40). Flagging agent references
-    // would be a false positive. The cross-kind shadow rule: if a name is both an
-    // agent AND a non-agent sibling, it is NOT excluded (it does get prefixed for
-    // the non-agent kind, so the warning is still meaningful).
-    let agent_names: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|it| it.kind == ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    let non_agent_names: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|it| it.kind != ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    // The scanning set: all names except pure-agent-only ones.
+    // would be a false positive. The cross-kind shadow rule (a name that is both
+    // an agent AND a non-agent sibling stays in the scan) lives in the one shared
+    // definition, `namespace::bare_agent_names`.
+    let bare =
+        crate::namespace::bare_agent_names(items.iter().map(|it| (it.kind, it.name.as_str())));
     let siblings: std::collections::HashSet<String> = items
         .iter()
         .map(|it| it.name.clone())
-        .filter(|name| {
-            // Keep the name if it is not an agent, OR if it is also a non-agent
-            // sibling (the shadow case).
-            !agent_names.contains(name) || non_agent_names.contains(name)
-        })
+        .filter(|name| !bare.contains(name))
         .collect();
     for item in items {
         let mut refs: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
+            // spec: DSC-90 DSC-108 -- full, uncapped content (the same file
+            // install copies), behind the no-follow regular-file guard.
+            if !is_regular_file_nofollow(&file) {
+                continue;
+            }
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue; // skip non-UTF-8 / unreadable files
             };
@@ -2260,6 +2252,10 @@ fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String])
         }
         reads.insert(entry.name.as_str(), read);
     }
+    // spec: WF-61 -- an unmanaged lobe workflow claims its name too: the
+    // harness loads it like any other. Never a subject below (its key is never
+    // in `touched`), only ever one of the others named.
+    claimed.extend(unmanaged_workflow_claims(paths, manifest));
     // spec: WF-59 -- one group per colliding name, built once for the whole
     // installed set rather than rebuilt per claimant.
     let groups = crate::workflow_check::claim_groups(&claimed);
@@ -2343,6 +2339,8 @@ struct WorkflowDetail {
     harness_name: Option<String>,
     /// The findings, in the order the detail view prints them.
     findings: Vec<String>,
+    /// The store copy's `meta.whenToUse` (WF-62), for the `--json` document.
+    when_to_use: Option<String>,
 }
 
 fn workflow_detail(
@@ -2350,12 +2348,23 @@ fn workflow_detail(
     manifest: &Manifest,
     found: &crate::manifest::InstalledItem,
 ) -> WorkflowDetail {
-    let read = crate::workflow_check::read(&paths.mind_home.join(&found.store));
+    let store = paths.mind_home.join(&found.store);
+    let read = crate::workflow_check::read(&store);
     let harness_name = crate::workflow_check::harness_name(&read.meta);
     let mut findings: Vec<String> = Vec::new();
     // spec: WF-56 -- mind's own cap, reported as mind's own.
     if let Some(notice) = crate::workflow_check::cap_notice(&read) {
         findings.push(notice);
+    }
+    // spec: WF-30 WF-60 -- why the harness would not load it, the same reasons
+    // `learn` and `upgrade` warn with. Only for a store copy mind actually
+    // read: one it could not read at all (gone, a directory, not UTF-8) says
+    // nothing about what the file declares, so it yields no finding rather
+    // than a "no `meta`" verdict about bytes mind never saw.
+    if store_copy_was_read(&store, &read) {
+        for reason in crate::workflow_check::skip_reasons(&read) {
+            findings.push(format!("the harness will not load this workflow: {reason}"));
+        }
     }
     // spec: WF-24 -- the remedy names the bare name, the only spelling a
     // `{{ns:}}` token resolves (NS-11).
@@ -2367,7 +2376,7 @@ fn workflow_detail(
     // spec: WF-29 WF-59 -- one report for the name, naming the other
     // claimants, capped in `workflow_check` rather than here.
     if let Some(harness) = &harness_name {
-        let others: Vec<String> = manifest
+        let mut others: Vec<String> = manifest
             .items
             .values()
             .filter(|e| e.kind == ItemKind::Workflow && e.name != found.name)
@@ -2378,6 +2387,13 @@ fn workflow_detail(
             })
             .map(|e| e.display_key())
             .collect();
+        // spec: WF-61 -- unmanaged lobe workflows claim names too.
+        others.extend(
+            unmanaged_workflow_claims(paths, manifest)
+                .into_iter()
+                .filter(|(name, _)| name == harness)
+                .map(|(_, key)| key),
+        );
         if !others.is_empty() {
             findings.push(crate::workflow_check::collision(harness, &others));
         }
@@ -2385,6 +2401,79 @@ fn workflow_detail(
     WorkflowDetail {
         harness_name,
         findings,
+        when_to_use: read.meta.when_to_use.clone(),
+    }
+}
+
+/// Whether mind actually read `store`'s text: the capped read either parsed
+/// it, or refused it for size (WF-56, which [`crate::workflow_check::cap_notice`]
+/// reports and `skip_reasons` already handles). A file that is gone, is not a
+/// regular file, or is not UTF-8 was not read, so nothing is known about what
+/// it declares.
+///
+/// A non-empty `meta` proves a read; only the empty case re-checks, so the
+/// ordinary path costs no second read.
+fn store_copy_was_read(
+    store: &std::path::Path,
+    read: &crate::workflow_check::WorkflowRead,
+) -> bool {
+    if read.over_mind_cap.is_some() || !read.meta.is_empty() {
+        return true;
+    }
+    // `file_meta` folds a read failure into an empty `meta` (WF-5), so the
+    // question "could mind read it" is asked of the capped reader directly.
+    is_regular_file_nofollow(store) && crate::error::read_capped_metadata(store).is_ok()
+}
+
+/// The WF-29 claims of every UNMANAGED lobe workflow (WF-61): `(harness name,
+/// "workflow:<name> (unmanaged)")` for each one whose `meta.name` mind can
+/// read through the capped reader (WF-55) and use (WF-58).
+///
+/// Best-effort like every workflow check: a scan failure yields no claims.
+/// The scan's own UNM-9 skip warnings are muted here, since the verbs that
+/// list unmanaged items (`recall`, `probe`) already print them and a `learn`
+/// warning block is the wrong place for them. Only a regular file (after
+/// following a hand-placed symlink) is read, so a fifo in a lobe cannot stall.
+fn unmanaged_workflow_claims(paths: &Paths, manifest: &Manifest) -> Vec<(String, String)> {
+    let was_quiet = crate::render::scan_quiet();
+    crate::render::set_scan_quiet(true);
+    let scanned = crate::unmanaged::scan(paths, manifest);
+    crate::render::set_scan_quiet(was_quiet);
+    let Ok(items) = scanned else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|u| u.kind == ItemKind::Workflow)
+        .filter_map(|u| {
+            let file = u.paths.first()?;
+            if !std::fs::metadata(file).is_ok_and(|m| m.is_file()) {
+                return None;
+            }
+            let read = crate::workflow_check::read(file);
+            let name = crate::workflow_check::harness_name(&read.meta)?;
+            Some((name, format!("{} (unmanaged)", u.display_key())))
+        })
+        .collect()
+}
+
+/// An installed workflow's `meta.whenToUse`, read from its store copy (WF-62),
+/// sanitized for `--json`. `None` for every other kind and when absent.
+fn installed_when_to_use(paths: &Paths, m: &crate::manifest::InstalledItem) -> Option<String> {
+    if m.kind != ItemKind::Workflow {
+        return None;
+    }
+    crate::workflow_check::read(&paths.mind_home.join(&m.store))
+        .meta
+        .when_to_use
+        .as_deref()
+        .map(crate::sanitize::strip_ansi)
+}
+
+/// Add `when_to_use` to a `recall --json` row object, only when present (WF-62).
+fn insert_when_to_use(row: &mut serde_json::Value, when: Option<String>) {
+    if let (Some(when), Some(obj)) = (when, row.as_object_mut()) {
+        obj.insert("when_to_use".to_string(), serde_json::Value::String(when));
     }
 }
 
@@ -2816,11 +2905,7 @@ pub fn init_source(
 
     // Read the pre-existing mind.toml content (if any) for the scaffold patching
     // step and for extracting description/prefix for the marketplace manifest.
-    let pre_toml = if toml_path.exists() {
-        Some(crate::error::read_capped_metadata(&toml_path)?)
-    } else {
-        None
-    };
+    let pre_toml = read_existing_mind_toml(&toml_path, crate::error::metadata_size_limit())?;
 
     // Discover items exactly as melding would (INIT-2): build a local Source for
     // the directory and scan it (honors convention + mind.toml + min-mind-version).
@@ -3031,10 +3116,20 @@ pub fn init_source(
 /// It has to be the ITEM-aware gate, not the extension-and-kind half: install
 /// expands an `expand:`-listed file too (NS-57), so reading the narrower set
 /// dropped the real dependency edges a token in one of those files declares.
+///
+/// spec: DSC-90 WF-55 -- content semantics, the same as install, which copies
+/// and expands the whole file: the read is NOT capped, so an over-cap
+/// workflow's `{{ns:}}` tokens still pull their referents into the closure.
+/// The unbounded-read hazard (a device, fifo, or symlink out of the clone) is
+/// closed by the catalog's no-follow regular-file guarantee (DSC-108) and, as
+/// defense in depth, by [`is_regular_file_nofollow`] here.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
         if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
+            continue;
+        }
+        if !is_regular_file_nofollow(&file) {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&file) {
@@ -3043,6 +3138,24 @@ fn read_item_text(item: &CatalogItem) -> String {
         }
     }
     buf
+}
+
+/// `init-source`'s pre-read of an existing `mind.toml`: `None` when there is
+/// none, else its text through the metadata cap (DSC-91), so an oversized file
+/// is refused with `MetadataTooLarge` before anything is scaffolded.
+fn read_existing_mind_toml(path: &std::path::Path, limit: u64) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    crate::error::read_capped_metadata_with(path, limit).map(Some)
+}
+
+/// Whether `file` is a regular file, judged WITHOUT following a final
+/// symlink: the guard every full-content read of source files goes through, so
+/// a symlink, fifo, socket, or device never reaches `read_to_string`
+/// (DSC-108 defense in depth).
+fn is_regular_file_nofollow(file: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// Run the uninstall hooks declared by the source at `idx` in `registry`.
@@ -3616,27 +3729,10 @@ fn resolve_learn(
     let manifest = Manifest::load(paths)?;
     let installed: HashSet<String> = manifest.items.keys().cloned().collect();
 
-    // The `read` closure feeds each item's concatenated UTF-8 text to the
-    // resolver so it can scan for `{{ns:}}` tokens (DEP-1). Mirrors
-    // `read_item_text`: only the files install expands are scanned
-    // (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25), since install never
-    // expands a `{{ns:}}` token in any other file either -- and it DOES expand
-    // one in an `expand:`-listed file, so the gate has to be the item-aware one
-    // or this closure drops the edges those files declare.
-    let read = |item: &CatalogItem| -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for file in crate::review::item_files(item) {
-            if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&file) {
-                parts.push(content);
-            }
-        }
-        parts.join("\n")
-    };
-
-    let resolution = crate::deps::resolve(&items, &selected_idx, &installed, read);
+    // `read_item_text` feeds each item's concatenated UTF-8 text to the
+    // resolver so it can scan for `{{ns:}}` tokens (DEP-1): only the files
+    // install expands, read in full, through the same regular-file guard.
+    let resolution = crate::deps::resolve(&items, &selected_idx, &installed, read_item_text);
     Ok((registry, items, resolution))
 }
 
@@ -8653,6 +8749,14 @@ pub fn recall(
                 && let Some(obj) = doc.as_object_mut()
             {
                 let detail = workflow_detail(paths, &manifest, found);
+                // spec: WF-62 -- `whenToUse` as its own key, beside the bare
+                // `description` the manifest records; omitted when absent.
+                if let Some(when) = &detail.when_to_use {
+                    obj.insert(
+                        "when_to_use".to_string(),
+                        serde_json::Value::String(crate::sanitize::strip_ansi(when)),
+                    );
+                }
                 obj.insert(
                     "harness_name".to_string(),
                     match &detail.harness_name {
@@ -8805,21 +8909,36 @@ pub fn recall(
                         let inst = manifest.items.values().find(|m| {
                             m.source == it.source && m.kind == it.kind && m.bare_name == it.name
                         });
-                        serde_json::json!({
+                        let mut row = serde_json::json!({
                             // DSC-95: the key embeds a source-controlled name.
                             "key": it.display_key(),
                             "installed": inst.is_some(),
                             "commit": inst.map(|m| m.commit.clone()),
-                        })
+                        });
+                        // spec: WF-62 -- an installed workflow's `whenToUse`
+                        // comes from the store copy (what the harness reads);
+                        // an available one's from the catalog.
+                        let when = match inst {
+                            Some(m) => installed_when_to_use(paths, m),
+                            None => it
+                                .when_to_use
+                                .as_deref()
+                                .filter(|_| it.kind == ItemKind::Workflow)
+                                .map(crate::sanitize::strip_ansi),
+                        };
+                        insert_when_to_use(&mut row, when);
+                        row
                     })
                     .collect();
                 for m in orphans_of(s) {
-                    rows.push(serde_json::json!({
+                    let mut row = serde_json::json!({
                         "key": m.display_key(),
                         "installed": true,
                         "commit": m.commit.clone(),
                         "orphaned": true,
-                    }));
+                    });
+                    insert_when_to_use(&mut row, installed_when_to_use(paths, m));
+                    rows.push(row);
                 }
                 serde_json::json!({
                     "name": s.name,
@@ -9054,10 +9173,14 @@ pub fn probe(
                     name: it.display_effective_name(),
                     source: crate::sanitize::strip_ansi(&it.source),
                     hash: it.content_hash().ok(),
-                    // spec: WF-51
-                    description: it
-                        .display_description()
+                    // spec: WF-62 -- the JSON carries the pair separately; the
+                    // `<description> - <whenToUse>` join (WF-51) is human
+                    // output only.
+                    description: it.description.as_deref().map(crate::sanitize::strip_ansi),
+                    when_to_use: it
+                        .when_to_use
                         .as_deref()
+                        .filter(|_| it.kind == ItemKind::Workflow)
                         .map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
@@ -9072,6 +9195,7 @@ pub fn probe(
                 source: String::new(),
                 hash: None,
                 description: None,
+                when_to_use: None,
                 unmanaged: true,
                 dependencies: Vec::new(),
             });
@@ -9194,7 +9318,12 @@ struct ProbeRow<'a> {
     // both source-controlled text.
     source: String,
     hash: Option<String>,
+    /// The item's own description, never joined with `whenToUse` (WF-62).
     description: Option<String>,
+    /// A workflow's `meta.whenToUse` (WF-62). Omitted when absent, and for
+    /// every other kind (the catalog carries it for workflows only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    when_to_use: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unmanaged: bool,
     /// Direct dependency keys (DEP-62). Empty for unmanaged rows. Omitted when
@@ -9704,7 +9833,10 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             "default_lobe": paths.claude_home.display().to_string(),
             "ssh": cfg.ssh,
             "max_metadata_size": crate::error::format_metadata_size(limit),
-            "max_metadata_size_bytes": limit,
+            // spec: CLI-242 -- every integer mind produces in JSON fits an
+            // i64, so a consumer that parses numbers as signed 64-bit does not
+            // overflow on the unlimited cap (held as u64::MAX).
+            "max_metadata_size_bytes": limit.min(i64::MAX as u64),
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -9733,7 +9865,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     // it is not what the config key says. Without this the line reads as a
     // report of `config.toml` and quietly is not one, the same trap the
     // MIND_AGENT_HOMES note below exists for.
-    if let Some(note) = metadata_cap_origin(cfg.max_metadata_size.as_deref(), limit) {
+    if let Some(note) = metadata_cap_origin(crate::config::metadata_limit_origin()) {
         println!("note: {note}");
     }
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
@@ -9748,30 +9880,27 @@ pub fn config_show(paths: &Paths) -> Result<()> {
 /// Where `config show`'s effective metadata cap came from, when that is not the
 /// `max-metadata-size` config key it is printed beside (DSC-104).
 ///
-/// `None` when the printed value IS the configured one, and when nothing is
-/// configured and nothing overrode the built-in default -- in both of those the
-/// line already tells the whole story and a note would be noise.
-fn metadata_cap_origin(configured: Option<&str>, effective: u64) -> Option<String> {
-    let config_value = configured.and_then(|raw| crate::error::parse_metadata_size(raw).ok());
-    if config_value == Some(effective) {
-        return None;
+/// Pure in the origin `main::run` recorded at startup, so the credit goes to
+/// the origin that actually won rather than to whichever one happens to parse
+/// to the same number: the flag is named whenever it was given, even when its
+/// value equals the config key or the default. `None` for the config key, the
+/// built-in default, or no recorded origin -- the printed line already tells
+/// the whole story there and a note would be noise.
+fn metadata_cap_origin(origin: Option<&crate::config::MetadataLimitOrigin>) -> Option<String> {
+    use crate::config::MetadataLimitOrigin;
+    match origin? {
+        MetadataLimitOrigin::Flag(raw) => Some(format!(
+            "the max-metadata-size shown is this run's --max-metadata-size ({}), which \
+             overrides the environment and the config key",
+            crate::sanitize::strip_ansi(raw)
+        )),
+        MetadataLimitOrigin::Env(raw) => Some(format!(
+            "{} is set and overrides the max-metadata-size config key: {}",
+            crate::config::MAX_METADATA_SIZE_ENV,
+            crate::sanitize::strip_ansi(raw)
+        )),
+        MetadataLimitOrigin::Config(_) | MetadataLimitOrigin::Default => None,
     }
-    if configured.is_none() && effective == crate::error::METADATA_SIZE_LIMIT {
-        return None;
-    }
-    let env = std::env::var("MIND_MAX_METADATA_SIZE").ok();
-    if let Some(raw) = env.as_deref()
-        && crate::error::parse_metadata_size(raw) == Ok(effective)
-    {
-        return Some(format!(
-            "MIND_MAX_METADATA_SIZE is set and overrides the max-metadata-size config key: {raw}"
-        ));
-    }
-    Some(
-        "the max-metadata-size shown is this run's --max-metadata-size, which overrides the \
-         config key and the environment"
-            .to_string(),
-    )
 }
 
 /// Render a lobe entry for display: the path, plus its `kinds` filter in brackets
@@ -10770,50 +10899,61 @@ mod tests {
     /// environment outrank (DSC-104), so it names the origin whenever that is
     /// not the config key beside it -- and stays silent when the printed value
     /// needs no explanation, so an ordinary `config show` gains no noise.
-    ///
-    /// The env lock is held because this reads `MIND_MAX_METADATA_SIZE`, which
-    /// other tests in this binary mutate.
+    /// Pure in the recorded origin: no environment read, no env lock.
     // spec: CLI-241 DSC-104
     #[test]
     fn config_show_names_where_a_non_config_metadata_cap_came_from() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let had = std::env::var("MIND_MAX_METADATA_SIZE").ok();
-        // SAFETY: the process-wide env lock is held for the whole test.
-        unsafe { std::env::remove_var("MIND_MAX_METADATA_SIZE") };
-
-        // Nothing configured and the built-in default in force: no note.
+        use crate::config::MetadataLimitOrigin;
+        // Nothing recorded, the default, or the config key: no note.
+        assert_eq!(metadata_cap_origin(None), None);
         assert_eq!(
-            metadata_cap_origin(None, crate::error::METADATA_SIZE_LIMIT),
+            metadata_cap_origin(Some(&MetadataLimitOrigin::Default)),
             None
         );
-        // Configured, and the configured value is what is in force: no note.
-        assert_eq!(metadata_cap_origin(Some("2MiB"), 2 * 1024 * 1024), None);
-        // Configured, but something outranked it: the flag is the only
-        // remaining origin once the environment is ruled out.
-        let note = metadata_cap_origin(Some("2MiB"), 4096).expect("an override must be named");
-        assert!(note.contains("--max-metadata-size"), "{note}");
-        // Nothing configured, but the value is not the default either.
-        assert!(metadata_cap_origin(None, 4096).is_some());
-
-        // With the environment set to the value in force, that is the origin.
-        // SAFETY: as above.
-        unsafe { std::env::set_var("MIND_MAX_METADATA_SIZE", "4KiB") };
-        let note = metadata_cap_origin(Some("2MiB"), 4096).expect("an override must be named");
+        assert_eq!(
+            metadata_cap_origin(Some(&MetadataLimitOrigin::Config("2MiB".into()))),
+            None
+        );
+        // The flag is credited with its raw value, even when that value equals
+        // the default (the flag still won).
+        let note = metadata_cap_origin(Some(&MetadataLimitOrigin::Flag("8MiB".into())))
+            .expect("the flag must be named");
         assert!(
-            note.contains("MIND_MAX_METADATA_SIZE") && note.contains("4KiB"),
+            note.contains("--max-metadata-size (8MiB)")
+                && note.contains("overrides the environment and the config key"),
             "{note}"
         );
-        // And an env value that is NOT in force does not get the credit.
-        let note = metadata_cap_origin(Some("2MiB"), 8192).expect("an override must be named");
-        assert!(note.contains("--max-metadata-size"), "{note}");
+        // The environment is named by its constant, with its raw value.
+        let note = metadata_cap_origin(Some(&MetadataLimitOrigin::Env("4KiB".into())))
+            .expect("the environment must be named");
+        assert!(
+            note.contains(crate::config::MAX_METADATA_SIZE_ENV) && note.contains("4KiB"),
+            "{note}"
+        );
+    }
 
-        // SAFETY: as above; restore whatever the environment had.
-        unsafe {
-            match had {
-                Some(v) => std::env::set_var("MIND_MAX_METADATA_SIZE", v),
-                None => std::env::remove_var("MIND_MAX_METADATA_SIZE"),
-            }
-        }
+    /// `init-source`'s pre-read of an existing `mind.toml` goes through the
+    /// metadata cap: over the cap is `MetadataTooLarge`, under it is the text,
+    /// and an absent file is `None`. This pins the pre-read itself, which the
+    /// CLI test cannot isolate (the scan's own load would refuse the file too).
+    // spec: DSC-91
+    #[test]
+    fn init_source_pre_read_of_mind_toml_is_capped() {
+        let dir = scratch("init-pre-read");
+        let toml = dir.join("mind.toml");
+        assert!(matches!(read_existing_mind_toml(&toml, 8), Ok(None)));
+        let body = "[source]\ndescription = \"forty bytes!!!\"\n";
+        assert_eq!(body.len(), 40);
+        std::fs::write(&toml, body).unwrap();
+        let err = read_existing_mind_toml(&toml, 8).expect_err("over the cap must be refused");
+        assert!(matches!(err, MindError::MetadataTooLarge { .. }), "{err:?}");
+        assert_eq!(
+            read_existing_mind_toml(&toml, crate::error::METADATA_SIZE_LIMIT)
+                .unwrap()
+                .as_deref(),
+            Some(body)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Which `requires` entries a single-item link instance drops, and which

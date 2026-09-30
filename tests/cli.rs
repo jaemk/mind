@@ -2697,12 +2697,12 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
 
 #[test]
 fn init_source_oversized_pre_existing_mind_toml_is_refused() {
-    // spec: DSC-91 -- init-source's own read of a pre-existing mind.toml (for
-    // the scaffold-patching step) goes through the same size-capped helper as
-    // every other metadata read, not a raw unbounded `read_to_string`. Proven
-    // with a lowered cap rather than an 8 MiB fixture: a 1-byte cap must
-    // refuse even a tiny mind.toml, which only holds if the read honors the
-    // cap at all.
+    // spec: DSC-91 -- `init-source` refuses a pre-existing mind.toml over the
+    // metadata cap, end to end. Proven with a lowered cap rather than an 8 MiB
+    // fixture: a 1-byte cap must refuse even a tiny mind.toml. This does NOT
+    // isolate init-source's own pre-read (the catalog scan's load of the same
+    // file would refuse it too); that read is pinned by the unit test
+    // `commands::tests::init_source_pre_read_of_mind_toml_is_capped`.
     let sb = Sandbox::new();
     let repo = sb.base.join("authoring");
     write(

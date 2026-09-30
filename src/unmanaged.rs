@@ -509,8 +509,11 @@ mod tests {
         std::fs::write(workflows.join("...js"), b"export const meta = {};").unwrap();
         std::fs::write(workflows.join("deploy.js"), b"export const meta = {};").unwrap();
 
+        let saved_agent_homes = std::env::var_os("MIND_AGENT_HOMES");
+        let saved_policy = std::env::var_os("MIND_POLICY_FILE");
         unsafe {
             std::env::set_var("MIND_AGENT_HOMES", home.to_str().unwrap());
+            std::env::remove_var("MIND_POLICY_FILE");
         }
         let paths = Paths {
             mind_home: home.join("mind-home-unused"),
@@ -518,7 +521,13 @@ mod tests {
         };
         let result = scan(&paths, &Manifest::default());
         unsafe {
-            std::env::remove_var("MIND_AGENT_HOMES");
+            match saved_agent_homes {
+                Some(v) => std::env::set_var("MIND_AGENT_HOMES", v),
+                None => std::env::remove_var("MIND_AGENT_HOMES"),
+            }
+            if let Some(v) = saved_policy {
+                std::env::set_var("MIND_POLICY_FILE", v);
+            }
         }
         let _ = std::fs::remove_dir_all(&home);
 

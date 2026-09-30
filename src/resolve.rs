@@ -92,6 +92,11 @@ fn split_kind(raw: &str) -> Result<(Option<ItemKind>, String)> {
     // kind=None, so a prefixed effective name like `jk:review` parses as a name and
     // resolves by effective-name match, while `skill:review` stays kind-qualified.
     //
+    // spec: NS-74 -- a kind-qualified ref with no source selector is ALSO
+    // read as the effective name `<kind>:<name>` by `resolve` and
+    // `resolve_installed` (a legacy prefix equal to a kind word); see
+    // `alternate_ref`.
+    //
     // spec: DSC-112 -- the set of kind words grows (`workflow` joined it with
     // the workflow kind), and a word joining it silently re-reads every
     // existing `<word>:<name>` ref as kind-qualified. Prefixes are guarded at
@@ -211,22 +216,46 @@ pub fn select<'a>(items: &'a [CatalogItem], r: &ItemRef) -> Vec<&'a CatalogItem>
         .collect()
 }
 
+/// NS-74: the second reading of a kind-qualified ref with no source selector.
+/// `workflow:review` is the workflow `review`, but it is also the effective name
+/// `workflow:review` (a legacy prefix that equals a kind word, DSC-112). `None`
+/// when the ref is not kind-qualified or carries a source selector.
+fn alternate_ref(r: &ItemRef) -> Option<ItemRef> {
+    let kind = r.kind?;
+    if r.source.is_some() {
+        return None;
+    }
+    Some(ItemRef {
+        kind: None,
+        name: format!("{}:{}", kind.as_str(), r.name),
+        source: None,
+    })
+}
+
 /// Find the single catalog item matching `r`, erroring on none or ambiguity.
 pub fn resolve<'a>(
     items: &'a [CatalogItem],
     r: &ItemRef,
     sources: usize,
 ) -> Result<&'a CatalogItem> {
-    let matches: Vec<&CatalogItem> = items
-        .iter()
-        .filter(|it| {
-            r.kind.is_none_or(|k| it.kind == k)
-                && it.effective_name() == r.name
-                && r.source
-                    .as_ref()
-                    .is_none_or(|s| source_matches(&it.source, s))
-        })
-        .collect();
+    let matching = |r: &ItemRef| -> Vec<&'a CatalogItem> {
+        items
+            .iter()
+            .filter(|it| {
+                r.kind.is_none_or(|k| it.kind == k)
+                    && it.effective_name() == r.name
+                    && r.source
+                        .as_ref()
+                        .is_none_or(|s| source_matches(&it.source, s))
+            })
+            .collect()
+    };
+    let mut matches = matching(r);
+    if let Some(alt) = alternate_ref(r) {
+        // spec: NS-74 -- both readings matching is ambiguous; only the
+        // effective-name reading matching resolves to it.
+        matches.extend(matching(&alt));
+    }
 
     match matches.as_slice() {
         [] => Err(MindError::ItemNotFound {
@@ -331,10 +360,14 @@ pub fn resolve_installed<'a>(
     items: &'a std::collections::BTreeMap<String, InstalledItem>,
     r: &ItemRef,
 ) -> Result<&'a InstalledItem> {
-    let matches: Vec<&InstalledItem> = items
+    let mut matches: Vec<&InstalledItem> = items
         .values()
         .filter(|it| installed_matches(it, r))
         .collect();
+    if let Some(alt) = alternate_ref(r) {
+        // spec: NS-74 -- see `resolve`.
+        matches.extend(items.values().filter(|it| installed_matches(it, &alt)));
+    }
     match matches.as_slice() {
         [] => Err(MindError::NotInstalled {
             name: r.name.clone(),
@@ -800,6 +833,111 @@ mod tests {
             }
             other => panic!("expected AmbiguousItem, got {other:?}"),
         }
+    }
+
+    /// NS-74: `workflow:review` is the workflow `review` AND the effective name
+    /// `workflow:review` (a legacy prefix equal to a kind word). Both matching
+    /// is ambiguous; only the alternate matching resolves to it; only the
+    /// primary matching is unchanged.
+    #[test]
+    fn kind_qualified_ref_also_reads_as_an_effective_name_in_resolve() {
+        // spec: NS-74
+        let mut aliased = cat(ItemKind::Skill, "review", "h/o/a");
+        aliased.prefix = Some("workflow".to_string());
+        let wf = cat(ItemKind::Workflow, "review", "h/o/b");
+        let r = parse_item_ref("workflow:review").unwrap();
+
+        match resolve(&[aliased.clone(), wf.clone()], &r, 2) {
+            Err(MindError::AmbiguousItem { candidates, .. }) => {
+                assert_eq!(candidates.len(), 2, "{candidates:?}");
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
+        let only_alt = [aliased];
+        assert_eq!(
+            resolve(&only_alt, &r, 1).unwrap().kind,
+            ItemKind::Skill,
+            "only the effective-name reading matches"
+        );
+        let only_primary = [wf];
+        assert_eq!(
+            resolve(&only_primary, &r, 1).unwrap().kind,
+            ItemKind::Workflow
+        );
+        // A source selector suppresses the alternate reading.
+        let mut aliased2 = cat(ItemKind::Skill, "review", "h/o/a");
+        aliased2.prefix = Some("workflow".to_string());
+        let scoped = parse_item_ref("h/o/a#workflow:review").unwrap();
+        assert!(matches!(
+            resolve(&[aliased2], &scoped, 1),
+            Err(MindError::ItemNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn kind_qualified_ref_also_reads_as_an_effective_name_in_resolve_installed() {
+        // spec: NS-74
+        let m = manifest(vec![
+            inst(ItemKind::Skill, "workflow:review", "h/o/a"),
+            inst(ItemKind::Workflow, "review", "h/o/b"),
+        ]);
+        let r = parse_item_ref("workflow:review").unwrap();
+        assert!(matches!(
+            resolve_installed(&m, &r),
+            Err(MindError::AmbiguousItem { .. })
+        ));
+        let only_alt = manifest(vec![inst(ItemKind::Skill, "workflow:review", "h/o/a")]);
+        assert_eq!(
+            resolve_installed(&only_alt, &r).unwrap().kind,
+            ItemKind::Skill
+        );
+        let only_primary = manifest(vec![inst(ItemKind::Workflow, "review", "h/o/b")]);
+        assert_eq!(
+            resolve_installed(&only_primary, &r).unwrap().kind,
+            ItemKind::Workflow
+        );
+    }
+
+    #[test]
+    fn alternate_reading_unions_candidates_and_is_suppressed_by_a_source_selector() {
+        // spec: NS-74
+        let mut aliased = cat(ItemKind::Skill, "review", "h/o/a");
+        aliased.prefix = Some("workflow".to_string());
+        let wf = cat(ItemKind::Workflow, "review", "h/o/b");
+        let r = parse_item_ref("workflow:review").unwrap();
+        match resolve(&[aliased, wf], &r, 2) {
+            Err(MindError::AmbiguousItem { candidates, .. }) => {
+                assert!(
+                    candidates.iter().any(|c| c.contains("workflow:review"))
+                        && candidates.iter().any(|c| c == "h/o/b#workflow:review"),
+                    "union must name the aliased skill and the workflow: {candidates:?}"
+                );
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
+        // Two aliased items and no workflow: the alternate itself is ambiguous.
+        let mut a1 = cat(ItemKind::Skill, "review", "h/o/a");
+        a1.prefix = Some("workflow".to_string());
+        let mut a2 = cat(ItemKind::Skill, "review", "h/o/c");
+        a2.prefix = Some("workflow".to_string());
+        assert!(matches!(
+            resolve(&[a1, a2], &r, 2),
+            Err(MindError::AmbiguousItem { .. })
+        ));
+        // A bare (kind-less) ref never gets an alternate.
+        assert!(alternate_ref(&parse_item_ref("review").unwrap()).is_none());
+        // Installed: a source selector suppresses the alternate reading.
+        let m = manifest(vec![inst(ItemKind::Skill, "workflow:review", "h/o/a")]);
+        let scoped = parse_item_ref("h/o/a#workflow:review").unwrap();
+        assert!(matches!(
+            resolve_installed(&m, &scoped),
+            Err(MindError::NotInstalled { .. })
+        ));
+        // Neither reading matches.
+        assert!(matches!(
+            resolve_installed(&m, &parse_item_ref("agent:review").unwrap()),
+            Err(MindError::NotInstalled { .. })
+        ));
     }
 
     #[test]

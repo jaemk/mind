@@ -117,13 +117,15 @@ pub struct Cli {
     /// `meta` (default 8MiB).
     ///
     /// Takes a byte count (`16777216`), a suffixed size (`32MiB`, `512KiB`,
-    /// `16MB`), or `unlimited`, `none`, or any zero value (`0`, `0B`, `0MiB`)
-    /// for no ceiling. Raise it for a source with a legitimately large metadata
-    /// file; lower it to bound how much a source you do not trust can make
-    /// `mind` allocate while scanning it. Also settable as
-    /// `MIND_MAX_METADATA_SIZE` or the `max-metadata-size` config key, which
-    /// this flag outranks.
-    // spec: CLI-240
+    /// `16MB`), or `unlimited` or `none` for no ceiling. A zero value (`0`,
+    /// `0B`, `0MiB`) also turns the cap off, with a warning; prefer
+    /// `unlimited` to do that on purpose. Raise it for a source with a
+    /// legitimately large metadata file; lower it to bound how much a source
+    /// you do not trust can make `mind` allocate while scanning it. The flag
+    /// applies to this invocation only; set the `max-metadata-size` config key
+    /// or `MIND_MAX_METADATA_SIZE` to make a value last (this flag outranks
+    /// both).
+    // spec: CLI-240 DSC-110
     #[arg(
         long,
         global = true,
@@ -285,8 +287,8 @@ EXAMPLES:
         /// `rule`, or `command`. Only needed for a file that neither sits under
         /// an `agents/`, `rules/`, or `commands/` directory nor declares
         /// `kind:` in its frontmatter. Item links only. A workflow cannot be
-        /// item-linked, since the blob form takes `.md` files only; meld the
-        /// repo, or use `learn workflow:<name>` instead.
+        /// item-linked (a blob link takes a `.md` file, a tree link a skill
+        /// directory); meld the repo, or use `learn workflow:<name>` instead.
         // spec: CLI-239, LNK-21
         #[arg(long)]
         kind: Option<LinkKindArg>,
@@ -351,7 +353,8 @@ EXAMPLES:
         path: Option<String>,
 
         /// Rewrite bare sibling references into `{{ns:name}}` tokens. This edits
-        /// the repo's item files; it is heuristic, so review the result.
+        /// the repo's item files; it is heuristic, so review the result. Like
+        /// `review --fix`, it leaves `.js` files (workflows) alone.
         #[arg(long)]
         template: bool,
 

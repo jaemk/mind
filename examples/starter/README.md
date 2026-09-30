@@ -15,7 +15,8 @@ commands/ship.md         command, description in frontmatter
 workflows/hello.js       workflow, description in its `export const meta` object
 ```
 
-Each item's `description` comes from its own YAML frontmatter. There is no
+Each item's `description` comes from its own YAML frontmatter, or a workflow's
+`meta` object. There is no
 `mind.toml`: convention scanning is the default and needs no configuration. Add
 a `mind.toml` only to set repo metadata, a namespace, or a non-standard layout (see
 [../namespacing/](../namespacing/) for a repo that ships one).
@@ -29,10 +30,9 @@ as `/ship` (CMD-5).
 `workflows/<name>.js`, installed into the agent home's `workflows/` directory
 (WF-10). It is the one kind with no YAML frontmatter, so its description and
 `whenToUse` are read from the `export const meta` object the harness already
-requires (WF-4, WF-51). Its `meta.name` is the literal `'hello'`, which matches
-the installed name here; melding this source under a namespace prefix makes the
-two diverge and mind reports it (WF-24). Write `meta.name: '{{ns:hello}}'`
-instead to keep them in step under any prefix (WF-23).
+requires (WF-4, WF-51). Its `meta.name` is the `{{ns:hello}}` token, which
+expands to `hello` when unprefixed and `<prefix>:hello` under a namespace, so the
+harness name stays in step with the installed name (WF-23, WF-24).
 
 In real use you skip the local copy entirely and run:
 
@@ -94,7 +94,7 @@ target).
 
 `../../spec/workflows.md` - the `workflow` kind `hello` demonstrates: WF-1
 (convention path), WF-4/WF-51 (description and `whenToUse` from `meta`), WF-10
-(store path and link target), WF-24 (a literal `meta.name` diverging under a
+(store path and link target), WF-23/WF-24 (the `meta.name` token tracking the
 prefix).
 
 ## Verified
@@ -104,5 +104,5 @@ asserts the items are discovered with their descriptions, so the example stays
 correct as the code changes. `tests/cli_examples_commands.rs` melds it and
 asserts the `ship` command installs and links at `commands/ship.md`, that
 `hello` installs and links at `workflows/hello.js`, that its `meta` object is
-really read, and that its literal `meta.name` is quiet unprefixed and warned
-under a namespace prefix.
+really read, and that its `meta.name` token expands to `hello` unprefixed and
+`jk:hello` under a namespace prefix.

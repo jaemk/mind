@@ -1,5 +1,5 @@
 export const meta = {
-  name: 'hello',
+  name: '{{ns:hello}}',
   description: 'Greet the user and summarize the repo state',
   whenToUse: 'when a session starts and you want a quick orientation',
   phases: [{ title: 'Greet' }],

@@ -1029,3 +1029,9 @@ field lets the curator opt in to named handling.
     the remedy, rather than the pre-meld wording that the prefix "cannot be
     used": the value is the source's own declaration, so no consumer-side flag
     overrides it and the only action available is to drop the source.
+
+- `DSC-113` `completions` and `man` read no source metadata, so they skip
+  metadata-cap resolution entirely (DSC-104). A malformed `--max-metadata-size`,
+  `MIND_MAX_METADATA_SIZE`, or `max-metadata-size` config value therefore never
+  stops a shell from loading its completion script or a user from reading the
+  manual. Every other verb resolves the cap and refuses an undecodable value.

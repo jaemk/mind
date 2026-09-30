@@ -458,10 +458,41 @@ fn run(cli: Cli) -> Result<()> {
     // The report waits for precedence, though (spec: DSC-104): an undecodable
     // value is refused only when the environment is the origin that would have
     // been USED. A junk-but-decodable value is never even parsed when the flag
-    // is present (`config::resolve_metadata_limit` picks one origin and parses
+    // is present (`config::resolve_metadata_limit_detail` picks one origin and parses
     // only that), so refusing the undecodable one earlier would make the
     // flag-outranks-the-environment rule depend on which bytes happen to be in
     // a variable the flag was supposed to override.
+    //
+    // spec: DSC-113 -- `completions` and `man` read no metadata at all, so the
+    // whole resolution is skipped for them: a malformed flag, environment
+    // variable, or config value must not stop a shell from loading its
+    // completion script or a user from reading the manual.
+    if !matches!(cli.command, Command::Completions { .. } | Command::Man) {
+        install_metadata_limit(&cli, &paths)?;
+    }
+
+    // spec: STO-40 STO-41 STO-42
+    // Completions and man touch no persisted state: skip the lock. All other
+    // commands acquire the lock (shared or exclusive) before reading or writing.
+    match lock_mode(&cli.command, cli.json, cli.ascii) {
+        LockMode::None => dispatch(cli, &paths),
+        LockMode::Exclusive => {
+            let mut lock = lock::open(&paths)?;
+            let _guard = lock.write()?;
+            dispatch(cli, &paths)
+        }
+        LockMode::Shared => {
+            let lock = lock::open(&paths)?;
+            let _guard = lock.read()?;
+            dispatch(cli, &paths)
+        }
+    }
+}
+
+/// Resolve this run's metadata cap from the flag, the environment, and the
+/// config key (DSC-104), install it, and record where it came from (CLI-241).
+/// Warns when a zero-valued spelling turned the cap off (DSC-110).
+fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
     let env_raw = std::env::var_os(MAX_METADATA_SIZE_ENV);
     let env = match &env_raw {
         None => None,
@@ -480,34 +511,34 @@ fn run(cli: Cli) -> Result<()> {
         },
     };
     let configured = if cli.max_metadata_size.is_none() && env.is_none() {
-        config::Config::load(&paths)
+        config::Config::load(paths)
             .ok()
             .and_then(|c| c.max_metadata_size)
     } else {
         None
     };
-    error::set_metadata_size_limit(config::resolve_metadata_limit(
+    let (limit, origin) = config::resolve_metadata_limit_detail(
         cli.max_metadata_size.as_deref(),
         env.as_deref(),
         configured.as_deref(),
-    )?);
-
-    // spec: STO-40 STO-41 STO-42
-    // Completions and man touch no persisted state: skip the lock. All other
-    // commands acquire the lock (shared or exclusive) before reading or writing.
-    match lock_mode(&cli.command, cli.json, cli.ascii) {
-        LockMode::None => dispatch(cli, &paths),
-        LockMode::Exclusive => {
-            let mut lock = lock::open(&paths)?;
-            let _guard = lock.write()?;
-            dispatch(cli, &paths)
-        }
-        LockMode::Shared => {
-            let lock = lock::open(&paths)?;
-            let _guard = lock.read()?;
-            dispatch(cli, &paths)
-        }
+    )?;
+    error::set_metadata_size_limit(limit);
+    // spec: DSC-110 -- a zero spelling is "no ceiling", which is more often a
+    // typo for a small cap than a choice; say so on stderr (never stdout, so a
+    // `--json` document stays parseable) and keep going. The words `unlimited`
+    // and `none` say it on purpose and stay silent.
+    if let Some(raw) = origin.raw()
+        && config::zero_turns_cap_off(raw)
+    {
+        eprintln!(
+            "warning: {} value '{}' is zero, which turns mind's metadata cap off (no ceiling); \
+             write 'unlimited' to do that on purpose, or give a size to keep a cap",
+            origin.label(),
+            sanitize::strip_ansi(raw)
+        );
     }
+    config::set_metadata_limit_origin(origin);
+    Ok(())
 }
 
 fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {

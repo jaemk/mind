@@ -295,22 +295,137 @@ fn an_alias_the_reserved_list_caught_up_with_warns_but_keeps_scanning() {
         recall.stdout, recall.stderr
     );
     assert!(
-        recall.stderr.contains("workflow") && recall.stderr.contains("reserve"),
+        recall
+            .stderr
+            .contains("'workflow' is a word mind now reserves"),
         "the scan must warn that the recorded prefix is now a reserved word: {}",
         recall.stderr
     );
     assert!(
-        recall.stderr.contains("--namespace"),
+        recall
+            .stderr
+            .contains("unmeld it, then re-meld with `--namespace <other>`"),
         "the warning must name the way to rename it: {}",
         recall.stderr
     );
     // Advisory only: the item is still there, under the prefix it was
-    // installed with.
+    // installed with, as a SKILL named `workflow:review` (not read as a
+    // kind-qualified workflow ref).
     let probe = sb.mind(&["probe", "--no-tui"]);
     assert!(
-        probe.stdout.contains("workflow:review"),
+        probe.stdout.contains("skill:workflow:review"),
         "the items must still be listed under the recorded prefix: {}",
         probe.stdout
+    );
+}
+
+// spec: DSC-112
+#[test]
+fn the_reserved_alias_warning_prints_once_per_source_per_run() {
+    // The warning is about the source, not the scan, so it prints once per
+    // run whatever the verb does: a sync, an upgrade with real changes, a
+    // learn, a JSON listing. The per-process gate itself is pinned by the unit
+    // test `the_reserved_prefix_warning_is_owed_once_per_source`; this pins the
+    // CLI surface so a verb that grows a second scan cannot double it.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+    // A real upstream change, so `upgrade` has something to sync and re-link.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff, v2\n---\n# review skill v2\n",
+    );
+    write(
+        &sb.source.join("skills/other/SKILL.md"),
+        "---\nname: other\ndescription: Another skill\n---\n# other\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "v2"]);
+
+    for args in [
+        vec!["recall"],
+        vec!["upgrade", "--yes"],
+        vec!["learn", "skill:workflow:other", "--yes"],
+        vec!["probe", "--no-tui"],
+        vec!["sync", "--upgrade", "--yes"],
+        vec!["introspect"],
+        vec!["recall", "skill:workflow:review"],
+        vec!["--json", "probe", "--no-tui"],
+        vec!["upgrade", "skill:workflow:review", "--yes"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must succeed: {} {}",
+            r.stdout, r.stderr
+        );
+        assert_eq!(
+            r.stderr.matches("now reserves").count(),
+            1,
+            "{args:?}: the warning must print exactly once: {}",
+            r.stderr
+        );
+    }
+}
+
+// spec: DSC-112
+#[test]
+fn following_the_reserved_alias_remedy_clears_the_warning() {
+    // The warning names a remedy; following it has to end the condition.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+    assert!(
+        sb.mind(&["recall"]).stderr.contains("now reserves"),
+        "precondition: the warning fires before the remedy"
+    );
+
+    // A glob selector, since a namespaced meld's recorded name carries more
+    // than the repo's own name.
+    let unmeld = sb.mind(&["unmeld", "*agents*", "--yes"]);
+    assert!(
+        unmeld.success,
+        "unmeld must succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    let remeld = sb.mind(&["meld", &spec, "--namespace", "acme2", "--yes"]);
+    assert!(
+        remeld.success,
+        "re-meld under another prefix must succeed: {} {}",
+        remeld.stdout, remeld.stderr
+    );
+    for args in [vec!["recall"], vec!["probe", "--no-tui"]] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must succeed: {} {}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            !r.stderr.contains("reserves"),
+            "{args:?}: the warning must be gone after the remedy: {}",
+            r.stderr
+        );
+    }
+    assert!(
+        sb.mind(&["recall"]).stdout.contains("acme2:review"),
+        "the item is installed under the new prefix"
     );
 }
 
@@ -471,8 +586,8 @@ fn a_reserved_alias_does_not_block_sync_or_upgrade() {
     );
     let recall = sb.mind(&["recall"]);
     assert!(
-        recall.stdout.contains("workflow:review"),
-        "the item must still be reported: {}",
+        recall.stdout.contains("skill:workflow:review"),
+        "the item must still be reported, as a skill: {}",
         recall.stdout
     );
 }

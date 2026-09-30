@@ -1614,7 +1614,13 @@ and per-harness `kinds` defaults.
   not in force. `--json` carries it twice: `max_metadata_size` as the rendered
   string a human reads, and `max_metadata_size_bytes` as the byte count a
   consumer compares against, with an unlimited cap rendering as `"unlimited"` /
-  `18446744073709551615`.
+  `9223372036854775807` (CLI-242).
+
+- `CLI-242` Every integer mind emits in `--json` fits a signed 64-bit integer,
+  so a consumer that parses numbers as `i64` never overflows. The one value that
+  could exceed it, the unlimited metadata cap (held as `u64::MAX`), is emitted
+  as `max_metadata_size_bytes: 9223372036854775807` (`i64::MAX`). The rendered `max_metadata_size` string
+  still reads `unlimited`.
 
 - `CLI-163` The short flag `-n` is reserved for `--dry-run` on `learn` (CLI-32),
   which already owned it. As a consequence, `--namespace` on `meld`, `review`, and

@@ -1,5 +1,5 @@
 //! Integration tests for the workflow warnings `upgrade` emits (spec/workflows.md
-//! WF-24, WF-29, WF-50). Each test drives the real `mind` binary against a
+//! WF-7, WF-24, WF-29, WF-30..32, WF-50, WF-55, WF-56, LIFE-48, CLI-217). Each test drives the real `mind` binary against a
 //! hermetic fixture: a local git repo melded by filesystem path, with
 //! MIND_HOME/CLAUDE_HOME pointed at temp dirs. No network.
 
@@ -545,6 +545,71 @@ fn wf32_upgrade_reports_a_workflow_that_grew_past_the_cap_and_installs_it() {
         installed.len() > 524_288,
         "the over-cap file must be what landed, unmodified: {} bytes",
         installed.len()
+    );
+}
+
+/// An upgrade that touches only `beta` says nothing about `alpha`, whose harness
+/// name already diverges and stays installed untouched: the warning keys follow
+/// the upgraded set, not the whole installed set, and alpha's store copy is not
+/// rewritten.
+// spec: WF-24 WF-29
+#[test]
+fn an_upgrade_of_one_workflow_does_not_re_report_an_untouched_diverged_one() {
+    let sb = Sandbox::new();
+    sb.write_workflow("alpha", "not-alpha");
+    sb.write_workflow("beta", "beta");
+    sb.commit_src("add workflows");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    let learn_a = sb.mind(&["learn", "workflow:alpha"]);
+    assert!(learn_a.success, "learn alpha: {}", learn_a.stderr);
+    assert!(
+        learn_a
+            .stderr
+            .contains("the harness resolves it as 'not-alpha'"),
+        "the fixture's divergence must be real, or this test proves nothing: {}",
+        learn_a.stderr
+    );
+    let learn_b = sb.mind(&["learn", "workflow:beta"]);
+    assert!(learn_b.success, "learn beta: {}", learn_b.stderr);
+
+    let store_alpha = sb.mind_home.join("store/workflow/alpha");
+    let before = std::fs::read(&store_alpha).expect("alpha's store copy");
+
+    // Change only beta's content, keeping its harness name.
+    sb.write_workflow_raw(
+        "beta",
+        &format!("{}// touched\n", workflow_js("beta", "beta")),
+    );
+    sb.commit_src("touch beta only");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        up.success,
+        "upgrade must succeed: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+    assert!(
+        up.stdout.contains("upgraded"),
+        "beta must actually have upgraded: {}",
+        up.stdout
+    );
+    assert!(
+        !up.stderr.contains("workflow:alpha"),
+        "no warning may be keyed to the untouched workflow:alpha: {}",
+        up.stderr
+    );
+    assert!(
+        !up.stderr.contains("workflow:beta"),
+        "beta's name is unchanged, so it draws no divergence: {}",
+        up.stderr
+    );
+    let after = std::fs::read(&store_alpha).expect("alpha's store copy after");
+    assert_eq!(
+        before, after,
+        "alpha's store copy must be byte-identical after the upgrade"
     );
 }
 

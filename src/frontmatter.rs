@@ -31,7 +31,7 @@ use crate::error::{MindError, Result};
 /// pass the result to [`field`] per key. `catalog::build_item` is that caller,
 /// and it wants six keys, so a read per key was six reads per item per scan.
 ///
-/// A file at or above [`crate::error::METADATA_SIZE_LIMIT`] is refused with
+/// A file above the cap in effect ([`crate::error::metadata_size_limit`]) is refused with
 /// [`MindError::MetadataTooLarge`] rather than read in full. An absent or
 /// otherwise unreadable file yields `Ok(String::new())`, which [`field`] reads
 /// as "no frontmatter" (a tool's `TOOL.md` is optional, so this is the common

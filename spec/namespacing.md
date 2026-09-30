@@ -110,6 +110,13 @@ The rest of this document states these rules normatively.
   character is rejected the same as one carrying a bidi override. The
   broadened set is a strict superset of the original: every code point
   blocked before NS-73 is still blocked.
+- `NS-74` A kind-qualified item ref with no source selector (`workflow:review`)
+  has two readings: the item `review` of that kind, and the item whose
+  effective name is literally `<kind>:<name>` (a legacy prefix equal to a kind
+  word, DSC-112). `resolve` and `resolve_installed` consider both. A single
+  match under either reading resolves to it; matches under both are ambiguous
+  (`AmbiguousItem`), never silently preferring one. A ref carrying a source
+  selector, or one that is not kind-qualified, has only its own reading.
 - `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only.
   The following additional words are reserved against plausible future
   item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,

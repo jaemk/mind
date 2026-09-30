@@ -1270,17 +1270,43 @@ mod tests {
         let mut item = make_available("workflow:review", "review", "src/a", ItemKind::Workflow);
         item.description = Some("Review changed files - before a PR".to_string());
         let snap = snap_with(vec![], vec![item]);
-        // Present in "... - before a PR - before a PR", absent from the single
-        // composition. Matching it means something joined `whenToUse` twice.
+        // Ground truth from a REAL catalog item carrying `when_to_use`: its
+        // display form is the single join, and a query spanning a doubled
+        // "... - before a PR - before a PR" join does not match it.
+        let real = catalog::CatalogItem {
+            kind: ItemKind::Workflow,
+            name: "review".to_string(),
+            source: "src/a".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::new(),
+            description: Some("Review changed files".to_string()),
+            when_to_use: Some("before a PR".to_string()),
+            link_rel: None,
+            bin: None,
+            build: None,
+            requires: Vec::new(),
+            ignore: None,
+            expand: Vec::new(),
+            hooks: Vec::new(),
+        };
+        assert_eq!(
+            real.display_description().as_deref(),
+            Some("Review changed files - before a PR")
+        );
+        assert!(
+            !catalog::matches_query(&real, "pr - before"),
+            "a query spanning the join of a DOUBLED \"desc - whenToUse - \
+             whenToUse\" must not match, since the description is composed \
+             once"
+        );
+        // The TUI row's fake item must agree with the real item on both.
         let nodes = build_tree(&snap, "pr - before", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         assert!(
             !flat
                 .iter()
                 .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review")),
-            "a query spanning the join of a DOUBLED \"desc - whenToUse - \
-             whenToUse\" must not match, since the description is composed \
-             once: {flat:?}"
+            "the TUI row must not match a doubled join either: {flat:?}"
         );
         // The same search path does match a span of the single composition,
         // so the negative above is a real discrimination, not a dead query.

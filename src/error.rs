@@ -311,6 +311,35 @@ impl ItemKind {
         ItemKind::Workflow,
     ];
 
+    /// Every kind, in declaration order. The one list the user-facing kind
+    /// wording is built from (NS-25), so a new variant shows up in messages.
+    pub const ALL: [ItemKind; 6] = [
+        ItemKind::Skill,
+        ItemKind::Agent,
+        ItemKind::Rule,
+        ItemKind::Command,
+        ItemKind::Workflow,
+        ItemKind::Tool,
+    ];
+
+    /// "skill, agent, rule, command, workflow, tool".
+    pub fn word_list() -> String {
+        Self::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// "'skill:name', 'agent:name', ..." for every kind.
+    pub fn ref_forms() -> String {
+        Self::ALL
+            .iter()
+            .map(|k| format!("'{}:name'", k.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Parse a list of kind strings into [`ItemKind`]s, rejecting any unknown
     /// string with [`MindError::UnknownKind`]. Used by the config `kinds` filter
     /// (HARN-1) and the harness presets (HARN-4).
@@ -531,12 +560,14 @@ pub enum MindError {
     BadItemLink { url: String, reason: String },
 
     #[error(
-        "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', 'command:name', or 'owner/repo#name')"
+        "'{name}' is not a valid item ref (expected 'name', {forms}, or 'owner/repo#name')",
+        forms = ItemKind::ref_forms()
     )]
     InvalidItemRef { name: String },
 
     #[error(
-        "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, command, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
+        "'{prefix}' cannot be used as a namespace prefix: it is a reserved word (an item kind: {words}; or a word mind reserves for a future kind), which would make a prefixed name indistinguishable from a kind-qualified ref",
+        words = ItemKind::word_list()
     )]
     ReservedPrefix { prefix: String },
 
@@ -751,19 +782,24 @@ pub enum MindError {
     LinkNotAFile { source_name: String, path: String },
 
     /// LNK-20: an item-link path that names a file kind mind deliberately does
-    /// not support installing by item link -- a workflow's `.js`, since the
-    /// blob/tree link form takes `.md` files only. Distinct from
+    /// not support installing by item link -- a workflow's `.js`, since a blob
+    /// link takes a `.md` file and a tree link a skill directory. Distinct from
     /// `LinkNotASkill`/`LinkNotAFile`, which mean the path itself is wrong:
     /// this path is understood fine, it is just a kind the link form refuses.
     /// The message names the kind and the remedy instead of claiming the path
     /// is unrecognized.
     // The remedy is ONE ordered sequence, not a choice: the user is here
-    // because the repo is not melded, so `mind learn workflow:<name>` has no
-    // source to resolve the workflow from until the meld has happened.
+    // because the repo is not melded, so `mind learn <ref>` has no source to
+    // resolve the workflow from until the meld has happened. `mind probe`
+    // finds the ref; `--add-root` reaches a workflow the source's
+    // authoritative inventory leaves out.
     #[error(
         "source '{source_name}': linked path '{path}' names a workflow, and mind does not \
-         support installing a workflow by item link (the blob/tree link form takes `.md` \
-         files only); meld the repo, then run `mind learn workflow:<name>`"
+         install a workflow by item link (a blob link takes a .md file, a tree link takes a \
+         skill directory); meld the repo, run `mind probe <name>` to find the workflow's ref, \
+         then `mind learn <ref>` (if the repo's authoritative mind.toml or plugin manifest \
+         leaves it out, meld with `--add-root <dir>` naming the directory that holds its \
+         workflows/ folder)"
     )]
     LinkKindNotSupported { source_name: String, path: String },
 
@@ -771,11 +807,11 @@ pub enum MindError {
     /// `workflows/`, so nothing about it says "workflow". The link form takes
     /// `.md` files (and skill directories) only, so it is refused -- but as a
     /// JavaScript file, not as a workflow: `LinkKindNotSupported`'s remedy
-    /// (`mind learn workflow:<name>`) would name an item that does not exist.
+    /// (`mind probe` for a workflow's ref) would name an item that does not exist.
     #[error(
         "source '{source_name}': linked path '{path}' is a JavaScript file, and mind does not \
-         install one by item link (the blob/tree link form takes `.md` files only); meld the \
-         repo instead"
+         install one by item link (a blob link takes a .md file, a tree link takes a skill \
+         directory); meld the repo instead"
     )]
     LinkNotLinkableFile { source_name: String, path: String },
 
@@ -1725,6 +1761,73 @@ impl MindError {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// NS-25/NS-26: the kind wording in the two errors is built from
+    /// `ItemKind::ALL`, and `ALL` covers every variant.
+    #[test]
+    fn kind_word_lists_cover_every_kind() {
+        // spec: NS-25 NS-26
+        let invalid = MindError::InvalidItemRef { name: "x".into() }.to_string();
+        let reserved = MindError::ReservedPrefix { prefix: "x".into() }.to_string();
+        for k in ItemKind::ALL {
+            let w = k.as_str();
+            assert_eq!(ItemKind::parse(w), Some(k), "ALL round-trips through parse");
+            assert!(invalid.contains(&format!("'{w}:name'")), "{invalid}");
+            assert!(reserved.contains(w), "{reserved}");
+        }
+        assert_eq!(
+            ItemKind::word_list(),
+            "skill, agent, rule, command, workflow, tool"
+        );
+        // An exhaustive match: adding a variant breaks the build here until
+        // ALL (and this test) are updated.
+        for k in ItemKind::ALL {
+            match k {
+                ItemKind::Skill
+                | ItemKind::Agent
+                | ItemKind::Rule
+                | ItemKind::Command
+                | ItemKind::Workflow
+                | ItemKind::Tool => {}
+            }
+        }
+        assert_eq!(ItemKind::ALL.len(), 6);
+    }
+
+    /// LNK-20/WF-6: the two link-refusal messages carry the remedy and the
+    /// corrected link-form wording.
+    #[test]
+    fn link_refusal_messages_carry_the_remedy() {
+        // spec: LNK-20 WF-6
+        let wf = MindError::LinkKindNotSupported {
+            source_name: "s".into(),
+            path: "workflows/x.js".into(),
+        }
+        .to_string();
+        for needle in [
+            "mind probe <name>",
+            "mind learn <ref>",
+            "--add-root",
+            "a blob link takes a .md file, a tree link takes a skill directory",
+        ] {
+            assert!(wf.contains(needle), "{needle}: {wf}");
+        }
+        let js = MindError::LinkNotLinkableFile {
+            source_name: "s".into(),
+            path: "x.js".into(),
+        }
+        .to_string();
+        assert!(js.contains("meld the repo instead"), "{js}");
+        assert!(js.contains("JavaScript file"), "{js}");
+        assert!(!js.contains("names a workflow"), "{js}");
+        let reserved = MindError::ReservedPrefix { prefix: "p".into() }.to_string();
+        assert!(reserved.contains("future kind"), "{reserved}");
+        assert!(
+            MindError::InvalidItemRef { name: "x".into() }
+                .to_string()
+                .contains("or 'owner/repo#name')")
+        );
+    }
 
     /// `command` is a full item kind: it parses, names itself, maps to the
     /// `commands/` directory both ways, and is linked into agent homes.

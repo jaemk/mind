@@ -376,8 +376,8 @@ pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
 /// Validate that `prefix` is safe to use as a namespace prefix (NS-25, NS-28, NS-29).
 ///
 /// Rejects any prefix that:
-/// - is a reserved item-kind word (`skill`, `agent`, `rule`, `command`, `tool`;
-///   NS-25), or
+/// - is a reserved item-kind word (`skill`, `agent`, `rule`, `command`,
+///   `workflow`, `tool`; NS-25), or
 /// - is in the extended reserved list (NS-29), or
 /// - is not a single safe path component (NS-28).
 ///
@@ -410,6 +410,26 @@ pub fn validate_prefix(prefix: &str) -> crate::error::Result<()> {
         });
     }
     Ok(())
+}
+
+/// The NS-42 bare-name set: every sibling AGENT name that no non-agent sibling
+/// also holds (the cross-kind shadow rule). A `{{ns:}}` token naming one of
+/// these expands bare even under a prefix. The one definition shared by
+/// install (`expand_references`), `review`, and meld's unguarded-reference scan.
+pub(crate) fn bare_agent_names<'a>(
+    siblings: impl IntoIterator<Item = (crate::error::ItemKind, &'a str)>,
+) -> HashSet<String> {
+    let mut agents: HashSet<String> = HashSet::new();
+    let mut others: HashSet<String> = HashSet::new();
+    for (kind, name) in siblings {
+        if kind == crate::error::ItemKind::Agent {
+            agents.insert(name.to_string());
+        } else {
+            others.insert(name.to_string());
+        }
+    }
+    agents.retain(|n| !others.contains(n));
+    agents
 }
 
 /// Expand every `{{ns:name}}` token in `content` to its effective name.
@@ -1568,6 +1588,20 @@ mod tests {
 
     fn sibs(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bare_agent_names_excludes_names_shadowed_by_non_agents() {
+        // spec: NS-42
+        use crate::error::ItemKind;
+        let got = bare_agent_names([
+            (ItemKind::Agent, "a"),
+            (ItemKind::Agent, "b"),
+            (ItemKind::Skill, "b"),
+            (ItemKind::Rule, "c"),
+        ]);
+        assert_eq!(got, sibs(&["a"]));
+        assert!(bare_agent_names(std::iter::empty()).is_empty());
     }
 
     #[test]

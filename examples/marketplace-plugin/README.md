@@ -10,7 +10,9 @@ Layout mirrors a real Claude plugin:
 - `commands/hello.md` - a command; installs as `acme-tools:hello` (MKT-18)
 - `workflows/deploy.js` - a workflow; installs as `acme-tools:deploy` (WF-40). Its
   `meta.name` is the `{{ns:deploy}}` token, so it expands to the same
-  `acme-tools:deploy` the harness would name a plugin workflow (WF-42).
+  `acme-tools:deploy` the harness would name a plugin workflow (WF-42). The token
+  only resolves when the plugin is consumed through mind; a plugin also installed
+  natively by the harness should keep a literal `meta.name`.
 - `elsewhere/workflows/release.js` - a second workflow, at the path the manifest's
   `workflows` key names instead of the conventional `workflows/` directory
 - `hooks/` - an unsupported component kind; `mind` reports a skipped count (MKT-4)

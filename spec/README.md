@@ -275,6 +275,11 @@ and verified.
 | One zero/unlimited rule for the metadata cap across flag, env, config, and library | done | [discovery.md](discovery.md) (DSC-110) |
 | A present-but-undecodable `MIND_MAX_METADATA_SIZE` is a hard error, never a silent fallback | done | [discovery.md](discovery.md) (DSC-111) |
 | A registered source whose prefix is now a reserved kind word: a consumer-set prefix is warned about once per scan, a source-declared `[source].prefix` is a hard error naming `unmeld` | done | [discovery.md](discovery.md) (DSC-112) |
+| `completions` and `man` skip metadata-cap resolution, so a malformed cap never blocks them | done | [discovery.md](discovery.md) (DSC-113) |
+| `--json` integers fit i64: the unlimited metadata cap is emitted as `i64::MAX` bytes | done | [cli.md](cli.md) (CLI-242) |
+| A kind-qualified ref with no source selector also matches the effective name `<kind>:<name>`; both matching is ambiguous | done | [namespacing.md](namespacing.md) (NS-74) |
+| An unmanaged lobe workflow claims its harness name in the collision check | done | [workflows.md](workflows.md) (WF-61) |
+| `--json` carries a workflow's `when_to_use` separately from `description` | done | [workflows.md](workflows.md) (WF-62) |
 
 ## Documents
 

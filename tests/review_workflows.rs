@@ -317,6 +317,13 @@ fn a_meta_name_naming_a_sibling_agent_is_predicted_bare_under_a_prefix() {
             && collisions[0].contains("workflow:jk:literal"),
         "and both claimants are named in it: {collisions:?}"
     );
+    // spec: WF-29 -- review predicts, so it says what mind WOULD install, and
+    // the count-aware tail reads "both" for two claimants.
+    assert!(
+        collisions[0].contains("and mind would install both")
+            && !collisions[0].contains("are installed"),
+        "review wording, not the installed-site wording: {collisions:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -786,7 +793,7 @@ fn a_lowered_cap_reports_minds_own_cap_and_not_the_harnesss() {
 /// The body checks (`{{ns:}}` resolution and the rest) read every item file, so
 /// a workflow past mind's cap must be skipped by them too, not just by the
 /// catalog scan: a token sitting in the unread body draws no finding.
-// spec: WF-55 DSC-103
+// spec: WF-55 WF-56 DSC-103
 #[test]
 fn an_over_cap_workflow_body_is_not_read_by_the_body_checks() {
     let sb = Sandbox::new("wf");
@@ -808,6 +815,20 @@ fn an_over_cap_workflow_body_is_not_read_by_the_body_checks() {
         "the body of an over-cap workflow must not be read by a later check: {} {}",
         r.stdout,
         r.stderr
+    );
+    assert!(
+        !r.stdout.contains("bad-reference") && !r.stderr.contains("bad-reference"),
+        "no token finding for a file review did not read: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    // The skipped checks are said out loud, not silently absent.
+    let unread = findings(&r.stdout, "workflow-unread");
+    assert_eq!(unread.len(), 1, "{}", r.stdout);
+    assert!(
+        unread[0].contains("checks were skipped"),
+        "the finding must say the token checks were skipped: {}",
+        unread[0]
     );
 }
 
@@ -907,6 +928,12 @@ fn many_workflows_sharing_one_name_produce_one_bounded_finding() {
         "the claimant list must be capped and the rest counted: {}",
         collisions[0]
     );
+    // spec: WF-29 -- and the tail counts every claimant, not "both".
+    assert!(
+        collisions[0].ends_with("and mind would install all 300"),
+        "count-aware review wording: {}",
+        collisions[0]
+    );
     assert!(
         collisions[0].len() < 400,
         "the finding must stay bounded in length: {} chars",
@@ -935,7 +962,7 @@ fn many_workflows_sharing_one_name_produce_one_bounded_finding() {
 /// "a token in a non-markdown file never expands", which WF-25 makes untrue
 /// for a workflow -- install DOES expand tokens in a `.js`. The behavior pinned
 /// here is today's; the rationale is the part that no longer covers this kind.
-// spec: NS-54 WF-25
+// spec: NS-54 WF-25 WF-27
 #[test]
 fn fix_leaves_a_workflow_js_untouched() {
     let sb = Sandbox::new("wf");
@@ -977,4 +1004,109 @@ fn fix_leaves_a_workflow_js_untouched() {
         "{}",
         r.stdout
     );
+}
+
+// ---------------------------------------------------------------------------
+// WF-55: every review content read skips an over-cap workflow
+// ---------------------------------------------------------------------------
+
+/// Builds a prefixed source whose workflow `name` carries a body that trips the
+/// hard token check (`{{ns:nonesuch}}`), the path-token check
+/// (`{{tools:nonesuch}}`), the tool-by-bare-name check (`{{ns:mytool}}`), and
+/// the prose sibling check (`helper`), padded by `pad` bytes.
+fn prefixed_source_with_workflow(sb: &Sandbox, name: &str, pad: usize) {
+    write(&sb.source.join("mind.toml"), "[source]\nprefix = \"pre\"\n");
+    write(
+        &sb.source.join("skills/helper/SKILL.md"),
+        "---\ndescription: helper skill\n---\n# helper\n",
+    );
+    write(&sb.source.join("tools/mytool/run.sh"), "#!/bin/sh\n");
+    let mut body = format!(
+        "export const meta = {{ name: '{name}', description: 'D' }}\n\
+         // {{{{ns:nonesuch}}}} {{{{tools:nonesuch}}}} {{{{ns:mytool}}}}\n\
+         // Ask helper to do it.\n"
+    );
+    body.push_str(&"p".repeat(pad));
+    body.push('\n');
+    write(&sb.source.join(format!("workflows/{name}.js")), &body);
+}
+
+/// Non-vacuity control: under the cap the very same body draws every finding the
+/// over-cap test below expects to be absent.
+// spec: WF-55
+#[test]
+fn an_under_cap_workflow_body_draws_the_token_and_reference_findings() {
+    let sb = Sandbox::new("wf");
+    prefixed_source_with_workflow(&sb, "small", 0);
+    let r = sb.review_with(&["--max-metadata-size", "2KiB"]);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(all.contains("bad-reference"), "{all}");
+    assert!(all.contains("unguarded-reference"), "{all}");
+    assert!(all.contains("ns-tool-reference"), "{all}");
+    assert!(all.contains("nonesuch"), "{all}");
+}
+
+/// Every content-reading review check goes through `review_item_files`: an
+/// over-cap workflow with a prefix in effect draws none of the findings its
+/// body would otherwise trigger, only `workflow-unread`, and review exits 0.
+// spec: WF-55 WF-56
+#[test]
+fn an_over_cap_workflow_under_a_prefix_is_skipped_by_every_content_check() {
+    let sb = Sandbox::new("wf");
+    prefixed_source_with_workflow(&sb, "big", 2600);
+    let r = sb.review_with(&["--max-metadata-size", "2KiB"]);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(r.success, "{all}");
+    for tag in [
+        "bad-reference",
+        "unguarded-reference",
+        "ns-tool-reference",
+        "nonesuch",
+    ] {
+        assert!(
+            !all.contains(tag),
+            "{tag} leaked from an unread file: {all}"
+        );
+    }
+    let unread = findings(&r.stdout, "workflow-unread");
+    assert_eq!(unread.len(), 1, "{}", r.stdout);
+    assert!(
+        unread[0].contains("checks were skipped"),
+        "the skip is disclosed: {}",
+        unread[0]
+    );
+}
+
+/// The `--json` finding carries the same skipped-checks text.
+// spec: WF-56
+#[test]
+fn the_json_workflow_unread_finding_says_checks_were_skipped() {
+    let sb = Sandbox::new("wf");
+    prefixed_source_with_workflow(&sb, "big", 2600);
+    let r = sb.review_with(&["--max-metadata-size", "2KiB", "--json"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("workflow-unread")
+            && r.stdout
+                .contains("token and reference checks were skipped for this file"),
+        "{}",
+        r.stdout
+    );
+}
+
+/// Exactly at the cap is read (the exclusion is strictly `>`): the boundary
+/// workflow is not `workflow-unread` and its body checks run.
+// spec: WF-55
+#[test]
+fn a_workflow_exactly_at_the_cap_is_still_read() {
+    let sb = Sandbox::new("wf");
+    let body = "export const meta = { name: 'edge', description: 'D' }\n// {{ns:nonesuch}}\n";
+    let mut padded = body.to_string();
+    padded.push_str(&"p".repeat(2048 - body.len()));
+    assert_eq!(padded.len(), 2048);
+    write(&sb.source.join("workflows/edge.js"), &padded);
+    let r = sb.review_with(&["--max-metadata-size", "2KiB"]);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(findings(&r.stdout, "workflow-unread").is_empty(), "{all}");
+    assert!(all.contains("bad-reference"), "{all}");
 }

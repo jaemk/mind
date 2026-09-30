@@ -228,19 +228,12 @@ fn starter_workflow_meta_object_is_really_read_not_just_present() {
     );
 }
 
-/// The starter workflow writes `meta.name` as the LITERAL `'hello'` rather than
-/// the `{{ns:hello}}` token `examples/marketplace-plugin` uses, which is the
-/// hazard docs/src/source-layout.md now documents: a literal name is correct
-/// unprefixed and silently wrong under a prefix, because `meta.name` is a plain
-/// JS field with no frontmatter rule forcing a token.
-///
-/// Both halves are pinned, since the claim is that the literal form is fine for
-/// THIS example and reported when it is not: unprefixed the install is quiet,
-/// and under `--namespace` the very same file draws the WF-24 divergence warning
-/// naming both names and the remedy token.
+/// The starter workflow writes `meta.name` as the `{{ns:hello}}` token, so the
+/// harness name tracks the effective name: `hello` unprefixed and `jk:hello`
+/// under `--namespace jk`, with no WF-24 divergence warning either way.
 #[test]
-fn starter_workflows_literal_meta_name_is_quiet_bare_and_warned_under_a_prefix() {
-    // spec: WF-24 WF-23
+fn starter_workflows_token_meta_name_tracks_the_prefix() {
+    // spec: WF-23 WF-24
     let bare = Sandbox::from_example("starter");
     assert!(
         bare.mind(&["meld", &bare.source_spec(), "--register-only"])
@@ -251,8 +244,14 @@ fn starter_workflows_literal_meta_name_is_quiet_bare_and_warned_under_a_prefix()
     let combined = format!("{}{}", learn.stdout, learn.stderr);
     assert!(
         !combined.contains("the harness resolves it as"),
-        "unprefixed, the literal name equals the effective name, so there is \
+        "unprefixed, the token expands to the effective name, so there is \
          nothing to warn about: {combined}"
+    );
+    let stored = std::fs::read_to_string(bare.mind_home.join("store/workflow/hello"))
+        .expect("read the bare store copy");
+    assert!(
+        stored.contains("name: 'hello'"),
+        "the token must expand to the bare name: {stored}"
     );
 
     let pre = Sandbox::from_example("starter");
@@ -270,18 +269,19 @@ fn starter_workflows_literal_meta_name_is_quiet_bare_and_warned_under_a_prefix()
     assert!(learn.success, "{}\n{}", learn.stdout, learn.stderr);
     let combined = format!("{}{}", learn.stdout, learn.stderr);
     assert!(
-        combined.contains("the harness resolves it as 'hello', not 'jk:hello'"),
-        "the same file under a prefix must draw the WF-24 divergence warning \
-         naming both names: {combined}"
+        !combined.contains("the harness resolves it as"),
+        "under a prefix the token expands to the prefixed name, so there is \
+         nothing to warn about: {combined}"
     );
+    let stored = std::fs::read_to_string(pre.mind_home.join("store/workflow/jk:hello"))
+        .expect("read the prefixed store copy");
     assert!(
-        combined.contains("{{ns:hello}}"),
-        "and must carry the remedy token, spelled with the BARE name: {combined}"
+        stored.contains("name: 'jk:hello'"),
+        "the token must expand to the prefixed name: {stored}"
     );
-    // Advisory only: the workflow is installed and linked regardless.
     assert!(
         std::fs::symlink_metadata(pre.claude_home.join("workflows/jk:hello.js")).is_ok(),
-        "a divergence is advisory, so the item must still link: {combined}"
+        "the prefixed workflow must be linked: {combined}"
     );
 }
 

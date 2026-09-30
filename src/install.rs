@@ -573,18 +573,8 @@ fn expand_references(
     // set of agent bare names that are NOT also a non-agent sibling name (the
     // cross-kind shadow rule: if a name is both an agent and a skill/rule/tool, it
     // is NOT bare -- it keeps the prefix).
-    let agent_names: std::collections::HashSet<String> = siblings
-        .iter()
-        .filter(|s| s.kind == crate::error::ItemKind::Agent)
-        .map(|s| s.name.clone())
-        .collect();
-    let non_agent_names: std::collections::HashSet<String> = siblings
-        .iter()
-        .filter(|s| s.kind != crate::error::ItemKind::Agent)
-        .map(|s| s.name.clone())
-        .collect();
-    let bare_names: std::collections::HashSet<String> =
-        agent_names.difference(&non_agent_names).cloned().collect();
+    let bare_names =
+        namespace::bare_agent_names(siblings.iter().map(|s| (s.kind, s.name.as_str())));
     let path_siblings: Vec<namespace::PathSibling> =
         siblings.iter().map(CatalogItem::as_path_sibling).collect();
     // TOOL-16: render store paths with a leading `~` when the store is under
@@ -1681,6 +1671,47 @@ mod tests {
             result.is_ok(),
             "a self-requires must resolve to the item itself and not error: {result:?}"
         );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// NS-42 through `expand_references`: under a prefix an agent-only referent
+    /// expands bare, while a name held by an agent AND another kind (the
+    /// cross-kind shadow rule) and a plain non-agent both keep the prefix.
+    // spec: NS-42
+    #[test]
+    fn expand_references_applies_the_ns42_shadow_rule_under_a_prefix() {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-ns42-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("SKILL.md"),
+            "{{ns:solo}} {{ns:twin}} {{ns:plain}}\n",
+        )
+        .unwrap();
+
+        let mut me = skill_item_at("me", std::path::PathBuf::from("/src/skills/me"), Vec::new());
+        me.prefix = Some("pre".to_string());
+        let siblings = vec![
+            me.clone(),
+            agent_item_at("solo", std::path::PathBuf::from("/src/agents/solo.md")),
+            agent_item_at("twin", std::path::PathBuf::from("/src/agents/twin.md")),
+            skill_item_at(
+                "twin",
+                std::path::PathBuf::from("/src/skills/twin"),
+                Vec::new(),
+            ),
+            skill_item_at(
+                "plain",
+                std::path::PathBuf::from("/src/skills/plain"),
+                Vec::new(),
+            ),
+        ];
+        expand_references(&staging, &me, &siblings, std::path::Path::new("/store")).unwrap();
+
+        let md = std::fs::read_to_string(staging.join("SKILL.md")).unwrap();
+        assert_eq!(md, "solo pre:twin pre:plain\n");
         let _ = std::fs::remove_dir_all(&staging);
     }
 

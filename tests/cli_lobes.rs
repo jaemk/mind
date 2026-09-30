@@ -89,6 +89,7 @@ impl Sandbox {
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_AGENT_HOMES")
+            .env_remove("MIND_POLICY_FILE")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for (k, v) in envs {
@@ -4539,5 +4540,34 @@ fn wf13_link_project_has_no_claude_preset() {
             .is_some_and(|p| p.contains("claude-proj"))),
         "a failed preset add must register no lobe: {}",
         listed.stdout
+    );
+}
+
+// UNM-9: an unmanaged workflow whose filename strips to an unsafe name
+// (`...js` -> `..`) is skipped with a warning; the scan and `recall` still
+// succeed and a well-formed sibling is still listed.
+#[test]
+fn unm9_recall_skips_an_unsafe_named_unmanaged_workflow() {
+    // spec: UNM-9
+    let sb = Sandbox::new();
+    let body = "export const meta = {\n  name: 'deploy',\n  description: 'Deploy it',\n}\n";
+    write(&sb.claude_home.join("workflows/...js"), body);
+    write(&sb.claude_home.join("workflows/deploy.js"), body);
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "recall must succeed despite the unsafe entry: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("skipping unmanaged workflow"),
+        "the unsafe entry must be reported as skipped: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("deploy"),
+        "the well-formed sibling must still be listed: {}",
+        r.stdout
     );
 }

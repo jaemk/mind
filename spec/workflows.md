@@ -395,6 +395,19 @@ that mind depends on is called out at the requirement that depends on it.
   entry. Without these fields the machine-readable surface was the one place a
   WF-24 divergence and a WF-29 collision were invisible, which is backwards: a
   scripted consumer is exactly who cannot notice a warning it was never sent.
+- `WF-61` An UNMANAGED lobe workflow (a `workflows/<n>.js` mind did not
+  install, UNM-*) claims its harness name in the WF-29 collision check like any
+  installed one, because the harness loads it the same way. It is only ever one
+  of the OTHER claimants a finding names, never the subject of one: its key is
+  not among the items a verb touched. It is listed as
+  `workflow:<name> (unmanaged)`. The check is best-effort, so a lobe scan
+  failure yields no claims, and the scan's own skip warnings (UNM-9) are muted
+  there since `recall` and `probe` already print them.
+- `WF-62` `probe --json` and `recall --json` (list and item) carry a workflow's
+  `description` unchanged and its `meta.whenToUse` as a separate `when_to_use`
+  key, present only when the workflow declares one and never on any other kind.
+  The `<description> - <whenToUse>` join (WF-51) is the human display form only,
+  so a JSON consumer never has to split a joined string.
 - `WF-53` `review` reports EVERY workflow item as a `workflow-content` advisory
   finding, the workflow counterpart of the command disclosure (CLI-237, DSC-91).
   A workflow is not content the harness offers, it is JavaScript the harness
