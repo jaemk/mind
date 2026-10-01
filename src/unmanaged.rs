@@ -149,7 +149,12 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>
         // spec: WF-50 -- a workflow is the file `<name>.js`, and only the
         // immediate children of `workflows/` are scanned, matching the flat
         // convention scan (WF-2).
-        ItemKind::Workflow => name.strip_suffix(".js").map(str::to_string),
+        // A directory named `deploy.js` is not a workflow the harness loads, so
+        // only a file (or a symlink resolving to one) derives a name.
+        ItemKind::Workflow => name
+            .strip_suffix(".js")
+            .filter(|_| entry.path().is_file())
+            .map(str::to_string),
         ItemKind::Tool => None,
     };
     let Some(derived) = derived else {
@@ -632,6 +637,12 @@ mod tests {
         assert_eq!(
             item_name(ItemKind::Workflow, &entry_named(&dir, "ok.js")).unwrap(),
             Some("ok".to_string())
+        );
+        // A directory named `x.js` is not a workflow file: skipped.
+        std::fs::create_dir(dir.join("dirflow.js")).unwrap();
+        assert_eq!(
+            item_name(ItemKind::Workflow, &entry_named(&dir, "dirflow.js")).unwrap(),
+            None
         );
         // A `.md` file is not a workflow, and a `.js` file is not an agent:
         // the wrong-suffix entry is skipped by both, never cross-derived.

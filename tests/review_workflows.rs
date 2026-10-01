@@ -1094,6 +1094,30 @@ fn the_json_workflow_unread_finding_says_checks_were_skipped() {
     );
 }
 
+/// A malformed `config.toml` is an error when config is the cap's origin, not a
+/// silent fall back to the default cap, even for a verb that never reloads it.
+// spec: DSC-104
+#[test]
+fn a_malformed_config_is_an_error_not_a_default_cap() {
+    let sb = Sandbox::new("wf");
+    write(
+        &sb.source.join("workflows/w.js"),
+        "export const meta = { name: 'w', description: 'D' }\n",
+    );
+    write(&sb.mind_home.join("config.toml"), "this is = = not toml\n");
+    let r = sb.review();
+    assert!(
+        !r.success,
+        "a malformed config must not be ignored: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("config"),
+        "the error names the config: {}",
+        r.stderr
+    );
+}
+
 /// Exactly at the cap is read (the exclusion is strictly `>`): the boundary
 /// workflow is not `workflow-unread` and its body checks run.
 // spec: WF-55

@@ -511,9 +511,7 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
         },
     };
     let configured = if cli.max_metadata_size.is_none() && env.is_none() {
-        config::Config::load(paths)
-            .ok()
-            .and_then(|c| c.max_metadata_size)
+        config::Config::load(paths)?.max_metadata_size
     } else {
         None
     };
