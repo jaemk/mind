@@ -549,14 +549,15 @@ pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
     symlink(store, link)
 }
 
-/// Rewrite reference tokens in every markdown file under the staged copy (the
-/// extension test `namespace::is_markdown`, NS-53; a token in a non-markdown
-/// file is left literal): the `{{ns:name}}` name tokens, then the `{{self}}` /
-/// `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve against
-/// `siblings` (every item in the same source) and a bad reference in either
-/// pass aborts the staged install.
-/// A non-markdown file the item lists in `expand:` is expanded too (NS-57), with
-/// path tokens rendered absolute rather than the TOOL-16 `~` form (TOOL-20).
+/// Rewrite reference tokens in every file under the staged copy that expands
+/// them (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25: a markdown file,
+/// a workflow's own `.js`, or a file the item lists in `expand:`; a token
+/// anywhere else is left literal): the `{{ns:name}}` name tokens, then the
+/// `{{self}}` / `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve
+/// against `siblings` (every item in the same source) and a bad reference in
+/// either pass aborts the staged install.
+/// An `expand:`-listed file renders path tokens absolute rather than in the
+/// TOOL-16 `~` form (TOOL-20); the other two keep `~`.
 /// Also validates the `requires` frontmatter entries (DEP-6): each must resolve
 /// to exactly one sibling (not source-qualified, not ambiguous, not missing);
 /// and each `expand:` entry must be a safe relative path naming a shipped file.
@@ -572,18 +573,8 @@ fn expand_references(
     // set of agent bare names that are NOT also a non-agent sibling name (the
     // cross-kind shadow rule: if a name is both an agent and a skill/rule/tool, it
     // is NOT bare -- it keeps the prefix).
-    let agent_names: std::collections::HashSet<String> = siblings
-        .iter()
-        .filter(|s| s.kind == crate::error::ItemKind::Agent)
-        .map(|s| s.name.clone())
-        .collect();
-    let non_agent_names: std::collections::HashSet<String> = siblings
-        .iter()
-        .filter(|s| s.kind != crate::error::ItemKind::Agent)
-        .map(|s| s.name.clone())
-        .collect();
-    let bare_names: std::collections::HashSet<String> =
-        agent_names.difference(&non_agent_names).cloned().collect();
+    let bare_names =
+        namespace::bare_agent_names(siblings.iter().map(|s| (s.kind, s.name.as_str())));
     let path_siblings: Vec<namespace::PathSibling> =
         siblings.iter().map(CatalogItem::as_path_sibling).collect();
     // TOOL-16: render store paths with a leading `~` when the store is under
@@ -668,8 +659,6 @@ fn expand_references(
         let entry = crate::sanitize::strip_ansi(entry);
         bad_ref(format!("expand: {entry}"), reason)
     };
-    let mut expand_set: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
     for entry in &item.expand {
         // spec: NS-57
         use crate::error::BadRefReason::InvalidRef;
@@ -690,7 +679,6 @@ fn expand_references(
         if !(root.is_dir() && root.join(rel).is_file()) {
             return Err(bad_expand(entry, NoMatch));
         }
-        expand_set.insert(rel.to_path_buf());
     }
 
     let mut files = Vec::new();
@@ -700,29 +688,37 @@ fn expand_references(
         files.push(root.to_path_buf());
     }
     for file in files {
-        // NS-53: all four token families expand only in a markdown file. A
-        // token in any other file (a script, data) is left exactly as written
-        // -- including one that would not resolve, which retires the
-        // BadReference this loop used to raise for it (NS-11/NS-12 are scoped
-        // to markdown accordingly).
+        // NS-53: all four token families expand only in a file the gate admits
+        // -- a markdown one, a workflow's own `.js` (WF-25), or one the item
+        // lists in `expand:` (NS-57). A token in any other file (a script,
+        // data) is left exactly as written -- including one that would not
+        // resolve, which retires the BadReference this loop used to raise for
+        // it (NS-11/NS-12 are scoped accordingly).
+        //
+        // `namespace::item_expands_tokens` is that gate, and it is the same
+        // one `review` and the dependency scan ask, so what install expands
+        // and what they predict install expands cannot drift apart.
         //
         // A directory item (skill/tool) stages every file under its original
         // name, so `file` itself carries the right extension to check. A
-        // single-file item (agent/rule) stages as a bare name with no
-        // extension at all (matching its store form), so its markdown-ness is
-        // read from the source path instead.
+        // single-file item (agent/rule/command/workflow) stages as a bare name
+        // with no extension at all (matching its store form), so its
+        // markdown-ness is read from the source path instead -- which the gate
+        // does, given the staging `root`.
+        //
+        // spec: WF-25 -- and a workflow's own `.js` expands whatever its
+        // extension, which is what makes the `{{ns:}}` in its `meta.name`
+        // (WF-23) render as the name mind installed it under.
         let source_like: &Path = if root.is_dir() { &file } else { &item.path };
-        let is_md = namespace::is_markdown(source_like);
+        let expands = namespace::expands_tokens(source_like, item.kind);
         // NS-57: a file listed in `expand:` is expanded like markdown even
         // though its extension is not, so a bundled script can reference a
         // sibling tool. Its relative path (under the staged dir) is what the
-        // validated `expand_set` holds.
-        let is_listed = root.is_dir()
-            && file
-                .strip_prefix(root)
-                .map(|rel| expand_set.contains(rel))
-                .unwrap_or(false);
-        if !is_md && !is_listed {
+        // item's validated `expand:` list holds. Asked separately from
+        // `expands` because the TOOL-20 path rendering below turns on the
+        // difference between the two, not on the combined answer.
+        let is_listed = namespace::item_lists_file(item, root, &file);
+        if !namespace::item_expands_tokens(item, root, &file) {
             continue;
         }
         // Skip anything that is not valid UTF-8 text.
@@ -733,8 +729,16 @@ fn expand_references(
             continue;
         }
         // TOOL-20: a listed non-markdown file renders path tokens absolute; a
-        // markdown file keeps the TOOL-16 `~` form.
-        let path_ctx = if is_listed && !is_md { &ctx_abs } else { &ctx };
+        // markdown file keeps the TOOL-16 `~` form, and so does a workflow's
+        // own `.js` (WF-26) -- it reaches here on its kind rather than on the
+        // `expand:` list, so `expands` is true for it and the `~` branch is
+        // the one it takes. A workflow never executes a path; its strings are
+        // prompts, which is the reader the `~` form is for.
+        let path_ctx = if is_listed && !expands {
+            &ctx_abs
+        } else {
+            &ctx
+        };
         let expanded =
             namespace::expand(&content, &item.prefix, &names, &bare_names).map_err(|name| {
                 // spec: DSC-95 -- `name` is the raw `{{ns:name}}` inner text
@@ -1345,6 +1349,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: Some(build.to_string()),
@@ -1397,6 +1402,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1415,6 +1421,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1535,6 +1542,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/agents/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1550,6 +1558,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/rules/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1599,6 +1608,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/agents/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1614,6 +1624,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/rules/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1660,6 +1671,47 @@ mod tests {
             result.is_ok(),
             "a self-requires must resolve to the item itself and not error: {result:?}"
         );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// NS-42 through `expand_references`: under a prefix an agent-only referent
+    /// expands bare, while a name held by an agent AND another kind (the
+    /// cross-kind shadow rule) and a plain non-agent both keep the prefix.
+    // spec: NS-42
+    #[test]
+    fn expand_references_applies_the_ns42_shadow_rule_under_a_prefix() {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-ns42-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(
+            staging.join("SKILL.md"),
+            "{{ns:solo}} {{ns:twin}} {{ns:plain}}\n",
+        )
+        .unwrap();
+
+        let mut me = skill_item_at("me", std::path::PathBuf::from("/src/skills/me"), Vec::new());
+        me.prefix = Some("pre".to_string());
+        let siblings = vec![
+            me.clone(),
+            agent_item_at("solo", std::path::PathBuf::from("/src/agents/solo.md")),
+            agent_item_at("twin", std::path::PathBuf::from("/src/agents/twin.md")),
+            skill_item_at(
+                "twin",
+                std::path::PathBuf::from("/src/skills/twin"),
+                Vec::new(),
+            ),
+            skill_item_at(
+                "plain",
+                std::path::PathBuf::from("/src/skills/plain"),
+                Vec::new(),
+            ),
+        ];
+        expand_references(&staging, &me, &siblings, std::path::Path::new("/store")).unwrap();
+
+        let md = std::fs::read_to_string(staging.join("SKILL.md")).unwrap();
+        assert_eq!(md, "solo pre:twin pre:plain\n");
         let _ = std::fs::remove_dir_all(&staging);
     }
 
@@ -2130,6 +2182,7 @@ mod tests {
             prefix: None,
             path: src_file,
             description: None,
+            when_to_use: None,
             link_rel: None, // defaults to agents/myagent.md under each lobe
             bin: None,
             build: None,

@@ -674,6 +674,13 @@ fn item_matches_search_installed(item: &crate::tui::data::SnapshotInstalled, sea
         prefix: None,
         path: std::path::PathBuf::new(),
         description: item.description.clone(),
+        // spec: WF-51 -- `None` because there is nothing to carry: an
+        // installed row is MANIFEST-derived, and the manifest never records
+        // `whenToUse` (`install.rs` stores `item.description`), so
+        // `item.description` here is the bare description and an installed
+        // workflow is searchable by that alone. (The `available` twin below
+        // is catalog-derived and differs -- see its note.)
+        when_to_use: None,
         link_rel: None,
         bin: None,
         build: None,
@@ -702,6 +709,14 @@ fn item_matches_search_available(item: &crate::tui::data::SnapshotAvailable, sea
         prefix: None,
         path: item.path.clone(),
         description: item.description.clone(),
+        // spec: WF-51 -- `None`, not a dropped field: `item.description`
+        // already holds `SnapshotAvailable`'s composed "desc - whenToUse"
+        // string for a workflow (data.rs reads it via
+        // `CatalogItem::display_description`), so carrying `whenToUse` here
+        // too would make `matches_query`'s own `display_description()` call
+        // below join it a second time. See
+        // `search_does_not_match_across_a_doubled_workflow_description`.
+        when_to_use: None,
         link_rel: None,
         bin: None,
         build: None,
@@ -1198,6 +1213,140 @@ mod tests {
             .iter()
             .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "x"));
         assert!(found, "search should match description text");
+    }
+
+    /// A workflow's `whenToUse` (WF-51) is not a separate field on
+    /// `SnapshotAvailable`: data.rs folds it into `description` as
+    /// `"<description> - <whenToUse>"` at load time. Search must still find a
+    /// query that only matches the `whenToUse` half of that composed string,
+    /// through the same `description` search path `search_matches_description`
+    /// exercises above -- this pins that the `when_to_use: None` in
+    /// `item_matches_search_available`'s fake `CatalogItem` (WF-51) does not
+    /// lose the phrase, since it is not lost at all: it already lives in
+    /// `description`.
+    #[test]
+    fn search_matches_a_workflows_when_to_use_phrase() {
+        // spec: TUI-14 WF-51
+        let mut item = make_available("workflow:review", "review", "src/a", ItemKind::Workflow);
+        item.description = Some("Review changed files - before a PR".to_string());
+        let snap = snap_with(vec![], vec![item]);
+        // "before a PR" only appears in the whenToUse half of the pair.
+        let nodes = build_tree(&snap, "before a pr", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let found = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"));
+        assert!(
+            found,
+            "search should match a workflow's whenToUse phrase via the \
+             composed description: {flat:?}"
+        );
+        // A control, so the positive above cannot be read as "search matches
+        // everything": a phrase in neither half must still be filtered out.
+        let nodes = build_tree(&snap, "after the merge", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            !flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review")),
+            "a phrase in neither the description nor the whenToUse half must \
+             not match: {flat:?}"
+        );
+    }
+
+    /// The composed description (WF-51) must be search input EXACTLY ONCE.
+    /// `item_matches_search_available` hands `matches_query` a fake
+    /// `CatalogItem` whose `description` is already the joined
+    /// `"<d> - <w>"` string, and `matches_query` calls
+    /// `display_description()` on it again -- so the `when_to_use: None` there
+    /// is load-bearing: plumbing `whenToUse` through as well would produce
+    /// `"<d> - <w> - <w>"` as the haystack. A doubled haystack still contains
+    /// every query the single one does, so no positive search test can see the
+    /// difference; the only observable consequence is a FALSE match on a query
+    /// that spans the join, which is what this pins.
+    #[test]
+    fn search_does_not_match_across_a_doubled_workflow_description() {
+        // spec: TUI-14 WF-51
+        let mut item = make_available("workflow:review", "review", "src/a", ItemKind::Workflow);
+        item.description = Some("Review changed files - before a PR".to_string());
+        let snap = snap_with(vec![], vec![item]);
+        // Ground truth from a REAL catalog item carrying `when_to_use`: its
+        // display form is the single join, and a query spanning a doubled
+        // "... - before a PR - before a PR" join does not match it.
+        let real = catalog::CatalogItem {
+            kind: ItemKind::Workflow,
+            name: "review".to_string(),
+            source: "src/a".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::new(),
+            description: Some("Review changed files".to_string()),
+            when_to_use: Some("before a PR".to_string()),
+            link_rel: None,
+            bin: None,
+            build: None,
+            requires: Vec::new(),
+            ignore: None,
+            expand: Vec::new(),
+            hooks: Vec::new(),
+        };
+        assert_eq!(
+            real.display_description().as_deref(),
+            Some("Review changed files - before a PR")
+        );
+        assert!(
+            !catalog::matches_query(&real, "pr - before"),
+            "a query spanning the join of a DOUBLED \"desc - whenToUse - \
+             whenToUse\" must not match, since the description is composed \
+             once"
+        );
+        // The TUI row's fake item must agree with the real item on both.
+        let nodes = build_tree(&snap, "pr - before", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            !flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review")),
+            "the TUI row must not match a doubled join either: {flat:?}"
+        );
+        // The same search path does match a span of the single composition,
+        // so the negative above is a real discrimination, not a dead query.
+        let nodes = build_tree(&snap, "files - before", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            flat.iter()
+                .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review")),
+            "a query spanning the single composition's own join must match: {flat:?}"
+        );
+    }
+
+    /// The installed twin of the WF-51 search path: an installed workflow's
+    /// description is manifest-derived and therefore bare (see
+    /// `an_installed_workflow_row_is_bare_where_the_available_row_composes` in
+    /// data.rs), so `item_matches_search_installed`'s `when_to_use: None` has
+    /// nothing to lose -- but the row must still be searchable by that bare
+    /// description, and a `Workflow` kind must not be treated specially on the
+    /// way through (the kind reaches `matches_query` on the fake item).
+    #[test]
+    fn installed_workflow_search_matches_its_bare_description() {
+        // spec: TUI-14 WF-51
+        let mut wf = make_installed("workflow:review", "review", "src/a", ItemKind::Workflow);
+        wf.description = Some("Review changed files".to_string());
+        let other = make_installed("workflow:ship", "ship", "src/a", ItemKind::Workflow);
+        let snap = snap_with(vec![wf, other], vec![]);
+        let nodes = build_tree(&snap, "changed files", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            flat.iter()
+                .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review")),
+            "an installed workflow must be matched by its bare description: {flat:?}"
+        );
+        assert!(
+            !flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "ship")),
+            "an installed workflow matching neither name nor description must \
+             be filtered out: {flat:?}"
+        );
     }
 
     #[test]

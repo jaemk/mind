@@ -22,6 +22,7 @@
 - [Source layout](source-layout.md)
 - [The mind.toml file](mind-toml.md)
 - [Authoring a source](authoring.md)
+- [Workflows](workflows.md)
 - [Namespacing](namespacing.md)
 - [Claude plugin marketplaces](marketplace.md)
 - [Tooling](tooling.md)

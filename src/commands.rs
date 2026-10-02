@@ -1266,7 +1266,7 @@ fn meld_recursive(
             println!(
                 "  no items found by convention scanning \
                  (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
-                 commands/<name>.md, \
+                 commands/<name>.md, workflows/<name>.js, \
                  tools/<name>/); if your layout differs, use --root <dir>, \
                  --add-root <dir>, or --flat-skills"
             );
@@ -2041,32 +2041,24 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
     // spec: NS-42 -- exclude pure-agent names from the warning scan: a bare prose
     // reference to a sibling agent resolves correctly even under a prefix (because
     // agents link under their bare harness name, NS-40). Flagging agent references
-    // would be a false positive. The cross-kind shadow rule: if a name is both an
-    // agent AND a non-agent sibling, it is NOT excluded (it does get prefixed for
-    // the non-agent kind, so the warning is still meaningful).
-    let agent_names: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|it| it.kind == ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    let non_agent_names: std::collections::HashSet<String> = items
-        .iter()
-        .filter(|it| it.kind != ItemKind::Agent)
-        .map(|it| it.name.clone())
-        .collect();
-    // The scanning set: all names except pure-agent-only ones.
+    // would be a false positive. The cross-kind shadow rule (a name that is both
+    // an agent AND a non-agent sibling stays in the scan) lives in the one shared
+    // definition, `namespace::bare_agent_names`.
+    let bare =
+        crate::namespace::bare_agent_names(items.iter().map(|it| (it.kind, it.name.as_str())));
     let siblings: std::collections::HashSet<String> = items
         .iter()
         .map(|it| it.name.clone())
-        .filter(|name| {
-            // Keep the name if it is not an agent, OR if it is also a non-agent
-            // sibling (the shadow case).
-            !agent_names.contains(name) || non_agent_names.contains(name)
-        })
+        .filter(|name| !bare.contains(name))
         .collect();
     for item in items {
         let mut refs: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
+            // spec: DSC-90 DSC-108 -- full, uncapped content (the same file
+            // install copies), behind the no-follow regular-file guard.
+            if !is_regular_file_nofollow(&file) {
+                continue;
+            }
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue; // skip non-UTF-8 / unreadable files
             };
@@ -2210,6 +2202,298 @@ fn agent_collision(
         }
     }
     Ok(None)
+}
+
+/// Warn about each freshly installed workflow the harness would skip (WF-30/31),
+/// answer to under a name mind does not report (WF-24), or share a name with
+/// (WF-29). Installs nothing back and fails nothing: every one of these is
+/// advisory by construction (see `workflow_check`), so an unreadable manifest or
+/// store file drops the warning rather than propagating.
+///
+/// Runs AFTER the install, against the STORE copies, which is what makes it
+/// exact: `{{ns:}}` in a `meta.name` (WF-23) is already expanded there, so the
+/// comparison is against the literal string the harness will read, with no
+/// second expansion to keep in step with `install.rs`. It also means the WF-29
+/// comparison set is the whole installed set, freshly written, including the
+/// other items of this same closure.
+///
+/// Returns immediately when nothing in `installed_keys` is a workflow, which is
+/// the common case: every warning below is keyed off one, so without one there
+/// is nothing to report, and the scan of the whole manifest that builds the
+/// WF-29 comparison set would be pure cost (it reads and parses every installed
+/// workflow's store copy). Behavior is otherwise unchanged.
+///
+/// spec: WF-24 WF-29 WF-30 WF-31 WF-56 WF-59
+fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String]) {
+    let touches_workflow = installed_keys.iter().any(|key| {
+        manifest
+            .items
+            .get(key.as_str())
+            .is_some_and(|entry| entry.kind == ItemKind::Workflow)
+    });
+    if !touches_workflow {
+        return;
+    }
+
+    // Every installed workflow, read ONCE: the tokens in a store copy are
+    // already expanded, so the harness-facing name is a trim of `meta.name`.
+    // One pass, one read per file -- the touched items' warnings below index
+    // into this map rather than re-reading and re-parsing their store copies.
+    let mut reads: std::collections::HashMap<&str, crate::workflow_check::WorkflowRead> =
+        std::collections::HashMap::new();
+    let mut claimed: Vec<(String, String)> = Vec::new();
+    for entry in manifest.items.values() {
+        if entry.kind != ItemKind::Workflow {
+            continue;
+        }
+        let read = crate::workflow_check::read(&paths.mind_home.join(&entry.store));
+        if let Some(name) = crate::workflow_check::harness_name(&read.meta) {
+            claimed.push((name, entry.key().as_str().to_string()));
+        }
+        reads.insert(entry.name.as_str(), read);
+    }
+    // spec: WF-61 -- an unmanaged lobe workflow claims its name too: the
+    // harness loads it like any other. Never a subject below (its key is never
+    // in `touched`), only ever one of the others named.
+    claimed.extend(unmanaged_workflow_claims(paths, manifest));
+    // spec: WF-59 -- one group per colliding name, built once for the whole
+    // installed set rather than rebuilt per claimant.
+    let groups = crate::workflow_check::claim_groups(&claimed);
+
+    let touched: std::collections::HashSet<&str> =
+        installed_keys.iter().map(String::as_str).collect();
+    for key in installed_keys {
+        let Some(entry) = manifest.items.get(key.as_str()) else {
+            continue;
+        };
+        if entry.kind != ItemKind::Workflow {
+            continue;
+        }
+        let Some(read) = reads.get(entry.name.as_str()) else {
+            continue;
+        };
+        // spec: WF-56 -- mind's own metadata cap is reported as mind's, not as
+        // a verdict about the harness mind never read enough of the file to
+        // reach.
+        if let Some(notice) = crate::workflow_check::cap_notice(read) {
+            eprintln!(
+                "warning: {}: {notice} Installed anyway.",
+                entry.display_key()
+            );
+        }
+        // spec: WF-31 -- warn and keep the install. The item is already on disk
+        // by the time this runs, which is the point: mind's reader disagreeing
+        // with the harness's must not be able to decide an install.
+        for reason in crate::workflow_check::skip_reasons(read) {
+            eprintln!(
+                "warning: {}: the harness will not load this workflow: {reason}; installed anyway",
+                entry.display_key()
+            );
+        }
+        // spec: WF-24 -- the remedy token in the message names the BARE name
+        // (`entry.bare_name`), the only spelling `{{ns:}}` resolves.
+        let harness = crate::workflow_check::harness_name(&read.meta);
+        if let Some(msg) =
+            crate::workflow_check::divergence(&entry.name, &entry.bare_name, harness.as_deref())
+        {
+            eprintln!("warning: {}: {msg}", entry.display_key());
+        }
+    }
+    // spec: WF-29 WF-59 -- one warning per colliding NAME, not one per
+    // claimant, and only for a name this run touched: an untouched pair was
+    // reported by the run that installed it.
+    for (name, claimants) in groups {
+        // The subject is an item this run touched: the warning belongs to the
+        // install that caused it to be printed.
+        let Some(subject) = claimants.iter().find(|key| touched.contains(key.as_str())) else {
+            continue;
+        };
+        let others: Vec<String> = claimants
+            .iter()
+            .filter(|key| *key != subject)
+            .map(|key| crate::sanitize::strip_ansi(key))
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+        eprintln!(
+            "warning: {}: {}",
+            crate::sanitize::strip_ansi(subject),
+            crate::workflow_check::collision(&name, &others)
+        );
+    }
+}
+
+/// What `recall <item>` has to say about an installed workflow: the name the
+/// harness answers to, and every finding about it.
+///
+/// spec: WF-60 -- one producer for both renderings. The text view prints each
+/// finding on a `harness` line and the `--json` document serializes the same
+/// strings, so a scripted consumer learns of a WF-24 divergence or a WF-29
+/// collision on the same terms a reader does. The manifest records neither the
+/// `meta.name` nor the resolved harness name, so without this the JSON document
+/// was the one surface where the divergence was invisible.
+struct WorkflowDetail {
+    /// The name the harness resolves this workflow by (WF-20), or `None` when
+    /// mind read no usable one (absent, empty, unread, or WF-58-unusable).
+    harness_name: Option<String>,
+    /// The findings, in the order the detail view prints them.
+    findings: Vec<String>,
+    /// The store copy's `meta.whenToUse` (WF-62), for the `--json` document.
+    when_to_use: Option<String>,
+}
+
+fn workflow_detail(
+    paths: &Paths,
+    manifest: &Manifest,
+    found: &crate::manifest::InstalledItem,
+) -> WorkflowDetail {
+    let store = paths.mind_home.join(&found.store);
+    let read = crate::workflow_check::read(&store);
+    let harness_name = crate::workflow_check::harness_name(&read.meta);
+    let mut findings: Vec<String> = Vec::new();
+    // spec: WF-56 -- mind's own cap, reported as mind's own.
+    if let Some(notice) = crate::workflow_check::cap_notice(&read) {
+        findings.push(notice);
+    }
+    // spec: WF-30 WF-60 -- why the harness would not load it, the same reasons
+    // `learn` and `upgrade` warn with. Only for a store copy mind actually
+    // read: one it could not read at all (gone, a directory, not UTF-8) says
+    // nothing about what the file declares, so it yields no finding rather
+    // than a "no `meta`" verdict about bytes mind never saw.
+    if store_copy_was_read(&store, &read) {
+        for reason in crate::workflow_check::skip_reasons(&read) {
+            findings.push(format!("the harness will not load this workflow: {reason}"));
+        }
+    }
+    // spec: WF-24 -- the remedy names the bare name, the only spelling a
+    // `{{ns:}}` token resolves (NS-11).
+    if let Some(msg) =
+        crate::workflow_check::divergence(&found.name, &found.bare_name, harness_name.as_deref())
+    {
+        findings.push(msg);
+    }
+    // spec: WF-29 WF-59 -- one report for the name, naming the other
+    // claimants, capped in `workflow_check` rather than here.
+    if let Some(harness) = &harness_name {
+        let mut others: Vec<String> = manifest
+            .items
+            .values()
+            .filter(|e| e.kind == ItemKind::Workflow && e.name != found.name)
+            .filter(|e| {
+                let other = crate::workflow_check::read(&paths.mind_home.join(&e.store));
+                crate::workflow_check::harness_name(&other.meta).as_deref()
+                    == Some(harness.as_str())
+            })
+            .map(|e| e.display_key())
+            .collect();
+        // spec: WF-61 -- unmanaged lobe workflows claim names too.
+        others.extend(
+            unmanaged_workflow_claims(paths, manifest)
+                .into_iter()
+                .filter(|(name, _)| name == harness)
+                .map(|(_, key)| key),
+        );
+        if !others.is_empty() {
+            findings.push(crate::workflow_check::collision(harness, &others));
+        }
+    }
+    WorkflowDetail {
+        harness_name,
+        findings,
+        when_to_use: read.meta.when_to_use.clone(),
+    }
+}
+
+/// Whether mind actually read `store`'s text: the capped read either parsed
+/// it, or refused it for size (WF-56, which [`crate::workflow_check::cap_notice`]
+/// reports and `skip_reasons` already handles). A file that is gone, is not a
+/// regular file, or is not UTF-8 was not read, so nothing is known about what
+/// it declares.
+///
+/// A non-empty `meta` proves a read; only the empty case re-checks, so the
+/// ordinary path costs no second read.
+fn store_copy_was_read(
+    store: &std::path::Path,
+    read: &crate::workflow_check::WorkflowRead,
+) -> bool {
+    if read.over_mind_cap.is_some() || !read.meta.is_empty() {
+        return true;
+    }
+    // `file_meta` folds a read failure into an empty `meta` (WF-5), so the
+    // question "could mind read it" is asked of the capped reader directly.
+    is_regular_file_nofollow(store) && crate::error::read_capped_metadata(store).is_ok()
+}
+
+/// The WF-29 claims of every UNMANAGED lobe workflow (WF-61): `(harness name,
+/// "workflow:<name> (unmanaged)")` for each one whose `meta.name` mind can
+/// read through the capped reader (WF-55) and use (WF-58).
+///
+/// Best-effort like every workflow check: a scan failure yields no claims.
+/// The scan's own UNM-9 skip warnings are muted here, since the verbs that
+/// list unmanaged items (`recall`, `probe`) already print them and a `learn`
+/// warning block is the wrong place for them. Only a regular file (after
+/// following a hand-placed symlink) is read, so a fifo in a lobe cannot stall.
+fn unmanaged_workflow_claims(paths: &Paths, manifest: &Manifest) -> Vec<(String, String)> {
+    let was_quiet = crate::render::scan_quiet();
+    crate::render::set_scan_quiet(true);
+    let scanned = crate::unmanaged::scan(paths, manifest);
+    crate::render::set_scan_quiet(was_quiet);
+    let Ok(items) = scanned else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|u| u.kind == ItemKind::Workflow)
+        .filter_map(|u| {
+            let file = u.paths.first()?;
+            if !std::fs::metadata(file).is_ok_and(|m| m.is_file()) {
+                return None;
+            }
+            let read = crate::workflow_check::read(file);
+            let name = crate::workflow_check::harness_name(&read.meta)?;
+            Some((name, format!("{} (unmanaged)", u.display_key())))
+        })
+        .collect()
+}
+
+/// An installed workflow's `meta.whenToUse`, read from its store copy (WF-62),
+/// sanitized for `--json`. `None` for every other kind and when absent.
+fn installed_when_to_use(paths: &Paths, m: &crate::manifest::InstalledItem) -> Option<String> {
+    if m.kind != ItemKind::Workflow {
+        return None;
+    }
+    crate::workflow_check::read(&paths.mind_home.join(&m.store))
+        .meta
+        .when_to_use
+        .as_deref()
+        .map(crate::sanitize::strip_ansi)
+}
+
+/// Add `when_to_use` to a `recall --json` row object, only when present (WF-62).
+fn insert_when_to_use(row: &mut serde_json::Value, when: Option<String>) {
+    if let (Some(when), Some(obj)) = (when, row.as_object_mut()) {
+        obj.insert("when_to_use".to_string(), serde_json::Value::String(when));
+    }
+}
+
+/// `upgrade`'s failure-path tail: persist what the batch applied, then warn
+/// about the workflows among them, exactly as the success path does.
+///
+/// spec: LIFE-48 -- the save must not mask the root-cause error, so a save
+/// failure is warned about rather than propagated; the caller returns the
+/// original error.
+///
+/// spec: WF-24 WF-29 WF-30 WF-31 -- the warnings run here too. An item that
+/// upgraded before a later one failed is LIVE on disk and recorded, and the
+/// next `upgrade` finds it current and never looks at it again, so skipping
+/// the warning would mean no run ever reports its defect. `learn` already
+/// warns on its own failure path for this reason.
+fn save_and_warn_workflows(paths: &Paths, manifest: &Manifest, applied_keys: &[String]) {
+    if let Err(se) = manifest.save(paths) {
+        warn_manifest_save_also_failed(&se);
+    }
+    warn_workflows(paths, manifest, applied_keys);
 }
 
 /// The set of bare item names belonging to a source, for reference validation.
@@ -2445,8 +2729,10 @@ fn sibling_token_resolves_alone(r: &crate::namespace::SiblingRef, item: &Catalog
     r.name == item.name && r.kind.is_none_or(|k| k == item.kind)
 }
 
-/// The files an item's tokens are expanded in, mirroring `install::expand_references`:
-/// every markdown file (NS-53), plus any non-markdown file the item lists in its
+/// The files an item's tokens are expanded in, mirroring
+/// `install::expand_references` by asking the same gate it does
+/// (`namespace::item_expands_tokens`): every markdown file (NS-53), a
+/// workflow's own `.js` (WF-25), and any other file the item lists in its
 /// `expand:` frontmatter (NS-57). Scanning a narrower set than install expands
 /// would let a reference slip past the LNK-18 check and fail later with the
 /// blunt error LNK-18 exists to replace.
@@ -2463,21 +2749,13 @@ fn expandable_files(item: &CatalogItem) -> Result<Vec<std::path::PathBuf>> {
     } else {
         files.push(item.path.clone());
     }
-    let expand: Vec<&str> = item.expand.iter().map(String::as_str).collect();
     Ok(files
         .into_iter()
-        .filter(|file| {
-            // A single-file item (agent/rule) has no bundled files, so only its
-            // own path applies and its markdown-ness is read from that path.
-            if crate::namespace::is_markdown(file) {
-                return true;
-            }
-            if !item.path.is_dir() {
-                return false;
-            }
-            file.strip_prefix(&item.path)
-                .is_ok_and(|rel| expand.iter().any(|e| std::path::Path::new(e) == rel))
-        })
+        // A single-file item (agent/rule/command/workflow) has no bundled
+        // files, so only its own path applies and its markdown-ness is read
+        // from that path -- which the shared gate does, given the item's root.
+        // spec: NS-53 NS-57 WF-25
+        .filter(|file| crate::namespace::item_expands_tokens(item, &item.path, file))
         .collect())
 }
 
@@ -2627,11 +2905,7 @@ pub fn init_source(
 
     // Read the pre-existing mind.toml content (if any) for the scaffold patching
     // step and for extracting description/prefix for the marketplace manifest.
-    let pre_toml = if toml_path.exists() {
-        Some(std::fs::read_to_string(&toml_path).map_err(|e| MindError::io(&toml_path, e))?)
-    } else {
-        None
-    };
+    let pre_toml = read_existing_mind_toml(&toml_path, crate::error::metadata_size_limit())?;
 
     // Discover items exactly as melding would (INIT-2): build a local Source for
     // the directory and scan it (honors convention + mind.toml + min-mind-version).
@@ -2648,7 +2922,7 @@ pub fn init_source(
     if items.is_empty() {
         println!(
             "  no items found (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
-             commands/<name>.md)"
+             commands/<name>.md, workflows/<name>.js, tools/<name>/)"
         );
     } else {
         println!("  {} item(s):", items.len());
@@ -2802,8 +3076,16 @@ pub fn init_source(
             for file in crate::review::item_files(it) {
                 // {{ns:}} is a prose reference (NS-24); only markdown carries
                 // prose. Never templatize scripts/data, where every word is code.
-                // spec: INIT-5 -- the same extension set install expands
-                // (`namespace::is_markdown`, NS-53), not an exact-`.md` test.
+                //
+                // spec: INIT-5 NS-54 -- the gate here is prose-ness
+                // (`namespace::is_markdown`, the markdown extension set rather
+                // than an exact-`.md` test), NOT the set install expands. The
+                // two differ: install also expands a workflow's `.js` (WF-25)
+                // and an `expand:`-listed script (NS-57), and this pass must
+                // still leave both alone. It rewrites bare prose into tokens by
+                // matching sibling names as words, and in code a sibling name
+                // may be an identifier, a key, or part of one, so a rewrite
+                // there is as likely to corrupt the file as to improve it.
                 if !crate::namespace::is_markdown(&file) {
                     continue;
                 }
@@ -2825,15 +3107,29 @@ pub fn init_source(
     Ok(())
 }
 
-/// Read all of an item's MARKDOWN text files into one buffer, for `{{ns:}}`
-/// dependency-edge detection (DEP-1). Narrowed to markdown
-/// (`namespace::is_markdown`, NS-53) so a `{{ns:}}` token in a non-markdown
-/// file -- which install no longer expands and no longer treats as a
-/// dependency -- does not create a phantom dependency edge here either.
+/// Read all of an item's token-expanding text files into one buffer, for
+/// `{{ns:}}` dependency-edge detection (DEP-1). Narrowed to the files install
+/// expands (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25) so a `{{ns:}}`
+/// token in a file install never expands -- and so never treats as a dependency
+/// -- does not create a phantom dependency edge here either.
+///
+/// It has to be the ITEM-aware gate, not the extension-and-kind half: install
+/// expands an `expand:`-listed file too (NS-57), so reading the narrower set
+/// dropped the real dependency edges a token in one of those files declares.
+///
+/// spec: DSC-90 WF-55 -- content semantics, the same as install, which copies
+/// and expands the whole file: the read is NOT capped, so an over-cap
+/// workflow's `{{ns:}}` tokens still pull their referents into the closure.
+/// The unbounded-read hazard (a device, fifo, or symlink out of the clone) is
+/// closed by the catalog's no-follow regular-file guarantee (DSC-108) and, as
+/// defense in depth, by [`is_regular_file_nofollow`] here.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
-        if !crate::namespace::is_markdown(&file) {
+        if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
+            continue;
+        }
+        if !is_regular_file_nofollow(&file) {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&file) {
@@ -2842,6 +3138,24 @@ fn read_item_text(item: &CatalogItem) -> String {
         }
     }
     buf
+}
+
+/// `init-source`'s pre-read of an existing `mind.toml`: `None` when there is
+/// none, else its text through the metadata cap (DSC-91), so an oversized file
+/// is refused with `MetadataTooLarge` before anything is scaffolded.
+fn read_existing_mind_toml(path: &std::path::Path, limit: u64) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    crate::error::read_capped_metadata_with(path, limit).map(Some)
+}
+
+/// Whether `file` is a regular file, judged WITHOUT following a final
+/// symlink: the guard every full-content read of source files goes through, so
+/// a symlink, fifo, socket, or device never reaches `read_to_string`
+/// (DSC-108 defense in depth).
+fn is_regular_file_nofollow(file: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// Run the uninstall hooks declared by the source at `idx` in `registry`.
@@ -3415,25 +3729,10 @@ fn resolve_learn(
     let manifest = Manifest::load(paths)?;
     let installed: HashSet<String> = manifest.items.keys().cloned().collect();
 
-    // The `read` closure feeds each item's concatenated UTF-8 text to the
-    // resolver so it can scan for `{{ns:}}` tokens (DEP-1). Mirrors
-    // `read_item_text`: only markdown files are scanned
-    // (`namespace::is_markdown`, NS-53), since install never expands a
-    // `{{ns:}}` token in any other file either.
-    let read = |item: &CatalogItem| -> String {
-        let mut parts: Vec<String> = Vec::new();
-        for file in crate::review::item_files(item) {
-            if !crate::namespace::is_markdown(&file) {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&file) {
-                parts.push(content);
-            }
-        }
-        parts.join("\n")
-    };
-
-    let resolution = crate::deps::resolve(&items, &selected_idx, &installed, read);
+    // `read_item_text` feeds each item's concatenated UTF-8 text to the
+    // resolver so it can scan for `{{ns:}}` tokens (DEP-1): only the files
+    // install expands, read in full, through the same regular-file guard.
+    let resolution = crate::deps::resolve(&items, &selected_idx, &installed, read_item_text);
     Ok((registry, items, resolution))
 }
 
@@ -3937,6 +4236,10 @@ fn learn_selected(
         }
     }
     manifest.save(paths)?;
+    // spec: WF-24 WF-29 WF-30 WF-31 -- after the manifest is written, so the
+    // warnings read the store copies and the full installed set. Reported even
+    // when the batch failed part-way: the items that did install are on disk.
+    warn_workflows(paths, &manifest, &installed_keys);
     match failure {
         Some(e) => Err(e),
         None => {
@@ -4068,6 +4371,10 @@ fn learn_collecting_selected(
         }
     }
     manifest.save(paths)?;
+    // spec: WF-31 -- the same warnings as the `learn` path above; they route to
+    // stderr, which is where this flow's other advisories go under `--json`
+    // (CLI-217).
+    warn_workflows(paths, &manifest, &installed_keys);
     match failure {
         Some(e) => Err(e),
         None => Ok(installed_keys),
@@ -5444,6 +5751,7 @@ fn item_catalog_match<'a>(
 /// - agent   -> `agents/<name>.md`
 /// - rule    -> `rules/<name>.md`
 /// - command -> `commands/<name>.md` (CMD-8)
+/// - workflow -> `workflows/<name>.js` (WF-50)
 ///
 /// A tool is never unmanaged (it is store-only, so it is never linked into a
 /// lobe for `absorb` to find), and panics.
@@ -5458,6 +5766,8 @@ fn convention_path_in_root(
         ItemKind::Rule => root.join("rules").join(format!("{name}.md")),
         // spec: CMD-8
         ItemKind::Command => root.join("commands").join(format!("{name}.md")),
+        // spec: WF-50
+        ItemKind::Workflow => root.join("workflows").join(format!("{name}.js")),
         ItemKind::Tool => panic!("tools are never unmanaged; absorb should not reach this"),
     }
 }
@@ -7664,6 +7974,11 @@ fn upgrade_inner_scoped(
 
     let mut manifest = manifest;
     let mut applied: Vec<String> = Vec::new();
+    // The manifest keys (`kind:name`) of what this pass installed, as `learn`
+    // collects them: `applied` holds DISPLAY keys, which do not index the
+    // manifest. A rename (a prefix change) records the NEW key, since the old
+    // entry is gone by the time the warnings run.
+    let mut applied_keys: Vec<String> = Vec::new();
     let mut renamed = false;
     for up in &pending {
         let siblings = siblings_of(&catalog, &up.cat.source);
@@ -7683,9 +7998,7 @@ fn upgrade_inner_scoped(
         let (cat, dropped_requires) = match link_reconciled(paths, &registry, &up.cat) {
             Ok(c) => c,
             Err(e) => {
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
         };
@@ -7714,9 +8027,7 @@ fn upgrade_inner_scoped(
             Err(e) => {
                 // spec: LIFE-48 -- persist what earlier items applied, but do not
                 // let a save failure mask the root cause `e`.
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
         };
@@ -7750,11 +8061,10 @@ fn upgrade_inner_scoped(
                 // (install hooks included), which is why the record is safe to
                 // leave. The old key is left in place (it was never removed), so
                 // both entries are recorded until this is resolved.
+                applied_keys.push(installed.key().into());
                 manifest.insert(installed);
                 // spec: LIFE-48 -- a save failure here must not mask `e`.
-                if let Err(se) = manifest.save(paths) {
-                    warn_manifest_save_also_failed(&se);
-                }
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
                 return Err(e);
             }
             manifest.items.remove(up.old.key().as_str());
@@ -7777,11 +8087,10 @@ fn upgrade_inner_scoped(
                 if !installed.links.contains(old_link)
                     && let Err(e) = install::remove_path(std::path::Path::new(old_link))
                 {
+                    applied_keys.push(installed.key().into());
                     manifest.insert(installed);
                     // spec: LIFE-48 -- a save failure here must not mask `e`.
-                    if let Err(se) = manifest.save(paths) {
-                        warn_manifest_save_also_failed(&se);
-                    }
+                    save_and_warn_workflows(paths, &manifest, &applied_keys);
                     return Err(e);
                 }
             }
@@ -7795,9 +8104,15 @@ fn upgrade_inner_scoped(
         }
         // spec: DSC-95
         applied.push(installed.display_key());
+        applied_keys.push(installed.key().into());
         manifest.insert(installed);
     }
     manifest.save(paths)?;
+    // spec: WF-24 WF-29 WF-30 WF-31 -- the same post-install warnings `learn`
+    // emits, on the same terms: after the manifest is written, so they read the
+    // store copies and compare against the whole installed set. Advisory only:
+    // an upgrade is never failed or altered by one.
+    warn_workflows(paths, &manifest, &applied_keys);
     if out.json {
         let outcome = if renamed { "renamed" } else { "upgraded" };
         let mut result = MutationResult::new("upgrade", target, outcome);
@@ -8423,7 +8738,44 @@ pub fn recall(
             // source-controlled bare name; sanitize the display copy so a
             // bidi/ANSI name cannot ride the `--json` document to a terminal
             // (serde escapes ESC but not a bidi override).
-            return print_json(&found.sanitized_for_display());
+            let mut doc = serde_json::to_value(found.sanitized_for_display())
+                .map_err(|e| MindError::json("recall item", e))?;
+            // spec: WF-60 -- a workflow answers to its `meta.name`, which the
+            // manifest does not record, so a `--json` consumer had no way to
+            // learn of a WF-24 divergence or a WF-29 collision that the text
+            // view printed right below. Same findings, same wording, one
+            // serialized field each.
+            if found.kind == ItemKind::Workflow
+                && let Some(obj) = doc.as_object_mut()
+            {
+                let detail = workflow_detail(paths, &manifest, found);
+                // spec: WF-62 -- `whenToUse` as its own key, beside the bare
+                // `description` the manifest records; omitted when absent.
+                if let Some(when) = &detail.when_to_use {
+                    obj.insert(
+                        "when_to_use".to_string(),
+                        serde_json::Value::String(crate::sanitize::strip_ansi(when)),
+                    );
+                }
+                obj.insert(
+                    "harness_name".to_string(),
+                    match &detail.harness_name {
+                        Some(name) => serde_json::Value::String(crate::sanitize::strip_ansi(name)),
+                        None => serde_json::Value::Null,
+                    },
+                );
+                obj.insert(
+                    "workflow_findings".to_string(),
+                    serde_json::Value::Array(
+                        detail
+                            .findings
+                            .iter()
+                            .map(|f| serde_json::Value::String(crate::sanitize::strip_ansi(f)))
+                            .collect(),
+                    ),
+                );
+            }
+            return print_json(&doc);
         }
         println!("{}", out.bold(&found.display_key()));
         if let Some(d) = &found.description {
@@ -8462,6 +8814,19 @@ pub fn recall(
                         .join(", ")
                 ))
             );
+        }
+        // spec: WF-24 WF-29 -- a workflow answers to its `meta.name`, not to the
+        // name printed above, so the two are shown together when they differ.
+        // This is a property of the installed item, not a one-off install
+        // message, so it belongs in the detail view the way LNK-19's dropped
+        // requirement does. Deliberately absent from the `recall` LISTING and
+        // from `introspect`: the divergence is legal and nothing mind can
+        // repair, so it would be unactionable noise in the one command whose
+        // output is meant to be acted on.
+        if found.kind == ItemKind::Workflow {
+            for msg in workflow_detail(paths, &manifest, found).findings {
+                println!("  {}{}", out.dim("harness "), out.yellow(&msg));
+            }
         }
         // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
         // source-content hash changed, or effective name changed (rename).
@@ -8544,21 +8909,36 @@ pub fn recall(
                         let inst = manifest.items.values().find(|m| {
                             m.source == it.source && m.kind == it.kind && m.bare_name == it.name
                         });
-                        serde_json::json!({
+                        let mut row = serde_json::json!({
                             // DSC-95: the key embeds a source-controlled name.
                             "key": it.display_key(),
                             "installed": inst.is_some(),
                             "commit": inst.map(|m| m.commit.clone()),
-                        })
+                        });
+                        // spec: WF-62 -- an installed workflow's `whenToUse`
+                        // comes from the store copy (what the harness reads);
+                        // an available one's from the catalog.
+                        let when = match inst {
+                            Some(m) => installed_when_to_use(paths, m),
+                            None => it
+                                .when_to_use
+                                .as_deref()
+                                .filter(|_| it.kind == ItemKind::Workflow)
+                                .map(crate::sanitize::strip_ansi),
+                        };
+                        insert_when_to_use(&mut row, when);
+                        row
                     })
                     .collect();
                 for m in orphans_of(s) {
-                    rows.push(serde_json::json!({
+                    let mut row = serde_json::json!({
                         "key": m.display_key(),
                         "installed": true,
                         "commit": m.commit.clone(),
                         "orphaned": true,
-                    }));
+                    });
+                    insert_when_to_use(&mut row, installed_when_to_use(paths, m));
+                    rows.push(row);
                 }
                 serde_json::json!({
                     "name": s.name,
@@ -8793,7 +9173,15 @@ pub fn probe(
                     name: it.display_effective_name(),
                     source: crate::sanitize::strip_ansi(&it.source),
                     hash: it.content_hash().ok(),
+                    // spec: WF-62 -- the JSON carries the pair separately; the
+                    // `<description> - <whenToUse>` join (WF-51) is human
+                    // output only.
                     description: it.description.as_deref().map(crate::sanitize::strip_ansi),
+                    when_to_use: it
+                        .when_to_use
+                        .as_deref()
+                        .filter(|_| it.kind == ItemKind::Workflow)
+                        .map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
                 }
@@ -8807,6 +9195,7 @@ pub fn probe(
                 source: String::new(),
                 hash: None,
                 description: None,
+                when_to_use: None,
                 unmanaged: true,
                 dependencies: Vec::new(),
             });
@@ -8860,7 +9249,8 @@ pub fn probe(
         } else {
             String::new()
         };
-        let mut desc = summary(it.description.as_deref(), 60);
+        // spec: WF-51
+        let mut desc = summary(it.display_description().as_deref(), 60);
         if outdated {
             desc = format!("{desc} {}", out.yellow("(outdated; run `mind upgrade`)"));
         }
@@ -8928,7 +9318,12 @@ struct ProbeRow<'a> {
     // both source-controlled text.
     source: String,
     hash: Option<String>,
+    /// The item's own description, never joined with `whenToUse` (WF-62).
     description: Option<String>,
+    /// A workflow's `meta.whenToUse` (WF-62). Omitted when absent, and for
+    /// every other kind (the catalog carries it for workflows only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    when_to_use: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unmanaged: bool,
     /// Direct dependency keys (DEP-62). Empty for unmanaged rows. Omitted when
@@ -9427,12 +9822,21 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     paths.ensure_config()?;
     let file = paths.config_file();
     let cfg = Config::load(paths)?;
+    // spec: CLI-241 -- the effective cap, not the config key: the flag and the
+    // environment outrank it (DSC-104), so reporting the key alone would name a
+    // value that is not the one in force.
+    let limit = crate::error::metadata_size_limit();
     if out.json {
         return print_json(&serde_json::json!({
             "config_file": file.display().to_string(),
             "lobes": cfg.lobes,
             "default_lobe": paths.claude_home.display().to_string(),
             "ssh": cfg.ssh,
+            "max_metadata_size": crate::error::format_metadata_size(limit),
+            // spec: CLI-242 -- every integer mind produces in JSON fits an
+            // i64, so a consumer that parses numbers as signed 64-bit does not
+            // overflow on the unlimited cap (held as u64::MAX).
+            "max_metadata_size_bytes": limit.min(i64::MAX as u64),
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -9451,6 +9855,19 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         out.dim("·"),
         cfg.ssh
     );
+    println!(
+        "  {} max-metadata-size = {}  (cap on every metadata file read from a source)",
+        out.dim("·"),
+        crate::error::format_metadata_size(limit)
+    );
+    // spec: CLI-241 DSC-104 -- the value printed is the effective one, which
+    // the flag and the environment can outrank, so say where it came from when
+    // it is not what the config key says. Without this the line reads as a
+    // report of `config.toml` and quietly is not one, the same trap the
+    // MIND_AGENT_HOMES note below exists for.
+    if let Some(note) = metadata_cap_origin(crate::config::metadata_limit_origin()) {
+        println!("note: {note}");
+    }
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
             "note: MIND_AGENT_HOMES is set and overrides lobes: {}",
@@ -9458,6 +9875,32 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Where `config show`'s effective metadata cap came from, when that is not the
+/// `max-metadata-size` config key it is printed beside (DSC-104).
+///
+/// Pure in the origin `main::run` recorded at startup, so the credit goes to
+/// the origin that actually won rather than to whichever one happens to parse
+/// to the same number: the flag is named whenever it was given, even when its
+/// value equals the config key or the default. `None` for the config key, the
+/// built-in default, or no recorded origin -- the printed line already tells
+/// the whole story there and a note would be noise.
+fn metadata_cap_origin(origin: Option<&crate::config::MetadataLimitOrigin>) -> Option<String> {
+    use crate::config::MetadataLimitOrigin;
+    match origin? {
+        MetadataLimitOrigin::Flag(raw) => Some(format!(
+            "the max-metadata-size shown is this run's --max-metadata-size ({}), which \
+             overrides the environment and the config key",
+            crate::sanitize::strip_ansi(raw)
+        )),
+        MetadataLimitOrigin::Env(raw) => Some(format!(
+            "{} is set and overrides the max-metadata-size config key: {}",
+            crate::config::MAX_METADATA_SIZE_ENV,
+            crate::sanitize::strip_ansi(raw)
+        )),
+        MetadataLimitOrigin::Config(_) | MetadataLimitOrigin::Default => None,
+    }
 }
 
 /// Render a lobe entry for display: the path, plus its `kinds` filter in brackets
@@ -10441,6 +10884,7 @@ mod tests {
             prefix: None,
             path: PathBuf::from("/nonexistent"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -10449,6 +10893,67 @@ mod tests {
             hooks: Vec::new(),
             ignore: None,
         }
+    }
+
+    /// `config show` prints the EFFECTIVE metadata cap, which the flag and the
+    /// environment outrank (DSC-104), so it names the origin whenever that is
+    /// not the config key beside it -- and stays silent when the printed value
+    /// needs no explanation, so an ordinary `config show` gains no noise.
+    /// Pure in the recorded origin: no environment read, no env lock.
+    // spec: CLI-241 DSC-104
+    #[test]
+    fn config_show_names_where_a_non_config_metadata_cap_came_from() {
+        use crate::config::MetadataLimitOrigin;
+        // Nothing recorded, the default, or the config key: no note.
+        assert_eq!(metadata_cap_origin(None), None);
+        assert_eq!(
+            metadata_cap_origin(Some(&MetadataLimitOrigin::Default)),
+            None
+        );
+        assert_eq!(
+            metadata_cap_origin(Some(&MetadataLimitOrigin::Config("2MiB".into()))),
+            None
+        );
+        // The flag is credited with its raw value, even when that value equals
+        // the default (the flag still won).
+        let note = metadata_cap_origin(Some(&MetadataLimitOrigin::Flag("8MiB".into())))
+            .expect("the flag must be named");
+        assert!(
+            note.contains("--max-metadata-size (8MiB)")
+                && note.contains("overrides the environment and the config key"),
+            "{note}"
+        );
+        // The environment is named by its constant, with its raw value.
+        let note = metadata_cap_origin(Some(&MetadataLimitOrigin::Env("4KiB".into())))
+            .expect("the environment must be named");
+        assert!(
+            note.contains(crate::config::MAX_METADATA_SIZE_ENV) && note.contains("4KiB"),
+            "{note}"
+        );
+    }
+
+    /// `init-source`'s pre-read of an existing `mind.toml` goes through the
+    /// metadata cap: over the cap is `MetadataTooLarge`, under it is the text,
+    /// and an absent file is `None`. This pins the pre-read itself, which the
+    /// CLI test cannot isolate (the scan's own load would refuse the file too).
+    // spec: DSC-91
+    #[test]
+    fn init_source_pre_read_of_mind_toml_is_capped() {
+        let dir = scratch("init-pre-read");
+        let toml = dir.join("mind.toml");
+        assert!(matches!(read_existing_mind_toml(&toml, 8), Ok(None)));
+        let body = "[source]\ndescription = \"forty bytes!!!\"\n";
+        assert_eq!(body.len(), 40);
+        std::fs::write(&toml, body).unwrap();
+        let err = read_existing_mind_toml(&toml, 8).expect_err("over the cap must be refused");
+        assert!(matches!(err, MindError::MetadataTooLarge { .. }), "{err:?}");
+        assert_eq!(
+            read_existing_mind_toml(&toml, crate::error::METADATA_SIZE_LIMIT)
+                .unwrap()
+                .as_deref(),
+            Some(body)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Which `requires` entries a single-item link instance drops, and which
@@ -12185,6 +12690,13 @@ mod tests {
             convention_path_in_root(root, ItemKind::Command, "ship"),
             PathBuf::from("/repo/commands/ship.md"),
             "command convention path is commands/<name>.md"
+        );
+        // spec: WF-50 -- a workflow is a one-file kind like a command, but its
+        // extension is `.js`, not `.md`.
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Workflow, "deploy"),
+            PathBuf::from("/repo/workflows/deploy.js"),
+            "workflow convention path is workflows/<name>.js"
         );
     }
 

@@ -29,13 +29,16 @@ mod selfupdate;
 mod source;
 mod tui;
 mod unmanaged;
+mod workflow_check;
+mod workflow_meta;
 
 use std::io::IsTerminal;
 
 use clap::{CommandFactory, Parser};
 
 use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
-use error::Result;
+use config::MAX_METADATA_SIZE_ENV;
+use error::{MindError, Result};
 use paths::Paths;
 
 /// CLI-217's enforcement mechanism: under `--json`, stdout is RESERVED for the
@@ -433,6 +436,41 @@ fn run(cli: Cli) -> Result<()> {
 
     let paths = Paths::resolve()?;
 
+    // spec: DSC-103 DSC-104 -- install the metadata cap before any dispatch, so
+    // every metadata read in this run uses one ceiling.
+    //
+    // The config file is consulted only when neither the flag nor the
+    // environment supplied a value, and a config that will not parse falls back
+    // to the default rather than failing here: verbs that never read config
+    // (`completions`, `man`) must not start failing on a malformed one, and the
+    // verbs that do read it report the parse error themselves, with the context
+    // this early in the run does not have. (`recall` is NOT in that list: it
+    // reads config through `unmanaged::scan` -> `Paths::agent_homes` ->
+    // `Config::load`.)
+    //
+    // An empty `MIND_MAX_METADATA_SIZE=` reads as unset, the shell convention,
+    // rather than as an unparseable value. A value that is PRESENT but not
+    // valid UTF-8 is neither unset nor a size, so it is reported rather than
+    // collapsed into "absent" by `env::var`'s single `Err` for both -- silently
+    // applying the default cap under a value the operator did set is exactly
+    // the failure DSC-105 refuses (spec: DSC-111).
+    //
+    // The report waits for precedence, though (spec: DSC-104): an undecodable
+    // value is refused only when the environment is the origin that would have
+    // been USED. A junk-but-decodable value is never even parsed when the flag
+    // is present (`config::resolve_metadata_limit_detail` picks one origin and parses
+    // only that), so refusing the undecodable one earlier would make the
+    // flag-outranks-the-environment rule depend on which bytes happen to be in
+    // a variable the flag was supposed to override.
+    //
+    // spec: DSC-113 -- `completions` and `man` read no metadata at all, so the
+    // whole resolution is skipped for them: a malformed flag, environment
+    // variable, or config value must not stop a shell from loading its
+    // completion script or a user from reading the manual.
+    if !matches!(cli.command, Command::Completions { .. } | Command::Man) {
+        install_metadata_limit(&cli, &paths)?;
+    }
+
     // spec: STO-40 STO-41 STO-42
     // Completions and man touch no persisted state: skip the lock. All other
     // commands acquire the lock (shared or exclusive) before reading or writing.
@@ -449,6 +487,56 @@ fn run(cli: Cli) -> Result<()> {
             dispatch(cli, &paths)
         }
     }
+}
+
+/// Resolve this run's metadata cap from the flag, the environment, and the
+/// config key (DSC-104), install it, and record where it came from (CLI-241).
+/// Warns when a zero-valued spelling turned the cap off (DSC-110).
+fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
+    let env_raw = std::env::var_os(MAX_METADATA_SIZE_ENV);
+    let env = match &env_raw {
+        None => None,
+        Some(raw) => match raw.to_str() {
+            Some(text) => Some(text.to_string()).filter(|v| !v.trim().is_empty()),
+            // Undecodable and the environment IS the origin (no flag): refuse,
+            // naming it. With a flag present it is overridden and dropped, the
+            // same fate a junk-but-decodable value meets.
+            None if cli.max_metadata_size.is_none() => {
+                return Err(MindError::BadMetadataSize {
+                    origin: MAX_METADATA_SIZE_ENV.to_string(),
+                    msg: "the value is not valid UTF-8".to_string(),
+                });
+            }
+            None => None,
+        },
+    };
+    let configured = if cli.max_metadata_size.is_none() && env.is_none() {
+        config::Config::load(paths)?.max_metadata_size
+    } else {
+        None
+    };
+    let (limit, origin) = config::resolve_metadata_limit_detail(
+        cli.max_metadata_size.as_deref(),
+        env.as_deref(),
+        configured.as_deref(),
+    )?;
+    error::set_metadata_size_limit(limit);
+    // spec: DSC-110 -- a zero spelling is "no ceiling", which is more often a
+    // typo for a small cap than a choice; say so on stderr (never stdout, so a
+    // `--json` document stays parseable) and keep going. The words `unlimited`
+    // and `none` say it on purpose and stay silent.
+    if let Some(raw) = origin.raw()
+        && config::zero_turns_cap_off(raw)
+    {
+        eprintln!(
+            "warning: {} value '{}' is zero, which turns mind's metadata cap off (no ceiling); \
+             write 'unlimited' to do that on purpose, or give a size to keep a cap",
+            origin.label(),
+            sanitize::strip_ansi(raw)
+        );
+    }
+    config::set_metadata_limit_origin(origin);
+    Ok(())
 }
 
 fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {

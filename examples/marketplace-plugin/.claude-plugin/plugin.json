@@ -1,5 +1,6 @@
 {
   "name": "acme-tools",
   "version": "1.0.0",
-  "description": "Acme developer tools plugin"
+  "description": "Acme developer tools plugin",
+  "workflows": "./elsewhere/workflows"
 }

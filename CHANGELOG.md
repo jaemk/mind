@@ -6,6 +6,84 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A sixth item kind, `workflow`: a flat `workflows/<name>.js` discovered,
+  installed, and linked like any other item, with its description read from the
+  file's `export const meta` object (spec/workflows.md). A Claude plugin's
+  `workflows/` directory maps to it the way its `commands/` does, on a directly
+  melded plugin and on each in-repo entry of a marketplace catalog (WF-40..42).
+- The harness keys a workflow by its `meta.name`, not its file name, so
+  `meta.name: '{{ns:<name>}}'` expands at install to the name `mind` installed
+  under. `review`, `learn`, and `recall <item>` report a `meta.name` that
+  diverges from it, two workflows claiming one name, and a file the harness
+  would skip (no readable `meta`, a missing or empty `name`/`description`, or a
+  file over the harness's 524288-byte cap). All three are reports: none blocks
+  an install, since `mind`'s `meta` reader is looser than the harness's and the
+  size cap is the harness's (WF-24, WF-29, WF-30..32).
+- A workflow past `mind`'s own metadata read cap reads as no readable `meta`,
+  joining the unloadable case above instead of failing the whole source's scan.
+  A workflow's metadata is its entire `.js` body, so one oversized file would
+  otherwise take every other item of that source with it, for every verb that
+  scans a catalog (WF-55).
+- `upgrade` reports the workflows it applied even when a later item in the same
+  batch fails, as `learn` already did. An applied item is live on disk and
+  recorded, so the next `upgrade` finds it current and never looks at it again,
+  and a divergence the upgrade introduced would otherwise be reported by no run
+  (WF-24, WF-29, WF-30).
+- `probe` appends `- <whenToUse>` to a workflow's description on every display
+  surface, `--json` included, so a JSON consumer sees a description shaped
+  differently for this kind; `recall` reads the manifest and shows the
+  description alone (WF-51).
+- `--max-metadata-size <SIZE>`, a global flag setting the ceiling on every
+  metadata file read from a source (a `mind.toml`, an item's frontmatter, a
+  plugin or marketplace manifest, a workflow's `meta`). It outranks
+  `MIND_MAX_METADATA_SIZE`, which outranks the new `max-metadata-size` config
+  key; absent all three the cap is the 8 MiB it has always been. Takes a byte
+  count, a binary or decimal suffixed size, or `unlimited`. `config show`
+  reports the cap in force (DSC-103..107, CLI-240, CLI-241).
+- `{{ns:}}` tokens (and `{{path:}}`, `{{tools:}}`, `{{self}}`) now expand
+  inside a workflow's `.js` body too, gated on the `workflow` kind rather than
+  a markdown extension, since a workflow item IS one `.js` file whose content
+  is agent prompts. An unresolvable token is a hard install failure, the same
+  as in a markdown item (WF-25).
+- `review --fix` never rewrites a `.js`: its rewrite gate stays on the
+  markdown-extension test, so a workflow's `{{ns:}}` tokens are left
+  unrewritten even though they now expand at install (NS-54).
+- `review` reports a `workflow-content` advisory for EVERY workflow item,
+  unconditionally, since `mind` neither reads nor validates a workflow's
+  body; a source shipping workflows can no longer review with zero
+  advisories, so a CI gate keyed on `review`'s advisory count needs updating
+  (WF-53).
+- Two new item-link error kinds in the `--json` error envelope:
+  `link-kind-not-supported` (a linked path names a workflow's `.js`, which the
+  blob/tree link form does not install) and `link-not-linkable-file` (a linked
+  path is a `.js` file not under `workflows/`, so neither a workflow nor a
+  supported link target) (LNK-20).
+
+### Changed
+
+- `workflow` is now a reserved namespace prefix. A source whose
+  `[source].prefix` is `workflow`, or a `meld -N workflow` that worked in
+  0.28.1, is now refused with `ReservedPrefix` (WF-52). The check runs on
+  every `mind.toml` load, not only at meld time, and aborts the scan; a
+  source already melded under `prefix = "workflow"` before this release
+  therefore fails that check on its next scan too, breaking `recall`,
+  `probe`, `learn`, `upgrade`, and `introspect` for it after upgrading `mind`.
+  The remedy is `mind unmeld <source>`.
+
+### Security
+
+- `rustls` updated to 0.23.45, clearing RUSTSEC-2026-0285 (TLS 1.3 handshake
+  messages accepted across encryption level boundaries). Transitive, via
+  `ureq` and `rustls-platform-verifier`; a lockfile-only fix, same as the
+  `lru` bump below (9fae4b0).
+- An unmanaged lobe file whose name strips to `.`, `..`, or empty (e.g. a
+  workflow literally named `...js`) is now skipped, with a warning, instead of
+  being surfaced as a resolvable item: unresolved, it let `absorb`/`forget`
+  build a destination, store, staging, or backup path that pointed at the
+  PARENT directory holding every other item of that kind (UNM-9).
+
 ## [0.28.1] - 2026-09-08
 
 ### Fixed

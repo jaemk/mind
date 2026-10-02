@@ -5,8 +5,8 @@ A marketplace catalog fixture for testing `mind`'s Claude plugin marketplace sup
 Layout:
 - `.claude-plugin/marketplace.json` - lists two in-repo plugins by relative path
 - `plugins/alpha/` - a plugin named `alpha` with one skill (`alpha:one`)
-- `plugins/beta/` - a plugin named `beta` with one agent (`two`, bare frontmatter name per NS-40)
-  and one slash command (`beta:ship`, MKT-18)
+- `plugins/beta/` - a plugin named `beta` with one agent (`two`, bare frontmatter name per NS-40),
+  one slash command (`beta:ship`, MKT-18), and one workflow (`beta:ship-it`, WF-40)
 
 The catalog is self-contained: all plugins are in-repo relative paths, no network access needed.
 External-plugin cases are built inline in tests using `Sandbox::bare` + `write_and_commit`.

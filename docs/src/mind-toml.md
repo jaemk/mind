@@ -7,11 +7,13 @@ gate.
 
 There are four discovery layers, in precedence order:
 
-1. **Convention** (default, no file): the scanner finds `skills/<name>/SKILL.md`,
-   `agents/<name>.md`, `rules/<name>.md`, `commands/<name>.md`, and
-   `tools/<name>/`.
-2. **Frontmatter** (always read): each item's `description` (and a tool's `bin` /
-   `build`) come from the frontmatter it already carries.
+1. **Convention** (default, no file): the scanner finds
+   `skills/<name>/SKILL.md`, `agents/<name>.md`, `rules/<name>.md`,
+   `commands/<name>.md`, `workflows/<name>.js`, and `tools/<name>/`.
+2. **Frontmatter** (always read): each item's `description` (and a tool's
+   `bin` / `build`) come from the frontmatter it already carries -- except a
+   workflow, which has no frontmatter at all; its description and
+   `whenToUse` come from its `export const meta` object instead (WF-4/WF-5).
 3. **Claude plugin manifest** (optional): a `.claude-plugin/plugin.json` or
    `.claude-plugin/marketplace.json` in the repo is read as a discovery input. It
    is authoritative for the items it declares (convention scanning is skipped for
@@ -140,7 +142,7 @@ scanning for the source.
 
 ```toml
 [[items]]
-kind = "rule"                    # skill | agent | rule | command | tool (required)
+kind = "rule"                    # skill | agent | rule | command | workflow | tool (required)
 name = "style"                   # the bare name (required)
 path = "guidelines/style.md"     # path relative to the repo root; a dir for skills/tools (required)
 link = "rules/house-style.md"    # optional: link target relative to the agent home
@@ -175,7 +177,10 @@ event = "install"
   [Install hooks](install-hooks.md#where-an-item-declares-its-hooks). A hook
   runs in the item's store directory for a skill or a tool, and in the shared
   `~/.mind/store/<kind>/` directory for a single-file kind (agent, rule,
-  command), so a relative `./script` only works for a directory-backed item.
+  command, workflow), so a relative `./script` only works for a
+  directory-backed item. A workflow's hooks can come only from a root
+  `[[items]]` entry: a `.js` has no frontmatter, and a single-file kind has no
+  directory for a scoped `mind.toml` (WF-50).
 - **`ignore`** on an item REPLACES `[source].ignore` for that item rather than
   adding to it; the built-in VCS-directory set (`.git`, `.hg`, `.svn`, `.bzr`)
   still applies either way. `ignore = []` is the only way to opt one item out of
@@ -192,6 +197,7 @@ skills = { include = ["packages/*/skill"], exclude = ["packages/internal/*"] }
 agents = { include = ["agents/**/*.md"] }
 rules  = { include = ["rules/*.md"] }
 commands = { include = ["commands/**/*.md"] }   # name is the file STEM: a nested match flattens
+workflows = { include = ["workflows/**/*.js"] }   # name is the file STEM, as for commands
 tools  = { include = ["packages/*/tool"] }   # globs match the tool DIRECTORY
 ```
 
@@ -256,7 +262,8 @@ install = true
   item link (a deep `tree`/`blob` URL); on an ordinary `source` it is a
   `LinkKindMismatch` error. Without it, the kind comes from the file's
   containing directory (`agents/`, `rules/`, `commands/`), then from the
-  file's own frontmatter `kind:`.
+  file's own frontmatter `kind:`. `workflow` is not a valid item-link kind,
+  for the same `.md`-only reason.
 
 By default a melded super-source registers the whole chain but installs only its
 own items plus the `install = true` (or `install-items`) entries.
@@ -314,7 +321,7 @@ event = "install"
 
 ### A regular source
 
-A repo that ships its own skills, agents, rules, commands, and tools. The simplest form is
+A repo that ships its own skills, agents, rules, commands, workflows, and tools. The simplest form is
 no `mind.toml` at all (pure convention). Add a `mind.toml` to attach metadata or a
 namespace:
 

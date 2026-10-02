@@ -259,6 +259,371 @@ fn meld_declared_prefix_with_tag_block_character_is_refused_on_load() {
     );
 }
 
+// spec: DSC-112
+#[test]
+fn an_alias_the_reserved_list_caught_up_with_warns_but_keeps_scanning() {
+    // The reserved-word list is append-only: `workflow` joined it when the
+    // workflow kind shipped, under sources already melded with that prefix.
+    // A registry entry is never re-validated, so the prefix stays in effect;
+    // the items are installed under it and failing every scanning verb would
+    // take the user's whole lobe down over a naming problem. Warn instead.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+
+    // Rewrite the recorded namespace prefix to what a pre-reservation binary
+    // would have accepted. Nothing in mind can produce this state today, which
+    // is exactly why the guard has to read the registry rather than trust the
+    // ingress. Only the `alias` field (the namespace prefix) is rewritten:
+    // `as_alias` (the instance-identity alias) is already revalidated on load
+    // by STO-68, which drops the whole entry, and this is about the prefix that
+    // survives into the scan.
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    let recorded = "\"alias\": \"acme\"";
+    assert!(
+        text.contains(recorded),
+        "the namespace prefix must be recorded as `{recorded}` to be rewritten: {text}"
+    );
+    std::fs::write(&registry, text.replace(recorded, "\"alias\": \"workflow\"")).unwrap();
+
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.success,
+        "a reserved recorded prefix must not fail the scan: {} {}",
+        recall.stdout, recall.stderr
+    );
+    assert!(
+        recall
+            .stderr
+            .contains("'workflow' is a word mind now reserves"),
+        "the scan must warn that the recorded prefix is now a reserved word: {}",
+        recall.stderr
+    );
+    assert!(
+        recall
+            .stderr
+            .contains("unmeld it, then re-meld with `--namespace <other>`"),
+        "the warning must name the way to rename it: {}",
+        recall.stderr
+    );
+    // Advisory only: the item is still there, under the prefix it was
+    // installed with, as a SKILL named `workflow:review` (not read as a
+    // kind-qualified workflow ref).
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(
+        probe.stdout.contains("skill:workflow:review"),
+        "the items must still be listed under the recorded prefix: {}",
+        probe.stdout
+    );
+}
+
+// spec: DSC-112
+#[test]
+fn the_reserved_alias_warning_prints_once_per_source_per_run() {
+    // The warning is about the source, not the scan, so it prints once per
+    // run whatever the verb does: a sync, an upgrade with real changes, a
+    // learn, a JSON listing. The per-process gate itself is pinned by the unit
+    // test `the_reserved_prefix_warning_is_owed_once_per_source`; this pins the
+    // CLI surface so a verb that grows a second scan cannot double it.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+    // A real upstream change, so `upgrade` has something to sync and re-link.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff, v2\n---\n# review skill v2\n",
+    );
+    write(
+        &sb.source.join("skills/other/SKILL.md"),
+        "---\nname: other\ndescription: Another skill\n---\n# other\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "v2"]);
+
+    for args in [
+        vec!["recall"],
+        vec!["upgrade", "--yes"],
+        vec!["learn", "skill:workflow:other", "--yes"],
+        vec!["probe", "--no-tui"],
+        vec!["sync", "--upgrade", "--yes"],
+        vec!["introspect"],
+        vec!["recall", "skill:workflow:review"],
+        vec!["--json", "probe", "--no-tui"],
+        vec!["upgrade", "skill:workflow:review", "--yes"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must succeed: {} {}",
+            r.stdout, r.stderr
+        );
+        assert_eq!(
+            r.stderr.matches("now reserves").count(),
+            1,
+            "{args:?}: the warning must print exactly once: {}",
+            r.stderr
+        );
+    }
+}
+
+// spec: DSC-112
+#[test]
+fn following_the_reserved_alias_remedy_clears_the_warning() {
+    // The warning names a remedy; following it has to end the condition.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+    assert!(
+        sb.mind(&["recall"]).stderr.contains("now reserves"),
+        "precondition: the warning fires before the remedy"
+    );
+
+    // A glob selector, since a namespaced meld's recorded name carries more
+    // than the repo's own name.
+    let unmeld = sb.mind(&["unmeld", "*agents*", "--yes"]);
+    assert!(
+        unmeld.success,
+        "unmeld must succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    let remeld = sb.mind(&["meld", &spec, "--namespace", "acme2", "--yes"]);
+    assert!(
+        remeld.success,
+        "re-meld under another prefix must succeed: {} {}",
+        remeld.stdout, remeld.stderr
+    );
+    for args in [vec!["recall"], vec!["probe", "--no-tui"]] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must succeed: {} {}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            !r.stderr.contains("reserves"),
+            "{args:?}: the warning must be gone after the remedy: {}",
+            r.stderr
+        );
+    }
+    assert!(
+        sb.mind(&["recall"]).stdout.contains("acme2:review"),
+        "the item is installed under the new prefix"
+    );
+}
+
+// spec: DSC-112
+#[test]
+fn a_melded_source_declaring_a_reserved_prefix_names_unmeld_as_the_remedy() {
+    // The other half: a `[source].prefix` is re-validated at every mind.toml
+    // load, so once the word is reserved the refusal is hard and lands on
+    // every verb that scans the source. The consumer cannot override a value
+    // the source declares, so the error has to name the source and the one
+    // command that ends the condition, not the pre-meld "cannot be used as a
+    // namespace prefix" wording.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+
+    // The source declares the prefix AFTER the meld, standing in for a binary
+    // that accepted the word when the meld happened. A local path source is
+    // read from its working tree, so this is what the next scan sees.
+    sb.declare_prefix("workflow");
+
+    // `must_fail` is false for the verbs that already degrade per source rather
+    // than aborting (upgrade reports the source it could not check). What every
+    // verb owes the user is the same either way: the actionable message.
+    for (verb, must_fail) in [
+        (vec!["recall"], true),
+        (vec!["probe", "--no-tui"], true),
+        (vec!["learn", "review"], true),
+        (vec!["upgrade", "--no-sync", "--yes"], false),
+        (vec!["introspect"], false),
+    ] {
+        let r = sb.mind(&verb);
+        assert!(
+            !must_fail || !r.success,
+            "{verb:?} must refuse a source declaring a now-reserved prefix: {} {}",
+            r.stdout,
+            r.stderr
+        );
+        let combined = format!("{}{}", r.stdout, r.stderr);
+        assert!(
+            combined.contains("mind unmeld"),
+            "{verb:?}: the error must name `mind unmeld <source>` as the remedy: {combined}"
+        );
+        assert!(
+            combined.contains("agents"),
+            "{verb:?}: the error must name the source it is about: {combined}"
+        );
+        assert!(
+            combined.contains("workflow"),
+            "{verb:?}: the error must name the offending prefix: {combined}"
+        );
+    }
+
+    // And the remedy works: after unmeld, the verbs run again.
+    let unmeld = sb.mind(&["unmeld", "agents", "--yes"]);
+    assert!(
+        unmeld.success,
+        "the named remedy must work: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.success,
+        "after the remedy, scanning verbs must work again: {} {}",
+        recall.stdout, recall.stderr
+    );
+}
+
+/// The advisory warning is written by the SCAN, which runs under `--json` too.
+/// A line on stdout there would corrupt the one document a `--json` caller
+/// parses, so the warning has to be stderr-only and the document has to stay
+/// whole.
+// spec: DSC-112 CLI-217
+#[test]
+fn the_reserved_alias_warning_does_not_reach_the_json_document() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+
+    // Two catalog-reading verbs with a JSON stdout contract, one of which
+    // (`probe`) scans every source twice over in its listing path.
+    for args in [
+        vec!["--json", "recall"],
+        vec!["--json", "probe", "--no-tui"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must still succeed under the warning: {} {}",
+            r.stdout, r.stderr
+        );
+        let doc: serde_json::Value = serde_json::from_str(&r.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{args:?}: stdout must be exactly one JSON document ({e}): {}",
+                r.stdout
+            )
+        });
+        assert!(doc.is_object(), "{args:?}: {doc}");
+        assert!(
+            !r.stdout.contains("reserve"),
+            "{args:?}: the warning must not be on stdout: {}",
+            r.stdout
+        );
+        assert!(
+            r.stderr.contains("reserve"),
+            "{args:?}: the warning must still be emitted, on stderr: {}",
+            r.stderr
+        );
+    }
+}
+
+/// The condition is advisory, so the verbs that touch a source's git state have
+/// to keep working under it: an operator who cannot sync or upgrade is not
+/// getting advice, they are locked out by a naming problem.
+// spec: DSC-112
+#[test]
+fn a_reserved_alias_does_not_block_sync_or_upgrade() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--namespace", "acme", "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    let registry = sb.mind_home.join("sources.json");
+    let text = std::fs::read_to_string(&registry).expect("read sources.json");
+    std::fs::write(
+        &registry,
+        text.replace("\"alias\": \"acme\"", "\"alias\": \"workflow\""),
+    )
+    .unwrap();
+
+    for args in [
+        vec!["sync"],
+        vec!["upgrade", "--no-sync", "--yes"],
+        vec!["introspect"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must not be blocked by an advisory prefix warning: {} {}",
+            r.stdout, r.stderr
+        );
+    }
+
+    // The installed item keeps its identity throughout: the warning renames
+    // nothing on its own, so nothing is orphaned or re-linked behind the
+    // operator's back.
+    assert!(
+        sb.claude_home.join("skills/workflow:review").exists(),
+        "the item must still be linked under the prefix it was installed with"
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("skill:workflow:review"),
+        "the item must still be reported, as a skill: {}",
+        recall.stdout
+    );
+}
+
+/// The new variant is an error like any other, so a `--json` caller has to
+/// reach it through the CLI-181 envelope with its own machine-readable kind,
+/// not as a text line or as the generic `reserved-prefix` kind (which names a
+/// different remedy).
+// spec: DSC-112 CLI-181
+#[test]
+fn the_melded_reserved_prefix_error_has_its_own_json_envelope() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let meld = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(meld.success, "setup meld must succeed: {}", meld.stderr);
+    sb.declare_prefix("workflow");
+
+    let r = sb.mind(&["--json", "recall"]);
+    assert!(!r.success, "the run must fail: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    assert_eq!(doc["schema"], 1, "the envelope must be schema 1: {doc}");
+    assert_eq!(
+        doc["error"]["kind"], "melded-source-reserved-prefix",
+        "the melded-source case must be distinguishable from the pre-meld \
+         `reserved-prefix` one, whose remedy is different: {doc}"
+    );
+    let msg = doc["error"]["message"].as_str().unwrap_or_default();
+    for needle in ["agents", "workflow", "mind unmeld"] {
+        assert!(
+            msg.contains(needle),
+            "the envelope message must name '{needle}': {doc}"
+        );
+    }
+}
+
 // spec: NS-72 NS-73
 #[test]
 fn meld_namespace_with_clean_prefix_still_succeeds() {

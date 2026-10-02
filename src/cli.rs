@@ -33,13 +33,16 @@ pub enum HookEventArg {
 use crate::error::ItemKind;
 
 /// An item kind as accepted on the command line
-/// (`--kind skill|agent|rule|command|tool`).
+/// (`--kind skill|agent|rule|command|workflow|tool`).
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum KindArg {
     Skill,
     Agent,
     Rule,
     Command,
+    // spec: WF-6 -- a plain comment, not a doc comment: clap renders a doc
+    // comment on a value variant as its help text.
+    Workflow,
     Tool,
 }
 
@@ -50,6 +53,7 @@ impl KindArg {
             KindArg::Agent => ItemKind::Agent,
             KindArg::Rule => ItemKind::Rule,
             KindArg::Command => ItemKind::Command,
+            KindArg::Workflow => ItemKind::Workflow,
             KindArg::Tool => ItemKind::Tool,
         }
     }
@@ -85,7 +89,7 @@ impl LinkKindArg {
 #[command(
     name = "mind",
     version,
-    about = "A manager for agent tooling: skills, agents, rules, commands, and tools.",
+    about = "A manager for agent tooling: skills, agents, rules, commands, workflows, and tools.",
     propagate_version = true,
     arg_required_else_help = true
 )]
@@ -107,6 +111,28 @@ pub struct Cli {
     /// Emit extra advisory output (e.g. unguarded-reference warnings on meld).
     #[arg(short = 'v', long, global = true, help_heading = "Global options")]
     pub verbose: bool,
+
+    /// Ceiling on every metadata file `mind` reads from a source: a `mind.toml`,
+    /// an item's frontmatter, a plugin or marketplace manifest, a workflow's
+    /// `meta` (default 8MiB).
+    ///
+    /// Takes a byte count (`16777216`), a suffixed size (`32MiB`, `512KiB`,
+    /// `16MB`), or `unlimited` or `none` for no ceiling. A zero value (`0`,
+    /// `0B`, `0MiB`) also turns the cap off, with a warning; prefer
+    /// `unlimited` to do that on purpose. Raise it for a source with a
+    /// legitimately large metadata file; lower it to bound how much a source
+    /// you do not trust can make `mind` allocate while scanning it. The flag
+    /// applies to this invocation only; set the `max-metadata-size` config key
+    /// or `MIND_MAX_METADATA_SIZE` to make a value last (this flag outranks
+    /// both).
+    // spec: CLI-240 DSC-110
+    #[arg(
+        long,
+        global = true,
+        value_name = "SIZE",
+        help_heading = "Global options"
+    )]
+    pub max_metadata_size: Option<String>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -211,7 +237,7 @@ EXAMPLES:
         /// each scan root, with no `skills/` container. Turns the layout on for a
         /// source that did not declare `[source].flat-skills`; there is no way to
         /// disable a source's declared flat layout. Applies to skills only (agent,
-        /// rule, command, and tool discovery are unaffected) and to convention discovery
+        /// rule, command, workflow, and tool discovery are unaffected) and to convention discovery
         /// only (ignored for an authoritative `mind.toml`). Persisted on the source
         /// and used by later scans and sync. Only takes effect at the meld that
         /// registers the source: passing it against an already-melded source is
@@ -260,7 +286,9 @@ EXAMPLES:
         /// Declare what kind of item a `blob` item link's file is: `agent`,
         /// `rule`, or `command`. Only needed for a file that neither sits under
         /// an `agents/`, `rules/`, or `commands/` directory nor declares
-        /// `kind:` in its frontmatter. Item links only.
+        /// `kind:` in its frontmatter. Item links only. A workflow cannot be
+        /// item-linked (a blob link takes a `.md` file, a tree link a skill
+        /// directory); meld the repo, or use `learn workflow:<name>` instead.
         // spec: CLI-239, LNK-21
         #[arg(long)]
         kind: Option<LinkKindArg>,
@@ -325,7 +353,8 @@ EXAMPLES:
         path: Option<String>,
 
         /// Rewrite bare sibling references into `{{ns:name}}` tokens. This edits
-        /// the repo's item files; it is heuristic, so review the result.
+        /// the repo's item files; it is heuristic, so review the result. Like
+        /// `review --fix`, it leaves `.js` files (workflows) alone.
         #[arg(long)]
         template: bool,
 
@@ -908,7 +937,7 @@ EXAMPLES:
     /// Resolves <ref> to a single unmanaged item (an exact `kind:name`; a kind
     /// prefix disambiguates across kinds). Moves the item to the destination source
     /// at the convention path for its kind (`skills/<name>/`, `agents/<name>.md`,
-    /// `rules/<name>.md`, `commands/<name>.md`), commits it, melds the source if not yet registered, and
+    /// `rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`), commits it, melds the source if not yet registered, and
     /// installs it via `learn`. After absorb the item is an ordinary managed item.
     ///
     /// The destination source is resolved from, in precedence order:
@@ -925,7 +954,7 @@ EXAMPLES:
     /// `absorb` refuses with an error.
     Absorb {
         /// The unmanaged item ref: `name`, `skill:name`, `agent:name`,
-        /// `rule:name`, or `command:name`. A kind prefix disambiguates when the same name exists
+        /// `rule:name`, `command:name`, or `workflow:name`. A kind prefix disambiguates when the same name exists
         /// across kinds. Glob refs are rejected (absorb claims exactly one item).
         item_ref: String,
 

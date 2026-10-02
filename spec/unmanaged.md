@@ -13,16 +13,46 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
 
 - `UNM-1` An *unmanaged item* is an entry in a configured agent home's kind
   directory (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`,
-  `commands/<name>.md`) whose path is not a managed link, i.e. not recorded in
-  any manifest item's `links` (storage.md STO-21). Its kind is the directory's
-  kind and its name is the entry name (the basename, with a trailing `.md`
-  stripped for an agent, rule, or command). A managed link occupies its path,
-  so a given path is either managed or unmanaged, never both. Tools are never
+  `commands/<name>.md`, `workflows/<name>.js`, WF-50) whose path is not a
+  managed link, i.e. not recorded in any manifest item's `links` (storage.md
+  STO-21). Its kind is the directory's kind and its name is the entry name
+  (the basename, with a trailing `.md` stripped for an agent, rule, or
+  command, or `.js` for a workflow). A managed link occupies its path, so a
+  given path is either managed or unmanaged, never both. Tools are never
   linked into an agent home (tooling.md TOOL-3), so unmanaged detection covers
-  every linked kind: skills, agents, rules, and commands (commands.md CMD-8).
-  `mind` scans every configured lobe (`Paths::agent_homes`, STO-14); an item
-  present in more than one lobe is one logical item that records each
-  occupied path.
+  every linked kind: skills, agents, rules, commands, and workflows
+  (commands.md CMD-8). `mind` scans every configured lobe (`Paths::agent_homes`,
+  STO-14); an item present in more than one lobe is one logical item that
+  records each occupied path.
+- `UNM-9` An unmanaged lobe item whose name, once derived from its filename,
+  fails the standard item-name safety check (empty, `.`, `..`, or otherwise
+  unsafe) is skipped, not surfaced as an absorbable or listable item. This
+  matters because a naive suffix strip has no such check built in: a lobe file
+  literally named `...js` (or `...md`) strips to the unsafe name `..`, `..js`
+  to `.`, and `.js` to the empty name. Each of those is a string a caller joins
+  onto a directory to build the destination path (ABS-1), the store path
+  (`store/<kind>/<name>`, storage.md) and the staging/backup paths, so the
+  "item" names the directory that holds every OTHER item of its kind. The
+  check is the same predicate the catalog scan applies to a source-declared
+  name (discovery.md DSC-96), applied to every kind's derived name, so a skill
+  directory whose name carries a blocked code point is skipped too.
+  Detection reports and continues, the same per-entry severity DSC-96/DSC-102
+  give a hostile catalog-scanned name: the scan prints one warning naming the
+  kind and the sanitized derived name, then keeps going, so one hostile entry
+  never takes the rest of the listing down with it. The skipped entry is
+  simply absent from the scan's result, so a ref naming it -- `absorb <ref>`
+  (absorb.md ABS-1), `forget <ref>`, or `forget --unmanaged` with no ref
+  (UNM-4/UNM-7) -- resolves to nothing (`NotInstalled`), the same as any other
+  name nothing matches, whether or not `--yes`/`--force` is given. A verb that
+  scans is therefore unaffected in its own success (only the one entry is
+  missing from its output), and a verb that does not scan unmanaged items at
+  all keeps its stable schema untouched: `recall --json` lists sources only
+  (UNM-2) and `introspect` reads the manifest, neither one emitting the
+  warning. The interactive `probe` TUI treats a failed unmanaged scan as
+  non-fatal like every other snapshot failure (UNM-6); with UNM-9 a per-entry
+  skip rather than a whole-scan failure, that path is no longer even reached
+  for this cause. Nothing removes the entry: `mind` cannot name it safely, so
+  clearing it is a manual filesystem operation.
 
 ## recall
 

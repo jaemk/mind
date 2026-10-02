@@ -111,6 +111,32 @@ impl Sandbox {
         p
     }
 
+    /// Place an unmanaged workflow in the lobe: a lobe's workflow is a bare
+    /// `workflows/<name>.js` whose metadata lives in its `meta` object, not in
+    /// frontmatter (WF-50).
+    fn place_unmanaged_workflow(&self, name: &str) -> PathBuf {
+        let p = self
+            .claude_home
+            .join("workflows")
+            .join(format!("{name}.js"));
+        write_file(
+            &p,
+            &format!(
+                "export const meta = {{\n  \
+                 name: '{name}',\n  \
+                 description: 'Run the {name} pass',\n  \
+                 phases: [{{ title: 'Go' }}],\n\
+                 }}\n\
+                 \n\
+                 phase('Go')\n\
+                 const done = await agent('Do the {name} work.')\n\
+                 \n\
+                 return done\n"
+            ),
+        );
+        p
+    }
+
     fn dest_spec(&self) -> String {
         self.dest.to_string_lossy().into_owned()
     }
@@ -255,6 +281,52 @@ fn abs1_absorb_command_installs_managed_symlink() {
     assert!(
         recall.stdout.contains("command:ship"),
         "the absorbed command must be managed: {}",
+        recall.stdout
+    );
+}
+
+/// Absorbing an unmanaged workflow moves it to workflows/<name>.js in the
+/// destination, commits it there, and leaves a managed symlink in the lobe.
+/// A workflow is a one-file kind like a command, but with the `.js` extension
+/// the harness loads (WF-50), so it is the one absorb path where the
+/// convention name is not `<name>.md`.
+// spec: ABS-1 ABS-5 WF-50
+#[test]
+fn abs1_absorb_workflow_installs_managed_symlink() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_workflow("deploy");
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb workflow:deploy must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // spec: WF-50 -- the convention path is workflows/<name>.js, not .md.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "the workflow must land at workflows/<name>.js in the destination source"
+    );
+    assert!(
+        !sb.dest.join("workflows/deploy.md").exists(),
+        "the workflow must not be written under a markdown extension"
+    );
+    // spec: ABS-5 -- absorb commits the moved item in the destination repo.
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        "absorb workflow:deploy",
+        "absorb must commit the workflow in the destination repo"
+    );
+    // spec: ABS-1 -- and the lobe entry is replaced by a managed symlink.
+    assert!(
+        is_symlink(&lobe_path),
+        "lobe path must be a managed symlink after absorb"
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("workflow:deploy"),
+        "the absorbed workflow must be managed: {}",
         recall.stdout
     );
 }
@@ -409,6 +481,549 @@ fn abs1_unresolved_ref_is_not_installed() {
         "error must indicate not installed: {}",
         r.stderr
     );
+}
+
+// ---- UNM-9: an unsafe derived item name is skipped, not surfaced ----------
+
+/// A lobe file literally named `...js` (three dots) naively strips its `.js`
+/// suffix down to `..` -- a valid path component meaning "parent directory".
+/// Were that name ever surfaced as a resolvable item, `mind absorb
+/// workflow:..` would let `--force` reach the removal codepath with a
+/// destination path built from that name. `unmanaged::scan` must instead skip
+/// the entry (warning, not erroring) so it never enters the resolvable set:
+/// `absorb` then sees no such item at all, the same as any other unmatched
+/// ref, before it ever copies a file, commits, or deletes anything.
+// spec: UNM-9
+#[test]
+fn unm9_absorb_refuses_unsafe_derived_workflow_name() {
+    let sb = Sandbox::new();
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(
+        &evil,
+        "export const meta = { name: 'x', phases: [{ title: 'Go' }] }\n",
+    );
+    let commit_before = last_commit_msg(&sb.dest);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:..", "--to", &dest, "--yes", "--force"]);
+
+    assert!(
+        !r.success,
+        "absorb must not resolve an unsafe derived item name: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("not installed")
+            || r.stderr.to_lowercase().contains("notinstalled"),
+        "the ref must fail to resolve at all, the entry having been skipped \
+         out of the scan (UNM-9), not surfaced and then refused downstream: {}",
+        r.stderr
+    );
+    // Nothing must have been written or committed in the destination repo: a
+    // vulnerable build would have joined `..` onto the workflows/ kind
+    // directory and landed (or removed) content one level above it.
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        commit_before,
+        "absorb must not commit anything in the destination when the ref does not resolve"
+    );
+    assert!(
+        sb.dest.join("README.md").is_file(),
+        "the destination repo's own content must be untouched"
+    );
+    // The original lobe file must survive completely untouched.
+    assert!(
+        evil.is_file(),
+        "the original lobe file must be untouched after a refused absorb"
+    );
+}
+
+/// The same shape exists for every suffix-stripped kind, not just workflow
+/// (WF-50's `.js` mirrors the `.md` stripping done for agent/rule/command): a
+/// command file named `...md` strips to the same unsafe `..`.
+// spec: UNM-9
+#[test]
+fn unm9_absorb_refuses_unsafe_derived_command_name() {
+    let sb = Sandbox::new();
+    let evil = sb.claude_home.join("commands").join("...md");
+    write_file(&evil, "# not a real command\n");
+    let commit_before = last_commit_msg(&sb.dest);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "command:..", "--to", &dest, "--yes", "--force"]);
+
+    assert!(
+        !r.success,
+        "absorb must not resolve an unsafe derived item name: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("not installed")
+            || r.stderr.to_lowercase().contains("notinstalled"),
+        "the ref must fail to resolve at all: {}",
+        r.stderr
+    );
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        commit_before,
+        "absorb must not commit anything in the destination when the ref does not resolve"
+    );
+    assert!(
+        evil.is_file(),
+        "the original lobe file must be untouched after a refused absorb"
+    );
+}
+
+/// `recall` still succeeds with an unsafe-named lobe entry present (UNM-9 is a
+/// per-entry skip, not a whole-scan failure): the entry is simply absent from
+/// the listing, with a warning on stderr naming it, while a well-formed
+/// sibling is still listed.
+// spec: UNM-9
+#[test]
+fn unm9_recall_skips_unsafe_derived_name_and_warns() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "recall must succeed despite the one unsafe-named entry: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "recall must still warn about the skipped entry: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains(".."),
+        "the unsafe-named entry must not be listed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("deploy"),
+        "the well-formed sibling must still be listed: {}",
+        r.stdout
+    );
+}
+
+/// UNM-9 asserted against real installed state, which is where the traversal
+/// would do its damage. Every install path is built by joining the item name
+/// onto a directory -- `Paths::store_rel` is `store/<kind>/<name>`,
+/// `staging_path`/`backup_path` likewise -- so a derived name of `..` aims all
+/// three at the PARENT directory that holds every other item: `store/workflow/..`
+/// is `store/` itself, and an install swaps its staged copy into that path after
+/// moving aside whatever is already there. A pre-UNM-9 build resolves the ref and
+/// reaches that arithmetic (it moves the lobe file into the destination repo and
+/// commits `absorb workflow:..` before install even starts).
+///
+/// So: install a legitimate item first, then attempt the traversal with every
+/// consent flag handed over, and require that the ref simply fails to
+/// resolve -- with the real item's store copy, its lobe symlink and its
+/// manifest entry all exactly as they were, and nothing staged.
+// spec: UNM-9
+#[test]
+fn unm9_refusal_protects_an_existing_store_from_the_traversal() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_skill("review");
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "skill:review", "--to", &dest, "--yes"]);
+    assert!(r.success, "setup absorb must succeed: stderr={}", r.stderr);
+
+    let store_item = sb.mind_home.join("store").join("skill").join("review");
+    let lobe_link = sb.claude_home.join("skills").join("review");
+    let manifest = sb.mind_home.join("manifest.json");
+    assert!(
+        store_item.join("SKILL.md").is_file(),
+        "setup: the legit item must have a store copy at {store_item:?}"
+    );
+    let manifest_before = std::fs::read_to_string(&manifest).expect("manifest after setup");
+
+    // Now the traversal attempt, with every consent flag handed over.
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [{ title: 'Go' }] }\n",
+    );
+    let evil = sb.mind(&["absorb", "workflow:..", "--to", &dest, "--yes", "--force"]);
+    assert!(
+        !evil.success,
+        "the traversal absorb must fail: stdout={} stderr={}",
+        evil.stdout, evil.stderr
+    );
+    // It must fail because the ref never resolves (the entry was skipped at
+    // the scan, UNM-9), not because some downstream step happened to reject
+    // it: a failure from some later step would mean the unsafe name was still
+    // resolved and acted on, and the next refactor could make it succeed.
+    assert!(
+        evil.stderr.to_lowercase().contains("not installed")
+            || evil.stderr.to_lowercase().contains("notinstalled"),
+        "the traversal ref must simply not resolve: stdout={} stderr={}",
+        evil.stdout,
+        evil.stderr
+    );
+
+    assert!(
+        store_item.join("SKILL.md").is_file(),
+        "the existing store copy must survive a refused traversal absorb"
+    );
+    assert!(
+        is_symlink(&lobe_link),
+        "the existing managed lobe link must survive a refused traversal absorb"
+    );
+    let manifest_after = std::fs::read_to_string(&manifest).expect("manifest after refusal");
+    assert_eq!(
+        manifest_after, manifest_before,
+        "a refused absorb must not touch the manifest at all"
+    );
+    assert!(
+        !manifest_after.contains("workflow:.."),
+        "no manifest entry may be keyed on the unsafe name: {manifest_after}"
+    );
+    // The staging/backup scratch must not be left holding the store either.
+    assert!(
+        !sb.mind_home
+            .join(".tmp")
+            .join("staging")
+            .join("workflow")
+            .exists(),
+        "a refused absorb must not have staged anything"
+    );
+}
+
+/// The third unsafe derivation, and the most innocuous-looking file on disk: a
+/// lobe entry named exactly `.md` (or `.js`) strips to the EMPTY name, whose
+/// store path `store/command/` is again a directory holding other items. It is
+/// skipped like the `..` case, and the warning names the entry's own kind
+/// rather than an empty string with no context; the sibling scan still
+/// succeeds and still lists the well-formed neighbor.
+// spec: UNM-9
+#[test]
+fn unm9_empty_derived_name_is_refused() {
+    let sb = Sandbox::new();
+    // A well-formed sibling, to prove the skip is not merely "the directory
+    // could not be read".
+    sb.place_unmanaged_command("deploy");
+    let evil = sb.claude_home.join("commands").join(".md");
+    write_file(&evil, "# nothing\n");
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "recall must still succeed with one empty-derived-name entry present: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "recall must still warn about the skipped entry: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("deploy"),
+        "the well-formed sibling must still be listed: {}",
+        r.stdout
+    );
+    assert!(
+        evil.is_file(),
+        "the skipped entry must be left on disk untouched"
+    );
+}
+
+/// `forget --unmanaged` with no ref is the one bulk-DESTRUCTIVE consumer of the
+/// scan: it deletes every unmanaged lobe entry it resolves. With an unsafe
+/// entry present the scan skips just that one entry (UNM-9's per-entry
+/// severity), so the bulk removal proceeds and removes every well-formed
+/// entry it found -- the unsafe entry was never among them, so it is left
+/// alone, not because the removal aborted but because it was never a
+/// candidate.
+// spec: UNM-9
+#[test]
+fn unm9_forget_unmanaged_bulk_skips_unsafe_entry_and_removes_the_rest() {
+    let sb = Sandbox::new();
+    let safe_cmd = sb.place_unmanaged_command("deploy");
+    let safe_skill = sb.place_unmanaged_skill("review");
+    let evil = sb.claude_home.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    let r = sb.mind(&["forget", "--unmanaged", "--yes"]);
+    assert!(
+        r.success,
+        "bulk forget --unmanaged must succeed despite the one unsafe entry: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.to_lowercase().contains("unsafe"),
+        "it must still warn about the skipped entry: {}",
+        r.stderr
+    );
+    assert!(
+        !safe_cmd.is_file(),
+        "a well-formed unmanaged entry must still be removed"
+    );
+    assert!(
+        !safe_skill.join("SKILL.md").is_file(),
+        "a well-formed unmanaged entry must still be removed"
+    );
+    assert!(
+        evil.is_file(),
+        "the unsafe entry itself must not be touched, having never been a candidate"
+    );
+}
+
+/// `probe` is the third surface UNM-9 names. Its plain listing goes through the
+/// same scan, so an unsafe-named entry is skipped (warned about, not listed)
+/// there too: with an explicit `--no-tui`, with a query, in `--json`, and as
+/// the bare `probe` that falls back to the plain listing whenever stdout is
+/// not a terminal. All of them still succeed; only the warning's channel
+/// differs by surface.
+// spec: UNM-9
+#[test]
+fn unm9_probe_skips_unsafe_entry_on_every_non_tui_surface() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [] }\n",
+    );
+
+    for args in [
+        vec!["probe", "--no-tui"],
+        vec!["probe", "--no-tui", "deploy"],
+        vec!["probe", "--json"],
+        vec!["probe"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} must succeed despite the one unsafe-named entry: \
+             stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        // The warning always lands on stderr (DSC-102's channel), independent
+        // of whether stdout is prose or a `--json` document, so a `--json`
+        // caller's stdout stays exactly one parseable document.
+        assert!(
+            r.stderr.to_lowercase().contains("unsafe"),
+            "{args:?} must still warn about the skipped entry: stdout={} stderr={}",
+            r.stdout,
+            r.stderr
+        );
+    }
+}
+
+/// The exact verb surface of the skip, pinned. UNM-9's severity is a
+/// per-entry skip (with a warning), so no verb that scans unmanaged items
+/// actually fails on an unsafe entry -- but the ones that never scan them stay
+/// completely unaffected either way, and that asymmetry is still load-bearing
+/// for `recall --json`/`introspect` staying stable schemas:
+///
+/// | verb | scans unmanaged? | with an unsafe entry |
+/// |------|------------------|----------------------|
+/// | `recall` (human, no `--source`) | yes (UNM-2) | succeeds, warns, skips it |
+/// | `probe --no-tui` | yes (UNM-3) | succeeds, warns, skips it |
+/// | `forget <ref>` / `forget --unmanaged` | yes (UNM-4/7) | succeeds, warns, skips it |
+/// | `absorb <ref>` | yes (ABS-1) | the unsafe ref itself is `NotInstalled` |
+/// | `recall --json` | no: sources-only schema (CLI-73) | succeeds, no warning |
+/// | `recall --source <name>` | no: unmanaged have no source | succeeds, no warning |
+/// | `introspect` | no: manifest/link drift only | succeeds, no warning |
+///
+/// The last three are the regression risk in both directions: a future change
+/// that routes them through `unmanaged::scan` would start warning on their
+/// stable output, and one that stops the first three from scanning would
+/// silently start surfacing an unsafe name as a resolvable item again.
+// spec: UNM-9
+#[test]
+fn unm9_verb_surface_of_the_skip_is_exactly_the_scanning_verbs() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    write_file(
+        &sb.claude_home.join("workflows").join("...js"),
+        "export const meta = { name: 'x', phases: [] }\n",
+    );
+
+    for args in [vec!["recall"], vec!["probe", "--no-tui"]] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} scans unmanaged items but must still succeed: \
+             stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            r.stderr.to_lowercase().contains("unsafe"),
+            "{args:?} must say the entry it skipped was unsafe: {}",
+            r.stderr
+        );
+    }
+
+    // `forget --unmanaged` last: it is destructive (removes `deploy`, the one
+    // well-formed entry the scan found), so it runs after the read-only checks
+    // above.
+    let forget = sb.mind(&["forget", "--unmanaged", "--yes"]);
+    assert!(
+        forget.success,
+        "forget --unmanaged must succeed despite the one unsafe entry: \
+         stdout={} stderr={}",
+        forget.stdout, forget.stderr
+    );
+    assert!(
+        forget.stderr.to_lowercase().contains("unsafe"),
+        "forget --unmanaged must say the entry it skipped was unsafe: {}",
+        forget.stderr
+    );
+
+    // And the verbs that do not scan keep working with no warning at all, so
+    // the user retains a way to inspect the lobe with a stable, unaffected
+    // schema (and, crucially, a way to be told to `rm` the entry).
+    for args in [
+        vec!["recall", "--json"],
+        vec!["recall", "--source", "agents"],
+        vec!["introspect"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            r.success,
+            "{args:?} does not scan unmanaged items, so an unsafe entry must not \
+             break it: stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            !r.stderr.to_lowercase().contains("unsafe"),
+            "{args:?} does not scan unmanaged items, so it must not warn about one: {}",
+            r.stderr
+        );
+    }
+}
+
+/// The refusal must not over-reach. Only the IMMEDIATE children of a kind dir
+/// are scanned (CMD-8), so a nested `commands/<group>/...md` never has a name
+/// derived from it at all and therefore cannot trip UNM-9: the scan still
+/// succeeds and still lists the well-formed sibling. Without this, one stray
+/// file anywhere under a grouped command tree would disable `recall` wholesale.
+// spec: UNM-9 CMD-8
+#[test]
+fn unm9_nested_unsafe_filename_does_not_trip_the_refusal() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_command("deploy");
+    write_file(
+        &sb.claude_home.join("commands").join("group").join("...md"),
+        "# nested, never derived\n",
+    );
+    // The same shape one level down in a skill's own directory.
+    write_file(
+        &sb.claude_home.join("skills").join("review").join("...md"),
+        "# inside a skill dir\n",
+    );
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "a nested unsafe filename is not an item name and must not refuse: \
+         stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("deploy"),
+        "the well-formed unmanaged sibling must still be listed: {}",
+        r.stdout
+    );
+}
+
+/// UNM-9 is per-LOBE-set, not per-primary-lobe: the scan walks every configured
+/// agent home (STO-14), so an unsafe entry in a secondary lobe is skipped just
+/// the same. A vulnerable build that only guarded the primary home would pass
+/// the tests above and still resolve `workflow:..` out of lobe2.
+// spec: UNM-9
+#[test]
+fn unm9_unsafe_entry_in_a_secondary_lobe_is_also_skipped() {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let base = std::env::temp_dir().join(format!("mind-abs-unm9ml-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("personal");
+    let mind_home = base.join("mind");
+    let lobe1 = base.join("lobe1");
+    let lobe2 = base.join("lobe2");
+    git_init(&dest);
+
+    // lobe1 is clean; only the SECONDARY lobe holds the unsafe entry.
+    write_file(&lobe1.join("commands").join("deploy.md"), "# deploy\n");
+    let evil = lobe2.join("workflows").join("...js");
+    write_file(&evil, "export const meta = { name: 'x', phases: [] }\n");
+
+    std::fs::create_dir_all(&mind_home).unwrap();
+    let lobe1_str = lobe1.to_string_lossy();
+    let lobe2_str = lobe2.to_string_lossy();
+    std::fs::write(
+        mind_home.join("config.toml"),
+        format!("lobes = [\"{lobe1_str}\", \"{lobe2_str}\"]\n"),
+    )
+    .unwrap();
+
+    let dest_str = dest.to_string_lossy().into_owned();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &mind_home)
+            .env("CLAUDE_HOME", &lobe1)
+            .env_remove("MIND_ABSORB_TO")
+            .env_remove("MIND_AGENT_HOMES")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .output()
+            .expect("run mind");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = run(&["recall"]);
+    assert!(
+        ok,
+        "an unsafe entry in a secondary lobe must not break the scan: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("unsafe"),
+        "it must still warn about the skipped entry: {stderr}"
+    );
+    assert!(
+        stdout.contains("deploy"),
+        "the well-formed entry in the primary lobe must still be listed: {stdout}"
+    );
+
+    let (ok, stdout, stderr) = run(&[
+        "absorb",
+        "workflow:..",
+        "--to",
+        &dest_str,
+        "--yes",
+        "--force",
+    ]);
+    assert!(
+        !ok,
+        "absorb must not resolve an unsafe-named entry in a secondary lobe: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.to_lowercase().contains("not installed")
+            || stderr.to_lowercase().contains("notinstalled"),
+        "the ref must simply fail to resolve: stdout={stdout} stderr={stderr}"
+    );
+    assert_eq!(
+        last_commit_msg(&dest),
+        "init",
+        "nothing may be committed for a secondary-lobe traversal attempt"
+    );
+    assert!(evil.is_file(), "the secondary-lobe entry must be untouched");
+
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 // ---- ABS-2: destination precedence --to > MIND_ABSORB_TO > absorb_to -------
@@ -915,6 +1530,133 @@ fn abs8_effective_name_follows_destination_prefix() {
     assert!(
         is_symlink(&link),
         "managed link must be at skills/mypfx:review when destination has prefix mypfx: {link:?}"
+    );
+}
+
+/// The same, for a workflow: the destination's prefix reaches the one kind
+/// whose convention path is not `<name>.md`, so the file lands bare at
+/// `workflows/deploy.js` in the source while the lobe link takes the prefixed
+/// name with the extension AFTER it (`workflows/mypfx:deploy.js`, WF-22) --
+/// not `workflows/mypfx:deploy` and not `mypfx:deploy.js.js`.
+///
+/// It also makes a WF-24 divergence out of nothing the user wrote: the file's
+/// `meta.name` is still `deploy` while mind installed it as `mypfx:deploy`, so
+/// the absorb must say so rather than leave a silently shadowed workflow.
+// spec: ABS-8 WF-22 WF-24 WF-50
+#[test]
+fn abs8_effective_name_follows_destination_prefix_for_a_workflow() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_workflow("deploy");
+
+    write_file(&sb.dest.join("mind.toml"), "[source]\nprefix = \"mypfx\"\n");
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add mind.toml"]);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb must succeed with a prefixed dest: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // The source copy keeps the BARE name: the prefix is an install-time
+    // transform, not part of the item's identity in the repo.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "the destination source must hold the bare workflows/deploy.js"
+    );
+    assert!(
+        !sb.dest.join("workflows/mypfx:deploy.js").exists(),
+        "the prefix must not be baked into the source path"
+    );
+
+    let recall = sb.mind(&["recall", "workflow:mypfx:deploy"]);
+    assert!(
+        recall.success,
+        "recall workflow:mypfx:deploy must work after a prefixed absorb: \
+         stdout={} stderr={}",
+        recall.stdout, recall.stderr
+    );
+
+    // spec: WF-22 -- prefix in the stem, `.js` still last.
+    let link = sb.claude_home.join("workflows").join("mypfx:deploy.js");
+    assert!(
+        is_symlink(&link),
+        "managed link must be at workflows/mypfx:deploy.js: {link:?}"
+    );
+    assert!(
+        !sb.claude_home.join("workflows/deploy.js").exists(),
+        "the unprefixed lobe entry must be gone (absorb claimed it)"
+    );
+    assert!(
+        !sb.claude_home.join("workflows/mypfx:deploy").exists(),
+        "the link must not drop the extension"
+    );
+
+    // spec: WF-24 -- the prefix created a divergence; absorb's install reports it.
+    assert!(
+        r.stderr
+            .contains("the harness resolves it as 'deploy', not 'mypfx:deploy'"),
+        "a prefixed absorb must report the harness-name divergence it created: {}",
+        r.stderr
+    );
+}
+
+/// `forget` is the inverse for a workflow too: the `.js` lobe link and the
+/// store copy go, and the destination repo's own copy stays (forget does not
+/// own the source). The kind's non-`.md` extension is exactly the sort of
+/// detail an uninstall that recomputed paths from kind+name would get wrong;
+/// the file registry is what makes it right.
+// spec: ABS-8 WF-50
+#[test]
+fn abs8_forget_is_inverse_of_absorb_for_a_workflow() {
+    let sb = Sandbox::new();
+    let lobe = sb.place_unmanaged_workflow("deploy");
+    let dest = sb.dest_spec();
+
+    let absorb = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        absorb.success,
+        "absorb must succeed: stdout={} stderr={}",
+        absorb.stdout, absorb.stderr
+    );
+    assert!(
+        is_symlink(&lobe),
+        "lobe must be a managed symlink after absorb"
+    );
+    let store = sb.mind_home.join("store/workflow/deploy");
+    assert!(
+        store.exists(),
+        "the absorbed workflow must have a store copy: {store:?}"
+    );
+
+    let forget = sb.mind(&["forget", "workflow:deploy", "--yes"]);
+    assert!(
+        forget.success,
+        "forget of an absorbed workflow must succeed: stdout={} stderr={}",
+        forget.stdout, forget.stderr
+    );
+
+    assert!(
+        !is_symlink(&lobe) && !lobe.exists(),
+        "forget must remove the managed .js symlink absorb installed"
+    );
+    assert!(
+        !store.exists(),
+        "forget must remove the store copy as well: {store:?}"
+    );
+    // The destination repo keeps its copy: forget does not own the source.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "forget must not reach into the destination source repo"
+    );
+    let recall = sb.mind(&["recall", "workflow:deploy"]);
+    assert!(
+        !recall.success,
+        "workflow:deploy must not resolve as managed after forget: \
+         stdout={} stderr={}",
+        recall.stdout, recall.stderr
     );
 }
 

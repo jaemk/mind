@@ -1,6 +1,6 @@
 # mind
 
-A manager for agent tooling (skills, agents, rules, commands, tools) that melds with
+A manager for agent tooling (skills, agents, rules, commands, workflows, tools) that melds with
 arbitrary git repos and links installed items into one or more agent homes
 (default `~/.claude`; see `Paths::agent_homes`). A tool is store-only: it is
 referenced by other items, not linked into an agent home.
@@ -91,8 +91,9 @@ CLI surface and output:
 Sources and discovery:
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
 - `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`,
-  `rules/<n>.md`, `commands/<n>.md`, `tools/<n>/`.
+  `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js`, `tools/<n>/`.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
+- `src/workflow_meta.rs` - minimal reader for a workflow's `export const meta` object (description, `whenToUse`, harness name).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
 - `src/plugin_manifest.rs` - Claude plugin manifests (`.claude-plugin/marketplace.json`) read as a source.
 - `src/resolve.rs` - item-ref parsing (`name`, `skill:name`, `owner/repo#name`) + resolution.
@@ -104,6 +105,7 @@ Install, lifecycle, and state:
 - `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`, with the file registry.
 - `src/hook.rs` - source/item lifecycle hooks (install, update, uninstall) plus tool build hooks (the safety-prompted shell commands).
 - `src/unmanaged.rs` - lobe items `mind` did not install (surfaced in `recall`/`probe`, removable via `forget`).
+- `src/workflow_check.rs` - the workflow unloadable / name-divergence / name-collision messages shared by `learn`, `upgrade`, `recall`, and `review`.
 - `src/hash.rs` - content hashing (drift detection). `src/git.rs` - the git CLI wrapper.
 - `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary.
 - `src/scaffold.rs` - pure helpers for `init-source` scaffolding.
@@ -111,7 +113,7 @@ Install, lifecycle, and state:
 Foundations and cross-cutting:
 - `src/error.rs` - structured errors (`thiserror`). No `anyhow`; every fallible path returns `MindError`.
 - `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` / `CLAUDE_HOME`, used for test isolation).
-- `src/config.rs` - user config at `~/.mind/config.toml` (`lobes`, `ssh`, `absorb-to`).
+- `src/config.rs` - user config at `~/.mind/config.toml` (`lobes`, `ssh`, `absorb-to`, `max-metadata-size`).
 - `src/lock.rs` - advisory file-lock + atomic registry writes guarding all persisted state.
 - `src/policy.rs` - enterprise managed policy (trusted sources, pins, lobe lock, self-update control).
 - `src/curate.rs` - `curate`: reconcile the melded state with what the registered curators declare.
@@ -128,7 +130,8 @@ Three layers, in precedence order:
 
 1. **Convention** (default, no file). The scanner finds `skills/<n>/SKILL.md`,
    `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md` (a harness slash command,
-   spec/commands.md), and `tools/<n>/` (a tool dir needs no anchor file). Works
+   spec/commands.md), `workflows/<n>.js` (a harness workflow, spec/workflows.md),
+   and `tools/<n>/` (a tool dir needs no anchor file). Works
    on any repo, including `~/dev/agents`.
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
@@ -159,7 +162,7 @@ min-mind-version = "0.2"    # version gate: meld refuses a source the binary is 
 # Explicit inventory (authoritative). Omit [[items]] and [discover] to keep
 # convention scanning while still supplying [source] metadata.
 [[items]]
-kind = "rule"                       # skill | agent | rule | command | tool
+kind = "rule"                       # skill | agent | rule | command | workflow | tool
 name = "style"
 path = "guidelines/style.md"        # relative to repo root; a dir for skills
 link = "rules/style.md"             # optional: link target relative to ~/.claude

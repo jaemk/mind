@@ -346,6 +346,227 @@ fn link_without_skill_md_is_an_error_and_registers_nothing() {
 }
 
 #[test]
+fn link_to_a_workflow_names_it_as_unsupported() {
+    // spec: WF-6 LNK-20
+    // A workflow's `.js` cannot be item-linked (the blob/tree form is
+    // `.md`-only). The path is understood -- it names a real workflow file --
+    // so the error must say so by name and point at the remedy, rather than
+    // falling into the generic "not a skill directory" / "not under an
+    // agents/, rules/, or commands/ directory" wording a merely-wrong path
+    // gets.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("tree/main/workflows/deploy.js")]);
+    assert!(
+        !r.success,
+        "an item link to a workflow must fail: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("workflow"),
+        "the error must name workflows as the unsupported kind: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("mind probe <name>"),
+        "the error must say how to find the workflow's ref after melding: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("--add-root"),
+        "the error must name --add-root for a workflow the inventory leaves out: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("not a skill directory"),
+        "must not fall into the skill-directory wording: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr
+            .contains("not under an agents/, rules/, or commands/ directory"),
+        "must not fall into the LNK-21 unresolved-kind wording: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_blob_link_to_a_workflow_fails_at_parse_not_at_scan() {
+    // spec: LNK-3 LNK-20 WF-6
+    // The `blob/` form of the same path never reaches the WF-6 message: a blob
+    // URL must name a `.md` file, which `parse_link_tail` enforces before any
+    // clone. The two errors are easy to conflate, and the distinction is
+    // load-bearing -- the blob refusal costs no network and registers nothing,
+    // while the tree refusal is a judgement about a path mind did fetch.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("blob/main/workflows/deploy.js")]);
+    assert!(!r.success, "a blob link to a `.js` must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("a blob link must name a `.md` file"),
+        "the blob form must fail the LNK-3 parse rule: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("does not install a workflow"),
+        "the blob form must NOT borrow the WF-6 wording -- it never gets far \
+         enough to classify the path: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn an_explicit_kind_on_a_workflow_shaped_link_is_a_mismatch() {
+    // spec: LNK-21 WF-6
+    // `--kind agent` cannot rescue a workflow-shaped link. The path is not
+    // `.md`, so it takes the directory reading, where any explicit kind other
+    // than `skill` is a mismatch -- the explicit kind is answered before the
+    // WF-6 refusal, and both are refusals, so nothing installs either way.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&[
+        "--json",
+        "learn",
+        &sb.link("tree/main/workflows/deploy.js"),
+        "--kind",
+        "agent",
+    ]);
+    assert!(
+        !r.success,
+        "`--kind agent` on a workflow path must fail: {}",
+        r.stdout
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", r.stdout));
+    assert_eq!(
+        v["error"]["kind"], "link-kind-mismatch",
+        "the explicit kind is answered first, as a mismatch: {v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("agent")),
+        "the error must name the kind that was asked for: {v}"
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+    // And `--kind workflow` is not a way in either: `LinkKindArg` (the item-link
+    // `--kind` flag's value set) is deliberately narrower than `KindArg` and
+    // has no `Workflow` variant at all, so clap itself rejects the value
+    // before mind ever classifies the path.
+    let wf = sb.mind(&[
+        "learn",
+        &sb.link("tree/main/workflows/deploy.js"),
+        "--kind",
+        "workflow",
+    ]);
+    assert!(
+        !wf.success,
+        "`--kind workflow` must not open a path WF-6 closes: {}",
+        wf.stdout
+    );
+    assert!(
+        wf.stderr.contains("invalid value 'workflow'"),
+        "clap must reject `workflow` as an invalid --kind value: {}",
+        wf.stderr
+    );
+    assert!(
+        wf.stderr.contains("agent") && wf.stderr.contains("rule") && wf.stderr.contains("command"),
+        "clap's usage error must list the item-link kind's actual value set \
+         (agent, rule, command -- no workflow): {}",
+        wf.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
+    // spec: LNK-20 WF-6
+    // The refusal is a judgement about the PATH (`workflows/` parent, or a
+    // `.js` extension), so it holds for a file the repo does not have -- the
+    // user gets the kind-specific remedy rather than a bare "not a skill
+    // directory" that would send them looking for a typo.
+    let sb = Sandbox::new();
+    let absent = sb.mind(&["learn", &sb.link("tree/main/workflows/absent.js")]);
+    assert!(!absent.success, "{}", absent.stdout);
+    assert!(
+        absent.stderr.contains("does not install a workflow"),
+        "a workflow-shaped path that is not in the repo still gets the WF-6 \
+         message: {}",
+        absent.stderr
+    );
+
+    // A `.js` OUTSIDE `workflows/` is refused too, but as what it is: nothing
+    // about `lib/util.js` says workflow, so the message must not call it one
+    // (its remedy, `learn workflow:<name>`, would name no item at all).
+    sb.write_and_commit("lib/util.js", "export const x = 1;\n");
+    let stray = sb.mind(&["learn", &sb.link("tree/main/lib/util.js")]);
+    assert!(!stray.success, "{}", stray.stdout);
+    assert!(
+        !stray.stderr.contains("workflow"),
+        "a `.js` outside workflows/ must not be claimed to be a workflow: {}",
+        stray.stderr
+    );
+    assert!(
+        stray.stderr.contains("meld the repo instead"),
+        "the remedy is to meld the repo: {}",
+        stray.stderr
+    );
+    assert!(
+        stray
+            .stderr
+            .contains("is a JavaScript file, and mind does not install one by item link"),
+        "it is refused as a JavaScript file the link form does not take: {}",
+        stray.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn the_two_js_link_refusals_carry_distinct_json_kinds() {
+    // spec: LNK-20 WF-6
+    // The distinction is only useful if a machine consumer can act on it: one
+    // path names a kind mind deliberately does not install by link, the other
+    // names a file the link form does not take at all. Same exit, different
+    // slug, and neither may collapse into the generic `link-not-a-skill`.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    sb.write_and_commit("lib/util.js", "export const x = 1;\n");
+
+    let wf = sb.mind(&["--json", "learn", &sb.link("tree/main/workflows/deploy.js")]);
+    assert!(!wf.success, "{}", wf.stdout);
+    let wf_v: serde_json::Value = serde_json::from_str(wf.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", wf.stdout));
+    assert_eq!(
+        wf_v["error"]["kind"], "link-kind-not-supported",
+        "a workflow link must carry its own kind slug: {wf_v}"
+    );
+
+    let stray = sb.mind(&["--json", "learn", &sb.link("tree/main/lib/util.js")]);
+    assert!(!stray.success, "{}", stray.stdout);
+    let stray_v: serde_json::Value = serde_json::from_str(stray.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", stray.stdout));
+    assert_eq!(
+        stray_v["error"]["kind"], "link-not-linkable-file",
+        "a stray `.js` must carry its own kind slug: {stray_v}"
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
 fn branch_link_upgrades_with_the_branch() {
     // spec: LNK-5
     // A tree/<branch> link follows that branch: sync + upgrade pick up an
@@ -2077,6 +2298,67 @@ fn an_unknown_kind_value_is_refused() {
         "the error must name the legal set: {}",
         r.stderr
     );
+}
+
+/// The `[possible values: ...]` line out of a clap usage error. A test asserts
+/// on that line rather than on the whole message because the rejected value's
+/// own name appears elsewhere in the message ("invalid value 'skill'"), which
+/// would defeat a negative match against the set.
+fn possible_values_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|l| l.contains("possible values:"))
+        .unwrap_or_else(|| panic!("clap must print the legal value set: {stderr}"))
+        .to_string()
+}
+
+#[test]
+fn the_link_kind_value_set_excludes_every_non_file_kind() {
+    // spec: LNK-21 CLI-239
+    // LNK-21 is normative that `meld`/`learn --kind` is "typed to accept only
+    // `agent`, `rule`, or `command` in the first place ... so `skill`/`tool`
+    // there is refused before any clone rather than reaching this mismatch".
+    // `kind_agent_rule_command_are_the_only_cli_kind_flag_values` pins one
+    // corner of that (`learn --kind skill`, asserted by the PRESENCE of a
+    // "possible values" list); this pins the set itself, from the other side:
+    // every kind that must NOT be in it (`skill`, `tool`, `workflow`), on BOTH
+    // verbs that take the flag (two separate `#[arg]` sites), asserting the
+    // rejected kind is absent from the advertised list rather than only that
+    // some list was printed -- a variant added to `LinkKindArg` would still
+    // print a list, and would still name `agent`.
+    let sb = file_item_sandbox();
+    let url = sb.link("blob/main/agents/dev.md");
+    for verb in ["learn", "meld"] {
+        for bad in ["skill", "tool", "workflow"] {
+            let r = sb.mind(&[verb, &url, "--kind", bad]);
+            assert!(
+                !r.success,
+                "`{verb} --kind {bad}` must be a usage error: {}",
+                r.stdout
+            );
+            assert!(
+                r.stderr.contains(&format!("invalid value '{bad}'")),
+                "clap must reject `{bad}` by name on `{verb}`: {}",
+                r.stderr
+            );
+            let values = possible_values_line(&r.stderr);
+            assert!(
+                values.contains("agent") && values.contains("rule") && values.contains("command"),
+                "the file-link kinds stay in the set on `{verb}`: {values}"
+            );
+            assert!(
+                !values.contains(bad),
+                "`{bad}` must not be offered as a `{verb} --kind` value: {values}"
+            );
+            // "Refused before any clone": no registration and no fetch, so the
+            // rejection cannot have cost a network round trip.
+            assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+            let cloned = std::fs::read_dir(sb.mind_home.join("sources"))
+                .map(|d| d.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(cloned, 0, "`{verb} --kind {bad}` must not clone anything");
+        }
+    }
 }
 
 #[test]

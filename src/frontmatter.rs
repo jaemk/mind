@@ -26,23 +26,16 @@ use std::path::Path;
 
 use crate::error::{MindError, Result};
 
-/// Read a top-level scalar `key` from a file's frontmatter, if present.
-pub fn file_field(file: &Path, key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(file).ok()?;
-    field(&text, key)
-}
-
 /// Read a file's whole text once, size-capped (DSC-91), so a caller wanting
 /// several keys out of one frontmatter block pays one read for all of them:
 /// pass the result to [`field`] per key. `catalog::build_item` is that caller,
 /// and it wants six keys, so a read per key was six reads per item per scan.
 ///
-/// A file at or above [`crate::error::METADATA_SIZE_LIMIT`] is refused with
+/// A file above the cap in effect ([`crate::error::metadata_size_limit`]) is refused with
 /// [`MindError::MetadataTooLarge`] rather than read in full. An absent or
 /// otherwise unreadable file yields `Ok(String::new())`, which [`field`] reads
-/// as "no frontmatter", matching [`file_field`]'s "unreadable -> None"
-/// tolerance (a tool's `TOOL.md` is optional, so this is the common case, not
-/// an edge). Only the size cap is a hard error.
+/// as "no frontmatter" (a tool's `TOOL.md` is optional, so this is the common
+/// case, not an edge). Only the size cap is a hard error.
 pub fn text_capped(file: &Path) -> Result<String> {
     match crate::error::read_capped_metadata(file) {
         Ok(text) => Ok(text),
@@ -615,9 +608,9 @@ mod tests {
 
     #[test]
     fn text_capped_missing_file_yields_empty_text_not_error() {
-        // spec: DSC-91 -- an absent file is still `Ok`, matching `file_field`'s
-        // existing tolerance (a tool's TOOL.md is optional); only the size cap
-        // is a hard error. The empty text carries no fields.
+        // spec: DSC-91 -- an absent file is still `Ok` (a tool's TOOL.md is
+        // optional); only the size cap is a hard error. The empty text
+        // carries no fields.
         let path = tmp("missing");
         let text = text_capped(&path).expect("absent file is not an error");
         assert!(text.is_empty());

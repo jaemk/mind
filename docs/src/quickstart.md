@@ -45,7 +45,7 @@ layout, see
 git clone --depth 1 https://github.com/jaemk/mind /tmp/mind-repo
 cp -r /tmp/mind-repo/examples/starter /tmp/starter
 cd /tmp/starter && git init -q && git add -A && git commit -qm init
-mind meld /tmp/starter   # prompts to install; confirm to install all three
+mind meld /tmp/starter   # prompts to install; confirm to install all five
 mind recall
 ```
 

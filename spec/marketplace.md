@@ -100,12 +100,13 @@ is direct.
 
 - `MKT-3` A `.claude-plugin/plugin.json` defines a plugin rooted at the manifest's
   parent directory. Its components map to `mind` item kinds by the convention rules
-  (DSC-10..12, DSC-14) applied at the plugin root: `skills/<name>/SKILL.md` -> a
-  `skill`, `agents/<name>.md` -> an `agent`, `commands/<name>.md` -> a `command`
-  (MKT-18). Component kinds the native format defines that
-  have no `mind` equivalent - `hooks/`, `.mcp.json`, LSP, monitors,
-  themes, output-styles - are not installed. A plugin has no `rules` or `tools`
-  component, so nothing maps to those `mind` kinds from a plugin.
+  (DSC-10..12, DSC-14, WF-2) applied at the plugin root: `skills/<name>/SKILL.md`
+  -> a `skill`, `agents/<name>.md` -> an `agent`, `commands/<name>.md` -> a
+  `command` (MKT-18), `workflows/<name>.js` -> a `workflow` (WF-40). Component
+  kinds the native format defines that have no `mind` equivalent - `hooks/`,
+  `.mcp.json`, LSP, monitors, themes, output-styles - are not installed. A
+  plugin has no `rules` or `tools` component, so nothing maps to those `mind`
+  kinds from a plugin.
 
 - `MKT-4` When a plugin declares unsupported components (MKT-3), `mind` reports a
   count of skipped components on meld (e.g. `2 hooks, 1 mcp server not installed
@@ -123,6 +124,11 @@ is direct.
   `.DS_Store`) is not counted: it is not a component the author published, and
   counting it would put noise in the one message whose job is to say what was
   dropped.
+
+  `workflows/` is counted by the same rule (WF-40): a flat `workflows/<name>.js`
+  is installed and so is not named, and an entry that scan does not map -- a
+  subdirectory, or a `workflows/deploy.ts` -- IS counted, reported as an
+  unmapped `workflows/` entry.
 
 - `MKT-18` A plugin's `commands/<name>.md` files map to the `command` item kind
   (commands.md CMD-1), on every path that reads a plugin: a directly melded

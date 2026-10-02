@@ -492,7 +492,18 @@ fn run_checks(
 
     // --- Check 4: missing descriptions (advisory) ---
     // CLI-132: missing description is advisory only.
+    //
+    // spec: WF-54 -- a workflow is exempt. Its description comes from `meta`
+    // (WF-4) and a `.js` file has no frontmatter at all, so this message's
+    // "no description in frontmatter or mind.toml" would point the author at a
+    // site the kind does not have. Check 17 below already reports a missing,
+    // empty, or unreadable one as `workflow-unloadable` (WF-30), in the terms
+    // the harness actually applies, so the exemption collapses a double report
+    // onto that single finding.
     for item in &items {
+        if item.kind == crate::error::ItemKind::Workflow {
+            continue;
+        }
         if item.description.is_none() {
             advisory.push(Finding::advisory(
                 "missing-description",
@@ -614,32 +625,74 @@ fn run_checks(
         ));
     }
 
-    // --- Check 5: {{ns:}} token resolution (hard in markdown, advisory
-    // otherwise) ---
+    // --- Check 8c: workflow payload disclosure (advisory) ---
+    // spec: WF-53, WF-55, CLI-237
+    // The workflow counterpart of Check 8b. A workflow is not content the
+    // harness offers, it is JavaScript the harness evaluates to drive subagents
+    // (workflows.md WF-1, WF-5), and mind does not evaluate its program logic:
+    // it parses only the `meta` object (one object literal) and expands
+    // `{{ns:}}` tokens at install. So a
+    // source shipping workflows must not review as a clean bill of health, and
+    // every workflow item is disclosed, not just one that tripped some pattern.
+    // Disclosure, not a gate: WF-31/WF-32 keep every workflow check a report.
+    //
+    // The file itself is not read here at all. The disclosure is unconditional
+    // (WF-53), so there is nothing to read it FOR, and WF-55 settled the one
+    // reason this check used to open it: an over-cap `.js` is no longer a hard
+    // `metadata-too-large` finding, it is a workflow mind did not read, which
+    // Check 17 reports as `workflow-unread` (WF-56), not `workflow-unloadable`.
+    // mind's read of a workflow stays capped where it happens (the catalog
+    // scan); a second read here would only re-derive that answer.
+    for item in &items {
+        if item.kind != crate::error::ItemKind::Workflow {
+            continue;
+        }
+        // The key rides in raw, as it does in every other check here (Check
+        // 8b's command disclosure, Check 17's workflow findings):
+        // `Finding::advisory` sanitizes the composed message, so stripping it
+        // again first would be a second pass over the same bytes and an
+        // inconsistency inside one file about where that happens.
+        advisory.push(Finding::advisory(
+            "workflow-content",
+            format!(
+                "{}: this is JavaScript the harness evaluates to drive subagents -- mind \
+                 neither reads nor validates a workflow's body (spec/workflows.md WF-53)",
+                item.key().as_str()
+            ),
+        ));
+    }
+
+    // --- Check 5: {{ns:}} token resolution (hard where tokens expand,
+    // advisory otherwise) ---
     // An unresolved {{ns:}} token would be a BadReference at install time --
-    // but only in a markdown file: install expands `{{ns:}}` in markdown only
-    // (NS-53), same as the path-token family Check 8 handles below. So an
-    // unresolved `{{ns:}}` in a non-markdown file is dead text install will
-    // never touch, not a defect that would break an install -- advisory,
-    // mirroring Check 8's non-markdown downgrade.
+    // but only in a file install expands: a markdown one, a workflow's own
+    // `.js` (WF-25), or a file the item lists in `expand:` (NS-57). That is
+    // `namespace::item_expands_tokens`, the same gate install itself reads,
+    // and the same one the path-token family Check 8 handles below. So an
+    // unresolved `{{ns:}}` anywhere else is dead text install will never
+    // touch, not a defect that would break an install -- advisory, mirroring
+    // Check 8's downgrade.
     // spec: CLI-132
     let source_name = source.name.clone();
     let siblings = siblings_of_source(&items, &source_name);
+    // spec: NS-42 -- used by Check 17 to predict an installed `meta.name`.
+    let bare_names = bare_names_of_source(&items, &source_name);
     let prefix = source
         .alias
         .clone()
         .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()));
 
     for item in &items {
-        for file in item_files(item) {
+        for file in review_item_files(item) {
             let content = match std::fs::read_to_string(&file) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
             // NS-57/CLI-226: an `expand:`-listed file expands like markdown, so
             // an unresolved token in it is a real install failure (hard), not the
-            // dead text a plain non-markdown file gets.
-            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
+            // dead text a plain non-markdown file gets. WF-25/WF-27: so does a
+            // workflow's own `.js`, which the gate grants on the kind.
+            let expands = crate::namespace::item_expands_tokens(item, &item.path, &file);
             // The bare_names set is empty here: review validates token resolution
             // (whether the name exists), not the expansion form, so bare vs.
             // prefixed output is irrelevant for this check.
@@ -745,7 +798,7 @@ fn run_checks(
     if prefix.is_some() {
         for item in &items {
             let mut refs: Vec<String> = Vec::new();
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -802,16 +855,19 @@ fn run_checks(
             siblings: &path_siblings,
         };
         let mut bare_tools: Vec<String> = Vec::new();
-        for file in item_files(item) {
+        for file in review_item_files(item) {
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue;
             };
             // A non-markdown item file (a script, data) is entirely code: any
             // `{{ns:}}` in it is misplaced (NS-24), and no token family expands
             // there at all (NS-53) -- unless the item opts the file into
-            // expansion with `expand:`, which makes it behave like markdown for
-            // every token check (NS-57, CLI-226).
-            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
+            // expansion with `expand:` (NS-57, CLI-226), or it is a workflow's
+            // own `.js`, which expands on its kind (WF-25). Either makes the
+            // file behave like markdown for every token check below, WF-27's
+            // exemption from the inert-token net included. One gate answers
+            // all three (`namespace::item_expands_tokens`).
+            let expands = crate::namespace::item_expands_tokens(item, &item.path, &file);
             // The one path token Check 8 (below) reports as `bad-reference` for
             // this file, if any, so Check 14 does not re-report the same span
             // (CLI-223). `expand_paths` stops at the first bad token, so this is
@@ -1133,7 +1189,7 @@ fn run_checks(
             items.iter().filter(|it| it.source == source_name).collect();
         let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
         for item in &items {
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -1192,7 +1248,7 @@ fn run_checks(
             items.iter().filter(|it| it.source == source_name).collect();
         for item in &items {
             let mut flagged: HashSet<String> = HashSet::new();
-            for file in item_files(item) {
+            for file in review_item_files(item) {
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
@@ -1238,6 +1294,98 @@ fn run_checks(
         }
     }
 
+    // Check 17: a workflow the harness would not load, or would load under a
+    // name mind does not report (advisory, WF-24/WF-29/WF-30).
+    //
+    // Every one of these is a report and nothing more. mind does not gatekeep
+    // the validity of item content for any other kind, and the harness's own
+    // `meta` reader is stricter than mind's and is the authority on what loads
+    // (WF-5), so a disagreement between the two readers must not be able to
+    // block an install (WF-31). The size cap is in the same position (WF-32):
+    // DSC-90 records that mind does not cap item content, and a cap mind
+    // enforced would be mind's cap, not the harness's.
+    //
+    // The WF-29 comparison set here is the reviewed source's OWN workflows.
+    // `review` reads a source, not the host: its target is usually not melded
+    // and by design may be a repo the user has not yet decided to trust, so the
+    // installed set is not its subject. `learn` and `recall` make the same
+    // comparison against everything installed.
+    {
+        let mut claims: Vec<(String, String)> = Vec::new();
+        for item in &items {
+            if item.kind != crate::error::ItemKind::Workflow {
+                continue;
+            }
+            let read = crate::workflow_check::read(&item.path);
+            // spec: WF-56 -- mind's own metadata cap is not a defect in the
+            // source and not a claim about the harness. It is reported as what
+            // it is, under its own code, and never as "the harness will not
+            // load this": DSC-103 exists so a cautious operator can lower that
+            // cap, and a lowered cap must not make mind libel every workflow
+            // past it.
+            if let Some(notice) = crate::workflow_check::cap_notice(&read) {
+                advisory.push(Finding::advisory(
+                    "workflow-unread",
+                    format!(
+                        "{}: {notice} mind's token and reference checks were skipped for this file.",
+                        item.key().as_str()
+                    ),
+                ));
+            }
+            for reason in crate::workflow_check::skip_reasons(&read) {
+                advisory.push(Finding::advisory(
+                    "workflow-unloadable",
+                    format!(
+                        "{}: the harness will not load this workflow: {reason}",
+                        item.key().as_str()
+                    ),
+                ));
+            }
+            let meta = &read.meta;
+            // The prefix and sibling set are the same ones Check 5 validated
+            // tokens against, so a `{{ns:}}` in `meta.name` (WF-23) is compared
+            // in its expanded form, exactly as installed.
+            //
+            // spec: NS-42 -- "exactly as installed" includes the bare-name rule:
+            // a token naming a sibling AGENT expands bare even under a prefix
+            // (`install.rs`'s `expand_references`). Predicting `prefix:x` for one
+            // would raise a WF-24 divergence against a name the store never
+            // holds, so this call is the bare-aware form.
+            let Some(harness) = crate::workflow_check::harness_name_with_bare(
+                meta,
+                &prefix,
+                &siblings,
+                &bare_names,
+            ) else {
+                continue;
+            };
+            // spec: WF-24 -- the remedy token names the BARE name: `{{ns:}}`
+            // resolves against bare sibling names, so the prefixed spelling
+            // would be a token naming nothing and following mind's advice
+            // would break the install.
+            if let Some(msg) = crate::workflow_check::divergence(
+                &item.effective_name(),
+                &item.name,
+                Some(&harness),
+            ) {
+                advisory.push(Finding::advisory(
+                    "workflow-name",
+                    format!("{}: {msg}", item.key().as_str()),
+                ));
+            }
+            claims.push((harness, item.key().as_str().to_string()));
+        }
+        // spec: WF-29 WF-59 -- two workflows answering to one harness name.
+        // One name is one defect, so one finding, whatever the number of
+        // claimants: grouping happens once, in `workflow_check`.
+        for (subject, msg) in crate::workflow_check::collisions(&claims) {
+            advisory.push(Finding::advisory(
+                "workflow-name-collision",
+                format!("{subject}: {msg}"),
+            ));
+        }
+    }
+
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
     // only; a registry selector or repo spec is refused with nothing changed.
     let mut fixed: Vec<String> = Vec::new();
@@ -1258,7 +1406,7 @@ fn run_checks(
                     self_name: &item.name,
                     siblings: &path_siblings,
                 };
-                for file in item_files(item) {
+                for file in review_item_files(item) {
                     // NS-54: a token expands only in markdown (NS-53), so a
                     // non-markdown file is reported (Checks 8-11 above already
                     // do so) and never rewritten -- turning a hardcoded path
@@ -1345,6 +1493,22 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
         .collect()
 }
 
+/// The NS-42 bare-name set for one source: sibling AGENT names, minus any name a
+/// non-agent sibling also holds.
+///
+/// Computed exactly as `install.rs`'s `expand_references` computes it, because
+/// its whole purpose is to predict what install will write: a `{{ns:}}` naming
+/// one of these expands bare even under a prefix, and a name held by both an
+/// agent and another kind keeps the prefix (the cross-kind shadow rule).
+fn bare_names_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
+    crate::namespace::bare_agent_names(
+        items
+            .iter()
+            .filter(|it| it.source == source)
+            .map(|it| (it.kind, it.name.as_str())),
+    )
+}
+
 /// Detect helper files duplicated byte-for-byte across two or more items, which
 /// COULD live once under a shared `tools/<name>/` and be referenced by token, or
 /// stay siloed per item (both valid; CLI-144 / INIT-7). Only non-markdown files
@@ -1403,19 +1567,8 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
 }
 
 /// All text files for an item: every file under a skill dir, or the single
-/// agent/rule file.
-/// Whether `file` (a path under the item's dir) is opted into token expansion by
-/// the item's `expand:` frontmatter (NS-57), so every token check treats it as
-/// markdown (CLI-226). A single-file item has no bundled files to list, so this
-/// is always false for it.
-fn item_expands_file(item: &CatalogItem, file: &Path) -> bool {
-    item.path.is_dir()
-        && file
-            .strip_prefix(&item.path)
-            .ok()
-            .is_some_and(|rel| item.expand.iter().any(|e| Path::new(e) == rel))
-}
-
+/// agent/rule/command/workflow file. The full list for every kind, including an
+/// over-cap workflow; `review`'s own content checks use [`review_item_files`].
 pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     if item.path.is_dir() {
         let mut files = Vec::new();
@@ -1443,6 +1596,26 @@ pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     } else {
         vec![item.path.clone()]
     }
+}
+
+/// [`item_files`] as `review`'s content checks read it: the same list, minus a
+/// workflow past mind's metadata cap.
+///
+/// spec: WF-55 -- the exclusion is review-only. `review` reports such a file as
+/// `workflow-unread` (WF-56) and skips its token and reference checks, but the
+/// other callers of [`item_files`] (install, the DEP-1 dependency scan, meld's
+/// unguarded-reference scan) read the whole file under DSC-90's uncapped content
+/// semantics, so an over-cap workflow's `{{ns:}}` references still pull their
+/// referents.
+fn review_item_files(item: &CatalogItem) -> Vec<PathBuf> {
+    if item.kind == crate::error::ItemKind::Workflow
+        && !item.path.is_dir()
+        && std::fs::metadata(&item.path)
+            .is_ok_and(|m| m.len() > crate::error::metadata_size_limit())
+    {
+        return Vec::new();
+    }
+    item_files(item)
 }
 
 /// The path remainder that follows a closing `}}` in text, as an item-relative
@@ -1602,6 +1775,64 @@ mod tests {
             install_hook: None,
             install_hook_commit: None,
         }
+    }
+
+    // --- review_item_files: the over-cap workflow exclusion is review-only ---
+
+    fn file_item(kind: crate::error::ItemKind, path: PathBuf) -> CatalogItem {
+        CatalogItem {
+            kind,
+            name: "x".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path,
+            description: None,
+            when_to_use: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            requires: Vec::new(),
+            expand: Vec::new(),
+            hooks: Vec::new(),
+            ignore: None,
+        }
+    }
+
+    /// A sparse file `len` bytes long (no real allocation).
+    fn sparse(path: &Path, len: u64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let f = std::fs::File::create(path).unwrap();
+        f.set_len(len).unwrap();
+    }
+
+    /// `item_files` is the full list (hashing callers rely on it); only
+    /// `review_item_files` drops a workflow strictly past the cap.
+    /// spec: WF-55
+    #[test]
+    fn review_item_files_drops_only_a_workflow_strictly_over_the_cap() {
+        use crate::error::{ItemKind, METADATA_SIZE_LIMIT};
+        let tmp = TmpDir::new();
+        let over = tmp.path().join("over.js");
+        sparse(&over, METADATA_SIZE_LIMIT + 1);
+        let at = tmp.path().join("at.js");
+        sparse(&at, METADATA_SIZE_LIMIT);
+        let rule = tmp.path().join("rule.md");
+        sparse(&rule, METADATA_SIZE_LIMIT + 1);
+
+        let wf_over = file_item(ItemKind::Workflow, over.clone());
+        assert_eq!(item_files(&wf_over), vec![over]);
+        assert!(review_item_files(&wf_over).is_empty());
+
+        let wf_at = file_item(ItemKind::Workflow, at.clone());
+        assert_eq!(review_item_files(&wf_at), vec![at]);
+
+        // The cap is a workflow rule: another kind's file is still listed.
+        let r = file_item(ItemKind::Rule, rule.clone());
+        assert_eq!(review_item_files(&r), vec![rule]);
+
+        // A missing workflow file is not "over the cap".
+        let gone = file_item(ItemKind::Workflow, tmp.path().join("gone.js"));
+        assert_eq!(review_item_files(&gone).len(), 1);
     }
 
     // --- target resolution precedence (CLI-130) ---

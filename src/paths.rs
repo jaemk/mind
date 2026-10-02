@@ -301,6 +301,11 @@ impl Paths {
             ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
                 Some(format!("{dir}/{name}.md"))
             }
+            // spec: WF-10 -- a workflow links as `workflows/<effective_name>.js`.
+            // The extension is exactly `.js` and the harness compares it
+            // case-sensitively (WF-3), so a file installed under any other
+            // spelling would never load.
+            ItemKind::Workflow => Some(format!("{dir}/{name}.js")),
             ItemKind::Tool => None,
         }
     }
@@ -942,6 +947,35 @@ mod tests {
         assert_eq!(
             paths.store_rel(ItemKind::Command, "jk:review"),
             "store/command/jk:review"
+        );
+    }
+
+    /// A workflow links the same way but with the harness's `.js` extension,
+    /// which it compares case-sensitively (WF-3).
+    #[test]
+    fn workflow_links_under_workflows_with_a_js_extension() {
+        // spec: WF-10 WF-22
+        let paths = Paths {
+            mind_home: PathBuf::from("/mind"),
+            claude_home: PathBuf::from("/claude"),
+        };
+        assert_eq!(
+            paths
+                .default_link_rel(ItemKind::Workflow, "review-changes")
+                .as_deref(),
+            Some("workflows/review-changes.js")
+        );
+        assert_eq!(
+            paths
+                .default_link_rel(ItemKind::Workflow, "jk:review-changes")
+                .as_deref(),
+            Some("workflows/jk:review-changes.js")
+        );
+        // The store copy is the bare effective name, no extension, as for every
+        // other single-file kind.
+        assert_eq!(
+            paths.store_rel(ItemKind::Workflow, "jk:review-changes"),
+            "store/workflow/jk:review-changes"
         );
     }
 

@@ -362,12 +362,19 @@ fn sanitize_dep_keys(keys: Vec<String>) -> Vec<String> {
     keys.iter().map(|k| strip_ansi(k)).collect()
 }
 
-/// Read all of a catalog item's text files into one buffer, for dependency
-/// detection (mirrors `commands::read_item_text`, kept local so data.rs stays
-/// independent of commands.rs and avoids a cross-module dep).
+/// Read all of a catalog item's token-expanding text files into one buffer,
+/// for dependency detection. Mirrors `commands::read_item_text`: narrowed to
+/// the files install actually expands tokens in
+/// (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25), so a `{{ns:sibling}}`
+/// token in a file install never expands does not draw a dependency edge here
+/// that install would never create either. Kept local (rather than shared with
+/// `commands.rs`) so data.rs stays independent of that module.
 fn read_item_text(item: &catalog::CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
+        if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&file) {
             buf.push_str(&content);
             buf.push('\n');
@@ -492,7 +499,8 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
                 name: strip_ansi(&it.effective_name()),
                 source: strip_ansi(&it.source),
                 kind: it.kind,
-                description: it.description.as_deref().map(strip_ansi),
+                // spec: WF-51
+                description: it.display_description().as_deref().map(strip_ansi),
                 path: it.path.clone(),
                 deps,
             }
@@ -574,6 +582,46 @@ mod tests {
             claude_home: base.join("claude"),
         };
         (paths, base)
+    }
+
+    /// Write `files` (relative path, content) into a fresh git repo under
+    /// `base`, commit it, and meld it into `paths`. Returns the repo dir.
+    fn meld_fixture(paths: &Paths, base: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
+        use std::process::Command;
+
+        let src = base.join("fixture-source");
+        for (rel, content) in files {
+            let file = src.join(rel);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, content).unwrap();
+        }
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+        src
     }
 
     fn cleanup(base: &std::path::Path) {
@@ -1196,6 +1244,231 @@ mod tests {
         assert!(
             snap2.installed[0].stale,
             "an in-place content edit must mark the item stale (TUI-63)"
+        );
+
+        cleanup(&base);
+    }
+
+    /// `load_inner`'s `available` list must read a workflow's description
+    /// through `CatalogItem::display_description` (WF-51: `<description> -
+    /// <whenToUse>`), not the bare `description` field. This regresses
+    /// silently if the `available` row built in `load_inner` from
+    /// `display_description()` is ever swapped back for `it.description`,
+    /// since both are `Option<String>` and the code still compiles either
+    /// way. The TUI keeps the joined human form (WF-51); `--json` emits the
+    /// pair separately (WF-62).
+    #[test]
+    fn available_workflow_description_is_composed_with_when_to_use() {
+        // spec: WF-51
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        meld_fixture(
+            &paths,
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review-changes',\n  \
+                 description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
+
+        let snap = load(&paths).expect("load should succeed");
+        let wf = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the melded workflow item must appear in `available`");
+        assert_eq!(
+            wf.description.as_deref(),
+            Some("Review changed files - before a PR"),
+            "an available workflow's description must be the composed \
+             \"description - whenToUse\" pair (display_description, WF-51), \
+             not the bare `meta.description` alone: {:?}",
+            wf.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// The WF-51 split is by DATA SOURCE, not by surface, and both halves of it
+    /// are visible in one snapshot: the `available` row is catalog-derived and
+    /// so carries the composed `<description> - <whenToUse>` pair, while the
+    /// `installed` row for that same workflow is manifest-derived
+    /// (`install.rs` records `item.description`, never `when_to_use`) and so
+    /// carries the bare description. Documented on
+    /// `CatalogItem::display_description`, but nothing pinned it: the
+    /// `installed` row is built from the manifest's `description` where the
+    /// `available` row is built in `load_inner` from `display_description()`,
+    /// and "fixing" the inconsistency in either direction compiles clean.
+    /// The TUI keeps the joined human form (WF-51) while `--json` emits the
+    /// pair separately (WF-62). Recording
+    /// `whenToUse` in the manifest is a deliberate deferral, so this test is
+    /// the one that should fail and be rewritten when that changes.
+    #[test]
+    fn an_installed_workflow_row_is_bare_where_the_available_row_composes() {
+        // spec: WF-51
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        meld_fixture(
+            &paths,
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review',\n  \
+                 description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
+        crate::commands::learn(
+            &paths,
+            "workflow:review",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        let snap = load(&paths).expect("load should succeed");
+        let installed = snap
+            .installed
+            .iter()
+            .find(|i| i.kind == ItemKind::Workflow)
+            .expect("the learned workflow must appear in `installed`");
+        assert_eq!(
+            installed.description.as_deref(),
+            Some("Review changed files"),
+            "an INSTALLED workflow row is manifest-derived, and the manifest \
+             never records `whenToUse` (WF-51), so its description must be the \
+             bare one: {:?}",
+            installed.description
+        );
+        let available = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the same workflow must still appear in `available`");
+        assert_eq!(
+            available.description.as_deref(),
+            Some("Review changed files - before a PR"),
+            "the AVAILABLE row for the same workflow is catalog-derived, so it \
+             must still compose the pair even once the item is installed: {:?}",
+            available.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// A workflow whose `meta` gives a `whenToUse` and no `description` is
+    /// malformed by the harness's own rules (WF-30 reports it), but the TUI
+    /// still shows what it has: `display_description`'s `(None, Some(w))` arm
+    /// returns the `whenToUse` alone rather than `None`. That arm had no test
+    /// at any layer -- only the `(Some, Some)` and `(None, None)` pairs did --
+    /// so collapsing it to `None` (an easy "simplify the match" edit) would
+    /// have silently blanked the row and left search with nothing to match on.
+    #[test]
+    fn an_available_workflow_with_only_when_to_use_shows_it_as_the_description() {
+        // spec: WF-51
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        meld_fixture(
+            &paths,
+            &base,
+            &[(
+                "workflows/review.js",
+                "export const meta = {\n  name: 'review',\n  whenToUse: 'before a PR',\n}\n",
+            )],
+        );
+
+        let snap = load(&paths).expect("load should succeed");
+        let wf = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Workflow)
+            .expect("the melded workflow item must appear in `available`");
+        assert_eq!(
+            wf.description.as_deref(),
+            Some("before a PR"),
+            "a workflow with a `whenToUse` and no `description` must show the \
+             `whenToUse` alone, not nothing and not a dangling \" - \" \
+             separator: {:?}",
+            wf.description
+        );
+
+        cleanup(&base);
+    }
+
+    /// `read_item_text` must mirror `commands::read_item_text`'s item-aware
+    /// gate (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25): a
+    /// `{{ns:sibling}}` token sitting in a non-markdown, non-`expand:`-listed
+    /// bundled file draws no TUI-50 dependency edge, since install never
+    /// expands it there either. A sibling skill whose SKILL.md carries the
+    /// same token IS an edge, so the negative case is not just an always-empty
+    /// dep list.
+    // spec: TUI-50
+    #[test]
+    fn a_token_in_an_unlisted_bundled_file_draws_no_tui_dependency_edge() {
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        meld_fixture(
+            &paths,
+            &base,
+            &[
+                (
+                    "skills/review/SKILL.md",
+                    "---\ndescription: review skill\n---\n# review\nsee {{self}}\n",
+                ),
+                ("skills/review/resources/pr.py", "# {{ns:helper}}\n"),
+                (
+                    "skills/linked/SKILL.md",
+                    "---\ndescription: linked skill, references {{ns:helper}} in prose\n---\n# linked\n",
+                ),
+                (
+                    "skills/helper/SKILL.md",
+                    "---\ndescription: helper skill\n---\n# helper\n",
+                ),
+            ],
+        );
+
+        let snap = load(&paths).expect("load should succeed");
+        let review = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Skill && a.name == "review")
+            .expect("the review skill must appear in `available`");
+        assert!(
+            !review.deps.iter().any(|d| d.contains("helper")),
+            "a {{{{ns:helper}}}} token in a non-markdown, non-expand-listed \
+             bundled file must not draw a dependency edge (install never \
+             expands it there either): {:?}",
+            review.deps
+        );
+
+        let linked = snap
+            .available
+            .iter()
+            .find(|a| a.kind == ItemKind::Skill && a.name == "linked")
+            .expect("the linked skill must appear in `available`");
+        assert!(
+            linked.deps.iter().any(|d| d.contains("helper")),
+            "a {{{{ns:helper}}}} token in SKILL.md itself must still draw a \
+             dependency edge, proving the negative case above is a real gate \
+             and not an always-empty dep list: {:?}",
+            linked.deps
         );
 
         cleanup(&base);

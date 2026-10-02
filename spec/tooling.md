@@ -97,27 +97,32 @@ the recorded content hash is of the source (token) form.
   (source) form, not the expanded copy, so drift detection compares source with
   source (NS-13). Both prefixed and unprefixed installs expand tokens (NS-14): a
   store path is prefix-aware via the referent's effective name.
-- `TOOL-14` Path tokens expand in a markdown item file, whatever the item kind:
-  the anchor file of a skill or tool (`SKILL.md`, `TOOL.md`), an agent or rule's
-  own file, or a bundled markdown reference doc. They do NOT expand in a
-  non-markdown bundled file (a script, data) -- `{{tools:shard-plan}}` written in
-  a bundled `pr.py` is left exactly as written -- because path tokens follow the
-  same markdown-only rule `{{ns:}}` does (NS-53, TOOL-19). The designed use of a
+- `TOOL-14` Path tokens follow the same gate `{{ns:}}` does (NS-53, TOOL-19). A
+  token expands in a file when the file has a markdown extension, or the item
+  is of the `workflow` kind, or the file is on the item's NS-57 `expand:` list.
+  For a markdown item file, whatever the item kind, that covers the anchor file
+  of a skill or tool (`SKILL.md`, `TOOL.md`), an agent or rule's own file, or a
+  bundled markdown reference doc. Outside that gate -- a non-markdown bundled
+  file (a script, data) that belongs to a non-workflow item and is not
+  `expand:`-listed -- `{{tools:shard-plan}}` written in a bundled `pr.py` is left
+  exactly as written. The designed use of a
   path token is prose (a skill telling Claude to run `{{tools:detect}}`), which
-  is why the narrowing costs nothing in practice. Token edge cases mirror
-  `{{ns:}}` (NS-15): inner whitespace is trimmed (`{{ path:x }}`); an
-  unterminated token (no closing `}}`) is left verbatim; a non-UTF-8 file is not
-  scanned; text with no `{{` token is copied unchanged.
+  is why the narrowing costs nothing in practice for the ordinary case. Token
+  edge cases mirror `{{ns:}}` (NS-15): inner whitespace is trimmed
+  (`{{ path:x }}`); an unterminated token (no closing `}}`) is left verbatim; a
+  non-UTF-8 file is not scanned; text with no `{{` token is copied unchanged.
 - `TOOL-15` Path tokens resolve within the source only (sibling scope), as
   `{{ns:}}` does, so tool-to-tool and bundled-script-to-tool references resolve
   when both items ship in the same source. Cross-source tooling references are out
   of scope: ship a tool in the same source as the items that use it.
-- `TOOL-19` Path tokens follow NS-53: `{{self}}`, `{{tools:name}}`, and
-  `{{path:ref}}` all expand only in a markdown file (an extension of `md`,
-  `markdown`, `mdown`, or `mkd`, case-insensitively), the same rule and the same
-  chokepoint (`namespace::is_markdown`) `{{ns:}}` expansion uses. Combined with
-  TOOL-14, this is the complete statement of where every token family expands,
-  except for a file an item opts in with `expand:` (NS-57, TOOL-20).
+- `TOOL-19` Path tokens follow NS-53's gate: `{{self}}`, `{{tools:name}}`, and
+  `{{path:ref}}` all expand in a file when the file has a markdown extension (an
+  extension of `md`, `markdown`, `mdown`, or `mkd`, case-insensitively), or the
+  item is of the `workflow` kind, or the file is on the item's NS-57 `expand:`
+  list -- the same rule and the same chokepoint
+  (`namespace::item_expands_tokens`) `{{ns:}}` expansion uses. Combined with
+  TOOL-14, this is
+  the complete statement of where every token family expands.
 - `TOOL-20` A path token in a file listed in an item's `expand:` frontmatter
   (NS-57) does expand, overriding TOOL-19 for that file, and renders as an
   absolute store path rather than the `~` form of TOOL-16. A `{{tools:name}}` in

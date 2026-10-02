@@ -10,6 +10,7 @@ config:
   agents/<name>.md           an agent
   rules/<name>.md            a rule
   commands/<name>.md         a slash command
+  workflows/<name>.js        a workflow the harness runs
   tools/<name>/              a tool (the whole directory; no anchor file)
   mind.toml                  optional: metadata, export control, odd layouts
 ```
@@ -20,6 +21,8 @@ The kinds:
   dir, scripts) ship with it.
 - **agent** / **rule** / **command**: a single markdown file. A command is what
   the harness offers at the prompt as `/<name>`.
+- **workflow**: a single `.js` file the harness loads from `workflows/` and
+  offers to its `Workflow` tool. See [Workflows](workflows.md).
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
   agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
@@ -43,7 +46,7 @@ See [Commands](commands.md#mental-model) for what happens when a source ships
 both.
 
 A group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
-`command`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
+`command`, `workflow`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
 an item ref reads as kind `tool`, name `build`, so `mind learn tool:build`
 fails with a not-found error naming `build`. Spell it `command:tool:build`,
 or pick another group name.
@@ -56,8 +59,8 @@ globs for non-standard or monorepo layouts. See
 A repo published for Claude Code's plugin system needs no changes either: a
 `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
 discovery input. The manifest supplies the plugin's name and metadata; `mind`
-maps the plugin root's conventional `skills/`, `agents/`, and `commands/`
-directories to items. See
+maps the plugin root's conventional `skills/`, `agents/`, `commands/`, and
+`workflows/` directories to items. See
 [Claude plugin marketplaces](marketplace.md).
 
 ## Where shared helpers belong
@@ -108,16 +111,32 @@ the name or a bundled path.
 References resolve within the same source only: ship a tool in the same source as
 the items that use it.
 
-Tokens expand only in markdown files. A token in a bundled script (a
-`resources/pr.py`) is left literal by default. To expand it there, list the file
-in the item's `expand:` frontmatter, so a script can locate its tooling without a
-language-specific self-locate; see [Tooling and shared scripts](tooling.md).
+A token expands in a file when the file has a markdown extension, or the item is
+of the `workflow` kind, or the file is on the item's NS-57 `expand:` list. A
+token in an ordinary bundled script (a `resources/pr.py`) is left literal by
+default; list the file in the item's `expand:` frontmatter to expand it there,
+so a script can locate its tooling without a language-specific self-locate; see
+[Tooling and shared scripts](tooling.md).
+
+The `workflow` kind's grant cuts both ways for an author. A workflow's `meta.name`
+is not frontmatter -- it is a plain JS object field -- so nothing stops you from
+writing it as a literal string instead of a `{{ns:}}` token; do that under a
+namespace prefix and the reference silently diverges from the installed
+effective name, rather than failing loudly, until `review`/`upgrade` catches it.
+The opposite mistake also becomes possible: a literal `{{ns:...}}`-shaped string
+elsewhere in the file's JS, written with no intention of it being a token (a
+template string, a comment, test fixture data), is now expanded and validated
+like any other reference, so an unresolvable name there is a hard `BadReference`
+install failure rather than inert text. The usual remedy for an unwanted
+expansion in a bundled non-markdown file -- omit the file from `expand:` -- does
+not apply here, since a workflow's `.js` has no frontmatter to carry an `expand:`
+key in the first place; the grant is unconditional for the whole file.
 
 ## Hardcoded paths
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
-`rules/<name>.md`, `commands/<name>.md`). A tool is the exception: it is
+`rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`). A tool is the exception: it is
 store-only and, by default, not linked into an agent home.
 
 A path you control is fine: pointing at a location your install hook populates

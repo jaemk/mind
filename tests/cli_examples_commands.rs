@@ -143,6 +143,148 @@ fn starter_command_item_is_discovered_installed_and_linked() {
     );
 }
 
+/// The `starter` example ships `workflows/hello.js`, a plain-convention
+/// workflow item with no `mind.toml`. It is discovered, installs into the
+/// store, and links into the agent home's `workflows/` directory like any
+/// other kind.
+#[test]
+fn starter_workflow_item_is_discovered_installed_and_linked() {
+    // spec: WF-1 WF-10
+    let sb = Sandbox::from_example("starter");
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        probe.stdout.contains("workflow:hello"),
+        "the hello workflow must be discovered by convention: {}",
+        probe.stdout
+    );
+
+    let learn = sb.mind(&["learn", "workflow:hello"]);
+    assert!(learn.success, "{}\n{}", learn.stdout, learn.stderr);
+
+    let store = sb.mind_home.join("store/workflow/hello");
+    assert!(
+        store.exists(),
+        "hello must be copied into the workflow store: {:?}",
+        store
+    );
+
+    let link = sb.claude_home.join("workflows/hello.js");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "hello must be linked at workflows/hello.js: {:?}",
+        link
+    );
+}
+
+/// The fixture's `export const meta` block must actually be READABLE by
+/// `workflow_meta.rs`, not merely present: the sibling test above passes just as
+/// well if the object's syntax drifts outside the reader's accepted grammar,
+/// because the item is discovered from the file's PATH and would still install
+/// with no description at all. An example that silently stopped demonstrating
+/// WF-4/WF-51 would be worse than no example, so both string fields the reader
+/// takes from the object are pinned here, through `probe`'s own rendering.
+///
+/// `whenToUse` is the field that makes this worth a separate assertion: no other
+/// item kind has one, it is read from the same object by the same reader, and it
+/// is the one field a markdown-frontmatter habit would drop.
+#[test]
+fn starter_workflow_meta_object_is_really_read_not_just_present() {
+    // spec: WF-4 WF-5 WF-51
+    let sb = Sandbox::from_example("starter");
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--register-only"])
+            .success
+    );
+
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "{}", probe.stderr);
+    let line = probe
+        .stdout
+        .lines()
+        .find(|l| l.contains("workflow:hello"))
+        .unwrap_or_else(|| panic!("no workflow:hello line: {}", probe.stdout));
+    assert!(
+        line.contains("Greet the user and summarize the repo state"),
+        "meta.description must be read out of the `meta` object (WF-4): {line}"
+    );
+    // `whenToUse` is asserted through the SEARCH path rather than the listing:
+    // the listing composes it as `<description> - <whenToUse>` (WF-51) and then
+    // truncates to the terminal width, so a substring of it is not reliably on
+    // screen. A query matches the composed text in full, so a word that appears
+    // ONLY in `whenToUse` selecting the item proves the field was read -- and
+    // proves it came from the `meta` object rather than the file path (CLI-85).
+    let by_when = sb.mind(&["probe", "--no-tui", "orientation"]);
+    assert!(by_when.success, "{}", by_when.stderr);
+    assert!(
+        by_when.stdout.contains("workflow:hello"),
+        "a word appearing only in meta.whenToUse must match (WF-51): {}",
+        by_when.stdout
+    );
+}
+
+/// The starter workflow writes `meta.name` as the `{{ns:hello}}` token, so the
+/// harness name tracks the effective name: `hello` unprefixed and `jk:hello`
+/// under `--namespace jk`, with no WF-24 divergence warning either way.
+#[test]
+fn starter_workflows_token_meta_name_tracks_the_prefix() {
+    // spec: WF-23 WF-24
+    let bare = Sandbox::from_example("starter");
+    assert!(
+        bare.mind(&["meld", &bare.source_spec(), "--register-only"])
+            .success
+    );
+    let learn = bare.mind(&["learn", "workflow:hello"]);
+    assert!(learn.success, "{}\n{}", learn.stdout, learn.stderr);
+    let combined = format!("{}{}", learn.stdout, learn.stderr);
+    assert!(
+        !combined.contains("the harness resolves it as"),
+        "unprefixed, the token expands to the effective name, so there is \
+         nothing to warn about: {combined}"
+    );
+    let stored = std::fs::read_to_string(bare.mind_home.join("store/workflow/hello"))
+        .expect("read the bare store copy");
+    assert!(
+        stored.contains("name: 'hello'"),
+        "the token must expand to the bare name: {stored}"
+    );
+
+    let pre = Sandbox::from_example("starter");
+    assert!(
+        pre.mind(&[
+            "meld",
+            &pre.source_spec(),
+            "--register-only",
+            "--namespace",
+            "jk",
+        ])
+        .success
+    );
+    let learn = pre.mind(&["learn", "workflow:jk:hello"]);
+    assert!(learn.success, "{}\n{}", learn.stdout, learn.stderr);
+    let combined = format!("{}{}", learn.stdout, learn.stderr);
+    assert!(
+        !combined.contains("the harness resolves it as"),
+        "under a prefix the token expands to the prefixed name, so there is \
+         nothing to warn about: {combined}"
+    );
+    let stored = std::fs::read_to_string(pre.mind_home.join("store/workflow/jk:hello"))
+        .expect("read the prefixed store copy");
+    assert!(
+        stored.contains("name: 'jk:hello'"),
+        "the token must expand to the prefixed name: {stored}"
+    );
+    assert!(
+        std::fs::symlink_metadata(pre.claude_home.join("workflows/jk:hello.js")).is_ok(),
+        "the prefixed workflow must be linked: {combined}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The `hooks` example: an update hook (M20c)
 // ---------------------------------------------------------------------------

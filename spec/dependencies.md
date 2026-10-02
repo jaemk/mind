@@ -26,13 +26,15 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
 ## What a dependency is
 
 - `DEP-1` An item's dependencies are its intra-source references: each sibling
-  named by a `{{ns:name}}` token (NS-10) appearing in the item's text files (the
-  whole skill directory, or the agent/rule file, matching the scan breadth of
-  NS-20). A skill that references an agent profile is the common case. Only
-  markdown files are scanned (`namespace::is_markdown`, NS-53): a `{{ns:}}`
-  token in a non-markdown file (a shell script, a data file) forms no
-  dependency edge, matching install, which never expands a token there either
-  (NS-53).
+  named by a `{{ns:name}}` token (NS-10) appearing in a file where the token
+  expands is a dependency. A token expands in a file when the file has a
+  markdown extension, or the item is of the `workflow` kind, or the file is on
+  the item's NS-57 `expand:` list (NS-53). A skill that references an agent
+  profile is the common case; a workflow referencing a sibling via its own
+  `.js` file is another (WF-25). A `{{ns:}}` token in a file the gate does not
+  admit -- an ordinary non-markdown bundled file, a shell script, a data file --
+  forms no dependency edge, matching install, which never expands a token there
+  either (NS-53).
 - `DEP-2` Dependencies are intra-source only. A `{{ns:}}` token never crosses
   sources, so resolution stays within the one source and never pulls an item from
   another source.

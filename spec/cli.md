@@ -940,7 +940,7 @@ define the non-interactive catalog listing, which `probe` prints instead when
 - `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
   widest value in each column, so rows stay aligned regardless of item-name
   length.
-- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule|tool>` and
+- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule|command|workflow|tool>` and
   `--source <selector>` filters that narrow the listing, composing with `probe`'s
   substring query. For `recall` they apply to the installed-items listing, not to
   `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there);
@@ -1039,11 +1039,12 @@ only appear at meld or install time. It is read-only and installs nothing.
   references, missing descriptions, hardcoded paths, bare tool references, and an
   unresolved `{{ns:}}` / path token in a non-markdown item file) exit zero. It
   changes nothing on disk in either case, except under `--fix` (CLI-138). An
-  unresolved `{{ns:}}` token is hard only in a markdown file
-  (`namespace::is_markdown`, NS-53): install expands `{{ns:}}` in markdown only,
-  so the identical unresolved token in a non-markdown item file (a script, data)
-  is dead text that cannot break an install and is downgraded to advisory,
-  mirroring the path-token treatment (CLI-135).
+  unresolved `{{ns:}}` token is hard only in a file install expands
+  (`namespace::expands_tokens`, NS-53): a markdown file, a workflow's own `.js`
+  (workflows.md WF-25, WF-27), or a file an item's `expand:` list names
+  (NS-57, CLI-226). The identical unresolved token in any other item file (a
+  script, data) is dead text that cannot break an install and is downgraded to
+  advisory, mirroring the path-token treatment (CLI-135).
 - `CLI-133` `review --as <prefix>` evaluates the source under a prospective
   namespace, so token expansion and the unguarded-reference scan are checked as
   they would install under that prefix. With no flag the effective prefix is the
@@ -1056,12 +1057,14 @@ only appear at meld or install time. It is read-only and installs nothing.
   token whose referent does not resolve in this source (a `{{tools:}}` naming a
   non-tool or a tool with no entrypoint, a `{{path:}}` miss or cross-kind
   ambiguity) is a hard `bad-reference` finding, which would be a `BadReference` at
-  install (tooling.md, TOOL-11/12), in a markdown file (`namespace::is_markdown`,
-  NS-53). The identical unresolved token in a non-markdown item file (a script,
-  data) is only an advisory `bad-reference` finding, never hard: install never
-  expands any token there either, so it is dead text that cannot break an
-  install, matching how Check 9 (CLI-136) and Check 11 (CLI-139) already treat a
-  non-markdown file. Every bad token is reported, not just the first.
+  install (tooling.md, TOOL-11/12), in a file install expands
+  (`namespace::expands_tokens`, NS-53): a markdown file, a workflow's own `.js`
+  (workflows.md WF-25), or an `expand:`-listed file (NS-57, CLI-226). The
+  identical unresolved token in any other item file (a script, data) is only an
+  advisory `bad-reference` finding, never hard: install never expands any token
+  there either, so it is dead text that cannot break an install, matching how
+  Check 9 (CLI-136) and Check 11 (CLI-139) already treat such a file. Every bad
+  token is reported, not just the first.
 - `CLI-136` `review` reports, as an advisory `hardcoded-path` finding, an item
   file that hardcodes a mind install path that a path token should replace. It
   recognizes the three install layouts (`.mind/store/<kind>/...`, the agent-home
@@ -1096,10 +1099,12 @@ only appear at meld or install time. It is read-only and installs nothing.
   token (CLI-136), un-wraps misplaced `{{ns:}}` tokens (CLI-139) back to the
   bare name, and templatizes bare sibling names into `{{ns:}}` (the
   `init-source --template` transform, INIT-5), then reports each file it
-  changed. A non-markdown item file is never rewritten, since its content never
-  expands out of the token form (NS-53): a finding there is still reported by
-  the CLI-135..139 checks, which scan every text file regardless of extension,
-  it is just left unrewritten (NS-54).
+  changed. A non-markdown item file is never rewritten, even one whose tokens
+  do expand (a workflow's own `.js`, WF-25): the rewrite gate stays on the
+  markdown-extension test alone, not on whether a token there would actually
+  expand (NS-54). A finding there is still reported by the CLI-135..139
+  checks, which scan every text file regardless of extension; it is just left
+  unrewritten.
 - `CLI-139` `review` flags a misplaced `{{ns:}}` token -- one in a non-prose
   context (NS-24) where name-substitution is wrong. A token inside a fenced code
   block, an inline code span, or adjacent to a path separator is an advisory
@@ -1109,11 +1114,17 @@ only appear at meld or install time. It is read-only and installs nothing.
   of the unguarded-reference scan (CLI-131): one finds a bare name that should be
   a token, the other a token that should be a bare word. The finding is reported
   in any text file, markdown or not, but `--fix` only un-wraps it in a markdown
-  file (CLI-138, NS-54); in a non-markdown file the misplaced token is left as
-  written, since it never expanded there either (NS-53).
+  file (CLI-138, NS-54); in any other file the misplaced token is left as
+  written. For a file that does not expand, it never expanded there either
+  (NS-53); for a workflow's `.js`, which does expand (WF-25), `--fix` still
+  leaves it alone, because the rewrite passes match sibling names as words and a
+  workflow file is code (WF-27).
 - `CLI-223` `review` reports, as an advisory `inert-token` finding, every
   `{{...}}` token found in a non-markdown item file, regardless of whether the
-  token would resolve: no token family expands outside markdown (NS-53), so a
+  token would resolve. The exceptions are the two files a token does reach
+  outside markdown: one on an item's NS-57 `expand:` list, and a `workflow`
+  item's own file (workflows.md, WF-25, WF-27). Outside those, no token family
+  expands outside markdown (NS-53), so a
   token there never reaches install either way, and one that would resolve if
   the file were markdown (e.g. a `{{tools:name}}` naming a real sibling tool,
   in a bundled `.sh`) is otherwise silently left literal and breaks at
@@ -1123,7 +1134,13 @@ only appear at meld or install time. It is read-only and installs nothing.
   token(s), states that tokens expand in markdown only, and names the three
   remedies: move the reference into markdown prose, have the script
   self-locate, or list the file in the item's `expand:` frontmatter to expand
-  it there (NS-57). Never hard, and `--fix` never rewrites the file (CLI-138,
+  it there (NS-57). "Markdown only" is the message's shorthand for the full
+  rule (a token expands when the file has a markdown extension, or the item
+  is of the `workflow` kind, or the file is on the item's `expand:` list) and
+  stays accurate where it is read: the two non-markdown files a token does
+  reach are exempt from this check above, so every file that draws the finding
+  really is one where only a markdown extension would have expanded it. Never
+  hard, and `--fix` never rewrites the file (CLI-138,
   NS-54). A token this generic net
   would otherwise re-report is excluded when another check already reported
   the same span for the same file, so a single broken or dead reference draws
@@ -1233,7 +1250,15 @@ only appear at meld or install time. It is read-only and installs nothing.
   through the same size-capped path (DSC-91) every metadata read in the
   codebase uses, since `review` runs against an untrusted, not-yet-melded
   source; an over-cap file is a hard `metadata-too-large` finding rather than
-  a silently skipped disclosure.
+  a silently skipped disclosure. The `workflow` kind has its own analogous
+  set of four `review` codes, each covered in [workflows.md](workflows.md):
+  `workflow-content` (WF-53), the unconditional disclosure counterpart of
+  `command-content` above, since `mind` neither reads nor validates a
+  workflow's body either; `workflow-unloadable` (WF-30), a file the harness
+  would skip; `workflow-name` (WF-24), a `meta.name` diverging from the
+  installed name; and `workflow-name-collision` (WF-29), two workflows
+  answering to one harness name. All four are disclosure only, like
+  `command-content`.
 - `CLI-238` The `item-hook` advisory (HOOK-85) states whether each hook is
   required or optional, reusing the same `required`/`optional` composition
   as the source-hook `install-hook` advisory above it (Check 6). Without
@@ -1573,6 +1598,29 @@ and per-harness `kinds` defaults.
   It enables extra advisory output that is otherwise suppressed: the unguarded-
   reference warning emitted during `meld` when a prefix is in effect (CLI-14,
   NS-20). It does not affect the color/Unicode capability gate (CLI-151).
+
+- `CLI-240` `--max-metadata-size <SIZE>` is a global flag accepted before or after
+  the verb, resolved at the top level like `--json`, `--yes`, and `--ascii`
+  (CLI-150). It sets the ceiling on every source-controlled metadata read for
+  that invocation (DSC-103), outranking `MIND_MAX_METADATA_SIZE` and the
+  `max-metadata-size` config key (DSC-104). The accepted forms and the refusal
+  of an unparseable one are DSC-105. Being global, it applies to every verb that
+  reads a source, including the ones that read one without installing anything
+  (`review`, `probe`, `recall`, `introspect`).
+
+- `CLI-241` `config show` reports `max-metadata-size` alongside `lobes` and
+  `ssh`, as the effective cap rather than the config key's value (DSC-106), so a
+  run under a flag or an environment override does not report a number that is
+  not in force. `--json` carries it twice: `max_metadata_size` as the rendered
+  string a human reads, and `max_metadata_size_bytes` as the byte count a
+  consumer compares against, with an unlimited cap rendering as `"unlimited"` /
+  `9223372036854775807` (CLI-242).
+
+- `CLI-242` Every integer mind emits in `--json` fits a signed 64-bit integer,
+  so a consumer that parses numbers as `i64` never overflows. The one value that
+  could exceed it, the unlimited metadata cap (held as `u64::MAX`), is emitted
+  as `max_metadata_size_bytes: 9223372036854775807` (`i64::MAX`). The rendered `max_metadata_size` string
+  still reads `unlimited`.
 
 - `CLI-163` The short flag `-n` is reserved for `--dry-run` on `learn` (CLI-32),
   which already owned it. As a consequence, `--namespace` on `meld`, `review`, and

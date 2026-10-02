@@ -7,15 +7,15 @@ Worked examples of mind features; each subdirectory has its own README with a
 
 The most common use of mind is melding an arbitrary existing repo you did not
 author and did not modify. Convention discovery finds skills, agents, rules,
-commands, and tools by directory layout alone - no `mind.toml` and no source
-changes required. `starter/` shows this from scratch.
+commands, workflows, and tools by directory layout alone - no `mind.toml` and
+no source changes required. `starter/` shows this from scratch.
 
 ## Reading order
 
 Simplest to most advanced:
 
-- [starter/](starter/) - zero-config: meld an unmodified repo, items found by
-  convention. START HERE.
+- [starter/](starter/) - zero-config: meld an unmodified repo, items (including
+  a workflow) found by convention. START HERE.
 - [hello/](hello/) - the `hello-mind` hello-world skill the repo-root
   `mind.toml` exposes via `[source].roots`; what `mind meld jaemk/mind` offers
   to install. Note that the same `mind.toml` also registers two curated skill
@@ -38,8 +38,9 @@ Simplest to most advanced:
   nested sources; `dump` output; `mind curate` reconciling the registry after
   the curator's list changes.
 - [marketplace-plugin/](marketplace-plugin/) - a Claude `.claude-plugin/plugin.json`
-  melded as a source: skills, agents, and commands become items, unsupported
-  components report a skipped count.
+  melded as a source: skills, agents, commands, and workflows become items,
+  unsupported components report a skipped count, and a component-path override
+  (`workflows`) shows mind and the harness disagreeing about which file loads.
 - [marketplace-catalog/](marketplace-catalog/) - a Claude `.claude-plugin/marketplace.json`
   catalog of in-repo plugins, each a namespaced sub-source.
 - [marketplace-curator/](marketplace-curator/) - a repo that is both a Claude

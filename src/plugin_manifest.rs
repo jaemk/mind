@@ -109,7 +109,8 @@ pub struct PluginManifest {
 /// - `name` is absent or empty/whitespace-only
 ///
 /// Returns `MindError::Io` for I/O failures, or `MindError::MetadataTooLarge`
-/// (DSC-91) when the file is at or above the metadata size cap.
+/// (DSC-91) when the file is above the metadata size cap in effect
+/// (`metadata_size_limit`).
 pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
     // spec: DSC-91 -- size-capped read: refuses an oversized plugin.json before
     // allocating the whole file, instead of the earlier unconditional
@@ -148,6 +149,10 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
 /// like any other unsupported component, and MKT-4 is normative that a drop is
 /// never silent.
 ///
+/// `workflows/` reads the same way (WF-40): a flat `workflows/<name>.js` maps to
+/// the `workflow` kind and is installed, and what that scan leaves behind is
+/// counted in `workflows`.
+///
 /// Populated by the consumer (catalog/commands shard) from what it finds on
 /// disk and in the manifest. This module owns the type and its rendering only.
 #[derive(Debug, Default)]
@@ -160,6 +165,8 @@ pub struct SkippedComponents {
     pub output_styles: u32,
     /// `commands/` entries the flat `.md` scan did not map (MKT-4, MKT-18).
     pub commands: u32,
+    /// `workflows/` entries the flat `.js` scan did not map (MKT-4, WF-40).
+    pub workflows: u32,
 }
 
 impl SkippedComponents {
@@ -172,6 +179,7 @@ impl SkippedComponents {
             + self.themes
             + self.output_styles
             + self.commands
+            + self.workflows
     }
 
     /// Human-readable summary, e.g. `"2 hooks, 1 mcp server not installed (no
@@ -192,19 +200,37 @@ impl SkippedComponents {
             "output style",
             "output styles",
         );
+        let mut unmapped: Vec<String> = Vec::new();
         // MKT-4/MKT-18: the commands the flat `.md` scan did not map. Named as
         // entries rather than "commands", so the note cannot be read as saying
         // that the commands mind DID install were dropped.
         Self::push_part(
-            &mut parts,
+            &mut unmapped,
             self.commands,
             "unmapped commands/ entry",
             "unmapped commands/ entries",
         );
-        Some(format!(
-            "{} not installed (no mind equivalent)",
-            parts.join(", ")
-        ))
+        // MKT-4/WF-40: the same, for what the flat `.js` workflow scan left.
+        Self::push_part(
+            &mut unmapped,
+            self.workflows,
+            "unmapped workflows/ entry",
+            "unmapped workflows/ entries",
+        );
+        let mut groups: Vec<String> = Vec::new();
+        if !parts.is_empty() {
+            groups.push(format!(
+                "{} not installed (no mind equivalent)",
+                parts.join(", ")
+            ));
+        }
+        if !unmapped.is_empty() {
+            groups.push(format!(
+                "{} not installed (mind maps only top-level .md commands and .js workflows)",
+                unmapped.join(", ")
+            ));
+        }
+        Some(groups.join("; "))
     }
 
     fn push_part(parts: &mut Vec<String>, count: u32, singular: &str, plural: &str) {
@@ -1222,6 +1248,39 @@ mod tests {
     }
 
     #[test]
+    fn skipped_unmapped_workflows_alone_do_not_claim_no_mind_equivalent() {
+        // spec: MKT-4
+        let s = SkippedComponents {
+            workflows: 2,
+            ..Default::default()
+        };
+        let summary = s.summary().expect("unmapped workflows -> Some");
+        assert!(
+            !summary.contains("no mind equivalent"),
+            "an unmapped entry is not an unsupported component: {summary}"
+        );
+        assert!(
+            summary.contains("2 unmapped workflows/ entries"),
+            "must name the entries: {summary}"
+        );
+        assert!(
+            summary.contains("mind maps only top-level .md commands and .js workflows"),
+            "must give the mapping reason: {summary}"
+        );
+        let both = SkippedComponents {
+            hooks: 1,
+            workflows: 1,
+            ..Default::default()
+        };
+        let summary = both.summary().expect("both -> Some");
+        assert!(
+            summary
+                .contains("1 hook not installed (no mind equivalent); 1 unmapped workflows/ entry"),
+            "groups join with '; ': {summary}"
+        );
+    }
+
+    #[test]
     fn skipped_output_styles_plural() {
         let s = SkippedComponents {
             output_styles: 2,
@@ -1244,15 +1303,16 @@ mod tests {
             themes: 1,
             output_styles: 1,
             commands: 0,
+            workflows: 0,
         };
         let summary = s.summary().expect("all kinds -> Some");
-        // spec: MKT-18 -- a MAPPED command is NOT among them: a plugin's
-        // `commands/<name>.md` files are installed, so the skipped-component
-        // summary never names them (only an unmapped entry, MKT-4, and this
-        // plugin has none).
+        // spec: MKT-18 WF-40 -- a MAPPED command or workflow is NOT among them:
+        // a plugin's `commands/<name>.md` and `workflows/<name>.js` files are
+        // installed, so the skipped-component summary never names them (only an
+        // unmapped entry, MKT-4, and this plugin has none).
         assert!(
-            !summary.contains("command"),
-            "a command is not a skipped component: {summary}"
+            !summary.contains("command") && !summary.contains("workflow"),
+            "a command or workflow is not a skipped component: {summary}"
         );
         for expected in &[
             "hook",

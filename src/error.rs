@@ -6,14 +6,15 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The crate-wide result type.
 pub type Result<T> = std::result::Result<T, MindError>;
 
-/// Size cap for a source-controlled metadata file read during discovery: a
-/// `mind.toml`, an item's frontmatter block (`SKILL.md`/agent/rule `.md`), or a
-/// Claude plugin/marketplace manifest (`.claude-plugin/plugin.json` /
-/// `marketplace.json`). DSC-91.
+/// Default size cap for a source-controlled metadata file read during
+/// discovery: a `mind.toml`, an item's frontmatter block (`SKILL.md`/agent/rule
+/// `.md`), or a Claude plugin/marketplace manifest
+/// (`.claude-plugin/plugin.json` / `marketplace.json`). DSC-91.
 ///
 /// These are hand-authored text files a maintainer edits directly; the largest
 /// legitimate one in this repo's own examples is a few KB. 8 MiB is chosen as a
@@ -23,13 +24,162 @@ pub type Result<T> = std::result::Result<T, MindError>;
 /// ONLY -- item content (an item tree's `{{ns:}}` expansion at install, the
 /// unguarded-reference scan, `review`, the TUI preview, and content hashing)
 /// stays uncapped (see spec/discovery.md DSC-90).
+///
+/// It is a *default*, not a constant of the format: an operator who has a
+/// legitimate metadata file past it raises (or lowers, or removes) the ceiling
+/// with `--max-metadata-size`, `MIND_MAX_METADATA_SIZE`, or the
+/// `max-metadata-size` config key (DSC-103..106). Only this default changes
+/// with the flag; the reader, the refusal, and the bounded-read guarantee are
+/// the same either way.
 pub const METADATA_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
 
+/// The sentinel [`EFFECTIVE_METADATA_LIMIT`] holds while unresolved. `0` cannot
+/// collide with a real limit: every zero-valued spelling of "no ceiling"
+/// resolves to [`u64::MAX`] (see [`parse_metadata_size`], DSC-110), never to
+/// zero.
+const METADATA_LIMIT_UNSET: u64 = 0;
+
+/// The process-wide metadata cap, resolved once at startup from the flag, the
+/// environment, and the config file (DSC-104) and read by every metadata read
+/// thereafter. Holds [`METADATA_LIMIT_UNSET`] until [`set_metadata_size_limit`]
+/// runs, so a library caller that never resolves one (a unit test, the TUI's
+/// own entry points) gets [`METADATA_SIZE_LIMIT`].
+static EFFECTIVE_METADATA_LIMIT: AtomicU64 = AtomicU64::new(METADATA_LIMIT_UNSET);
+
+/// Install the resolved metadata cap for the rest of the process (DSC-103).
+///
+/// Called once from `main::run` before any dispatch, so every metadata read in
+/// the run sees the same ceiling.
+///
+/// The `0` mapping here is sentinel protection, NOT the zero-means-unlimited
+/// rule: that rule lives in [`parse_metadata_size`] alone (DSC-110), which
+/// never hands this function a zero. [`METADATA_LIMIT_UNSET`] IS zero, so a
+/// caller passing a literal `0` (only reachable by calling this function
+/// directly, not through a parsed cap) would otherwise re-arm the sentinel and
+/// silently restore the default rather than setting anything.
+pub fn set_metadata_size_limit(limit: u64) {
+    let limit = if limit == METADATA_LIMIT_UNSET {
+        u64::MAX
+    } else {
+        limit
+    };
+    EFFECTIVE_METADATA_LIMIT.store(limit, Ordering::Relaxed);
+}
+
+/// The metadata cap in effect: whatever [`set_metadata_size_limit`] installed,
+/// else the [`METADATA_SIZE_LIMIT`] default.
+pub fn metadata_size_limit() -> u64 {
+    match EFFECTIVE_METADATA_LIMIT.load(Ordering::Relaxed) {
+        METADATA_LIMIT_UNSET => METADATA_SIZE_LIMIT,
+        limit => limit,
+    }
+}
+
+/// Parse a metadata size cap as written on the command line, in the
+/// environment, or in `config.toml` (DSC-105).
+///
+/// Accepts a bare byte count (`16777216`), a binary-suffixed size (`16MiB`,
+/// and the bare `16M`/`16K`/`16G` spellings, which are binary), a
+/// decimal-suffixed size (`16MB` = 16_000_000), an explicit `512B`, `unlimited`
+/// or `none`, or ANY zero-valued size (`0`, `00`, `0B`, `0MiB`, ...) for no
+/// ceiling at all. Case and internal whitespace are not significant. A fraction
+/// (`1.5MiB`) is refused rather than rounded, so a value that cannot be
+/// represented exactly is never silently changed.
+///
+/// spec: DSC-110 -- zero means "unlimited" HERE, once, for every spelling of
+/// it. A cap of literally zero bytes would refuse every metadata file including
+/// the source's own `mind.toml`, so no operator can mean it; reading only the
+/// bare `0` that way and letting `0B`/`0MiB` through as a real zero split the
+/// rule between this parser and whoever installed the result, so a library
+/// caller and the CLI disagreed on what `0B` meant. Every origin (flag,
+/// environment, config key) resolves through this one function, so folding the
+/// rule in here is what makes them agree.
+///
+/// Returns the byte count, with "no ceiling" as [`u64::MAX`]. The error is a
+/// bare message: the caller knows which of the three origins it came from and
+/// wraps it in [`MindError::BadMetadataSize`] accordingly.
+pub fn parse_metadata_size(raw: &str) -> std::result::Result<u64, String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if cleaned.is_empty() {
+        return Err("the value is empty".to_string());
+    }
+    if matches!(cleaned.as_str(), "unlimited" | "none") {
+        return Ok(u64::MAX);
+    }
+
+    let digits_end = cleaned
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(cleaned.len());
+    let (digits, suffix) = cleaned.split_at(digits_end);
+    if digits.is_empty() {
+        return Err(format!("'{raw}' does not start with a number"));
+    }
+    // A fractional size stops the digit scan at the `.`, leaving a suffix like
+    // `.5mib` that is not a unit at all. Naming it as an unknown unit sent the
+    // operator looking for a unit they never wrote, so say what is actually
+    // wrong.
+    if suffix.starts_with('.') {
+        return Err(format!(
+            "'{raw}' is a fractional size, which is not accepted (write a whole number of a \
+             smaller unit instead, e.g. 1536KiB rather than 1.5MiB)"
+        ));
+    }
+    let multiplier: u64 = match suffix {
+        "" | "b" => 1,
+        "k" | "kib" => 1024,
+        "kb" => 1_000,
+        "m" | "mib" => 1024 * 1024,
+        "mb" => 1_000_000,
+        "g" | "gib" => 1024 * 1024 * 1024,
+        "gb" => 1_000_000_000,
+        other => {
+            return Err(format!(
+                "'{other}' is not a known size unit (use B, KiB/KB, MiB/MB, GiB/GB, or no unit \
+                 for bytes)"
+            ));
+        }
+    };
+    let count: u64 = digits
+        .parse()
+        .map_err(|_| format!("'{digits}' is not a whole number of units"))?;
+    // spec: DSC-110 -- every zero-valued spelling, with or without a unit, is
+    // "no ceiling", exactly as the bare `0` and the words are.
+    if count == 0 {
+        return Ok(u64::MAX);
+    }
+    count
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("'{raw}' overflows a 64-bit byte count"))
+}
+
+/// Render a byte count the way [`MindError::MetadataTooLarge`] and
+/// `config show` report it: the largest binary unit that divides it exactly, so
+/// the 8 MiB default reads as `8 MiB` and a 1500-byte cap reads as `1500 bytes`
+/// rather than `0 MiB`.
+pub fn format_metadata_size(bytes: u64) -> String {
+    if bytes == u64::MAX {
+        return "unlimited".to_string();
+    }
+    for (unit, scale) in [
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024u64),
+    ] {
+        if bytes >= scale && bytes.is_multiple_of(scale) {
+            return format!("{} {unit}", bytes / scale);
+        }
+    }
+    format!("{bytes} bytes")
+}
+
 /// Read `path` into a `String`, refusing (with [`MindError::MetadataTooLarge`])
-/// a file at or above [`METADATA_SIZE_LIMIT`] bytes -- WITHOUT first allocating
-/// the whole file. Reads at most `METADATA_SIZE_LIMIT + 1` bytes via
-/// `Read::take`, so an oversized file's cost is bounded by the cap, not by its
-/// actual size.
+/// a file above the cap in effect ([`metadata_size_limit`]) -- WITHOUT first
+/// allocating the whole file. Reads at most `limit + 1` bytes via `Read::take`,
+/// so an oversized file's cost is bounded by the cap, not by its actual size.
 ///
 /// Shared by every metadata reader (`mindfile.rs`, `frontmatter.rs`,
 /// `plugin_manifest.rs`) so the limit and the error are defined exactly once.
@@ -39,17 +189,26 @@ pub const METADATA_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
 /// them (several metadata readers treat a NotFound source as "absent", not an
 /// error).
 pub fn read_capped_metadata(path: &Path) -> Result<String> {
+    read_capped_metadata_with(path, metadata_size_limit())
+}
+
+/// [`read_capped_metadata`] against an explicit cap rather than the process
+/// one, so a test can exercise the bound without touching global state that
+/// every other test in the binary shares.
+pub(crate) fn read_capped_metadata_with(path: &Path, limit: u64) -> Result<String> {
     use std::io::Read as _;
 
     let file = std::fs::File::open(path).map_err(|e| MindError::io(path, e))?;
     let mut buf = Vec::new();
-    file.take(METADATA_SIZE_LIMIT + 1)
+    // saturating: an unlimited cap is u64::MAX, where `+ 1` would wrap to 0 and
+    // read nothing at all.
+    file.take(limit.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(|e| MindError::io(path, e))?;
-    if buf.len() as u64 > METADATA_SIZE_LIMIT {
+    if buf.len() as u64 > limit {
         return Err(MindError::MetadataTooLarge {
             path: path.to_path_buf(),
-            limit: METADATA_SIZE_LIMIT,
+            limit,
         });
     }
     String::from_utf8(buf).map_err(|e| {
@@ -77,6 +236,11 @@ pub enum ItemKind {
     /// `/<name>` (commands.md CMD-1). An ordinary linked kind, shaped like an
     /// agent or rule: one file, named by its stem.
     Command,
+    /// A harness workflow: a JavaScript file the harness loads from
+    /// `workflows/` and offers to its `Workflow` tool (workflows.md WF-1). An
+    /// ordinary linked kind, shaped like an agent or a command -- one file,
+    /// named by its stem -- but with a `.js` extension rather than `.md`.
+    Workflow,
     /// Helper tooling (scripts or a compiled binary) other items reference. A
     /// tool installs to the store but is not linked into an agent home by
     /// default: the harness does not discover it; items reach it by path token.
@@ -90,6 +254,7 @@ impl ItemKind {
             ItemKind::Agent => "agent",
             ItemKind::Rule => "rule",
             ItemKind::Command => "command",
+            ItemKind::Workflow => "workflow",
             ItemKind::Tool => "tool",
         }
     }
@@ -101,6 +266,7 @@ impl ItemKind {
             "agent" => Some(ItemKind::Agent),
             "rule" => Some(ItemKind::Rule),
             "command" => Some(ItemKind::Command),
+            "workflow" => Some(ItemKind::Workflow),
             "tool" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -116,6 +282,7 @@ impl ItemKind {
             ItemKind::Agent => "agents",
             ItemKind::Rule => "rules",
             ItemKind::Command => "commands",
+            ItemKind::Workflow => "workflows",
             ItemKind::Tool => "tools",
         }
     }
@@ -127,6 +294,7 @@ impl ItemKind {
             "agents" => Some(ItemKind::Agent),
             "rules" => Some(ItemKind::Rule),
             "commands" => Some(ItemKind::Command),
+            "workflows" => Some(ItemKind::Workflow),
             "tools" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -135,12 +303,42 @@ impl ItemKind {
     /// The kinds linked into an agent home: every kind except `Tool`, which is
     /// store-only and reached by reference (tooling.md TOOL-3). Also the "all
     /// kinds" default for a lobe with no `kinds` filter (HARN-1).
-    pub const LINKABLE: [ItemKind; 4] = [
+    pub const LINKABLE: [ItemKind; 5] = [
         ItemKind::Skill,
         ItemKind::Agent,
         ItemKind::Rule,
         ItemKind::Command,
+        ItemKind::Workflow,
     ];
+
+    /// Every kind, in declaration order. The one list the user-facing kind
+    /// wording is built from (NS-25), so a new variant shows up in messages.
+    pub const ALL: [ItemKind; 6] = [
+        ItemKind::Skill,
+        ItemKind::Agent,
+        ItemKind::Rule,
+        ItemKind::Command,
+        ItemKind::Workflow,
+        ItemKind::Tool,
+    ];
+
+    /// "skill, agent, rule, command, workflow, tool".
+    pub fn word_list() -> String {
+        Self::ALL
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// "'skill:name', 'agent:name', ..." for every kind.
+    pub fn ref_forms() -> String {
+        Self::ALL
+            .iter()
+            .map(|k| format!("'{}:name'", k.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 
     /// Parse a list of kind strings into [`ItemKind`]s, rejecting any unknown
     /// string with [`MindError::UnknownKind`]. Used by the config `kinds` filter
@@ -301,15 +499,26 @@ pub enum MindError {
 
     /// DSC-91: a hand-authored source-controlled metadata file (`mind.toml`, an
     /// item's frontmatter block, or a Claude plugin/marketplace manifest)
-    /// exceeded [`METADATA_SIZE_LIMIT`]. Refused before the whole file is read
-    /// into memory (see [`read_capped_metadata`]).
+    /// exceeded the cap in effect ([`metadata_size_limit`]). Refused before the
+    /// whole file is read into memory (see [`read_capped_metadata`]).
     #[error(
-        "'{path}' exceeds the {} MiB size cap for a hand-authored metadata file (mind.toml, an \
-         item's frontmatter, or a plugin/marketplace manifest); trim the file, or move large \
-         content out of it, and try again",
-        limit / (1024 * 1024)
+        "'{path}' exceeds the {} size cap for a hand-authored metadata file (mind.toml, an \
+         item's frontmatter, or a plugin/marketplace manifest); trim the file, move large \
+         content out of it, or raise the cap with --max-metadata-size",
+        format_metadata_size(*limit)
     )]
     MetadataTooLarge { path: PathBuf, limit: u64 },
+
+    /// DSC-105: a metadata size cap that is not a size. `origin` names where the
+    /// value came from (the flag, the environment variable, or the config key)
+    /// so the operator knows which of the three to edit, since the resolution
+    /// order (DSC-104) means the one they just typed is not always the one in
+    /// effect.
+    #[error(
+        "invalid metadata size cap from {origin}: {msg} (expected a byte count like 16777216, a \
+         suffixed size like 32MiB, or 'unlimited')"
+    )]
+    BadMetadataSize { origin: String, msg: String },
 
     /// CLI-215: this message previously omitted the local-path forms
     /// `parse_spec` has always accepted (a bare `/abs/path`, `./rel/path`,
@@ -351,14 +560,33 @@ pub enum MindError {
     BadItemLink { url: String, reason: String },
 
     #[error(
-        "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', 'command:name', or 'owner/repo#name')"
+        "'{name}' is not a valid item ref (expected 'name', {forms}, or 'owner/repo#name')",
+        forms = ItemKind::ref_forms()
     )]
     InvalidItemRef { name: String },
 
     #[error(
-        "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, command, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
+        "'{prefix}' cannot be used as a namespace prefix: it is a reserved word (an item kind: {words}; or a word mind reserves for a future kind), which would make a prefixed name indistinguishable from a kind-qualified ref",
+        words = ItemKind::word_list()
     )]
     ReservedPrefix { prefix: String },
+
+    /// DSC-112: the same refusal, but for a source that is ALREADY melded --
+    /// registered (and possibly installed from) before the word its
+    /// `[source].prefix` names became reserved. `ReservedPrefix`'s wording is
+    /// written for a meld that has not happened yet ("cannot be used as a
+    /// namespace prefix"), so an existing user meets it on every scanning verb
+    /// with no stated way out: the value is in the SOURCE's `mind.toml`, so
+    /// nothing they can pass on the command line changes it. This variant names
+    /// the source and the one command that ends the condition.
+    #[error(
+        "melded source '{source_name}': its mind.toml declares the namespace prefix '{prefix}', \
+         which mind reserves as an item-kind word (a prefixed name would be indistinguishable \
+         from a kind-qualified ref like '{prefix}:<name>'); the prefix is the source's own \
+         declaration, so --namespace cannot override the refusal -- run `mind unmeld \
+         {source_name}` to drop the source, then re-meld it once its author renames the prefix"
+    )]
+    MeldedSourceReservedPrefix { source_name: String, prefix: String },
 
     /// NS-28/NS-72: prefix contains a path-unsafe character or structure. A
     /// melded repo's `[source].prefix` reaches this variant, so the offending
@@ -552,6 +780,40 @@ pub enum MindError {
     /// The sibling of `LinkNotASkill` for the file shape.
     #[error("source '{source_name}': linked path '{path}' is not a file in the clone")]
     LinkNotAFile { source_name: String, path: String },
+
+    /// LNK-20: an item-link path that names a file kind mind deliberately does
+    /// not support installing by item link -- a workflow's `.js`, since a blob
+    /// link takes a `.md` file and a tree link a skill directory. Distinct from
+    /// `LinkNotASkill`/`LinkNotAFile`, which mean the path itself is wrong:
+    /// this path is understood fine, it is just a kind the link form refuses.
+    /// The message names the kind and the remedy instead of claiming the path
+    /// is unrecognized.
+    // The remedy is ONE ordered sequence, not a choice: the user is here
+    // because the repo is not melded, so `mind learn <ref>` has no source to
+    // resolve the workflow from until the meld has happened. `mind probe`
+    // finds the ref; `--add-root` reaches a workflow the source's
+    // authoritative inventory leaves out.
+    #[error(
+        "source '{source_name}': linked path '{path}' names a workflow, and mind does not \
+         install a workflow by item link (a blob link takes a .md file, a tree link takes a \
+         skill directory); meld the repo, run `mind probe <name>` to find the workflow's ref, \
+         then `mind learn <ref>` (if the repo's authoritative mind.toml or plugin manifest \
+         leaves it out, meld with `--add-root <dir>` naming the directory that holds its \
+         workflows/ folder)"
+    )]
+    LinkKindNotSupported { source_name: String, path: String },
+
+    /// LNK-20 / WF-6: an item-link path naming a `.js` file that is NOT under
+    /// `workflows/`, so nothing about it says "workflow". The link form takes
+    /// `.md` files (and skill directories) only, so it is refused -- but as a
+    /// JavaScript file, not as a workflow: `LinkKindNotSupported`'s remedy
+    /// (`mind probe` for a workflow's ref) would name an item that does not exist.
+    #[error(
+        "source '{source_name}': linked path '{path}' is a JavaScript file, and mind does not \
+         install one by item link (a blob link takes a .md file, a tree link takes a skill \
+         directory); meld the repo instead"
+    )]
+    LinkNotLinkableFile { source_name: String, path: String },
 
     /// LNK-21: a file link whose kind none of the three resolution steps
     /// answered. The message names all three so the user can pick one.
@@ -1417,11 +1679,13 @@ impl MindError {
             MindError::MindToml { .. } => "mind-toml",
             MindError::Manifest { .. } => "manifest",
             MindError::MetadataTooLarge { .. } => "metadata-too-large",
+            MindError::BadMetadataSize { .. } => "bad-metadata-size",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
             MindError::UnsafeRepoSpec { .. } => "unsafe-repo-spec",
             MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",
+            MindError::MeldedSourceReservedPrefix { .. } => "melded-source-reserved-prefix",
             MindError::UnsafePrefix { .. } => "unsafe-prefix",
             MindError::NamespaceLocked { .. } => "namespace-locked",
             MindError::SourceExists { .. } => "source-exists",
@@ -1446,6 +1710,8 @@ impl MindError {
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::BadKindFlag { .. } => "bad-kind-flag",
             MindError::LinkNotAFile { .. } => "link-not-a-file",
+            MindError::LinkKindNotSupported { .. } => "link-kind-not-supported",
+            MindError::LinkNotLinkableFile { .. } => "link-not-linkable-file",
             MindError::LinkKindUnresolved { .. } => "link-kind-unresolved",
             MindError::LinkKindMismatch { .. } => "link-kind-mismatch",
             MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",
@@ -1496,6 +1762,73 @@ mod tests {
     use super::*;
     use std::process::Command;
 
+    /// NS-25/NS-26: the kind wording in the two errors is built from
+    /// `ItemKind::ALL`, and `ALL` covers every variant.
+    #[test]
+    fn kind_word_lists_cover_every_kind() {
+        // spec: NS-25 NS-26
+        let invalid = MindError::InvalidItemRef { name: "x".into() }.to_string();
+        let reserved = MindError::ReservedPrefix { prefix: "x".into() }.to_string();
+        for k in ItemKind::ALL {
+            let w = k.as_str();
+            assert_eq!(ItemKind::parse(w), Some(k), "ALL round-trips through parse");
+            assert!(invalid.contains(&format!("'{w}:name'")), "{invalid}");
+            assert!(reserved.contains(w), "{reserved}");
+        }
+        assert_eq!(
+            ItemKind::word_list(),
+            "skill, agent, rule, command, workflow, tool"
+        );
+        // An exhaustive match: adding a variant breaks the build here until
+        // ALL (and this test) are updated.
+        for k in ItemKind::ALL {
+            match k {
+                ItemKind::Skill
+                | ItemKind::Agent
+                | ItemKind::Rule
+                | ItemKind::Command
+                | ItemKind::Workflow
+                | ItemKind::Tool => {}
+            }
+        }
+        assert_eq!(ItemKind::ALL.len(), 6);
+    }
+
+    /// LNK-20/WF-6: the two link-refusal messages carry the remedy and the
+    /// corrected link-form wording.
+    #[test]
+    fn link_refusal_messages_carry_the_remedy() {
+        // spec: LNK-20 WF-6
+        let wf = MindError::LinkKindNotSupported {
+            source_name: "s".into(),
+            path: "workflows/x.js".into(),
+        }
+        .to_string();
+        for needle in [
+            "mind probe <name>",
+            "mind learn <ref>",
+            "--add-root",
+            "a blob link takes a .md file, a tree link takes a skill directory",
+        ] {
+            assert!(wf.contains(needle), "{needle}: {wf}");
+        }
+        let js = MindError::LinkNotLinkableFile {
+            source_name: "s".into(),
+            path: "x.js".into(),
+        }
+        .to_string();
+        assert!(js.contains("meld the repo instead"), "{js}");
+        assert!(js.contains("JavaScript file"), "{js}");
+        assert!(!js.contains("names a workflow"), "{js}");
+        let reserved = MindError::ReservedPrefix { prefix: "p".into() }.to_string();
+        assert!(reserved.contains("future kind"), "{reserved}");
+        assert!(
+            MindError::InvalidItemRef { name: "x".into() }
+                .to_string()
+                .contains("or 'owner/repo#name')")
+        );
+    }
+
     /// `command` is a full item kind: it parses, names itself, maps to the
     /// `commands/` directory both ways, and is linked into agent homes.
     #[test]
@@ -1517,6 +1850,35 @@ mod tests {
         assert_eq!(
             ItemKind::parse_kinds(&["command".to_string()]).unwrap(),
             vec![ItemKind::Command]
+        );
+    }
+
+    /// `workflow` is a full item kind on the same terms: it parses, names
+    /// itself, maps to the `workflows/` directory both ways, and is linked into
+    /// agent homes (the harness discovers it, unlike a tool).
+    #[test]
+    fn workflow_is_a_linked_item_kind() {
+        // spec: WF-1 WF-6
+        assert_eq!(ItemKind::parse("workflow"), Some(ItemKind::Workflow));
+        assert_eq!(ItemKind::Workflow.as_str(), "workflow");
+        assert_eq!(ItemKind::Workflow.dir(), "workflows");
+        assert_eq!(ItemKind::from_dir("workflows"), Some(ItemKind::Workflow));
+        assert!(
+            ItemKind::LINKABLE.contains(&ItemKind::Workflow),
+            "the harness reads workflows out of the agent home, so the kind links"
+        );
+        // The kinds filter a lobe may carry accepts it by name (HARN-1, WF-12).
+        assert_eq!(
+            ItemKind::parse_kinds(&["workflow".to_string()]).unwrap(),
+            vec![ItemKind::Workflow]
+        );
+        // The serialized form round-trips, so a persisted `item_kind` (STO-81)
+        // reads back as the same kind.
+        let json = serde_json::to_string(&ItemKind::Workflow).unwrap();
+        assert_eq!(json, "\"workflow\"");
+        assert_eq!(
+            serde_json::from_str::<ItemKind>(&json).unwrap(),
+            ItemKind::Workflow
         );
     }
 
@@ -3272,5 +3634,194 @@ mod tests {
             matches!(err, MindError::Io { .. }),
             "missing file must be a plain Io error: {err:?}"
         );
+    }
+
+    // ---- DSC-103..107: the configurable cap --------------------------------
+    //
+    // These exercise `read_capped_metadata_with` rather than the process-wide
+    // limit: every test in this binary shares that one atomic, so a test that
+    // set it would change the cap under whatever else is running concurrently.
+    // The wiring from flag/env/config into the atomic is covered end-to-end
+    // through the real binary in tests/cli_install_items.rs (the metadata-cap
+    // cluster: the flag, `MIND_MAX_METADATA_SIZE`, the config key, their
+    // precedence, and the zero/unlimited spellings).
+
+    #[test]
+    fn a_raised_cap_admits_a_file_the_default_refuses() {
+        // spec: DSC-103
+        let path = cap_tmp("raised");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        read_capped_metadata_with(&path, METADATA_SIZE_LIMIT)
+            .expect_err("the default cap must still refuse it");
+        let text = read_capped_metadata_with(&path, METADATA_SIZE_LIMIT * 2)
+            .expect("a raised cap must admit it");
+        assert_eq!(text.len() as u64, METADATA_SIZE_LIMIT + 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_lowered_cap_refuses_a_file_the_default_admits() {
+        // spec: DSC-103 -- the knob tightens as well as loosens, which is why it
+        // takes a size rather than being an allow-large boolean.
+        let path = cap_tmp("lowered");
+        std::fs::write(&path, "0123456789").unwrap();
+        read_capped_metadata_with(&path, METADATA_SIZE_LIMIT).expect("the default admits 10 bytes");
+        let err = read_capped_metadata_with(&path, 9).expect_err("a 9-byte cap must refuse it");
+        match &err {
+            MindError::MetadataTooLarge { limit, .. } => assert_eq!(*limit, 9),
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("9 bytes"),
+            "a sub-KiB cap must not render as '0 MiB': {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_unlimited_cap_reads_the_whole_file() {
+        // spec: DSC-107 -- u64::MAX is the no-ceiling value, and `limit + 1`
+        // must not wrap to a zero-byte read.
+        let path = cap_tmp("unlimited");
+        std::fs::write(&path, "every byte of it").unwrap();
+        let text = read_capped_metadata_with(&path, u64::MAX).expect("unlimited must read");
+        assert_eq!(text, "every byte of it");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_too_large_message_names_the_flag_that_raises_the_cap() {
+        // spec: DSC-106 -- the refusal has to name the remedy, or the cap reads
+        // as a hard limit of the format.
+        let err = MindError::MetadataTooLarge {
+            path: PathBuf::from("/src/mind.toml"),
+            limit: METADATA_SIZE_LIMIT,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--max-metadata-size"),
+            "message must name the flag: {msg}"
+        );
+        assert!(msg.contains("8 MiB"), "message must name the cap: {msg}");
+    }
+
+    #[test]
+    fn parse_metadata_size_accepts_every_documented_form() {
+        // spec: DSC-105
+        for (raw, want) in [
+            ("16777216", 16_777_216u64),
+            ("512B", 512),
+            ("32MiB", 32 * 1024 * 1024),
+            ("32mib", 32 * 1024 * 1024),
+            ("32M", 32 * 1024 * 1024),
+            ("32 MiB", 32 * 1024 * 1024),
+            ("512KiB", 512 * 1024),
+            ("512K", 512 * 1024),
+            ("2GiB", 2 * 1024 * 1024 * 1024),
+            ("2G", 2 * 1024 * 1024 * 1024),
+            // decimal suffixes are decimal, not a second spelling of binary
+            ("16MB", 16_000_000),
+            ("16KB", 16_000),
+            ("1GB", 1_000_000_000),
+            // no ceiling
+            ("unlimited", u64::MAX),
+            ("none", u64::MAX),
+            ("0", u64::MAX),
+            // spec: DSC-110 -- and every other spelling of zero, unit or not
+            ("00", u64::MAX),
+            ("0B", u64::MAX),
+            ("0KiB", u64::MAX),
+            ("0MiB", u64::MAX),
+            ("0GB", u64::MAX),
+            ("0 mib", u64::MAX),
+        ] {
+            assert_eq!(
+                parse_metadata_size(raw),
+                Ok(want),
+                "'{raw}' must parse as {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_metadata_size_refuses_what_it_cannot_represent_exactly() {
+        // spec: DSC-105 -- a fraction is refused rather than rounded, and an
+        // unknown unit is refused rather than read as bytes: silently using a
+        // different cap than the one written is the failure worth avoiding.
+        for raw in ["", "   ", "1.5MiB", "MiB", "16PB", "16 tons", "-1", "1e6"] {
+            assert!(
+                parse_metadata_size(raw).is_err(),
+                "'{raw}' must not parse to a size"
+            );
+        }
+        let err = parse_metadata_size("18446744073709551615GiB")
+            .expect_err("an overflowing size must be refused, not wrapped");
+        assert!(err.contains("overflow"), "message must say why: {err}");
+    }
+
+    #[test]
+    fn parse_metadata_size_names_a_fraction_as_a_fraction() {
+        // spec: DSC-105 -- the digit scan stops at the `.`, which used to leave
+        // the refusal blaming `.5mib` as an unknown *unit*: a token the
+        // operator never wrote, sending them to the unit table instead of to
+        // the decimal point. Say what is actually wrong and what to write.
+        let err = parse_metadata_size("1.5MiB").expect_err("a fraction must be refused");
+        assert!(
+            err.contains("fractional"),
+            "the message must name the fraction as the problem: {err}"
+        );
+        assert!(
+            !err.contains("is not a known size unit"),
+            "the message must not blame an invented unit token: {err}"
+        );
+        assert!(
+            err.contains("1536KiB"),
+            "the message must show the whole-unit equivalent to write: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_metadata_size_reads_every_zero_spelling_as_unlimited() {
+        // spec: DSC-110 -- the rule is the parser's, not a caller's: a library
+        // caller and the CLI both get "no ceiling" for `0B`, where previously
+        // only the CLI did (its setter rescued the literal 0) and a direct
+        // caller got a cap of zero bytes, which refuses every metadata file.
+        for raw in ["0", "00", "0b", "0B", "0KiB", "0MiB", "0GB", " 0 mib "] {
+            assert_eq!(
+                parse_metadata_size(raw),
+                Ok(u64::MAX),
+                "'{raw}' must read as unlimited"
+            );
+        }
+        // A non-zero count is unaffected: the fold-in is about zero alone.
+        assert_eq!(parse_metadata_size("1B"), Ok(1));
+        assert_eq!(parse_metadata_size("10MiB"), Ok(10 * 1024 * 1024));
+    }
+
+    #[test]
+    fn format_metadata_size_uses_the_largest_exact_unit() {
+        // spec: DSC-106 -- the same rendering serves the refusal and `config
+        // show`, so a cap reads back the way it was written.
+        assert_eq!(format_metadata_size(8 * 1024 * 1024), "8 MiB");
+        assert_eq!(format_metadata_size(512 * 1024), "512 KiB");
+        assert_eq!(format_metadata_size(2 * 1024 * 1024 * 1024), "2 GiB");
+        assert_eq!(format_metadata_size(1500), "1500 bytes");
+        assert_eq!(format_metadata_size(0), "0 bytes");
+        assert_eq!(format_metadata_size(u64::MAX), "unlimited");
+    }
+
+    #[test]
+    fn the_unresolved_limit_is_the_documented_default() {
+        // spec: DSC-104 -- with none of the three origins set, the cap is
+        // METADATA_SIZE_LIMIT, so a library caller that never resolves one
+        // behaves exactly as before the knob existed.
+        //
+        // Nothing here writes the process-wide limit: every test in this binary
+        // shares that atomic, and a test that set it would change the cap under
+        // whatever else is running. `0` mapping to "no ceiling" is asserted
+        // end-to-end against the real binary instead.
+        assert_eq!(metadata_size_limit(), METADATA_SIZE_LIMIT);
     }
 }

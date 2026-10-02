@@ -168,6 +168,157 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub absorb_to: Option<String>,
+
+    /// Ceiling for every source-controlled metadata read (DSC-103). Stored as
+    /// written (`"32MiB"`, `"16777216"`, `"unlimited"`) and parsed at startup by
+    /// [`resolve_metadata_limit_detail`]; absent means the [`METADATA_SIZE_LIMIT`]
+    /// default. The lowest-precedence of the three ways to set it: the
+    /// `--max-metadata-size` flag and `MIND_MAX_METADATA_SIZE` both outrank it
+    /// (DSC-104).
+    // spec: DSC-103
+    #[serde(
+        rename = "max-metadata-size",
+        alias = "max_metadata_size",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_metadata_size: Option<String>,
+}
+
+/// The environment variable that sets the metadata cap (DSC-104), between the
+/// `--max-metadata-size` flag and the config key in precedence.
+pub const MAX_METADATA_SIZE_ENV: &str = "MIND_MAX_METADATA_SIZE";
+
+/// Resolve the metadata size cap from its three origins, highest precedence
+/// first: the `--max-metadata-size` flag, `MIND_MAX_METADATA_SIZE`, then the
+/// `max-metadata-size` config key. `None` everywhere yields the
+/// [`METADATA_SIZE_LIMIT`] default (DSC-104).
+///
+/// Pure in its three inputs so the precedence is testable without a process
+/// environment shared by every other test in the binary; `main::run` gathers
+/// them. A value that is present but unparseable is a hard error naming its
+/// origin, never a silent fallback to the next one down: an operator who typed
+/// a cap and got the default instead would have no way to tell (DSC-105).
+///
+/// Startup uses [`resolve_metadata_limit_detail`], which also names the
+/// origin; this value-only form remains for the precedence tests.
+#[cfg(test)]
+pub fn resolve_metadata_limit(
+    flag: Option<&str>,
+    env: Option<&str>,
+    configured: Option<&str>,
+) -> Result<u64> {
+    resolve_metadata_limit_detail(flag, env, configured).map(|(limit, _)| limit)
+}
+
+/// Which of the three origins supplied the metadata cap in force, carrying the
+/// raw value as written (DSC-104). `Default` means none of them did.
+///
+/// Recorded once at startup (`main::run`, beside
+/// [`crate::error::set_metadata_size_limit`]) so `config show` can say where
+/// its effective value came from without re-reading the environment and
+/// guessing (CLI-241).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataLimitOrigin {
+    /// This run's `--max-metadata-size`.
+    Flag(String),
+    /// `MIND_MAX_METADATA_SIZE`.
+    Env(String),
+    /// The `max-metadata-size` config key.
+    Config(String),
+    /// Nothing was set: the built-in default.
+    Default,
+}
+
+impl MetadataLimitOrigin {
+    /// The name an operator knows this origin by, for messages.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MetadataLimitOrigin::Flag(_) => "--max-metadata-size",
+            MetadataLimitOrigin::Env(_) => MAX_METADATA_SIZE_ENV,
+            MetadataLimitOrigin::Config(_) => "the 'max-metadata-size' config key",
+            MetadataLimitOrigin::Default => "the built-in default",
+        }
+    }
+
+    /// The raw value as written, `None` for the default.
+    pub fn raw(&self) -> Option<&str> {
+        match self {
+            MetadataLimitOrigin::Flag(raw)
+            | MetadataLimitOrigin::Env(raw)
+            | MetadataLimitOrigin::Config(raw) => Some(raw),
+            MetadataLimitOrigin::Default => None,
+        }
+    }
+}
+
+/// Resolve the metadata size cap from its three origins (flag, then
+/// `MIND_MAX_METADATA_SIZE`, then the config key; the default when none is
+/// set, DSC-104) and report which origin supplied it. A present but
+/// unparseable value is a hard error naming its origin, never a fallback to
+/// the next one down (DSC-105).
+pub fn resolve_metadata_limit_detail(
+    flag: Option<&str>,
+    env: Option<&str>,
+    configured: Option<&str>,
+) -> Result<(u64, MetadataLimitOrigin)> {
+    let origin = match (flag, env, configured) {
+        (Some(raw), _, _) => MetadataLimitOrigin::Flag(raw.to_string()),
+        (None, Some(raw), _) => MetadataLimitOrigin::Env(raw.to_string()),
+        (None, None, Some(raw)) => MetadataLimitOrigin::Config(raw.to_string()),
+        (None, None, None) => {
+            return Ok((
+                crate::error::METADATA_SIZE_LIMIT,
+                MetadataLimitOrigin::Default,
+            ));
+        }
+    };
+    let raw = origin.raw().unwrap_or_default();
+    let limit =
+        crate::error::parse_metadata_size(raw).map_err(|msg| MindError::BadMetadataSize {
+            origin: origin.label().to_string(),
+            msg,
+        })?;
+    Ok((limit, origin))
+}
+
+static METADATA_LIMIT_ORIGIN: std::sync::OnceLock<MetadataLimitOrigin> = std::sync::OnceLock::new();
+
+/// Record where this run's metadata cap came from. First call wins; `main::run`
+/// makes the only one.
+pub fn set_metadata_limit_origin(origin: MetadataLimitOrigin) {
+    let _ = METADATA_LIMIT_ORIGIN.set(origin);
+}
+
+/// Where this run's metadata cap came from, or `None` when startup never
+/// recorded it (unit tests, and the verbs that skip the cap, DSC-113).
+pub fn metadata_limit_origin() -> Option<&'static MetadataLimitOrigin> {
+    METADATA_LIMIT_ORIGIN.get()
+}
+
+/// Whether `raw` is a zero-valued size (`0`, `0MiB`, ...) that turns the
+/// metadata cap off (DSC-110), as opposed to the words `unlimited`/`none`,
+/// which say so on purpose. A zero is the likelier typo for "a small cap", so
+/// startup warns about it; the words stay silent.
+pub fn zero_turns_cap_off(raw: &str) -> bool {
+    if crate::error::parse_metadata_size(raw) != Ok(u64::MAX) {
+        return false;
+    }
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if matches!(cleaned.as_str(), "unlimited" | "none") {
+        return false;
+    }
+    // Only a zero count reaches u64::MAX through a number: a literal byte count
+    // of u64::MAX is a real (if absurd) ceiling, not the zero spelling.
+    let digits: &str = cleaned
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default();
+    !digits.is_empty() && digits.chars().all(|c| c == '0')
 }
 
 impl Config {
@@ -210,6 +361,126 @@ mod tests {
         assert_eq!(cfg.lobes.len(), 1);
         assert_eq!(cfg.lobes[0].path(), "~/.claude");
         assert_eq!(cfg.lobes[0].kinds(), None, "bare entry admits all kinds");
+    }
+
+    /// The flag beats the environment, which beats the config key, and none of
+    /// the three yields the default.
+    // spec: DSC-104
+    #[test]
+    fn metadata_limit_precedence_is_flag_then_env_then_config() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            resolve_metadata_limit(Some("1MiB"), Some("2MiB"), Some("3MiB")).unwrap(),
+            mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, Some("2MiB"), Some("3MiB")).unwrap(),
+            2 * mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, None, Some("3MiB")).unwrap(),
+            3 * mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, None, None).unwrap(),
+            crate::error::METADATA_SIZE_LIMIT
+        );
+    }
+
+    /// The detail form reports the origin that won, carrying its raw value, so
+    /// `config show` can credit it without re-reading the environment.
+    // spec: DSC-104 CLI-241
+    #[test]
+    fn metadata_limit_detail_reports_the_winning_origin() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            resolve_metadata_limit_detail(Some("1MiB"), Some("2MiB"), Some("3MiB")).unwrap(),
+            (mib, MetadataLimitOrigin::Flag("1MiB".into()))
+        );
+        assert_eq!(
+            resolve_metadata_limit_detail(None, Some("2MiB"), Some("3MiB")).unwrap(),
+            (2 * mib, MetadataLimitOrigin::Env("2MiB".into()))
+        );
+        assert_eq!(
+            resolve_metadata_limit_detail(None, None, Some("3MiB")).unwrap(),
+            (3 * mib, MetadataLimitOrigin::Config("3MiB".into()))
+        );
+        assert_eq!(
+            resolve_metadata_limit_detail(None, None, None).unwrap(),
+            (
+                crate::error::METADATA_SIZE_LIMIT,
+                MetadataLimitOrigin::Default
+            )
+        );
+        let err = resolve_metadata_limit_detail(None, Some("nope"), None).unwrap_err();
+        assert!(err.to_string().contains(MAX_METADATA_SIZE_ENV), "{err}");
+    }
+
+    /// Every zero-valued spelling is flagged as turning the cap off by
+    /// accident; the words that say so on purpose, a real size, and a literal
+    /// u64::MAX byte count are not.
+    // spec: DSC-110
+    #[test]
+    fn zero_turns_cap_off_matches_only_zero_spellings() {
+        for raw in ["0", "0MiB", " 0 kb ", "000", "0b"] {
+            assert!(zero_turns_cap_off(raw), "{raw:?} is a zero spelling");
+        }
+        for raw in [
+            "unlimited",
+            "NONE",
+            " Unlimited ",
+            "8MiB",
+            "1",
+            "18446744073709551615",
+            "junk",
+            "",
+        ] {
+            assert!(!zero_turns_cap_off(raw), "{raw:?} is not a zero spelling");
+        }
+    }
+
+    /// A bad value fails, naming its own origin, and a valid lower-precedence
+    /// value does not rescue it: a typo that silently fell through to the
+    /// default would leave the operator no way to see the cap was not applied.
+    // spec: DSC-105
+    #[test]
+    fn a_bad_metadata_limit_fails_naming_where_it_came_from() {
+        for (flag, env, cfg, origin) in [
+            (
+                Some("1.5MiB"),
+                Some("2MiB"),
+                Some("3MiB"),
+                "--max-metadata-size",
+            ),
+            (None, Some("nope"), Some("3MiB"), MAX_METADATA_SIZE_ENV),
+            (None, None, Some("huge"), "max-metadata-size"),
+        ] {
+            let err = resolve_metadata_limit(flag, env, cfg)
+                .expect_err("an unparseable value must be a hard error");
+            assert_eq!(err.kind(), "bad-metadata-size");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(origin),
+                "message must name the origin '{origin}': {msg}"
+            );
+            assert!(
+                msg.contains("unlimited") && msg.contains("32MiB"),
+                "message must show the accepted forms: {msg}"
+            );
+        }
+    }
+
+    /// The config key accepts both its canonical kebab-case spelling and the
+    /// snake_case alias, like `absorb-to`.
+    // spec: DSC-103
+    #[test]
+    fn max_metadata_size_parses_under_both_spellings() {
+        let kebab: Config = toml::from_str("max-metadata-size = \"32MiB\"\n").unwrap();
+        assert_eq!(kebab.max_metadata_size.as_deref(), Some("32MiB"));
+        let snake: Config = toml::from_str("max_metadata_size = \"32MiB\"\n").unwrap();
+        assert_eq!(snake.max_metadata_size.as_deref(), Some("32MiB"));
+        let absent: Config = toml::from_str("ssh = true\n").unwrap();
+        assert_eq!(absent.max_metadata_size, None);
     }
 
     /// A table lobe entry parses its path and `kinds` filter.

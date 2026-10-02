@@ -175,10 +175,17 @@ impl SourceMeta {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemDecl {
-    /// `skill`, `agent`, `rule`, `command` (CMD-4), or `tool`.
+    /// `skill`, `agent`, `rule`, `command` (CMD-4), `workflow` (WF-1), or
+    /// `tool`.
     pub kind: String,
     pub name: String,
     /// Path to the item, relative to the repo root (a dir for skills/tools).
+    ///
+    /// Shape is checked against the kind where the path meets the filesystem,
+    /// in `catalog::from_decl`, not here: this reader is a pure parse of the
+    /// TOML and has no clone to look in. A `workflow` entry whose path names a
+    /// directory is refused there (DSC-109), since a workflow is exactly one
+    /// `.js` file.
     pub path: String,
     /// Optional override for where to link this item within each agent home
     /// (lobe). The value is a path relative to each lobe root
@@ -412,6 +419,10 @@ pub struct Discover {
     /// and rule globs do (commands.md CMD-4).
     #[serde(default)]
     pub commands: KindGlobs,
+    /// Workflow globs match the workflow FILE (`workflows/<name>.js`), as the
+    /// agent, rule, and command globs do (workflows.md WF-6).
+    #[serde(default)]
+    pub workflows: KindGlobs,
     /// Tool globs match the tool DIRECTORY (e.g. `packages/*/tool`), not an
     /// anchor file: the matched directory is the tool.
     #[serde(default)]
@@ -644,12 +655,13 @@ impl Discover {
     /// [`Discover`] cannot be silently honored by one and skipped by the other
     /// (which is exactly how `commands` first landed: discovered by the scan,
     /// but neither authoritative nor validated).
-    fn kind_globs(&self) -> [&KindGlobs; 5] {
+    fn kind_globs(&self) -> [&KindGlobs; 6] {
         [
             &self.skills,
             &self.agents,
             &self.rules,
             &self.commands,
+            &self.workflows,
             &self.tools,
         ]
     }
@@ -899,6 +911,14 @@ impl MindToml {
         // spec: NS-25 — a declared `[source].prefix` that is a reserved
         // item-kind word is rejected at load, before it can reach the
         // effective-prefix resolution.
+        //
+        // spec: DSC-112 -- the reserved list is append-only, so this refusal
+        // can also strike a source that melded cleanly before the word was
+        // reserved (`workflow`, once the kind shipped). `catalog::scan_source_at`
+        // re-words the `ReservedPrefix` it gets from here into
+        // `MeldedSourceReservedPrefix`, which names the source and `mind unmeld`;
+        // this load site has neither the source identity nor the registry to
+        // know it is looking at one.
         if let Some(p) = &parsed.source.prefix {
             crate::namespace::validate_prefix(p)?;
         }

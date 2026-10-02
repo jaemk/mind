@@ -1004,6 +1004,7 @@ mod tests {
             prefix: None,
             path: PathBuf::from("/tmp/fake"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,

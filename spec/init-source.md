@@ -60,11 +60,16 @@ namespacing.md.
   markdown body (NS-56). The rewrite is still heuristic in prose (a sibling name
   can be an ordinary word), so it is opt-in and the maintainer reviews the
   result (e.g. via `git diff`). The per-file gate is `namespace::is_markdown`
-  (NS-53), the same extension set (`.md`, `.markdown`, `.mdown`, `.mkd`,
-  case-insensitive) `install` expands tokens in: a non-markdown file in an
-  item's tree (a shell script, a data file) is skipped entirely, not just left
-  unwrapped at non-prose positions, since install never expands a `{{ns:}}`
-  token there either.
+  (NS-53's extension test: `.md`, `.markdown`, `.mdown`, `.mkd`,
+  case-insensitive): a non-markdown file in an item's tree (a shell script, a
+  data file) is skipped entirely, not just left unwrapped at non-prose
+  positions. This is narrower than the set install expands tokens in overall
+  (NS-53 also grants a workflow's `.js`): `--template`'s word-boundary matching
+  treats a workflow's code as code, not prose, the same reason `review --fix`
+  leaves a workflow file's tokens alone (NS-54) -- rewriting a sibling name
+  found as a bare word in JavaScript risks corrupting working code, a narrower
+  and more specific hazard than "install doesn't expand there" (install does
+  expand there now, WF-25).
 - `INIT-6` `init-source` makes no network calls and does not read or write the
   store or any agent home; it edits only the target repo. Without `--template` it
   is read-only except for creating an absent `mind.toml` (INIT-3).
