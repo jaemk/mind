@@ -280,6 +280,9 @@ and verified.
 | A kind-qualified ref with no source selector also matches the effective name `<kind>:<name>`; both matching is ambiguous | done | [namespacing.md](namespacing.md) (NS-74) |
 | An unmanaged lobe workflow claims its harness name in the collision check | done | [workflows.md](workflows.md) (WF-61) |
 | `--json` carries a workflow's `when_to_use` separately from `description` | done | [workflows.md](workflows.md) (WF-62) |
+| `[discover].workflows` globs match only regular non-symlink `.js` files | done | [discovery.md](discovery.md) (DSC-114) |
+| Item-link skill and tool `TOOL.md` anchors are classified no-follow | done | [discovery.md](discovery.md) (DSC-115) |
+| The `meta` reader rejects expression-headed strings; blank workflow description/whenToUse read as absent | done | [workflows.md](workflows.md) (WF-63) |
 
 ## Documents
 

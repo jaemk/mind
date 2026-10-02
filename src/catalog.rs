@@ -438,7 +438,10 @@ pub(crate) fn scan_source_at(
     // A verb can scan the same source several times in one run (upgrade syncs,
     // then rescans), so the warning is printed once per source per process.
     if let Some(p) = &prefix
-        && namespace::validate_prefix(p).is_err()
+        && matches!(
+            namespace::validate_prefix(p),
+            Err(MindError::ReservedPrefix { .. })
+        )
         && first_reserved_warning(&source.name)
     {
         crate::render::scan_warn(format!(
@@ -779,7 +782,10 @@ fn scan_item_link(
             });
         }
         let skill_md = target.join("SKILL.md");
-        if !(target.is_dir() && skill_md.is_file()) {
+        // spec: DSC-115 -- the skill dir and its anchor are classified
+        // no-follow, as in the convention scan: a symlinked `SKILL.md` or
+        // skill directory is not a skill.
+        if !(is_dir_nofollow(&target) && is_regular_file_nofollow(&skill_md)) {
             if is_workflow_link_path(item_path) {
                 return Err(MindError::LinkKindNotSupported {
                     source_name: source.name.clone(),
@@ -1691,11 +1697,17 @@ fn build_item(
     let description = match ov.description {
         Some(d) => Some(d),
         None => match kind {
-            ItemKind::Workflow => wf_meta.description,
+            // A blank `description: ''` is no description, so it reads as the
+            // WF-5 "yields nothing" case rather than an empty one.
+            ItemKind::Workflow => wf_meta.description.filter(|d| !d.trim().is_empty()),
             _ => frontmatter::field(&meta_text, "description"),
         },
     }
     .map(sanitized);
+    let when_to_use = wf_meta
+        .when_to_use
+        .filter(|w| !w.trim().is_empty())
+        .map(sanitized);
     Ok(Some(CatalogItem {
         kind,
         name,
@@ -1703,7 +1715,7 @@ fn build_item(
         prefix: prefix.clone(),
         path,
         description,
-        when_to_use: wf_meta.when_to_use.map(sanitized),
+        when_to_use,
         link_rel: ov.link,
         bin: tool_field(kind, ov.bin, &meta_text, "bin"),
         build: tool_field(kind, ov.build, &meta_text, "build"),
@@ -1761,6 +1773,9 @@ fn scan_globs(
     // Tool globs match the tool directory itself; its `TOOL.md` (if any) is the
     // metadata source.
     for dir in resolve_globs(root, &discover.tools, ItemKind::Tool)? {
+        if !tool_anchor_ok(&dir) {
+            continue;
+        }
         let meta = dir.join("TOOL.md");
         if let Some(item) = make_item(root, source, prefix, ItemKind::Tool, dir, &meta)? {
             out.push(item);
@@ -1876,7 +1891,7 @@ fn scan_convention(
         // spec: DSC-108 -- a tool needs no anchor file, so the directory
         // classification is the entire test of whether the item exists; a
         // symlink there is the oracle in its purest form.
-        if is_dir_nofollow(&entry) {
+        if is_dir_nofollow(&entry) && tool_anchor_ok(&entry) {
             let meta = entry.join("TOOL.md");
             if let Some(item) = make_item(root, source, prefix, ItemKind::Tool, entry, &meta)? {
                 out.push(item);
@@ -2378,6 +2393,16 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                         ),
                     });
                 }
+                // spec: DSC-114 DSC-109 -- a workflow IS one `.js` file (WF-1),
+                // so a glob match that is not a regular, non-symlink `.js` file
+                // (a directory, a `README.md`, a link) is not a workflow. Dropped
+                // silently, like the DSC-108 filter below, and placed after the
+                // DSC-81 escape check so an escaping link stays a hard error.
+                if kind == ItemKind::Workflow
+                    && !(is_regular_file_nofollow(&p) && p.extension().is_some_and(|e| e == "js"))
+                {
+                    continue;
+                }
                 // Derive the item name from the matched path and verify it is safe.
                 // spec: DSC-83 -- for skill globs the pattern points at SKILL.md;
                 // the bare skill name is the parent directory name. For all other
@@ -2449,6 +2474,19 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
 /// spec: DSC-108
 fn is_regular_file_nofollow(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// True when a tool directory's optional `TOOL.md` anchor is acceptable: absent
+/// (a tool needs no anchor), or a regular non-symlink file. A symlinked or
+/// non-file `TOOL.md` would have its target's `description`/`bin`/`build` read
+/// into the catalog, so the tool is not offered.
+///
+/// spec: DSC-115
+fn tool_anchor_ok(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir.join("TOOL.md")) {
+        Ok(m) => m.file_type().is_file(),
+        Err(_) => true,
+    }
 }
 
 /// True when `path` is a directory, classified WITHOUT following a symlink.
@@ -4323,6 +4361,168 @@ mod tests {
         assert!(!first_reserved_warning(&a), "a repeat sighting does not");
         assert!(first_reserved_warning(&b), "another source still warns");
         assert!(!first_reserved_warning(&b));
+    }
+
+    #[test]
+    fn only_a_reserved_prefix_consumes_the_reserved_warning() {
+        // spec: DSC-112 -- the scan warns only when validate_prefix fails with
+        // ReservedPrefix. An UnsafePrefix alias is a different problem the
+        // warning's text does not describe, so it must not consume (or print)
+        // the once-per-source warning.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("rules/style.md"), "---\ndescription: d\n---\n");
+
+        let mut unsafe_src = make_source_for(root);
+        unsafe_src.name = format!("local/test/dsc112-unsafe-{}", std::process::id());
+        unsafe_src.alias = Some("a:b".to_string());
+        let mut out = Vec::new();
+        scan_source_at(root, &unsafe_src, &mut out).unwrap();
+        assert!(
+            first_reserved_warning(&unsafe_src.name),
+            "an unsafe (non-reserved) prefix must not fire the reserved-word warning"
+        );
+
+        let mut reserved_src = make_source_for(root);
+        reserved_src.name = format!("local/test/dsc112-reserved-{}", std::process::id());
+        reserved_src.alias = Some("workflow".to_string());
+        let mut out = Vec::new();
+        scan_source_at(root, &reserved_src, &mut out).unwrap();
+        assert!(
+            !first_reserved_warning(&reserved_src.name),
+            "a reserved prefix must have fired the warning during the scan"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workflow_glob_matches_only_regular_js_files() {
+        // spec: DSC-114 -- a `[discover].workflows` glob drops a directory, a
+        // non-.js file, and a symlink; only a regular .js file is a match.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("workflows/ok.js"), "export const meta = {}\n");
+        write_file(&root.join("workflows/README.md"), "# readme\n");
+        write_file(&root.join("workflows/dir.js/inner.txt"), "x\n");
+        std::os::unix::fs::symlink(root.join("workflows/ok.js"), root.join("workflows/link.js"))
+            .unwrap();
+        let matches = glob_paths(root, "workflows/*", ItemKind::Workflow).unwrap();
+        let names: Vec<String> = matches.iter().map(|p| file_name(p)).collect();
+        assert_eq!(names, vec!["ok.js".to_string()], "got {names:?}");
+        // Other kinds are unaffected by the workflow filter.
+        let md = glob_paths(root, "workflows/*", ItemKind::Rule).unwrap();
+        assert!(md.len() > 1, "non-workflow globs keep matching: {md:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn item_link_skill_requires_a_regular_anchor() {
+        // spec: DSC-115 -- an item link's SKILL.md must be a regular file, and
+        // its directory a real directory, not links.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("skills/good/SKILL.md"),
+            "---\ndescription: g\n---\n",
+        );
+        write_file(
+            &root.join("elsewhere/real.md"),
+            "---\ndescription: SECRET\n---\n",
+        );
+        std::fs::create_dir_all(root.join("skills/linked")).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("elsewhere/real.md"),
+            root.join("skills/linked/SKILL.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.join("skills/good"), root.join("skills/dirlink")).unwrap();
+
+        let scan = |item_path: &str| {
+            let mut src = make_source_for(root);
+            src.item_path = Some(item_path.to_string());
+            let mut out = Vec::new();
+            scan_source_at(root, &src, &mut out).map(|_| out)
+        };
+        let ok = scan("skills/good").unwrap();
+        assert_eq!(ok.len(), 1, "the regular skill is still linkable");
+        assert!(matches!(
+            scan("skills/linked"),
+            Err(MindError::LinkNotASkill { .. })
+        ));
+        assert!(matches!(
+            scan("skills/dirlink"),
+            Err(MindError::LinkNotASkill { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_with_a_symlinked_anchor_is_not_offered() {
+        // spec: DSC-115 -- TOOL.md is optional, but when present it must be a
+        // regular non-symlink file: by convention scan and by glob.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("elsewhere/real.md"),
+            "---\ndescription: SECRET\n---\n",
+        );
+        write_file(&root.join("tools/bare/run.sh"), "#!/bin/sh\n");
+        write_file(
+            &root.join("tools/plain/TOOL.md"),
+            "---\ndescription: p\n---\n",
+        );
+        write_file(&root.join("tools/linked/run.sh"), "#!/bin/sh\n");
+        std::os::unix::fs::symlink(
+            root.join("elsewhere/real.md"),
+            root.join("tools/linked/TOOL.md"),
+        )
+        .unwrap();
+
+        let names = |out: &Vec<CatalogItem>| {
+            let mut v: Vec<String> = out.iter().map(|i| i.name.clone()).collect();
+            v.sort();
+            v
+        };
+        let src = make_source_for(root);
+        let mut out = Vec::new();
+        scan_source_at(root, &src, &mut out).unwrap();
+        assert_eq!(names(&out), vec!["bare", "plain"], "convention scan");
+
+        write_file(
+            &root.join("mind.toml"),
+            "[discover]\ntools = { include = [\"tools/*\"] }\n",
+        );
+        let mut out = Vec::new();
+        scan_source_at(root, &src, &mut out).unwrap();
+        assert_eq!(names(&out), vec!["bare", "plain"], "glob scan");
+        assert!(
+            out.iter()
+                .all(|i| i.description.as_deref() != Some("SECRET"))
+        );
+    }
+
+    #[test]
+    fn a_blank_workflow_description_and_when_to_use_are_none() {
+        // spec: WF-63 -- an empty or whitespace-only meta string is no value.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("workflows/blank.js"),
+            "export const meta = { name: 'blank', description: '   ', whenToUse: '' }\n",
+        );
+        write_file(
+            &root.join("workflows/full.js"),
+            "export const meta = { name: 'full', description: 'd', whenToUse: 'w' }\n",
+        );
+        let src = make_source_for(root);
+        let mut out = Vec::new();
+        scan_source_at(root, &src, &mut out).unwrap();
+        let blank = out.iter().find(|i| i.name == "blank").unwrap();
+        assert_eq!(blank.description, None);
+        assert_eq!(blank.when_to_use, None);
+        let full = out.iter().find(|i| i.name == "full").unwrap();
+        assert_eq!(full.description.as_deref(), Some("d"));
+        assert_eq!(full.when_to_use.as_deref(), Some("w"));
     }
 
     /// An `ItemDecl` with only kind, name, path, and link set.
