@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-02
+
 ### Added
 
 - A sixth item kind, `workflow`: a flat `workflows/<name>.js` discovered,
@@ -83,6 +85,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   being surfaced as a resolvable item: unresolved, it let `absorb`/`forget`
   build a destination, store, staging, or backup path that pointed at the
   PARENT directory holding every other item of that kind (UNM-9).
+- A symlinked `SKILL.md` on the item-link path, and a symlinked `TOOL.md` in the
+  convention and `[discover].tools` scans, are no longer followed: the skill
+  link is refused and the tool is not offered, closing a file-existence and
+  description read through the link (DSC-115).
+
+### Fixed
+
+- A `config.toml` that does not parse no longer fails every verb. The default
+  metadata cap is used unless the file names `max-metadata-size`, in which case
+  the parse error is still reported (DSC-104).
+- `[discover].workflows` globs match only regular, non-symlink `.js` files, so a
+  directory or a non-`.js` match is no longer catalogued as a workflow
+  (DSC-114).
+- The reserved-prefix warning (DSC-112) fires only for a reserved prefix, not
+  for any other invalid alias.
+- A workflow's empty or whitespace-only `description` or `whenToUse` reads as
+  absent, and a `meta` string value joined by an expression (`'a' + 'b'`) reads
+  as no value instead of its first literal (WF-63).
 
 ## [0.28.1] - 2026-09-08
 
@@ -1783,7 +1803,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.28.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/jaemk/mind/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/jaemk/mind/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/jaemk/mind/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/jaemk/mind/compare/v0.27.0...v0.27.1
