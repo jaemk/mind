@@ -553,7 +553,20 @@ impl<'a> Cursor<'a> {
                     let v = self.read_string();
                     // A template that turned out to be interpolated has been
                     // consumed; there is nothing left of this entry to skip.
-                    v
+                    // A string that is only the head of an expression
+                    // (`'a' + 'b'`) is not a literal value: drop it and skip
+                    // the rest of the entry.
+                    if v.is_some() {
+                        self.skip_trivia();
+                        if matches!(self.peek(), Some(ch) if ch != ',' && ch != '}') {
+                            self.skip_value();
+                            None
+                        } else {
+                            v
+                        }
+                    } else {
+                        v
+                    }
                 }
                 _ => {
                     self.skip_value();
@@ -624,6 +637,18 @@ mod tests {
         assert_eq!(m.description.as_deref(), Some("Review a diff"));
         assert_eq!(m.when_to_use.as_deref(), Some("Before a release"));
         assert!(!m.is_empty());
+    }
+
+    // spec: WF-5 -- a string that begins an expression (`'a' + 'b'`) is not a
+    // literal value, so that key is absent and its siblings still read.
+    #[test]
+    fn a_concatenated_string_is_not_a_value() {
+        let m = meta(
+            "export const meta = { name: 'a' + 'b', description: 'ok', whenToUse: 'x' /* c */ }",
+        );
+        assert_eq!(m.name, None);
+        assert_eq!(m.description.as_deref(), Some("ok"));
+        assert_eq!(m.when_to_use.as_deref(), Some("x"));
     }
 
     // spec: WF-5 -- all three JavaScript string forms are values; an
@@ -1448,12 +1473,13 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
         }
     }
 
-    // spec: WF-5 -- dropping a stray closer costs exactly that character: the
-    // key after it is still read, and the key before it is kept.
+    // spec: WF-5 WF-63 -- a stray closer after a string means the string did not
+    // end its entry, so that key yields nothing (WF-63); the key after the
+    // closer is still read.
     #[test]
-    fn a_dropped_closer_costs_only_itself() {
+    fn a_dropped_closer_costs_only_its_own_entry() {
         let m = parse_bounded("export const meta = { name: 'a' ) description: 'b' }");
-        assert_eq!(m.name.as_deref(), Some("a"));
+        assert_eq!(m.name, None);
         assert_eq!(m.description.as_deref(), Some("b"));
     }
 

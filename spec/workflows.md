@@ -408,6 +408,12 @@ that mind depends on is called out at the requirement that depends on it.
   key, present only when the workflow declares one and never on any other kind.
   The `<description> - <whenToUse>` join (WF-51) is the human display form only,
   so a JSON consumer never has to split a joined string.
+- `WF-63` The `meta` reader (WF-5) takes a string only as a whole value. When a
+  string literal is followed by anything other than `,` or `}` (the end of the
+  entry), as in `name: 'a' + 'b'`, it is the head of an expression, not a
+  literal: that key yields no value and its siblings still read. Likewise a
+  `description` or `whenToUse` that is empty or only whitespace is no value, so
+  the catalog item carries `None` rather than an empty string.
 - `WF-53` `review` reports EVERY workflow item as a `workflow-content` advisory
   finding, the workflow counterpart of the command disclosure (CLI-237, DSC-91).
   A workflow is not content the harness offers, it is JavaScript the harness

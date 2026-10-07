@@ -1104,7 +1104,10 @@ fn a_malformed_config_is_an_error_not_a_default_cap() {
         &sb.source.join("workflows/w.js"),
         "export const meta = { name: 'w', description: 'D' }\n",
     );
-    write(&sb.mind_home.join("config.toml"), "this is = = not toml\n");
+    write(
+        &sb.mind_home.join("config.toml"),
+        "max-metadata-size = = 1MiB\n",
+    );
     let r = sb.review();
     assert!(
         !r.success,

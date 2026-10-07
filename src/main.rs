@@ -511,7 +511,22 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
         },
     };
     let configured = if cli.max_metadata_size.is_none() && env.is_none() {
-        config::Config::load(paths)?.max_metadata_size
+        match config::Config::load(paths) {
+            Ok(c) => c.max_metadata_size,
+            // spec: DSC-104 -- a config that will not parse falls back to the
+            // default cap, unless it names the cap key: then it is the origin
+            // that would have been used, and silently applying the default
+            // under a value the operator set is refused (DSC-105).
+            Err(e) => {
+                let names_cap = std::fs::read_to_string(paths.config_file())
+                    .map(|t| t.contains("max-metadata-size") || t.contains("max_metadata_size"))
+                    .unwrap_or(false);
+                if names_cap {
+                    return Err(e);
+                }
+                None
+            }
+        }
     } else {
         None
     };

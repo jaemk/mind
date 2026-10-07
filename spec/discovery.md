@@ -904,9 +904,11 @@ field lets the curator opt in to named handling.
   The config file is read only when neither the flag nor the environment
   supplied a value, and a `config.toml` that will not parse falls back to the
   default cap rather than failing the run: commands that never read the config
-  (`completions`, `man`) must not start failing on a malformed one, and the
-  commands that do read it report the parse error themselves, in their own
-  context.
+  (`evolve`, `hooks`, `completions`, `man`) must not start failing on a
+  malformed one, and the commands that do read it report the parse error
+  themselves, in their own context. The exception is a malformed file that
+  names the `max-metadata-size` key: config would have been the cap's origin,
+  so the parse error is reported rather than the default applied silently.
 
 - `DSC-105` An accepted size is a whole number of bytes (`16777216`), a
   binary-suffixed size (`32MiB`, `512KiB`, `2GiB`, and the bare `32M`/`512K`/
@@ -1035,3 +1037,16 @@ field lets the curator opt in to named handling.
   `MIND_MAX_METADATA_SIZE`, or `max-metadata-size` config value therefore never
   stops a shell from loading its completion script or a user from reading the
   manual. Every other verb resolves the cap and refuses an undecodable value.
+
+- `DSC-114` A `[discover].workflows` glob matches only a regular, non-symlink
+  `.js` file, as the convention scan and a declared item (DSC-108, DSC-109)
+  do. A match that is a directory, a non-`.js` file, or a symlink is dropped
+  silently, not offered; a symlink resolving outside the clone stays the
+  DSC-81 hard error.
+
+- `DSC-115` A skill or tool anchor is classified no-follow wherever it is
+  discovered. An item link (item-link.md) to a skill directory requires the
+  directory and its `SKILL.md` to be a real directory and a regular file, not
+  links. A tool's `TOOL.md` is optional, but when present (convention scan or
+  `[discover].tools` glob) it must be a regular non-symlink file; a tool whose
+  `TOOL.md` is a symlink or other non-file is not offered.
