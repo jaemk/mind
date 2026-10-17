@@ -6,6 +6,68 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-17
+
+### Added
+
+- Install profiles: a source's `mind.toml` may declare `[profiles]`, named
+  item sets a consumer selects like cargo features (spec/profiles.md,
+  PROF-1..30). `meld --profile <name>`, `--no-default-profile`, and
+  `--all-profiles` choose them at meld; without them the `default` profile is
+  offered. `learn <source> --profile <name>` enables one on a melded source and
+  `forget <source> --profile <name>` disables it and forgets the items only it
+  wanted, keeping anything another item depends on. The enabled set is recorded
+  on the source, `upgrade` installs items a profile gains and reports the ones
+  it drops, curator entries take `profiles` and `default-profile`, `dump`
+  round-trips the enabled set, and `review` reports undefined members, cycles,
+  and empty profiles.
+- The probe TUI's meld input takes the meld flags (`--pin branch=dev`,
+  `--profile full`, ...) and runs the full meld flow, install offer included.
+  The source dialog lists declared and enabled profiles with Enable and Disable
+  actions that preview what installs or is forgotten (TUI-77, TUI-78).
+- A seventh item kind, `resource`: each file or directory directly under
+  `resources/` installs to `~/.mind/store/resource/<name>`, named by its full
+  file name, and is never linked into an agent home. An item reaches it with
+  `{{resources:name}}` (or `{{path:resource:name}}`). Under convention
+  discovery a resource is offered only when an item in the same source
+  references it; an authoritative `mind.toml` offers every resource it
+  declares through `[[items]]` or `[discover].resources`. Nothing is read from
+  a resource's content, and it cannot declare `link`, `bin`, or `build`
+  (spec/resources.md, RES-1..14).
+- `review` reports an `unreferenced-resource` advisory for each entry under
+  `resources/` that no item references, and maps a hardcoded
+  `~/.mind/store/resource/...` path to `{{resources:name}}` (RES-13, RES-14).
+- `--kind resource` on `probe` and `recall`.
+- The user guide is reorganized around tasks, with new pages for core
+  concepts, recipes, team setup, scripting, and an FAQ, and the command
+  reference rebuilt from the `--help` output.
+
+### Changed
+
+- Path tokens are dependencies. `{{tools:name}}`, `{{resources:name}}`, and
+  `{{path:kind:name}}` now pull their referent into a partial `learn`, as
+  `{{ns:}}` does, so a skill's tools and resources install with it instead of
+  its expanded paths naming an empty store location (DEP-8). Learning an item
+  that references a tool now shows the dependency tree and prompts; scripts
+  need `--yes`, and `learn --json` without `--yes` refuses with
+  `confirmation-required`. `forget` of a tool or resource that an installed
+  item references now warns about that dependent and prompts (DEP-60), so a
+  non-interactive `forget` of one needs `--force` or `--yes`.
+- `resource` is now a reserved namespace prefix. A new meld with
+  `[source].prefix = "resource"` or `meld -N resource` is refused with
+  `ReservedPrefix`. A source already melded under it keeps working with a
+  warning when the prefix came from `-N`, and fails its next scan when it came
+  from the repo's `[source].prefix`; either way the remedy is `mind unmeld` and
+  a re-meld under another prefix (RES-7, DSC-112).
+
+### Security
+
+- `rustls` updated to 0.23.46, clearing RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348, and RUSTSEC-2026-0349. `quinn-proto` updated to 0.11.19,
+  clearing RUSTSEC-2026-0338, RUSTSEC-2026-0340, and RUSTSEC-2026-0343. Both
+  are transitive: `rustls` backs the HTTP client `evolve` uses, and
+  `quinn-proto` is in the lockfile but not compiled into `mind`.
+
 ## [0.29.0] - 2026-10-02
 
 ### Added
@@ -1803,7 +1865,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/jaemk/mind/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/jaemk/mind/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/jaemk/mind/compare/v0.28.0...v0.28.1
 [0.28.0]: https://github.com/jaemk/mind/compare/v0.27.1...v0.28.0
