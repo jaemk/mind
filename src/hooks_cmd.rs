@@ -390,12 +390,15 @@ fn run_source_hooks(
                     );
                     // spec: HOOK-53 -- a non-zero exit is a hard stop; propagate
                     // the error after saving whatever was recorded so far.
+                    // spec: HOOK-141 -- `hooks run` sees the recorded set.
+                    let hook_env = crate::commands::source_hook_env(&registry.sources[idx]);
                     if let Err(e) = crate::hook::run_hook(
                         &h.run,
                         &clone_dir,
                         &source_name,
                         event_name,
                         h.label(),
+                        &hook_env,
                     ) {
                         if registry_dirty {
                             let _ = registry.save(paths);
@@ -675,6 +678,11 @@ fn run_item_build(
         "rebuilding {} via transactional reinstall",
         installed.display_key()
     );
+    // spec: HOOK-141 -- the recorded set and the item's recorded reasons.
+    let hook_env = crate::hook::HookEnv {
+        item_profiles: installed.profiles.clone(),
+        ..crate::commands::source_hook_env(source)
+    };
     let new_installed = crate::install::install(
         paths,
         catalog_item,
@@ -682,6 +690,7 @@ fn run_item_build(
         &catalog_items,
         false,
         dangerously_skip_build,
+        &hook_env,
     )?;
     // Persist the updated InstalledItem (hash may change after a build hook).
     let mut manifest = Manifest::load(paths)?;
@@ -728,6 +737,11 @@ fn run_item_lifecycle_hooks(
 
     let store = paths.mind_home.join(&installed.store);
     let commit = &installed.commit;
+    // spec: HOOK-141 -- the recorded set and the item's recorded reasons.
+    let hook_env = crate::hook::HookEnv {
+        item_profiles: installed.profiles.clone(),
+        ..crate::commands::source_hook_env(source)
+    };
 
     match event {
         // spec: HOOK-126 -- an update run selects the item's update hooks and is
@@ -775,6 +789,7 @@ fn run_item_lifecycle_hooks(
                 &store,
                 commit,
                 dangerously_skip,
+                &hook_env,
             );
             // spec: HOOK-110 -- persist whatever ran or was offered before an
             // abort too, exactly as `run_source_hooks` saves the registry
@@ -806,6 +821,7 @@ fn run_item_lifecycle_hooks(
                 &store,
                 commit,
                 dangerously_skip,
+                &hook_env,
             )?;
         }
         HookEventArg::Build => unreachable!("build handled by run_item_build"),

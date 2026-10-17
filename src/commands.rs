@@ -48,6 +48,37 @@ pub fn meld(
     dangerously_skip_install_hook_check: bool,
     item_kind: Option<ItemKind>,
 ) -> Result<MeldSummary> {
+    meld_with_profiles(
+        paths,
+        repo,
+        alias,
+        roots,
+        add_roots,
+        flat_skills,
+        pin,
+        install_hook,
+        dangerously_skip_install_hook_check,
+        item_kind,
+        &mut MeldProfiles::None,
+    )
+}
+
+/// [`meld`] followed by a consumer profile install (HOOK-142): `profiles`
+/// resolves the selection before the source's install hooks run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn meld_with_profiles(
+    paths: &Paths,
+    repo: &str,
+    alias: Option<String>,
+    roots: Vec<String>,
+    add_roots: Vec<String>,
+    flat_skills: bool,
+    pin: PinRequest,
+    install_hook: Option<String>,
+    dangerously_skip_install_hook_check: bool,
+    item_kind: Option<ItemKind>,
+    profiles: &mut MeldProfiles<'_>,
+) -> Result<MeldSummary> {
     paths.ensure_layout()?;
     // POL-3: the managed policy is authoritative over user intent. Load it once
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
@@ -88,6 +119,7 @@ pub fn meld(
         &mut meld_skipped,
         item_kind, // spec: CLI-239 -- the consumer's `--kind` for a file link
         None,      // a top-level meld has no curator
+        profiles,
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -382,6 +414,9 @@ enum HookOutcome {
 /// the meld commit and as baselines that never ran, so the first `upgrade` at an
 /// unmoved source finds nothing pending instead of running a migration against
 /// the very commit that was just installed.
+///
+/// `hook_env` is the profile environment the hooks run with: the selection the
+/// meld is about to apply (HOOK-142).
 #[allow(clippy::too_many_arguments)]
 fn run_install_hooks(
     source: &mut crate::source::Source,
@@ -392,6 +427,7 @@ fn run_install_hooks(
     dangerously_skip: bool,
     force_rerun: bool,
     extra_hooks: Vec<crate::mindfile::ResolvedHook>,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<HookOutcome> {
     let mut resolved = mindfile
         .as_ref()
@@ -469,7 +505,7 @@ fn run_install_hooks(
                 // `json_stdout`). spec: CLI-217
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
-                crate::hook::run_hook(&h.run, clone_dir, &name, "install", h.label())?;
+                crate::hook::run_hook(&h.run, clone_dir, &name, "install", h.label(), hook_env)?;
                 record_install_hook(source, &h.run, RecordedEvent::Install, current.clone());
                 stamp_origin(source, h, RecordedEvent::Install, origin_of(h));
             }
@@ -626,6 +662,7 @@ fn meld_recursive(
     skipped: &mut Vec<SkippedEntry>,
     item_kind: Option<ItemKind>,
     curated_by: Option<String>,
+    profiles: &mut MeldProfiles<'_>,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
@@ -1326,6 +1363,16 @@ fn meld_recursive(
         }
     }
 
+    // spec: HOOK-142 -- resolve the selection the meld applies (asking the
+    // PROF-13 picker now) so the install hooks see it. An item link has no
+    // profiles (PROF-8).
+    let hook_env = profiles.hook_env(
+        &source.name,
+        mindfile
+            .as_ref()
+            .filter(|_| source.item_path.is_none())
+            .and_then(|m| m.profiles.as_ref()),
+    )?;
     // Install hooks (HOOK-50..60): the working tree is now checked out at the
     // resolved pin, so hooks run in the right tree. A fresh meld runs every
     // (as-yet-unrun) install hook.
@@ -1340,6 +1387,7 @@ fn meld_recursive(
         // DSC-61: curator-supplied hooks (when applied) run through the same
         // disclosure/safety-prompt/non-TTY-skip path as a source's own hooks.
         curated_hooks,
+        &hook_env,
     ) {
         Ok(HookOutcome::Proceed) => {}
         Ok(HookOutcome::Abort) => {
@@ -1475,6 +1523,7 @@ fn meld_recursive(
                 entry_kind,
                 // spec: STO-82 -- provenance for `curate` (CUR-7).
                 Some(super_source_name.clone()),
+                &mut MeldProfiles::Curated(entry), // spec: HOOK-142
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1652,6 +1701,7 @@ fn meld_recursive(
                 None, // a marketplace entry is a repo, never an item link
                 // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
                 Some(super_source_name.clone()),
+                &mut MeldProfiles::None,
             ) {
                 Ok(n) => {
                     added += n;
@@ -3225,7 +3275,16 @@ fn run_uninstall_hooks(
                 println!("running uninstall hook '{}' for {}", h.label(), source_name);
                 // HOOK-53: any failure (optional or required) is a hard stop;
                 // the unmeld stops and the source remains.
-                crate::hook::run_hook(&h.run, &clone_dir, source_name, "uninstall", h.label())?;
+                // spec: HOOK-141 -- an unmeld sees the recorded set.
+                let hook_env = source_hook_env(&registry.sources[idx]);
+                crate::hook::run_hook(
+                    &h.run,
+                    &clone_dir,
+                    source_name,
+                    "uninstall",
+                    h.label(),
+                    &hook_env,
+                )?;
             }
             crate::hook::HookAct::Skip => {
                 // spec: CLI-217 -- same for `unmeld --json`.
@@ -4903,9 +4962,13 @@ pub fn is_item_link_spec(repo: &str) -> bool {
 /// answer keeps `selection`; otherwise the answer is the enabled set, exactly
 /// as `--no-default-profile --profile <answer>` would give it (list `default`
 /// to keep it). Every other case returns `selection` unchanged (PROF-12).
-pub(crate) fn pick_profiles(
-    paths: &Paths,
+///
+/// `table` is the source's `[profiles]`, read from the fresh clone: `meld`
+/// asks before the source's install hooks run, so they see the answer
+/// (HOOK-142).
+fn pick_profiles_from(
     source_name: &str,
+    table: Option<&crate::profile::ProfileTable>,
     selection: crate::profile::Selection,
     flags_given: bool,
     yes: bool,
@@ -4914,11 +4977,7 @@ pub(crate) fn pick_profiles(
     if flags_given || yes || json_mode() || !crate::hook::is_tty() {
         return Ok(selection);
     }
-    let registry = Registry::load(paths)?;
-    let Some(source) = registry.find(source_name) else {
-        return Ok(selection);
-    };
-    let Some(table) = source_profile_table(paths, source)? else {
+    let Some(table) = table else {
         return Ok(selection);
     };
     if !table.contains_key(crate::profile::DEFAULT)
@@ -5068,6 +5127,19 @@ fn apply_profile_plan(
     collect: bool,
 ) -> Result<Vec<String>> {
     let before: HashSet<String> = Manifest::load(paths)?.items.keys().cloned().collect();
+    // spec: HOOK-141 -- hooks run by these installs see the enabled set this
+    // install records (the recorded set plus the profiles being enabled) and
+    // each item's profiles, before either is written.
+    let recorded = Registry::load(paths)?
+        .find(source_name)
+        .and_then(|s| s.profiles.clone())
+        .unwrap_or_default();
+    let enabled: BTreeSet<String> = recorded.into_iter().chain(plan.enabled.clone()).collect();
+    let _scope = crate::hook::scope_profiles(crate::hook::ProfileScope {
+        source: source_name.to_string(),
+        enabled: enabled.into_iter().collect(),
+        reasons: plan.reasons.clone(),
+    });
     let mut failure: Option<MindError> = None;
     for m in plan.fresh() {
         let r = if collect {
@@ -5435,6 +5507,12 @@ pub fn forget_source_profile(
             entry.profiles = reasons.clone();
         }
     }
+    // spec: HOOK-141 -- uninstall hooks see the set that stays enabled.
+    let _scope = crate::hook::scope_profiles(crate::hook::ProfileScope {
+        source: source_name.to_string(),
+        enabled: plan.remaining_enabled.clone().unwrap_or_default(),
+        reasons: Default::default(),
+    });
     let mut removed: Vec<String> = Vec::new();
     for key in &remove {
         let Some(item) = manifest.items.remove(key) else {
@@ -5818,19 +5896,84 @@ pub(crate) fn curated_profile_route(
     curator: &str,
 ) -> Result<Option<(crate::profile::Selection, Vec<String>)>> {
     let table = source_profile_table(paths, source)?;
-    let names_profiles = entry.profiles.as_ref().is_some_and(|p| !p.is_empty());
-    let has_default = table
-        .as_ref()
-        .is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
-    let via_install = entry.install && (has_default || entry.default_profile == Some(false));
-    if !names_profiles && !via_install {
+    let Some(sel) = curated_route_selection(table.as_ref(), entry) else {
         return Ok(None);
-    }
-    let sel = crate::profile::Selection::from_nested(entry);
+    };
     // spec: PROF-26 PROF-27 -- an undeclared name is BadReference.
     let enabled =
         crate::profile::enabled_set_for_curator(table.as_ref(), &sel, &source.name, curator)?;
     Ok(Some((sel, enabled)))
+}
+
+/// The PROF-26 routing rule against the nested source's `table`: the entry's
+/// selection when it routes through profiles (it names `profiles`, or it is an
+/// `install = true` entry whose source declares `default` or that opts out
+/// with `default-profile = false`), else `None`.
+fn curated_route_selection(
+    table: Option<&crate::profile::ProfileTable>,
+    entry: &crate::mindfile::NestedSource,
+) -> Option<crate::profile::Selection> {
+    let names_profiles = entry.profiles.as_ref().is_some_and(|p| !p.is_empty());
+    let has_default = table.is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
+    let via_install = entry.install && (has_default || entry.default_profile == Some(false));
+    (names_profiles || via_install).then(|| crate::profile::Selection::from_nested(entry))
+}
+
+/// The profile install a meld is followed by, so the source's install hooks
+/// see the selection it applies (HOOK-142).
+pub(crate) enum MeldProfiles<'a> {
+    /// No profile install follows (`--register-only`, absorb, a policy
+    /// auto-meld, a marketplace entry, a sync re-walk).
+    None,
+    /// The consumer's own meld: the flags, plus the PROF-13 picker when they
+    /// are absent. `picked` receives the selection when the meld routes
+    /// through profiles (PROF-9, PROF-12), so the caller does not ask twice.
+    Consumer {
+        selection: crate::profile::Selection,
+        flags_given: bool,
+        yes: bool,
+        picked: Option<crate::profile::Selection>,
+    },
+    /// A curator's `[discover].sources` entry (PROF-26).
+    Curated(&'a crate::mindfile::NestedSource),
+}
+
+impl MeldProfiles<'_> {
+    /// Resolve the source hook environment for `source_name` against its
+    /// `table` (HOOK-142), running the PROF-13 picker for a consumer meld.
+    fn hook_env(
+        &mut self,
+        source_name: &str,
+        table: Option<&crate::profile::ProfileTable>,
+    ) -> Result<crate::hook::HookEnv> {
+        let selection = match self {
+            MeldProfiles::None => None,
+            MeldProfiles::Consumer {
+                selection,
+                flags_given,
+                yes,
+                picked,
+            } => {
+                let routes =
+                    *flags_given || table.is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
+                if routes {
+                    let sel = pick_profiles_from(
+                        source_name,
+                        table,
+                        selection.clone(),
+                        *flags_given,
+                        *yes,
+                    )?;
+                    *picked = Some(sel.clone());
+                    Some(sel)
+                } else {
+                    None
+                }
+            }
+            MeldProfiles::Curated(entry) => curated_route_selection(table, entry),
+        };
+        Ok(meld_hook_env(table, selection.as_ref(), None))
+    }
 }
 
 /// A curator entry's `install-items` that name a real item of the nested
@@ -6443,6 +6586,13 @@ pub fn remeld(
         repin_source(paths, &source_name, pin)?;
     }
 
+    // spec: PROF-16 -- resolved before the hooks so they see it (HOOK-142).
+    let remeld_selection = if link_only {
+        None
+    } else {
+        remeld_profile_selection(paths, &source_name, profile_flags)?
+    };
+
     // HOOK-60: re-offer the source's install hooks that have not run at the
     // current commit (a hook skipped at an earlier meld, or added since); `--force`
     // re-offers every install hook. Runs in the existing clone before installing.
@@ -6453,6 +6603,11 @@ pub fn remeld(
             let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
             let toml_path = clone_dir.join("mind.toml");
             let force_rerun = clobber == Clobber::Force;
+            let hook_env = meld_hook_env(
+                mindfile.as_ref().and_then(|m| m.profiles.as_ref()),
+                remeld_selection.as_ref(),
+                registry.sources[idx].profiles.as_ref(),
+            );
             match run_install_hooks(
                 &mut registry.sources[idx],
                 &clone_dir,
@@ -6462,6 +6617,7 @@ pub fn remeld(
                 dangerously_skip_hook_check,
                 force_rerun,
                 Vec::new(),
+                &hook_env,
             ) {
                 Ok(HookOutcome::Proceed) => registry.save(paths)?,
                 Ok(HookOutcome::Abort) => {
@@ -6484,9 +6640,7 @@ pub fn remeld(
         }
     }
 
-    if !link_only
-        && let Some(selection) = remeld_profile_selection(paths, &source_name, profile_flags)?
-    {
+    if let Some(selection) = remeld_selection {
         // spec: PROF-16 -- a re-meld honors the profile flags, adding to the
         // recorded set; the curated chain is walked as for install-all, but
         // not under `--learn` (CLI-236).
@@ -7223,13 +7377,25 @@ fn install_item(
     // spec: LIFE-50 -- refuse cleanly on a platform mind's symlink model does not
     // support, before creating (or reusing) any link.
     require_link_platform(paths)?;
-    let mut installed =
-        install::install(paths, item, commit, siblings, force, dangerously_skip_build)?;
+    // spec: HOOK-125 -- on a re-install the item's update hooks replace them.
+    let install_hooks = item.install_time_hooks(is_update);
+    let hook_env = if item.build.is_some() || !install_hooks.is_empty() {
+        catalog_item_hook_env(paths, item)?
+    } else {
+        crate::hook::HookEnv::default()
+    };
+    let mut installed = install::install(
+        paths,
+        item,
+        commit,
+        siblings,
+        force,
+        dangerously_skip_build,
+        &hook_env,
+    )?;
     // HOOK-86: run every resolved install hook in declaration order (the scalar
     // shorthand is folded in as the first required hook). On a hook failure, roll
     // the just-installed item back.
-    // spec: HOOK-125 -- on a re-install the item's update hooks replace them.
-    let install_hooks = item.install_time_hooks(is_update);
     if !install_hooks.is_empty() {
         let store = paths.mind_home.join(&installed.store);
         match install::run_item_install_hooks(
@@ -7238,6 +7404,7 @@ fn install_item(
             &store,
             commit,
             dangerously_skip,
+            &hook_env,
         ) {
             // spec: HOOK-110 -- persist the ran/skipped outcome on the item's
             // manifest record so a later `hooks run` (HOOK-102) does not treat
@@ -7269,16 +7436,85 @@ fn uninstall_item(
     if !uninstall_hooks.is_empty() {
         let store = paths.mind_home.join(&item.store);
         if store.exists() {
+            let hook_env = item_hook_env(paths, &item.source, item.profiles.clone())?;
             install::run_item_uninstall_hooks(
                 item,
                 uninstall_hooks,
                 &store,
                 commit,
                 dangerously_skip,
+                &hook_env,
             )?;
         }
     }
     install::uninstall(paths, item)
+}
+
+/// The profile environment a meld's source install hooks run with (HOOK-142):
+/// `recorded` plus the set `selection` resolves to against `table`. A name the
+/// table does not declare is left out here; the profile install raises it
+/// afterwards (PROF-14). `None` for `selection` means no profile install
+/// follows, so only the recorded set applies.
+fn meld_hook_env(
+    table: Option<&crate::profile::ProfileTable>,
+    selection: Option<&crate::profile::Selection>,
+    recorded: Option<&Vec<String>>,
+) -> crate::hook::HookEnv {
+    let mut profiles: BTreeSet<String> = recorded.into_iter().flatten().cloned().collect();
+    if let Some(sel) = selection {
+        let mut sel = sel.clone();
+        sel.named
+            .retain(|n| table.is_some_and(|t| t.contains_key(n)));
+        profiles.extend(crate::profile::enabled_set(table, &sel, "").unwrap_or_default());
+    }
+    crate::hook::HookEnv {
+        profiles: profiles.into_iter().collect(),
+        item_profiles: Vec::new(),
+    }
+}
+
+/// The profile environment a source hook of `source` runs with (HOOK-140,
+/// HOOK-141): an in-flight profile change's enabled set, else the recorded one.
+pub(crate) fn source_hook_env(source: &crate::source::Source) -> crate::hook::HookEnv {
+    crate::hook::HookEnv {
+        profiles: crate::hook::scoped_profiles(&source.name)
+            .unwrap_or_else(|| source.profiles.clone().unwrap_or_default()),
+        item_profiles: Vec::new(),
+    }
+}
+
+/// The profile environment an item hook runs with (HOOK-140, HOOK-141): the
+/// source's enabled set as [`source_hook_env`] reads it, and `item_profiles`,
+/// the item's recorded reasons.
+pub(crate) fn item_hook_env(
+    paths: &Paths,
+    source_name: &str,
+    item_profiles: Vec<String>,
+) -> Result<crate::hook::HookEnv> {
+    let registry = Registry::load(paths)?;
+    let mut env = registry
+        .find(source_name)
+        .map(source_hook_env)
+        .unwrap_or_default();
+    env.item_profiles = item_profiles;
+    Ok(env)
+}
+
+/// [`item_hook_env`] for a catalog item about to be installed: its reasons are
+/// those the in-flight profile install gives it plus what an existing install
+/// of the same stable identity recorded, so an upgrade (in place or a rename)
+/// keeps them (PROF-20).
+fn catalog_item_hook_env(paths: &Paths, item: &CatalogItem) -> Result<crate::hook::HookEnv> {
+    let manifest = Manifest::load(paths)?;
+    let mut reasons = crate::hook::scoped_item_reasons(&item.source, item.key().as_str());
+    if let Some(prev) = manifest
+        .items
+        .values()
+        .find(|m| m.source == item.source && m.kind == item.kind && m.bare_name == item.name)
+    {
+        reasons.extend(prev.profiles.iter().cloned());
+    }
+    item_hook_env(paths, &item.source, reasons)
 }
 
 /// The catalog item matching an installed item by stable identity (source, kind,
@@ -8306,6 +8542,7 @@ pub fn sync_with_selector(
                     &mut sync_skipped,
                     None, // a policy auto-meld names a repo, never an item link
                     None, // provisioned by policy, not by a curator (STO-82)
+                    &mut MeldProfiles::None,
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -8707,6 +8944,7 @@ pub fn sync_with_selector(
                 &mut sync_skipped,
                 todo_kind,          // spec: DSC-100
                 Some(todo_curator), // spec: STO-82
+                &mut MeldProfiles::None,
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -9045,7 +9283,8 @@ pub(crate) fn meld_curated_entry(
         Some(curated),
         skipped,
         item_kind,
-        Some(curator.to_string()), // spec: STO-82
+        Some(curator.to_string()),         // spec: STO-82
+        &mut MeldProfiles::Curated(entry), // spec: HOOK-142
     )
 }
 
@@ -9851,9 +10090,15 @@ fn rerun_source_hooks(
                 // in this pass before propagating, so an earlier source's
                 // successful re-run is not lost (and its side effect not
                 // silently re-offered on the next pass).
-                if let Err(e) =
-                    crate::hook::run_hook(&hook.run, &dir, &source.name, event, &hook.label)
-                {
+                let hook_env = source_hook_env(source);
+                if let Err(e) = crate::hook::run_hook(
+                    &hook.run,
+                    &dir,
+                    &source.name,
+                    event,
+                    &hook.label,
+                    &hook_env,
+                ) {
                     if changed {
                         registry.save(paths)?;
                     }
@@ -12686,7 +12931,18 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             (!profile_flags.is_empty()).then_some(&profile_selection),
         )?;
     } else {
-        let meld_sum = meld(
+        // spec: HOOK-142 -- the source's install hooks see the selection.
+        let mut meld_profiles = if register_only {
+            MeldProfiles::None
+        } else {
+            MeldProfiles::Consumer {
+                selection: profile_selection.clone(),
+                flags_given: !profile_flags.is_empty(),
+                yes,
+                picked: None,
+            }
+        };
+        let meld_sum = meld_with_profiles(
             paths,
             &repo,
             alias,
@@ -12697,6 +12953,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             install_hook,
             dangerously_skip_install_hook_check,
             item_kind,
+            &mut meld_profiles,
         )?;
         // CLI-23: by default, offer to install the melded source's items
         // right away (preview + prompt). `--register-only` stops at registering.
@@ -12711,14 +12968,14 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             !register_only && meld_uses_profiles(paths, &source_ident, !profile_flags.is_empty())?;
         if use_profiles {
             // spec: PROF-13 -- an interactive meld with no profile flag
-            // asks which profiles to enable first.
-            let selection = pick_profiles(
-                paths,
-                &source_ident,
-                profile_selection,
-                !profile_flags.is_empty(),
-                yes,
-            )?;
+            // asks which profiles to enable first; `meld` asked before the
+            // source's install hooks ran (HOOK-142).
+            let selection = match meld_profiles {
+                MeldProfiles::Consumer {
+                    picked: Some(sel), ..
+                } => sel,
+                _ => profile_selection,
+            };
             let req = ProfileInstall {
                 source_name: &source_ident,
                 selection: &selection,

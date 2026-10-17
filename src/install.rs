@@ -33,7 +33,8 @@ use crate::paths::{Paths, mkdir_p};
 /// to store paths. The recorded hash is of the *source* content so drift
 /// detection compares like with like. `dangerously_skip_build` runs a build hook
 /// non-interactively without prompting (HOOK-74); without it a non-TTY context
-/// skips the build hook (HOOK-72).
+/// skips the build hook (HOOK-72). `hook_env` is the profile environment the
+/// build hook runs with (HOOK-140).
 pub fn install(
     paths: &Paths,
     item: &CatalogItem,
@@ -41,6 +42,7 @@ pub fn install(
     siblings: &[CatalogItem],
     force: bool,
     dangerously_skip_build: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<InstalledItem> {
     let kind = item.kind;
     let name = item.effective_name();
@@ -149,7 +151,14 @@ pub fn install(
     //     installs unbuilt, HOOK-72); `dangerously_skip_build` runs it unattended
     //     (HOOK-74).
     if let Some(build) = &item.build
-        && let Err(e) = run_build_hook(item, build, &staging, commit, dangerously_skip_build)
+        && let Err(e) = run_build_hook(
+            item,
+            build,
+            &staging,
+            commit,
+            dangerously_skip_build,
+            hook_env,
+        )
     {
         let _ = remove_path(&staging);
         return Err(e);
@@ -771,6 +780,7 @@ fn run_build_hook(
     staging: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<()> {
     // spec: HOOK-72 HOOK-74
     let run = if dangerously_skip {
@@ -803,7 +813,7 @@ fn run_build_hook(
         // (main.rs's `json_stdout`), so it cannot reach the result document.
         // spec: CLI-217
         println!("running build hook for {}", item.display_key());
-        crate::hook::run_hook(build, staging, &item.source, "build", "build")?;
+        crate::hook::run_hook(build, staging, &item.source, "build", "build", hook_env)?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
         crate::render::note(format!(
@@ -861,6 +871,7 @@ fn run_item_hook(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<bool> {
     // The noun for the side effect the hook applies, per event: install and
     // update both apply a side effect; uninstall runs cleanup.
@@ -904,7 +915,7 @@ fn run_item_hook(
         // mode, unreachable from `--json` stdout by the process-wide redirect.
         // spec: CLI-217
         println!("running {event} hook for {display_key}");
-        crate::hook::run_hook(cmd, &cwd, source, event, event)?;
+        crate::hook::run_hook(cmd, &cwd, source, event, event, hook_env)?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
         crate::render::note(format!(
@@ -947,9 +958,18 @@ pub fn run_item_install_hooks(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<Vec<crate::source::RecordedHook>> {
     let mut recorded = Vec::with_capacity(hooks.len());
-    run_item_install_hooks_recording(item, hooks, store, commit, dangerously_skip, &mut recorded)?;
+    run_item_install_hooks_recording(
+        item,
+        hooks,
+        store,
+        commit,
+        dangerously_skip,
+        hook_env,
+        &mut recorded,
+    )?;
     Ok(recorded)
 }
 
@@ -968,6 +988,7 @@ pub fn run_item_install_hooks_partial(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> (Vec<crate::source::RecordedHook>, Result<()>) {
     let mut recorded = Vec::with_capacity(hooks.len());
     let result = run_item_install_hooks_recording(
@@ -976,6 +997,7 @@ pub fn run_item_install_hooks_partial(
         store,
         commit,
         dangerously_skip,
+        hook_env,
         &mut recorded,
     );
     (recorded, result)
@@ -993,6 +1015,7 @@ fn run_item_install_hooks_recording(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
     recorded: &mut Vec<crate::source::RecordedHook>,
 ) -> Result<()> {
     for hook in hooks {
@@ -1009,6 +1032,7 @@ fn run_item_install_hooks_recording(
             store,
             commit,
             dangerously_skip,
+            hook_env,
         )?;
         recorded.push(crate::source::RecordedHook {
             command: hook.run.clone(),
@@ -1027,6 +1051,7 @@ pub fn run_item_uninstall_hooks(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
+    hook_env: &crate::hook::HookEnv,
 ) -> Result<()> {
     for hook in hooks {
         run_item_hook(
@@ -1039,6 +1064,7 @@ pub fn run_item_uninstall_hooks(
             store,
             commit,
             dangerously_skip,
+            hook_env,
         )?;
     }
     Ok(())
@@ -1386,6 +1412,7 @@ mod tests {
             &staging,
             "abc123",
             false,
+            &crate::hook::HookEnv::default(),
         )
         .unwrap();
         assert!(
@@ -2206,6 +2233,7 @@ mod tests {
             std::slice::from_ref(&item),
             true,
             false,
+            &crate::hook::HookEnv::default(),
         );
 
         assert!(

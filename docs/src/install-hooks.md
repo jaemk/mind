@@ -168,6 +168,34 @@ a recorded source install or update hook whether it is pending and the commit
 it last ran at -- without running any. It is the read-only companion to
 `hooks run`.
 
+## Profile variables
+
+Every hook runs with two environment variables describing the source's
+[install profiles](authoring-profiles.md). Each holds a sorted, comma-separated
+list, or is empty when there is nothing to report:
+
+- `MIND_PROFILES`: the profiles enabled for the hook's source.
+- `MIND_ITEM_PROFILES`: for an item hook or build hook, the profiles the item is
+  installed for. Always empty for a source hook.
+
+```sh
+# skills/deploy/setup.sh, run by `install: sh setup.sh`
+case ",$MIND_PROFILES," in
+  *,full,*) ./setup-full.sh ;;
+  *) ./setup-basic.sh ;;
+esac
+```
+
+The values are the state the command leaves behind. During `meld`, `learn
+<source> --profile`, and `upgrade`, they include the profiles being enabled. During
+`forget <source> --profile <name>`, `MIND_PROFILES` is the set that stays enabled.
+
+A source's install hooks see the selection the meld is about to apply, so on a
+terminal `meld` asks which profiles to enable before it runs them. Enabling or
+disabling a profile later does not run the source's install hooks again. Put
+setup that depends on the profile set in an item hook, which runs when its item
+is installed or removed.
+
 ## Visibility
 
 `recall --sources` marks a source that carries hooks with a count-aware token in

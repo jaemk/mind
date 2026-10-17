@@ -866,6 +866,50 @@ its own hooks instead, next to the item.
   alone. So an `[[items.hooks]]` array entry, an item-manifest hook, and a
   frontmatter scalar are all disclosed, each naming its event.
 
+## Hook environment
+
+Status: done. A source with install profiles (spec/profiles.md) may want its
+hooks to do different setup depending on which profiles the consumer enabled.
+`mind` tells each hook through its environment.
+
+- `HOOK-140` Every hook `mind` runs gets two environment variables: a source's
+  install and uninstall hooks, an item's install, update, and uninstall hooks, a
+  tool build hook, and each of these when run through `hooks run`.
+  - `MIND_PROFILES`: the enabled profiles of the hook's source.
+  - `MIND_ITEM_PROFILES`: for an item hook or a build hook, the profiles the
+    item is installed for (PROF-20). Always empty for a source hook.
+
+  Each value is a sorted, comma-separated list with no spaces. Profile names
+  follow PROF-2's syntax, so the values need no quoting. Both variables are
+  always set, empty when there is nothing to report, so a value inherited from
+  the environment `mind` itself runs in never reaches the hook.
+- `HOOK-141` The values describe the profile state the operation leaves behind:
+  - While a profile install is applied (`meld`, a re-meld, `learn <source>
+    --profile`, `curate`, an `upgrade` addition per PROF-21), `MIND_PROFILES`
+    is the recorded set plus the profiles being enabled. An installed item's
+    `MIND_ITEM_PROFILES` includes the profiles it is being installed for. For a
+    closure item, those are the profiles of the member that pulled it in
+    (PROF-6).
+  - During `forget <source> --profile <NAME>`, `MIND_PROFILES` is the set that
+    stays enabled. A removed item's `MIND_ITEM_PROFILES` is its recorded
+    reasons, NAME included.
+  - Otherwise (a plain `learn`, `upgrade`, `forget`, `unmeld`, `hooks run`),
+    they are the source's recorded set and the item's recorded reasons. A source
+    that is not profile-tracked (PROF-19) has an empty `MIND_PROFILES`.
+- `HOOK-142` A source's install hooks at `meld` see the selection the meld is
+  about to apply: the profile flags plus, on an interactive meld, the PROF-13
+  picker's answer. The picker is therefore asked before the hooks run. A re-meld's
+  re-offered hooks see the re-meld's selection (PROF-16). The value is the
+  selection, not the outcome. The hooks run before the install prompt, so a hook
+  still sees a selection whose install is later declined. A name the source does
+  not declare (PROF-14) is left out. `MIND_PROFILES` is empty when no profile
+  install follows: `--register-only`, the CLI-23 install-all offer, and a nested
+  source whose curator entry routes outside profiles (PROF-26).
+- `HOOK-143` Enabling or disabling a profile later does not re-offer a source's
+  install hooks; HOOK-60 is unchanged. A setup step that depends on the profile
+  set belongs in an item hook, which runs when the item it serves is installed or
+  removed.
+
 ## Managed-policy composition (research needed)
 
 Install hooks are arbitrary code execution, which is exactly what an enterprise

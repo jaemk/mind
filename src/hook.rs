@@ -12,6 +12,89 @@ use std::process::{Command, Stdio};
 
 use crate::error::{MindError, Result};
 
+/// The profile variables every hook runs with (HOOK-140): the enabled profiles
+/// of the hook's source, and for an item or build hook the profiles the item is
+/// installed for. Both are always set on the child, empty when there is nothing
+/// to report, so a value inherited from mind's own environment never leaks in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookEnv {
+    pub profiles: Vec<String>,
+    pub item_profiles: Vec<String>,
+}
+
+impl HookEnv {
+    /// The `(name, value)` pairs set on the child (HOOK-140): sorted,
+    /// deduped, comma-separated, no spaces.
+    pub fn vars(&self) -> [(&'static str, String); 2] {
+        let join = |v: &[String]| {
+            let set: std::collections::BTreeSet<&str> = v.iter().map(String::as_str).collect();
+            set.into_iter().collect::<Vec<_>>().join(",")
+        };
+        [
+            ("MIND_PROFILES", join(&self.profiles)),
+            ("MIND_ITEM_PROFILES", join(&self.item_profiles)),
+        ]
+    }
+}
+
+/// The profile state an in-flight profile change leaves behind (HOOK-141),
+/// set while a profile install is applied or a profile is disabled, so hooks
+/// run deep inside the ordinary install/uninstall path see it before it is
+/// recorded.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileScope {
+    /// The registered source identity the change applies to.
+    pub source: String,
+    /// The enabled set once the change is recorded.
+    pub enabled: Vec<String>,
+    /// Effective item key -> the profiles it is being installed for.
+    pub reasons: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+thread_local! {
+    static PROFILE_SCOPE: std::cell::RefCell<Option<ProfileScope>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Holds a [`ProfileScope`] in effect; dropping it restores the previous one.
+pub struct ProfileScopeGuard(Option<ProfileScope>);
+
+impl Drop for ProfileScopeGuard {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        PROFILE_SCOPE.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// Put `scope` in effect for the lifetime of the returned guard (HOOK-141).
+pub fn scope_profiles(scope: ProfileScope) -> ProfileScopeGuard {
+    let prev = PROFILE_SCOPE.with(|c| c.borrow_mut().replace(scope));
+    ProfileScopeGuard(prev)
+}
+
+/// The scoped enabled set for `source`, when a profile change on it is in
+/// flight (HOOK-141).
+pub fn scoped_profiles(source: &str) -> Option<Vec<String>> {
+    PROFILE_SCOPE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|s| s.source == source)
+            .map(|s| s.enabled.clone())
+    })
+}
+
+/// The profiles the in-flight change installs `key` of `source` for.
+pub fn scoped_item_reasons(source: &str, key: &str) -> Vec<String> {
+    PROFILE_SCOPE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|s| s.source == source)
+            .and_then(|s| s.reasons.get(key))
+            .map(|r| r.iter().cloned().collect())
+            .unwrap_or_default()
+    })
+}
+
 /// The user's response to the three-way hook prompt (HOOK-20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookChoice {
@@ -430,13 +513,16 @@ pub fn apply_install_override(
 /// unsanitized, a hook name carrying cursor-control escapes could erase mind's
 /// own progress output the moment the frame opens. Keeping the two apart is
 /// what stops a failing uninstall hook from being reported as an install one.
-// spec: CLI-217 HOOK-30
+///
+/// `env` carries the profile variables the child runs with (HOOK-140).
+// spec: CLI-217 HOOK-30 HOOK-140
 pub fn run_hook(
     command: &str,
     clone_dir: &Path,
     identity: &str,
     event: &'static str,
     label: &str,
+    env: &HookEnv,
 ) -> Result<()> {
     let label = crate::sanitize::strip_ansi(label);
     let command_clean = crate::sanitize::strip_ansi(command);
@@ -453,6 +539,7 @@ pub fn run_hook(
     let status = Command::new("sh")
         .arg("-c")
         .arg(command)
+        .envs(env.vars())
         .current_dir(clone_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -1417,6 +1504,7 @@ mod tests {
             "github.com/test/repo",
             "install",
             evil_label,
+            &HookEnv::default(),
         );
         let err = result.expect_err("a non-zero exit must produce HookFailed");
         let msg = err.to_string();
@@ -1479,6 +1567,7 @@ mod tests {
             "github.com/test/repo",
             "install",
             "spawn-fail",
+            &HookEnv::default(),
         );
         match result {
             Err(MindError::HookFailed {
@@ -1516,12 +1605,60 @@ mod tests {
             "github.com/test/repo",
             "install",
             "test-label",
+            &HookEnv::default(),
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert!(
             marker.exists(),
             "marker file should exist after successful hook"
         );
+    }
+
+    // spec: HOOK-140
+    #[test]
+    fn run_hook_sets_profile_vars_sorted_and_always_present() {
+        let dir = TempDir::new("env");
+        let out = dir.path().join("env.txt");
+        let command = format!(
+            "printf '%s|%s|%s' \"$MIND_PROFILES\" \"$MIND_ITEM_PROFILES\" \
+             \"${{MIND_ITEM_PROFILES+set}}\" > '{}'",
+            out.display()
+        );
+        let env = HookEnv {
+            profiles: vec!["full".into(), "default".into(), "full".into()],
+            item_profiles: Vec::new(),
+        };
+        run_hook(&command, dir.path(), "local/a/b", "install", "env", &env).unwrap();
+        let got = std::fs::read_to_string(&out).unwrap();
+        // Sorted and deduped; the empty item list is still set (not unset).
+        assert_eq!(got, "default,full||set");
+    }
+
+    // spec: HOOK-141
+    #[test]
+    fn profile_scope_applies_to_its_source_and_restores_on_drop() {
+        assert_eq!(scoped_profiles("local/a/b"), None);
+        {
+            let mut reasons = std::collections::BTreeMap::new();
+            reasons.insert(
+                "skill:x".to_string(),
+                std::collections::BTreeSet::from(["full".to_string()]),
+            );
+            let _g = scope_profiles(ProfileScope {
+                source: "local/a/b".into(),
+                enabled: vec!["default".into(), "full".into()],
+                reasons,
+            });
+            assert_eq!(
+                scoped_profiles("local/a/b"),
+                Some(vec!["default".to_string(), "full".to_string()])
+            );
+            assert_eq!(scoped_profiles("local/other"), None);
+            assert_eq!(scoped_item_reasons("local/a/b", "skill:x"), vec!["full"]);
+            assert!(scoped_item_reasons("local/a/b", "skill:y").is_empty());
+            assert!(scoped_item_reasons("local/other", "skill:x").is_empty());
+        }
+        assert_eq!(scoped_profiles("local/a/b"), None);
     }
 
     // spec: HOOK-30
@@ -1534,6 +1671,7 @@ mod tests {
             "github.com/test/repo",
             "install",
             "test-label",
+            &HookEnv::default(),
         );
         match result {
             Err(
@@ -1600,6 +1738,7 @@ mod tests {
             "github.com/test/repo",
             "install",
             "test-label",
+            &HookEnv::default(),
         );
         match result {
             Err(
@@ -1640,6 +1779,7 @@ mod tests {
             "github.com/test/repo",
             "install",
             "test-label",
+            &HookEnv::default(),
         );
         match result {
             Err(ref e @ MindError::HookFailed { streamed, .. }) => {
@@ -1664,6 +1804,7 @@ mod tests {
             "github.com/acme/special",
             "install",
             "my-hook",
+            &HookEnv::default(),
         );
         match result {
             Err(MindError::HookFailed {

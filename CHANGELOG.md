@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Hooks run with `MIND_PROFILES` (the source's enabled profiles) and
+  `MIND_ITEM_PROFILES` (the profiles an item is installed for), so a hook can
+  branch on the consumer's profile selection.
+
+### Changed
+
+- On an interactive `meld`, the install-profile picker is now asked before the
+  source's install hooks run, so those hooks see the answer.
+
 ## [0.30.0] - 2026-10-17
 
 ### Added

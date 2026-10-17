@@ -71,6 +71,12 @@ Consumers who enabled a profile are tracked against it:
 So treat profile names as part of your public interface, as you would item
 names.
 
+## Hooks
+
+Hooks can read the enabled profiles from `MIND_PROFILES`, and an item hook can
+read the profiles its item was installed for from `MIND_ITEM_PROFILES`. See
+[Profile variables](install-hooks.md#profile-variables).
+
 ## Check them
 
 `mind review` reports invalid profile names, cycles, and exact members that

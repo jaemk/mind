@@ -1190,3 +1190,231 @@ fn learn_all_conflicts_with_profile_flags() {
     }
     assert!(sb.installed().is_empty());
 }
+
+// ----- Hook environment (HOOK-140..143) -----
+
+/// A [`PROFILES`] source whose source install/uninstall hooks and whose
+/// review, deploy, and helper skills' install/uninstall hooks each append
+/// `<who> <event> $MIND_PROFILES|$MIND_ITEM_PROFILES` to `$HOOK_LOG`.
+fn hooked(name: &str) -> Sandbox {
+    let toml = format!(
+        "{PROFILES}\n[[hooks]]\nrun = \"sh ./log.sh source install\"\nevent = \"install\"\n\n\
+         [[hooks]]\nrun = \"sh ./log.sh source uninstall\"\nevent = \"uninstall\"\n"
+    );
+    let sb = Sandbox::with_toml(name, &toml);
+    let log = "printf '%s %s %s|%s\\n' \"$1\" \"$2\" \"$MIND_PROFILES\" \"$MIND_ITEM_PROFILES\" \
+               >> \"$HOOK_LOG\"\n";
+    write_file(&sb.source.join("log.sh"), log);
+    for skill in ["review", "deploy", "helper"] {
+        let body = if skill == "deploy" {
+            "Uses {{ns:helper}}."
+        } else {
+            ""
+        };
+        write_file(
+            &sb.source.join(format!("skills/{skill}/SKILL.md")),
+            &format!(
+                "---\nname: {skill}\ndescription: {skill} skill\n\
+                 install: sh log.sh {skill} install\nuninstall: sh log.sh {skill} uninstall\n\
+                 ---\n# {skill}\n{body}\n"
+            ),
+        );
+        write_file(&sb.source.join(format!("skills/{skill}/log.sh")), log);
+    }
+    add_skill(&sb, "test", "# test");
+    sb
+}
+
+impl Sandbox {
+    fn hook_log(&self) -> std::path::PathBuf {
+        self.base.join("hook.log")
+    }
+
+    /// `mind` with the hook log wired up and hooks run unattended (HOOK-83).
+    fn mind_hooked(&self, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Run {
+        let log = self.hook_log();
+        let mut all: Vec<(&str, &str)> = vec![("HOOK_LOG", log.to_str().unwrap())];
+        all.extend_from_slice(envs);
+        let mut argv: Vec<&str> = args.to_vec();
+        argv.push("--dangerously-skip-install-hook-check");
+        self.mind_env(&argv, &all, stdin)
+    }
+
+    /// The hook log lines, then cleared.
+    fn take_hook_log(&self) -> Vec<String> {
+        let text = std::fs::read_to_string(self.hook_log()).unwrap_or_default();
+        let _ = std::fs::remove_file(self.hook_log());
+        text.lines().map(str::to_string).collect()
+    }
+}
+
+#[test]
+fn meld_hooks_see_the_enabled_profiles_and_item_reasons() {
+    // spec: HOOK-140 HOOK-141 HOOK-142 -- the source hook sees the selection;
+    // each item hook sees the profiles it is installed for, a closure item
+    // (helper) those of the member that pulled it in.
+    let sb = hooked("src");
+    let r = sb.mind_hooked(
+        &["meld", &sb.spec(), "--profile", "full", "--yes"],
+        &[],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("source install default,full|")
+    );
+    assert!(
+        log.contains(&"deploy install default,full|full".to_string()),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&"helper install default,full|full".to_string()),
+        "{log:?}"
+    );
+    let review = sb.reasons("skill:review").join(",");
+    assert!(!review.is_empty());
+    assert!(
+        log.contains(&format!("review install default,full|{review}")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn hook_vars_are_always_set_and_override_inherited_values() {
+    // spec: HOOK-140 HOOK-142 -- with no profile install following
+    // (`--register-only`) both are empty, never the inherited value.
+    let sb = hooked("src");
+    let r = sb.mind_hooked(
+        &["meld", &sb.spec(), "--register-only"],
+        &[("MIND_PROFILES", "leak"), ("MIND_ITEM_PROFILES", "leak")],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(sb.take_hook_log(), svec(&["source install |"]));
+}
+
+#[test]
+fn source_hooks_see_the_picker_answer() {
+    // spec: HOOK-142 -- the PROF-13 picker is asked before the source's
+    // install hooks run, so they see its answer.
+    let sb = hooked("src");
+    let r = sb.mind_hooked(
+        &["meld", &sb.spec()],
+        &[("MIND_TTY", "1")],
+        Some("full\ny\n"),
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("source install full|"),
+        "{log:?}"
+    );
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["full"])));
+}
+
+#[test]
+fn nested_source_hooks_see_the_curator_entry_selection() {
+    // spec: HOOK-142 -- a curator entry's `profiles` is the nested source's
+    // selection, so its install hooks see it.
+    let nested = hooked("nested");
+    let reg = curator(&nested, ", profiles = [\"full\"], default-profile = false");
+    let log = reg.hook_log();
+    let r = reg.mind_env(
+        &[
+            "meld",
+            &reg.spec(),
+            "--yes",
+            "--dangerously-skip-install-hook-check",
+        ],
+        &[("HOOK_LOG", log.to_str().unwrap())],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = reg.take_hook_log();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("source install full|"),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&"deploy install full|full".to_string()),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn enabling_and_disabling_a_profile_reports_the_resulting_set() {
+    // spec: HOOK-141 HOOK-143 -- `learn --profile` sees the recorded set plus
+    // the profile being enabled; `forget --profile` sees the set that stays,
+    // with the removed item's reasons; neither re-offers the source hooks.
+    let sb = hooked("src");
+    assert!(
+        sb.mind_hooked(&["meld", &sb.spec(), "--yes"], &[], None)
+            .success
+    );
+    sb.take_hook_log();
+
+    let r = sb.mind_hooked(&["learn", "src", "--profile", "full", "--yes"], &[], None);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert!(
+        log.contains(&"deploy install default,full|full".to_string()),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.starts_with("source ")), "{log:?}");
+
+    let r = sb.mind_hooked(&["forget", "src", "--profile", "full", "--yes"], &[], None);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert!(
+        log.contains(&"deploy uninstall default|full".to_string()),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&"helper uninstall default|full".to_string()),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.starts_with("source ")), "{log:?}");
+}
+
+#[test]
+fn unmeld_and_hooks_run_see_the_recorded_state() {
+    // spec: HOOK-141 -- outside a profile change, hooks see the recorded set
+    // and the item's recorded reasons.
+    let sb = hooked("src");
+    assert!(
+        sb.mind_hooked(
+            &["meld", &sb.spec(), "--profile", "full", "--yes"],
+            &[],
+            None
+        )
+        .success
+    );
+    sb.take_hook_log();
+
+    let r = sb.mind_hooked(
+        &["hooks", "run", "src#skill:deploy", "--event", "uninstall"],
+        &[],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.take_hook_log(),
+        svec(&["deploy uninstall default,full|full"])
+    );
+
+    let r = sb.mind_hooked(&["unmeld", "src", "--yes"], &[], None);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert!(
+        log.contains(&"source uninstall default,full|".to_string()),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&"helper uninstall default,full|full".to_string()),
+        "{log:?}"
+    );
+}

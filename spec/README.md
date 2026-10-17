@@ -286,6 +286,7 @@ and verified.
 | Install profiles: a source declares named, composable item sets (`[profiles]`, cargo-feature style); `meld`/`learn --profile` installs them additively over `default`, the enabled set is recorded and tracked by `upgrade`/`curate`/`dump` | done | [profiles.md](profiles.md) (PROF-1..30) |
 | `resource` item kind: a store-only file or directory under `resources/`, offered by convention only when an item references it, reached by `{{resources:name}}` | done | [resources.md](resources.md) (RES-1..14) |
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
+| Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
 
 ## Documents
 

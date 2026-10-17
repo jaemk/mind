@@ -243,4 +243,5 @@ item the user named.
 ## Out of scope
 
 - Per-profile hooks or profile-conditional item content. A profile selects
-  items; it does not change them.
+  items; it does not change them. A hook can read the enabled profiles from its
+  environment and branch on them itself (HOOK-140).
