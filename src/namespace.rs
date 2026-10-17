@@ -1028,14 +1028,16 @@ pub struct SiblingRef {
     pub token: String,
     /// The referent's bare name (may be empty for a malformed token).
     pub name: String,
-    /// The kind the token narrows to: `Tool` for `{{tools:}}`, the named kind
+    /// The kind the token narrows to: `Tool` for `{{tools:}}`, `Resource` for
+    /// `{{resources:}}`, the named kind
     /// for a qualified `{{path:kind:name}}`, `None` when the token matches any
     /// kind (`{{ns:}}`, bare `{{path:name}}`).
     pub kind: Option<crate::error::ItemKind>,
 }
 
 /// Every token in `content` that resolves against a SIBLING: `{{ns:name}}`
-/// (NS-10), `{{tools:name}}` (TOOL-15), and `{{path:[kind:]name}}` (TOOL-18).
+/// (NS-10), `{{tools:name}}` (TOOL-15), `{{resources:name}}` (RES-10), and
+/// `{{path:[kind:]name}}` (TOOL-18).
 ///
 /// This is the union of what [`expand`] and [`expand_paths`] resolve against the
 /// sibling set, so a caller can decide up front whether a given catalog could

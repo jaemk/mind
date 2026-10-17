@@ -498,13 +498,17 @@ fn run_checks(
     // --- Check 3a: convention resources nothing references (advisory) ---
     // spec: RES-14 -- the scan drops these silently (RES-3); an author whose
     // prose names `resources/<name>` without a token hears it here.
+    // The path is shown relative to the source, so an `--add-root` entry reads
+    // as `<root>/resources/<name>` rather than a bare `resources/<name>`.
     for item in &unreferenced {
         let name = item.display_name();
+        let rel = item.path.strip_prefix(source_dir).unwrap_or(&item.path);
         advisory.push(Finding::advisory(
             "unreferenced-resource",
             format!(
-                "resources/{name} is not referenced by any item, so it is not offered; an item \
-                 reaches it by writing {{{{resources:{name}}}}}"
+                "{} is not referenced by any item, so it is not offered; an item reaches it by \
+                 writing {{{{resources:{name}}}}}",
+                rel.display()
             ),
         ));
     }
