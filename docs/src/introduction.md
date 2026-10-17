@@ -1,7 +1,7 @@
 # Introduction
 
-`mind` installs agent tooling (skills, agents, rules, commands, workflows, and
-tools) from git repos into your agent homes, and keeps it up to date.
+`mind` installs agent tooling (skills, agents, rules, commands, workflows,
+tools, and shared resources) from git repos into your agent homes, and keeps it up to date.
 
 Point it at any repo that ships agent tooling and it finds the items by their
 layout, with no manifest required. It copies the items you choose into a store

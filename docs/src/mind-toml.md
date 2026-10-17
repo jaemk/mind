@@ -140,7 +140,7 @@ scanning for the source.
 
 ```toml
 [[items]]
-kind = "rule"                    # skill | agent | rule | command | workflow | tool (required)
+kind = "rule"                    # skill | agent | rule | command | workflow | tool | resource (required)
 name = "style"                   # the bare name (required)
 path = "guidelines/style.md"     # path relative to the repo root; a dir for skills/tools (required)
 link = "rules/house-style.md"    # optional: link target relative to the agent home
@@ -166,6 +166,11 @@ event = "install"
 
 - **`bin`** and **`build`** are valid only on a `tool`; on any other kind they are
   a schema error.
+- A **`resource`** entry's `path` names a file or a directory. It takes no
+  `link`, `bin`, or `build`, and its `description` comes only from this entry,
+  since nothing is read from a resource's content. A declared resource is
+  offered whether or not an item references it. See
+  [Share data files](resources.md).
 - **`install`** / **`update`** / **`uninstall`** are per-item lifecycle hooks
   (valid on any kind), distinct from `build` (which produces the item's content)
   and from the source-level `[[hooks]]`. An item that declares none here can
@@ -197,11 +202,13 @@ rules  = { include = ["rules/*.md"] }
 commands = { include = ["commands/**/*.md"] }   # name is the file STEM: a nested match flattens
 workflows = { include = ["workflows/**/*.js"] }   # name is the file STEM, as for commands
 tools  = { include = ["packages/*/tool"] }   # globs match the tool DIRECTORY
+resources = { include = ["assets/*"] }   # each match (file or directory) is one resource
 ```
 
 Within a kind, `include` globs are matched first, then anything also matched by an
 `exclude` glob is dropped. Tool globs match the tool directory (its `TOOL.md`, if
-present, supplies metadata), not an anchor file.
+present, supplies metadata), not an anchor file. A resource glob match keeps its
+full file name as the resource name (`assets/logo.svg` is `resource:logo.svg`).
 
 A `[discover].commands` glob names each command by its file stem, so
 `commands/frontend/component.md` installs as `component` and is offered as

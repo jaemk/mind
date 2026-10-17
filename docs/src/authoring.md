@@ -75,6 +75,7 @@ Everything below is optional. A `mind.toml` at the repo root enables it; see
 | let consumers pick a basic or full set | [Offer install profiles](authoring-profiles.md) |
 | have items reference each other safely | [Namespaces and references](namespacing.md) |
 | share a script between several skills | [Share helper scripts](tooling.md) |
+| ship a data file or template items read | [Share data files](resources.md) |
 | build or install tooling when the source is melded | [Run setup with hooks](install-hooks.md) |
 | make one item pull in another | [Dependencies between items](dependencies.md) |
 | ship only some files, or use a non-standard layout | [`[[items]]` and `[discover]`](mind-toml.md#items---explicit-inventory-authoritative) |

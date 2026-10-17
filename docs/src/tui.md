@@ -39,7 +39,7 @@ A third **Unmanaged** group appears below them when the agent home holds items
 mind did not install. See [Adopt items you placed by hand](unmanaged.md).
 
 Under each group the hierarchy is source -> kind (skills, agents, rules,
-commands, tools) -> item -> detail. Expanding an item shows its description
+commands, workflows, tools, resources) -> item -> detail. Expanding an item shows its description
 and frontmatter, and for a skill its file tree.
 
 ### Navigation keys

@@ -44,8 +44,9 @@ of each item. Lobes link to the store, not to the source clone, so a `sync`
 never changes an installed item under you. Only `upgrade` does.
 
 **Learn and forget.** `mind learn <item>` copies an item from the clone into the
-store and links it into every lobe. `mind forget <item>` removes both. A tool is
-the exception: it lives in the store only and is not linked into a lobe.
+store and links it into every lobe. `mind forget <item>` removes both. Tools
+and resources are the exception: they live in the store only and are not linked
+into a lobe.
 
 ## What each step puts on disk
 
@@ -86,8 +87,9 @@ the lobe:
     hello-mind -> ~/.mind/store/skill/hello-mind # the link the harness finds
 ```
 
-The harness now resolves `/hello-mind` through that link. A tool the skill used
-would land in `~/.mind/store/tool/<name>` with no link under `~/.claude`.
+The harness now resolves `/hello-mind` through that link. A tool or resource
+the skill used would land in `~/.mind/store/tool/<name>` or
+`~/.mind/store/resource/<name>`, with no link under `~/.claude`.
 
 ## Staying current
 

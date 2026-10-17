@@ -28,7 +28,8 @@ Findings are hard (non-zero exit) or advisory (exit 0):
 
 - a malformed `mind.toml`, or an unknown item kind
 - a `min-mind-version` newer than the running `mind`
-- an unresolved `{{ns:}}`, `{{self}}`, `{{tools:}}`, or `{{path:}}` reference
+- an unresolved `{{ns:}}`, `{{self}}`, `{{tools:}}`, `{{resources:}}`, or
+  `{{path:}}` reference
 - an `expand:` entry naming a file the item does not ship
 - an invalid install profile, a profile cycle, or a profile member naming no
   item
@@ -39,6 +40,8 @@ Findings are hard (non-zero exit) or advisory (exit 0):
 - a hardcoded install path (`hardcoded-path`); see
   [Source layout](source-layout.md#hardcoded-paths)
 - a sibling tool named in prose without a token
+- a file or directory under `resources/` that no item references, so it is not
+  offered (`unreferenced-resource`); see [Share data files](resources.md)
 - a `{{ns:}}` token in a code block or path, where it does not belong
 - an item that names a sibling in plain text when a namespace is in effect
 - the same helper script copied into several items (`duplicate-tooling`)

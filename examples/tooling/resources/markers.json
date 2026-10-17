@@ -1,0 +1,5 @@
+{
+  "rust": ["Cargo.toml"],
+  "node": ["package.json"],
+  "python": ["pyproject.toml", "setup.py"]
+}

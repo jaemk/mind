@@ -16,7 +16,7 @@ mind forget skill:old-experiment    # or delete it
 Any entry in a lobe's `skills/`, `agents/`, `rules/`, `commands/`, or
 `workflows/` directory that is not one of `mind`'s own links. A path is always
 one or the other. An item present in several lobes is listed once with every
-path it occupies. Tools live only in the store, so they are never unmanaged.
+path it occupies. Tools and resources live only in the store, so they are never unmanaged.
 
 ## List them
 

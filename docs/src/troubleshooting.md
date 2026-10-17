@@ -35,6 +35,14 @@ frontmatter name. See [Fix name collisions](collisions.md).
 `mind` links with real symlinks and supports unix-like systems only. On
 Windows, run it under WSL.
 
+### `learn` asks to install a tool or resource I did not select
+
+The item you chose names it with `{{tools:name}}`, `{{resources:name}}`, or
+`{{path:...}}`, and those tokens are dependencies, so `learn` offers the whole
+set. Confirm with `--yes`. Without the tool or resource, the item's expanded
+path would point at nothing. See [Items that depend on other
+items](installing.md#items-that-depend-on-other-items).
+
 ### An agent's tool permissions do not work in Gemini or Codex
 
 `mind` links files as they are and does not translate frontmatter. Keys such as
@@ -81,6 +89,13 @@ real subdirectories.
 The file is strict, so a misspelled key is an error. Common slips: pin keys are
 hyphenated (`follow-branch`, `pin-tag`, `pin-ref`), as is `min-mind-version`.
 Run `mind review <path>` to check the file. See [The mind.toml file](mind-toml.md).
+
+### A file under `resources/` is not offered
+
+Without an authoritative `mind.toml`, a resource is offered only when an item
+in the same source references it with `{{resources:name}}`. A plain mention of
+`resources/<name>` in prose does not count. `mind review` lists each skipped
+entry as `unreferenced-resource`. See [Share data files](resources.md).
 
 ### A meld finds no items
 

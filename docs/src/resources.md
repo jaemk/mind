@@ -3,7 +3,9 @@
 A resource is a file or directory a source's items read at runtime: a JSON
 allowlist, a prompt template, a reference document, a folder of examples. It
 installs to the store and is reached by the `{{resources:name}}` token, the same
-way a [tool](tooling.md) is reached by `{{tools:name}}`.
+way a [tool](tooling.md) is reached by `{{tools:name}}`. The
+[tooling example](https://github.com/jaemk/mind/tree/main/examples/tooling)
+ships one.
 
 ## Layout
 

@@ -23,7 +23,7 @@ mind probe
 |---------|-------|----------|
 | [starter](https://github.com/jaemk/mind/tree/main/examples/starter) | Convention discovery: a repo with no `mind.toml`, items found by `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js` | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [hello](https://github.com/jaemk/mind/tree/main/examples/hello) | The repo-root `mind.toml`'s `[source].roots` scanning `examples/hello`; what `mind meld jaemk/mind` offers | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
-| [tooling](https://github.com/jaemk/mind/tree/main/examples/tooling) | The `tool` kind plus path tokens `{{self}}`, `{{tools:name}}`, `{{path:ref}}` | [tooling.md](https://github.com/jaemk/mind/blob/main/spec/tooling.md) |
+| [tooling](https://github.com/jaemk/mind/tree/main/examples/tooling) | The `tool` and `resource` kinds plus path tokens `{{self}}`, `{{tools:name}}`, `{{resources:name}}`, `{{path:ref}}` | [tooling.md](https://github.com/jaemk/mind/blob/main/spec/tooling.md), [resources.md](https://github.com/jaemk/mind/blob/main/spec/resources.md) |
 | [hooks](https://github.com/jaemk/mind/tree/main/examples/hooks) | Source `[[hooks]]`: build/install tooling at meld, tear down at unmeld, with the disclosure prompt | [install-hooks.md](https://github.com/jaemk/mind/blob/main/spec/install-hooks.md) |
 | [explicit](https://github.com/jaemk/mind/tree/main/examples/explicit) | Authoritative `[[items]]` inventory: export control, custom `path`/`link`, per-item install/uninstall hooks | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [monorepo](https://github.com/jaemk/mind/tree/main/examples/monorepo) | `[source].roots`: convention discovery rooted at per-package subtrees | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
@@ -53,5 +53,6 @@ mind probe
 | export only some files | explicit | [The mind.toml file](mind-toml.md#items---explicit-inventory-authoritative) |
 | lay out a monorepo | monorepo, discover | [The mind.toml file](mind-toml.md#discover---glob-based-discovery) |
 | share a script between skills | tooling | [Share helper scripts](tooling.md) |
+| share a data file between skills | tooling | [Share data files](resources.md) |
 | build tooling at meld | hooks | [Run setup with hooks](install-hooks.md) |
 | curate other repos | super-source, marketplace-curator | [Curate other repos](curating.md) |

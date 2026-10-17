@@ -32,9 +32,8 @@ the installed items first (`mind forget`) and then re-meld with the new prefix.
 
 ## Agents are not namespaced
 
-A prefix reaches skills, rules, and tools but not an agent's harness identity.
-A
-skill is keyed by its directory name, so prefixing its directory and link changes
+A prefix reaches skills, rules, commands, workflows, tools, and resources but
+not an agent's harness identity. A skill is keyed by its directory name, so prefixing its directory and link changes
 the name the harness resolves. An agent is keyed by the `name` field in its
 frontmatter, not its filename, so renaming the link to `<prefix>:<name>` would
 not change the resolved name. mind therefore links an agent under its bare
@@ -126,8 +125,9 @@ rather than treated as a reference or an error.
 an inline code span, adjacent to a path separator (`/` or `~`), or in a
 frontmatter structured field like `name:`, where name-substitution would yield
 broken code, a broken path, or (under a prefix) a wrong identity. For code and
-paths, use the path tokens (`{{self}}`, `{{tools:name}}`, `{{path:ref}}`
-described in [Share helper scripts](tooling.md)) instead of `{{ns:}}`.
+paths, use the path tokens (`{{self}}`, `{{tools:name}}`, `{{resources:name}}`,
+`{{path:ref}}`, described in [Share helper scripts](tooling.md) and
+[Share data files](resources.md)) instead of `{{ns:}}`.
 
 `mind review` flags misplaced `{{ns:}}` tokens; `init-source
 --template` does not create them.

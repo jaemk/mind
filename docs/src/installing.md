@@ -24,7 +24,8 @@ mind probe --source '*anthropic*' # only items from matching sources
 mind probe --json                 # one JSON document, for scripts
 ```
 
-`--kind` takes `skill`, `agent`, `rule`, `command`, `workflow`, or `tool`.
+`--kind` takes `skill`, `agent`, `rule`, `command`, `workflow`, `tool`, or
+`resource`.
 `--source` takes an exact source name, a trailing part of it (`repo` or
 `owner/repo`), or a glob matched against the full `host/owner/repo` identity.
 Matching several sources is normal. `mind recall` accepts the same two filters
@@ -71,6 +72,10 @@ skill:review  [selected]
 
 Install these 3 items? [y/N]
 ```
+
+The same goes for the [tools](tooling.md) and [resources](resources.md) an
+item points at with `{{tools:name}}` or `{{resources:name}}`: learning the item
+installs them too, after the same prompt.
 
 Items already installed are marked `[installed]` and left alone. Preview the
 set without installing anything with `--dry-run`:

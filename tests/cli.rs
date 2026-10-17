@@ -9918,6 +9918,17 @@ fn example_tooling_expands_path_tokens() {
         "the detect tool should be copied into the store"
     );
 
+    // spec: RES-10 DEP-8
+    // The shared resource came along too, and its token names it.
+    assert!(
+        sb.mind_home.join("store/resource/markers.json").is_file(),
+        "the markers.json resource should be copied into the store"
+    );
+    assert!(
+        skill.contains("store/resource/markers.json") && !skill.contains("{{resources:"),
+        "{{resources:markers.json}} expands to the resource: {skill}"
+    );
+
     // spec: NS-53 TOOL-19
     // The tool's own non-markdown files mention the tokens that reach them (as
     // documentation), but those tokens do not expand there: markdown is the
