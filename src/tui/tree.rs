@@ -850,6 +850,8 @@ mod tests {
             path: None,
             recorded_hash: String::new(),
             ignore: vec![],
+            profiles: vec![],
+            explicit: false,
         }
     }
 
@@ -875,6 +877,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -900,6 +903,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         };
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
@@ -2195,6 +2199,8 @@ mod tests {
             path: None,
             recorded_hash: String::new(),
             ignore: vec![],
+            profiles: vec![],
+            explicit: false,
         }
     }
 

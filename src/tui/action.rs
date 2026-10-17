@@ -104,6 +104,11 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
                     dangerously_skip_build: false,
                 },
             )?;
+            // spec: TUI-78 PROF-20 -- installing one item from the browser
+            // names it, like `learn <exact ref>`, so it is marked explicit and
+            // survives disabling its profiles. A glob (the bulk installs) is
+            // skipped by the helper itself.
+            commands::mark_learned_explicit(paths, &item_ref)?;
         }
         // spec: TUI-20
         // `yes = true`: the TUI confirms destructive actions in its own UI
@@ -111,26 +116,39 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
         ActionKind::Forget { item_key } => {
             commands::forget(paths, Some(&item_key), false, true, true, false)?
         }
-        // spec: TUI-21
-        ActionKind::Meld { spec } => {
-            commands::meld(
+        // spec: TUI-21 TUI-30 TUI-77 -- the same end-to-end verb `mind meld`
+        // runs, with the flags typed into the meld input (`--pin`,
+        // `--profile`, `--kind`, ...). `yes: false`: a meld always runs with
+        // the TUI suspended (TUI-44), so its install offer, the PROF-13
+        // profile picker, and the hook prompts read the real terminal.
+        ActionKind::Meld { args } => commands::meld_verb(paths, *args, false, false)?,
+        // spec: TUI-78 PROF-17 -- `learn <source> --profile <name>`. Runs like
+        // the browser's other installs (TUI-20): `yes` because the confirm
+        // modal, which lists what installs, was the confirmation, and
+        // `Clobber::Error` so a conflict is an inline error, not a prompt.
+        ActionKind::EnableProfile { source, profile } => {
+            let selection = crate::profile::Selection {
+                include_default: false,
+                named: vec![profile],
+                all: false,
+            };
+            commands::learn_source_profiles(
                 paths,
-                &spec,
-                None,
-                vec![],
-                vec![],
+                &source,
+                &selection,
                 false,
-                commands::PinRequest::None,
-                None,
-                false,
-                // The TUI's spec input is forwarded verbatim, so it can meld
-                // a deep item-link URL; it just has no field to supply an
-                // explicit `--kind`, so a file link outside a conventional
-                // directory with no resolvable frontmatter kind fails here
-                // (LinkKindUnresolved) with no way to work around it from the
-                // browser.
-                None,
-            )?;
+                commands::InstallFlow {
+                    yes: true,
+                    clobber: commands::Clobber::Error,
+                    dangerously_skip: false,
+                    dangerously_skip_build: false,
+                },
+            )?
+        }
+        // spec: TUI-78 PROF-25 -- `forget <source> --profile <name>`, `yes`
+        // for the same reason: the confirm modal listed what is forgotten.
+        ActionKind::DisableProfile { source, profile } => {
+            commands::forget_source_profile(paths, &source, &profile, true, false)?
         }
         // spec: TUI-21
         // The TUI's `forget` toggle maps to the inverted `--unlink-only`; `yes =
@@ -1169,17 +1187,284 @@ mod tests {
         src
     }
 
+    /// A local source declaring `[profiles]`: `default = skill:a`, `full =
+    /// skill:b + skill:c`, plus a `dev` branch for the pin test.
+    fn make_profile_repo(base: &std::path::Path) -> std::path::PathBuf {
+        use std::process::Command;
+        let src = base.join("profile-repo");
+        for name in ["a", "b", "c"] {
+            std::fs::create_dir_all(src.join(format!("skills/{name}"))).unwrap();
+            std::fs::write(
+                src.join(format!("skills/{name}/SKILL.md")),
+                format!("---\ndescription: {name}\n---\n# {name}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            src.join("mind.toml"),
+            "[profiles]\ndefault = [\"skill:a\"]\nfull = [\"skill:b\", \"skill:c\"]\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .unwrap();
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["branch", "dev"]);
+        src
+    }
+
+    fn pending(kind: ActionKind) -> PendingAction {
+        PendingAction::new(kind, String::new())
+    }
+
+    /// Pin the lobe to the isolated claude_home, so an install never touches
+    /// the real ~/.claude (the default lobe when none is configured).
+    fn pin_lobe(paths: &Paths) {
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(paths)
+        .unwrap();
+    }
+
+    /// Register `src` (no install) and return its source name.
+    fn register(paths: &Paths, src: &std::path::Path) -> String {
+        pin_lobe(paths);
+        commands::meld(
+            paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+            None,
+        )
+        .expect("meld");
+        crate::source::Registry::load(paths).unwrap().sources[0]
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn meld_input_flags_reach_the_meld_verb_pin() {
+        // spec: TUI-77 - a `--pin branch=NAME` typed after the spec is applied
+        // exactly as `mind meld --pin` applies it.
+        let (paths, base) = temp_paths();
+        pin_lobe(&paths);
+        let src = make_profile_repo(&base);
+        let line = format!("{} --pin branch=dev --register-only", src.display());
+        let args = crate::tui::app::parse_meld_line(&line).expect("parse");
+        execute(
+            &paths,
+            pending(ActionKind::Meld {
+                args: Box::new(args),
+            }),
+        )
+        .expect("meld");
+        let reg = crate::source::Registry::load(&paths).unwrap();
+        assert_eq!(
+            reg.sources[0].pin,
+            crate::source::Pin::FollowBranch("dev".to_string())
+        );
+    }
+
+    #[test]
+    fn meld_input_profile_flag_reaches_the_meld_verb() {
+        // spec: TUI-77 - `--profile` is forwarded to the CLI meld flow: an
+        // undeclared name fails with the CLI's ProfileNotFound (PROF-14).
+        let (paths, base) = temp_paths();
+        pin_lobe(&paths);
+        let src = make_profile_repo(&base);
+        let line = format!("{} --profile nope", src.display());
+        let args = crate::tui::app::parse_meld_line(&line).expect("parse");
+        let err = execute(
+            &paths,
+            pending(ActionKind::Meld {
+                args: Box::new(args),
+            }),
+        )
+        .expect_err("an undeclared profile must fail");
+        assert!(
+            matches!(err, crate::error::MindError::ProfileNotFound { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn enable_and_disable_profile_actions_run_learn_and_forget_profile() {
+        // spec: TUI-78 - Enable runs `learn <source> --profile`, Disable runs
+        // `forget <source> --profile`.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+
+        execute(
+            &paths,
+            pending(ActionKind::EnableProfile {
+                source: name.clone(),
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("enable");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(manifest.items.contains_key("skill:b"));
+        assert!(manifest.items.contains_key("skill:c"));
+        assert!(!manifest.items.contains_key("skill:a"));
+        assert_eq!(manifest.items["skill:b"].profiles, vec!["full".to_string()]);
+        let reg = crate::source::Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].profiles, Some(vec!["full".to_string()]));
+
+        execute(
+            &paths,
+            pending(ActionKind::DisableProfile {
+                source: name,
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("disable");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(manifest.items.is_empty(), "{:?}", manifest.items.keys());
+        let reg = crate::source::Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].profiles, None);
+    }
+
+    #[test]
+    fn single_item_install_marks_explicit_and_survives_disable() {
+        // spec: TUI-78 PROF-20 - installing one item from the TUI names it, so
+        // disabling its profile keeps it; its profile sibling is forgotten.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+        execute(
+            &paths,
+            pending(ActionKind::EnableProfile {
+                source: name.clone(),
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("enable");
+        execute(
+            &paths,
+            pending(ActionKind::Learn {
+                item_key: "skill:b".to_string(),
+                source: name.clone(),
+            }),
+        )
+        .expect("learn");
+        assert!(crate::manifest::Manifest::load(&paths).unwrap().items["skill:b"].explicit);
+
+        execute(
+            &paths,
+            pending(ActionKind::DisableProfile {
+                source: name,
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("disable");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(manifest.items.contains_key("skill:b"));
+        assert!(!manifest.items.contains_key("skill:c"));
+    }
+
+    #[test]
+    fn bulk_install_does_not_mark_explicit() {
+        // spec: TUI-78 - a bulk (glob) install is not a by-name install.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+        execute(
+            &paths,
+            pending(ActionKind::EnableProfile {
+                source: name.clone(),
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("enable");
+        execute(
+            &paths,
+            pending(ActionKind::Learn {
+                item_key: "skill:*".to_string(),
+                source: name,
+            }),
+        )
+        .expect("bulk learn");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(manifest.items.contains_key("skill:a"));
+        assert!(!manifest.items["skill:b"].explicit);
+    }
+
+    #[test]
+    fn profile_change_preview_lists_installs_and_removals() {
+        // spec: TUI-78 - the confirm preview names what enabling installs and
+        // what disabling forgets, without changing anything.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+
+        let p = commands::profile_change_preview(&paths, &name, "full", true).unwrap();
+        assert_eq!(
+            p.install,
+            vec!["skill:b".to_string(), "skill:c".to_string()]
+        );
+        assert!(
+            crate::manifest::Manifest::load(&paths)
+                .unwrap()
+                .items
+                .is_empty(),
+            "a preview installs nothing"
+        );
+        // Disabling a profile that is not enabled previews nothing.
+        let p = commands::profile_change_preview(&paths, &name, "full", false).unwrap();
+        assert_eq!(p, commands::ProfileChangePreview::default());
+
+        execute(
+            &paths,
+            pending(ActionKind::EnableProfile {
+                source: name.clone(),
+                profile: "full".to_string(),
+            }),
+        )
+        .expect("enable");
+        let p = commands::profile_change_preview(&paths, &name, "full", false).unwrap();
+        assert_eq!(p.remove, vec!["skill:b".to_string(), "skill:c".to_string()]);
+        assert!(p.kept.is_empty());
+        assert_eq!(
+            crate::manifest::Manifest::load(&paths).unwrap().items.len(),
+            2,
+            "a preview forgets nothing"
+        );
+        // An undeclared profile fails the preview.
+        assert!(commands::profile_change_preview(&paths, &name, "nope", true).is_err());
+    }
+
     #[test]
     fn execute_meld_promotes_preview_and_registers_source() {
         // spec: TUI-30 - confirming a preview meld calls commands::meld under the
         // exclusive lock; after success the source appears in the registry.
         let (paths, base) = temp_paths();
-        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        pin_lobe(&paths);
         let src = make_source_repo(&base);
         let spec = src.to_str().unwrap().to_string();
 
         let action = PendingAction {
-            kind: ActionKind::Meld { spec: spec.clone() },
+            kind: ActionKind::meld(spec.clone()),
             description: format!("Meld {spec}?"),
             dep_tree: None,
             upgrade_keys: Vec::new(),
@@ -1204,12 +1489,12 @@ mod tests {
         // snapshot. In a non-TTY test the meld takes the non-interactive path (no
         // install prompt), so this exercises the uncaptured code path safely.
         let (paths, base) = temp_paths();
-        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        pin_lobe(&paths);
         let src = make_source_repo(&base);
         let spec = src.to_str().unwrap().to_string();
 
         let action = PendingAction {
-            kind: ActionKind::Meld { spec: spec.clone() },
+            kind: ActionKind::meld(spec.clone()),
             description: format!("Meld {spec}?"),
             dep_tree: None,
             upgrade_keys: Vec::new(),
@@ -1325,6 +1610,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         });
         manifest.save(paths).unwrap();
         source_name

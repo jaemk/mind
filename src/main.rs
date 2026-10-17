@@ -20,6 +20,7 @@ mod namespace;
 mod paths;
 mod plugin_manifest;
 mod policy;
+mod profile;
 mod render;
 mod resolve;
 mod review;
@@ -302,7 +303,7 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
         Command::Evolve { .. } => LockMode::None,
 
         // Mutating commands.
-        Command::Meld { .. }
+        Command::Meld(_)
         // curate registers, installs, re-pins, upgrades, and (with --prune)
         // unmelds: the same exclusive-lock class as the verbs it applies.
         | Command::Curate { .. }
@@ -560,190 +561,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
     let yes = cli.yes;
     let ascii = cli.ascii;
     match cli.command {
-        Command::Meld {
-            repo,
-            alias,
-            roots,
-            add_roots,
-            flat_skills,
-            pin,
-            follow_branch,
-            pin_tag,
-            pin_ref,
-            install_hook,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
-            register_only,
-            kind,
-            learn_patterns,
-            recursive,
-            force,
-            local,
-        } => {
-            // spec: HARN-20/HARN-21 -- `--local` restricts the install fan-out to
-            // the registered project lobe containing the cwd; without it, plain
-            // meld/learn inside such a lobe gets a one-line note that --local is
-            // available. The guard lives for the whole arm so every install path
-            // (fresh meld, re-meld, curated chain) is scoped.
-            let _local_guard = commands::apply_local_scope(paths, local)?;
-            // spec: CLI-17, CLI-200..202 -- fold the pin flag (and deprecated
-            // aliases) into one request; more than one is a structured
-            // ConflictingPin error rather than a clap usage string.
-            let pin = commands::parse_pin_flags(pin, follow_branch, pin_tag, pin_ref)?;
-            // spec: CLI-239 -- `--kind` declares a file link's item kind; a bad
-            // value, or one passed with a plain repo spec, is refused before the
-            // clone. Resolved after `repo` is defaulted below.
-            // spec: CLI-236 -- reject an unusable `--learn` value before the
-            // clone, so a typo does not leave a registered source behind.
-            commands::validate_learn_patterns(&learn_patterns)?;
-            // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
-            // current directory. Resolve it to an absolute path so `parse_spec`
-            // derives a sensible `local/<parent>/<dir>` identity.
-            let repo = match repo.as_deref() {
-                None | Some(".") | Some("./") => std::env::current_dir()
-                    .map_err(|e| crate::error::MindError::io(".", e))?
-                    .to_string_lossy()
-                    .into_owned(),
-                Some(r) => r.to_string(),
-            };
-            let item_kind = commands::parse_link_kind(kind, &repo)?;
-            // CLI-34: `--force` overwrites a conflicting target; otherwise a
-            // conflict prompts on a TTY (Clobber::Prompt).
-            let clobber = if force {
-                commands::Clobber::Force
-            } else {
-                commands::Clobber::Prompt
-            };
-            let flow = commands::InstallFlow {
-                yes,
-                clobber,
-                dangerously_skip: dangerously_skip_install_hook_check,
-                dangerously_skip_build: dangerously_skip_build_hook_check,
-            };
-            // spec: STO-58 -- the alias is part of the source identity, so the
-            // instance a re-meld/install targets is `host/owner/repo@<alias>`.
-            // Computed before `alias` is moved into meld/remeld.
-            let source_ident =
-                commands::instance_name(&repo, alias.as_deref()).unwrap_or_else(|_| repo.clone());
-            // CLI-12: re-melding an already-melded source is not an error; it
-            // ensures the items are installed, else reports their status.
-            if commands::is_melded(paths, &repo, alias.as_deref())? {
-                // spec: CLI-206 -- name every discovery flag this invocation
-                // carries; remeld() cannot apply any of them (it never
-                // re-clones or re-registers) and reports so explicitly.
-                let mut ignored_flags: Vec<&str> = Vec::new();
-                if !roots.is_empty() {
-                    ignored_flags.push("--root");
-                }
-                if !add_roots.is_empty() {
-                    ignored_flags.push("--add-root");
-                }
-                if flat_skills {
-                    ignored_flags.push("--flat-skills");
-                }
-                if install_hook.is_some() {
-                    ignored_flags.push("--install-hook");
-                }
-                if item_kind.is_some() {
-                    ignored_flags.push("--kind");
-                }
-                // spec: CLI-209 -- unlike the discovery flags above, `--pin`
-                // IS honored on a re-meld: it re-pins the source instead of
-                // being a silent no-op.
-                commands::remeld(
-                    paths,
-                    &repo,
-                    alias,
-                    register_only,
-                    flow,
-                    recursive,
-                    &ignored_flags,
-                    pin,
-                    &learn_patterns,
-                )?;
-            } else {
-                let meld_sum = commands::meld(
-                    paths,
-                    &repo,
-                    alias,
-                    roots,
-                    add_roots,
-                    flat_skills,
-                    pin,
-                    install_hook,
-                    dangerously_skip_install_hook_check,
-                    item_kind,
-                )?;
-                // CLI-23: by default, offer to install the melded source's items
-                // right away (preview + prompt). `--register-only` stops at registering.
-                //
-                // CLI-156: in json mode the entire meld+install outcome is folded
-                // into ONE JSON object emitted here. Human output is unchanged.
-                if !register_only {
-                    if json {
-                        // Install silently (no separate JSON from learn), collect keys.
-                        // spec: CLI-236 -- `--learn <glob>` narrows the install to
-                        // the matching subset in place of the whole set.
-                        let (mut inst, pend) = if learn_patterns.is_empty() {
-                            commands::install_source_items_for_json(paths, &source_ident, flow)?
-                        } else {
-                            // spec: STO-58 -- the same instance identity the
-                            // text arm installs against; the two arms of one
-                            // feature must not disagree on which identity they
-                            // trust, even where the two spellings coincide.
-                            // The two spellings are provably equal today, and
-                            // using one variable keeps a future change to
-                            // either derivation from breaking only the
-                            // `--learn` arm.
-                            commands::install_source_items_matching_for_json(
-                                paths,
-                                &source_ident,
-                                &learn_patterns,
-                                flow,
-                            )?
-                        };
-                        // Also walk the curated chain silently (DSC-54/55/58) --
-                        // but not under `--learn`, whose patterns are an
-                        // explicit, top-source-scoped selection (CLI-236).
-                        if learn_patterns.is_empty() {
-                            let curated = commands::install_curated_sources_for_json(
-                                paths,
-                                &source_ident,
-                                recursive,
-                                flow,
-                            )?;
-                            inst.extend(curated);
-                        }
-                        commands::emit_meld_json_result(meld_sum, inst, pend)?;
-                    } else if !learn_patterns.is_empty() {
-                        // spec: CLI-236 -- the named subset only: the curated
-                        // chain (DSC-54/55/58) is not walked, since a pattern
-                        // selects within the source being melded. Say so when
-                        // `--recursive` was passed, rather than dropping it
-                        // silently (the CLI-206 ignored-flag discipline).
-                        commands::note_learn_ignores_recursive(recursive);
-                        commands::install_source_items_matching(
-                            paths,
-                            &source_ident,
-                            &learn_patterns,
-                            flow,
-                        )?;
-                    } else {
-                        commands::install_source_items(paths, &source_ident, flow)?;
-                        // DSC-54 installs only the top-level source by default. Walk the
-                        // curated chain and install each nested source the curator
-                        // flagged `install = true` (DSC-58), or every nested source with
-                        // `--recursive` (DSC-55).
-                        commands::install_curated_sources(paths, &source_ident, recursive, flow)?;
-                    }
-                } else if json {
-                    // register-only + json: register only, emit the meld result now.
-                    commands::emit_meld_json_result(meld_sum, vec![], 0)?;
-                }
-            }
-            // DSC-56: suggest `mind probe` after melding a curated super-source.
-            commands::maybe_probe_hint(paths, &source_ident)
-        }
+        Command::Meld(args) => commands::meld_verb(paths, args, yes, json),
         Command::InitSource {
             path,
             template,
@@ -780,7 +598,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
             local,
+            profiles,
+            no_default_profile,
+            all_profiles,
         } => {
+            let profile_names = crate::profile::parse_cli_names(&profiles)?;
+            let profile_flags =
+                crate::profile::flags_given(&profile_names, no_default_profile, all_profiles);
             // spec: HARN-20/HARN-21 -- scope the install to the project lobe when
             // `--local`; guard held for the whole arm (URL, dry-run, glob paths).
             let _local_guard = commands::apply_local_scope(paths, local)?;
@@ -798,6 +622,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // item-link instance, then install its skill. spec: CLI-200 -- `--pin`
             // freezes the link's ref while registering.
             if item.contains("://") {
+                // spec: PROF-8 -- an item link is a single item: no profiles.
+                crate::profile::reject_on_item_link(&profile_flags)?;
                 let item_kind = commands::parse_link_kind(kind, &item)?;
                 return commands::learn_link(paths, &item, pin, item_kind, dry_run, flow);
             }
@@ -821,18 +647,53 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     "note: --pin is ignored for '{item}'; it applies only to a deep tree/blob URL"
                 );
             }
+            if no_default_profile && !json {
+                eprintln!(
+                    "note: --no-default-profile changes nothing for learn, which enables only \
+                     the profiles it names"
+                );
+            }
+            // spec: PROF-17 -- `learn <source> --profile/--all-profiles`
+            // installs those profiles of an already-melded source.
+            if !profile_names.is_empty() || all_profiles {
+                let selection = crate::profile::Selection {
+                    include_default: false,
+                    named: profile_names,
+                    all: all_profiles,
+                };
+                return commands::learn_source_profiles(paths, &item, &selection, dry_run, flow);
+            }
             // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
             let item = if all {
                 resolve::all_selector(&item)?
             } else {
                 item
             };
-            commands::learn(paths, &item, dry_run, flow)
+            commands::learn(paths, &item, dry_run, flow)?;
+            // spec: PROF-20 -- a by-name learn marks the item explicit.
+            if !all && !dry_run {
+                commands::mark_learned_explicit(paths, &item)?;
+            }
+            Ok(())
         }
         Command::Forget {
             item,
             unmanaged,
+            force: _,
+            profile: Some(profile),
+            dangerously_skip_install_hook_check,
+        } if !unmanaged => commands::forget_source_profile(
+            paths,
+            item.as_deref().unwrap_or_default(),
+            &profile,
+            yes,
+            dangerously_skip_install_hook_check,
+        ),
+        Command::Forget {
+            item,
+            unmanaged,
             force,
+            profile: _,
             dangerously_skip_install_hook_check,
         } => commands::forget(
             paths,

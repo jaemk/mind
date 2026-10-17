@@ -53,6 +53,19 @@ pub struct Snapshot {
     /// `[source].prefix` from mind.toml, then none.
     // spec: TUI-53
     pub source_namespaces: std::collections::HashMap<String, Option<String>>,
+    /// Declared and enabled profiles per melded source (TUI-78, PROF-29). A
+    /// source with no `[profiles]` (or an unreadable table) has no entry.
+    // spec: TUI-78
+    pub source_profiles: std::collections::HashMap<String, SourceProfiles>,
+}
+
+/// One source's profiles for the details dialog (TUI-78).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceProfiles {
+    /// Declared profile names, sorted (the table's key order).
+    pub declared: Vec<String>,
+    /// The recorded enabled set (PROF-19); empty when untracked.
+    pub enabled: Vec<String>,
 }
 
 /// One installed item in the snapshot.
@@ -111,6 +124,11 @@ pub struct SnapshotInstalled {
     /// `IgnoreSet` so this struct's `PartialEq`/`Eq` derives stay intact.
     // spec: TUI-74 IGN-10
     pub ignore: Vec<String>,
+    /// The profiles this item was installed for (PROF-20); empty for an item
+    /// installed by name or before profiles existed (TUI-78).
+    pub profiles: Vec<String>,
+    /// Asked for by name on top of its profile reasons (PROF-20).
+    pub explicit: bool,
 }
 
 /// One available (catalog) item in the snapshot.
@@ -478,6 +496,10 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             ignore: matched
                 .map(|ci| ci.ignore.clone().unwrap_or_default())
                 .unwrap_or_default(),
+            // spec: TUI-78 - profile names pass PROF-2's grammar, so they
+            // need no sanitizing.
+            profiles: it.profiles.clone(),
+            explicit: it.explicit,
         });
     }
 
@@ -554,6 +576,25 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         m
     };
 
+    // Declared and enabled profiles per source (TUI-78). A table that fails
+    // to load is left out rather than failing the poll, like the suggested
+    // registry above; `review` and the CLI report it.
+    // spec: TUI-78 PROF-29
+    let source_profiles: std::collections::HashMap<String, SourceProfiles> = registry
+        .sources
+        .iter()
+        .filter_map(|s| {
+            let table = crate::commands::source_profile_table(paths, s).ok()??;
+            Some((
+                s.name.clone(),
+                SourceProfiles {
+                    declared: table.keys().cloned().collect(),
+                    enabled: s.profiles.clone().unwrap_or_default(),
+                },
+            ))
+        })
+        .collect();
+
     Ok(Snapshot {
         installed,
         available,
@@ -562,6 +603,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         suggestions,
         lobes,
         source_namespaces,
+        source_profiles,
     })
 }
 
@@ -638,6 +680,60 @@ mod tests {
         assert!(snap.available.is_empty(), "fresh home: no available items");
         assert!(snap.unmanaged.is_empty(), "fresh home: no unmanaged items");
         assert!(snap.source_names.is_empty(), "fresh home: no sources");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn snapshot_carries_declared_and_enabled_profiles() {
+        // spec: TUI-78 PROF-29 - each source declaring `[profiles]` gets its
+        // declared names and its recorded enabled set; a source without
+        // profiles gets no entry.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        meld_fixture(
+            &paths,
+            &base,
+            &[
+                ("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n"),
+                ("skills/b/SKILL.md", "---\ndescription: b\n---\n# b\n"),
+                (
+                    "mind.toml",
+                    "[profiles]\nfull = [\"skill:b\"]\ndefault = [\"skill:a\"]\n",
+                ),
+            ],
+        );
+        let name = Registry::load(&paths).unwrap().sources[0].name.clone();
+        let snap = load(&paths).unwrap();
+        assert_eq!(
+            snap.source_profiles.get(&name),
+            Some(&SourceProfiles {
+                declared: vec!["default".to_string(), "full".to_string()],
+                enabled: vec![],
+            })
+        );
+
+        let mut reg = Registry::load(&paths).unwrap();
+        reg.sources[0].profiles = Some(vec!["full".to_string()]);
+        reg.save(&paths).unwrap();
+        let snap = load(&paths).unwrap();
+        assert_eq!(
+            snap.source_profiles[&name].enabled,
+            vec!["full".to_string()]
+        );
+        cleanup(&base);
+    }
+
+    #[test]
+    fn snapshot_has_no_profiles_entry_for_a_plain_source() {
+        // spec: TUI-78 - no `[profiles]`, no entry.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        meld_fixture(
+            &paths,
+            &base,
+            &[("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n")],
+        );
+        assert!(load(&paths).unwrap().source_profiles.is_empty());
         cleanup(&base);
     }
 

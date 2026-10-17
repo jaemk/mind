@@ -283,6 +283,7 @@ and verified.
 | `[discover].workflows` globs match only regular non-symlink `.js` files | done | [discovery.md](discovery.md) (DSC-114) |
 | Item-link skill and tool `TOOL.md` anchors are classified no-follow | done | [discovery.md](discovery.md) (DSC-115) |
 | The `meta` reader rejects expression-headed strings; blank workflow description/whenToUse read as absent | done | [workflows.md](workflows.md) (WF-63) |
+| Install profiles: a source declares named, composable item sets (`[profiles]`, cargo-feature style); `meld`/`learn --profile` installs them additively over `default`, the enabled set is recorded and tracked by `upgrade`/`curate`/`dump` | done | [profiles.md](profiles.md) (PROF-1..30) |
 
 ## Documents
 
@@ -341,6 +342,10 @@ and verified.
 - [ignore.md](ignore.md) - ignored files: which paths under an item are excluded
   from the store copy and the content hash, so an item can point at a directory
   that holds more than the item itself (a top-level `SKILL.md` at a repo root).
+- [profiles.md](profiles.md) - install profiles: named, composable item sets a
+  source declares in `[profiles]` (cargo-feature style), selected additively at
+  `meld`/`learn`, recorded on the source, and tracked by `upgrade`, `curate`, and
+  `dump`.
 
 ## Conventions
 

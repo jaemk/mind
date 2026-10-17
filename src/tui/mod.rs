@@ -250,18 +250,28 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
         // When the spec-input box is open, all keys go to it (TUI-30).
         match k.code {
             KeyCode::Enter => {
-                let spec = app.spec_input_text.trim().to_string();
-                app.spec_input_active = false;
-                app.spec_input_text.clear();
-                if spec.is_empty() {
+                let line = app.spec_input_text.trim().to_string();
+                if line.is_empty() {
                     // Empty input: cancel.
+                    app.spec_input_active = false;
                     app.status = None;
-                } else {
-                    // Submit: the user named the source, so meld it directly with
-                    // the same interactive flow as the CLI (suspend the TUI). This
-                    // also lets an auth-required (SSH) remote prompt for a key on
-                    // the normal terminal instead of hanging the UI (TUI-30, TUI-45).
-                    run_interactive_meld(paths, app, spec);
+                    return;
+                }
+                // spec: TUI-77 -- parse the spec and its flags exactly as
+                // `mind meld` would. A bad line keeps the input open with its
+                // text, so the user fixes the flag rather than retyping.
+                match app::parse_meld_line(&line) {
+                    Err(msg) => app.set_error(msg),
+                    Ok(args) => {
+                        app.spec_input_active = false;
+                        app.spec_input_text.clear();
+                        // Submit: the user named the source, so meld it directly
+                        // with the same interactive flow as the CLI (suspend the
+                        // TUI). This also lets an auth-required (SSH) remote
+                        // prompt for a key on the normal terminal instead of
+                        // hanging the UI (TUI-30, TUI-45).
+                        run_interactive_meld(paths, app, args);
+                    }
                 }
             }
             KeyCode::Esc => {
@@ -320,6 +330,10 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                 // as the direct `i` action does in normal mode.
                 if let Some(item_ref) = app.pending_learn_ref.take() {
                     run_learn_preview(paths, app, &item_ref);
+                }
+                // A profile change lists what it installs or forgets (TUI-78).
+                if let Some(req) = app.pending_profile_preview.take() {
+                    run_profile_preview(paths, app, &req);
                 }
             }
             _ => {}
@@ -437,6 +451,17 @@ fn run_set_namespace(paths: &Paths, app: &mut app::App, source: String, new_alia
     }
 }
 
+/// Compute a profile change's preview (TUI-78) under a shared lock (TUI-25)
+/// and append it to the pending action's confirm description.
+// spec: TUI-78 TUI-25
+fn run_profile_preview(paths: &Paths, app: &mut app::App, req: &app::ProfilePreviewRequest) {
+    let preview = crate::lock::open(paths).and_then(|lock| {
+        let _guard = lock.read()?;
+        crate::commands::profile_change_preview(paths, &req.source, &req.profile, req.enable)
+    });
+    app.apply_profile_preview(preview);
+}
+
 /// After an interactive verb runs with the TUI suspended (TUI-44), hold the
 /// normal terminal so the user can read the verb's output before the browser
 /// redraws over it. A bare Enter (or EOF) returns. Best-effort: any I/O error
@@ -454,9 +479,14 @@ fn pause_for_return() {
 /// confirmation all run on the normal terminal -- and so an auth-required (SSH)
 /// remote can prompt for a passphrase or host-key instead of hanging the UI
 /// (TUI-45). On success the snapshot is reloaded; an error is surfaced inline.
-// spec: TUI-30 TUI-44 TUI-45
-fn run_interactive_meld(paths: &Paths, app: &mut app::App, spec: String) {
-    let action = app::PendingAction::new(app::ActionKind::Meld { spec }, String::new());
+// spec: TUI-30 TUI-44 TUI-45 TUI-77
+fn run_interactive_meld(paths: &Paths, app: &mut app::App, args: crate::cli::MeldArgs) {
+    let action = app::PendingAction::new(
+        app::ActionKind::Meld {
+            args: Box::new(args),
+        },
+        String::new(),
+    );
     let result = term::with_suspended(|| {
         let r = action::execute_interactive(paths, action);
         pause_for_return();
@@ -604,6 +634,8 @@ mod tests {
                 path: None,
                 recorded_hash: String::new(),
                 ignore: vec![],
+                profiles: vec![],
+                explicit: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -620,6 +652,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         });
         app
     }
@@ -1159,9 +1192,7 @@ mod tests {
         // spec: TUI-44 - Meld may prompt (install-hook HOOK-20, install confirm
         // CLI-23, SSH passphrase TUI-45) and must run on the suspended terminal.
         assert!(
-            action_needs_suspension(&ActionKind::Meld {
-                spec: "git@github.com:foo/bar".to_string()
-            }),
+            action_needs_suspension(&ActionKind::meld("git@github.com:foo/bar")),
             "Meld must be classified as requiring suspension"
         );
     }
@@ -1319,6 +1350,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         });
         manifest.save(&paths).unwrap();
 

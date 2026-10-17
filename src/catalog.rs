@@ -2661,6 +2661,8 @@ mod tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 
@@ -5232,6 +5234,8 @@ mod plugin_tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 
@@ -6558,6 +6562,8 @@ mod lifecycle_tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 

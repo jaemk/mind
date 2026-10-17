@@ -66,9 +66,34 @@ pub struct InstalledItem {
     /// normal source, deserializes exactly as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_requires: Vec<String>,
+
+    /// The install profiles this item was installed for (PROF-20), as a
+    /// member or as a closure item (PROF-6). Empty (and omitted from the file)
+    /// for an item installed by name, and for every item installed before
+    /// profiles existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+
+    /// Set when the consumer also asked for this item by name while it carries
+    /// profile reasons (PROF-20), so disabling its profiles keeps it (PROF-25).
+    /// Omitted when false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit: bool,
+}
+
+/// `skip_serializing_if` helper: omit a `false` flag from `manifest.json`.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl InstalledItem {
+    /// Whether this item was asked for by name (PROF-20): it carries no profile
+    /// reason at all, or it was marked explicit on top of them. An explicit
+    /// item is never removed by disabling a profile (PROF-25).
+    pub fn is_explicit(&self) -> bool {
+        self.profiles.is_empty() || self.explicit
+    }
+
     /// Manifest key, using the effective installed name, e.g. `skill:jk:review`.
     ///
     /// Returns an [`ItemKey`] (DSC-95): the installed name is source-derived
@@ -124,6 +149,10 @@ impl InstalledItem {
             // it is source-controlled exactly like `description` and is
             // sanitized on the same terms.
             dropped_requires: self.dropped_requires.iter().map(|e| s(e)).collect(),
+            // Profile names pass PROF-2 before they are recorded, so they are
+            // safe to print as-is.
+            profiles: self.profiles.clone(),
+            explicit: self.explicit,
         }
     }
 }
@@ -289,7 +318,95 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         }
+    }
+
+    /// Install reasons (PROF-20) round-trip through `manifest.json`; an entry
+    /// without them (by-name or pre-feature) omits both keys, reads back
+    /// explicit, and an older manifest without the keys still loads.
+    // spec: PROF-20
+    #[test]
+    fn profile_reasons_round_trip_and_default_absent() {
+        let (base, paths) = tmp_paths();
+        let mut tagged = stub_item("tagged");
+        tagged.profiles = vec!["default".into(), "full".into()];
+        tagged.explicit = true;
+        let mut member = stub_item("member");
+        member.profiles = vec!["full".into()];
+        let plain = stub_item("plain");
+        let mut manifest = Manifest::default();
+        manifest.insert(tagged.clone());
+        manifest.insert(member.clone());
+        manifest.insert(plain.clone());
+        manifest.save(&paths).expect("save manifest");
+
+        let raw = std::fs::read_to_string(base.join("manifest.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let plain_obj = &v["items"]["skill:plain"];
+        assert!(plain_obj.get("profiles").is_none(), "{plain_obj}");
+        assert!(plain_obj.get("explicit").is_none(), "{plain_obj}");
+        assert!(v["items"]["skill:member"].get("explicit").is_none());
+
+        let loaded = Manifest::load(&paths).expect("load manifest");
+        let t = &loaded.items["skill:tagged"];
+        assert_eq!(t.profiles, tagged.profiles);
+        assert!(t.explicit && t.is_explicit());
+        let m = &loaded.items["skill:member"];
+        assert_eq!(m.profiles, vec!["full"]);
+        assert!(
+            !m.explicit && !m.is_explicit(),
+            "profile-only item is not explicit"
+        );
+        let p = &loaded.items["skill:plain"];
+        assert!(p.profiles.is_empty() && !p.explicit && p.is_explicit());
+
+        // The display copy keeps both.
+        let d = t.sanitized_for_display();
+        assert_eq!(d.profiles, tagged.profiles);
+        assert!(d.explicit);
+
+        // A manifest written before profiles existed has neither key.
+        std::fs::write(
+            base.join("manifest.json"),
+            r#"{"version":1,"items":{"skill:old":{
+                "kind":"skill","name":"old","bare_name":"old",
+                "source":"local/test","commit":"abc123","hash":"deadbeef",
+                "store":"store/skill/old","links":[]
+            }}}"#,
+        )
+        .unwrap();
+        let old = Manifest::load(&paths).expect("must load a pre-profile manifest");
+        let o = &old.items["skill:old"];
+        assert!(o.profiles.is_empty() && !o.explicit && o.is_explicit());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: PROF-20
+    #[test]
+    fn is_explicit_truth_table_and_display_copy() {
+        let mut i = stub_item("x");
+        assert!(i.is_explicit(), "no reasons: asked for by name");
+        i.explicit = true;
+        assert!(i.is_explicit(), "explicit with no reasons");
+        i.explicit = false;
+        i.profiles = vec!["full".into()];
+        assert!(!i.is_explicit(), "reasons, not explicit");
+        i.explicit = true;
+        assert!(i.is_explicit(), "reasons plus explicit");
+
+        // The display copy sanitizes source text but leaves reasons verbatim
+        // and keeps the flag.
+        i.description = Some("d\u{1b}[31m".into());
+        let d = i.sanitized_for_display();
+        assert!(!d.description.as_ref().unwrap().contains('\u{1b}'));
+        assert_eq!(d.profiles, vec!["full"]);
+        assert!(d.explicit && d.is_explicit());
+        let mut plain = stub_item("y");
+        plain.profiles = vec!["a".into()];
+        let d = plain.sanitized_for_display();
+        assert!(!d.explicit && !d.is_explicit());
     }
 
     /// An item's `install_hooks` record (STO-75) survives a save/load

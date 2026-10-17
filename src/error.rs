@@ -954,6 +954,34 @@ pub enum MindError {
         source_name: String,
     },
 
+    /// PROF-14: a `--profile` value that fails PROF-2's name syntax. Raised
+    /// before the clone, so a malformed name never leaves a registered source
+    /// behind. `name` is user-typed; it is sanitized anyway, since it is echoed
+    /// back verbatim.
+    #[error(
+        "invalid profile name '{}': {reason}",
+        crate::sanitize::strip_ansi(name)
+    )]
+    InvalidProfileName { name: String, reason: String },
+
+    /// PROF-14: a well-formed profile name the source does not declare. The
+    /// message lists the declared profiles (each already PROF-2-valid, so safe
+    /// to print) or says the source declares none. `source_name` is
+    /// source-controlled and sanitized (DSC-95).
+    #[error("{}", profile_not_found_message(profile, source_name, declared))]
+    ProfileNotFound {
+        profile: String,
+        source_name: String,
+        declared: Vec<String>,
+    },
+
+    /// PROF-8: a profile flag given with an item link, which installs exactly
+    /// one item and so has no profiles to select.
+    #[error(
+        "{flag} cannot be used with an item link: an item link installs a single item, which has no profiles"
+    )]
+    ProfileFlagOnItemLink { flag: String },
+
     /// DSC-95: `source_name` and `name` are both source-controlled (the
     /// source's own identity and an item name discovered under one of its scan
     /// roots), and `main.rs` prints this message verbatim via
@@ -1635,6 +1663,26 @@ fn learn_no_match_message(pattern: &str, source_name: &str) -> String {
     )
 }
 
+/// The [`MindError::ProfileNotFound`] message (PROF-14, DSC-95). The profile
+/// and declared names are sanitized too, defensively: a declared name has
+/// passed PROF-2, but the queried one may come from a curator entry.
+fn profile_not_found_message(profile: &str, source_name: &str, declared: &[String]) -> String {
+    let profile = crate::sanitize::strip_ansi(profile);
+    let source_name = crate::sanitize::strip_ansi(source_name);
+    if declared.is_empty() {
+        format!("source '{source_name}' declares no profiles, so it has no profile '{profile}'")
+    } else {
+        let names: Vec<String> = declared
+            .iter()
+            .map(|d| crate::sanitize::strip_ansi(d))
+            .collect();
+        format!(
+            "source '{source_name}' declares no profile '{profile}'; declared profiles: {}",
+            names.join(", ")
+        )
+    }
+}
+
 fn status_suffix(status: Option<ExitStatus>) -> String {
     match status.and_then(|s| s.code()) {
         Some(code) => format!(" (exit {code})"),
@@ -1720,6 +1768,9 @@ impl MindError {
             MindError::ExpandsIgnoredFile { .. } => "expands-ignored-file",
             MindError::InvalidLearnPattern { .. } => "invalid-learn-pattern",
             MindError::LearnPatternNoMatch { .. } => "learn-pattern-no-match",
+            MindError::InvalidProfileName { .. } => "invalid-profile-name",
+            MindError::ProfileNotFound { .. } => "profile-not-found",
+            MindError::ProfileFlagOnItemLink { .. } => "profile-flag-on-item-link",
             MindError::DuplicateItem { .. } => "duplicate-item",
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",
@@ -2958,6 +3009,31 @@ mod tests {
             .kind(),
             "hooks-not-run"
         );
+        // spec: PROF-8 -- the install-profile error variants carry stable slugs.
+        assert_eq!(
+            MindError::InvalidProfileName {
+                name: "Bad".into(),
+                reason: "r".into(),
+            }
+            .kind(),
+            "invalid-profile-name"
+        );
+        assert_eq!(
+            MindError::ProfileNotFound {
+                profile: "p".into(),
+                source_name: "s".into(),
+                declared: vec![],
+            }
+            .kind(),
+            "profile-not-found"
+        );
+        assert_eq!(
+            MindError::ProfileFlagOnItemLink {
+                flag: "--profile".into()
+            }
+            .kind(),
+            "profile-flag-on-item-link"
+        );
 
         // Every slug must be non-empty and kebab-case (lowercase, hyphens only).
         let samples: &[(&str, &MindError)] = &[
@@ -2983,6 +3059,80 @@ mod tests {
                 "slug must be lowercase kebab-case: {slug}"
             );
         }
+    }
+
+    // ProfileNotFound lists the declared profiles, or says there are none, and
+    // strips terminal escapes from the source-controlled source name.
+    #[test]
+    fn profile_not_found_lists_declared_or_says_none() {
+        let listed = MindError::ProfileNotFound {
+            profile: "full".into(),
+            source_name: "o/r".into(),
+            declared: vec!["basic".into(), "default".into()],
+        }
+        .to_string();
+        assert!(listed.contains("'full'"), "{listed}");
+        assert!(listed.contains("basic, default"), "{listed}");
+        let none = MindError::ProfileNotFound {
+            profile: "full".into(),
+            source_name: "o/\u{1b}[31mr".into(),
+            declared: vec![],
+        }
+        .to_string();
+        assert!(none.contains("declares no profiles"), "{none}");
+        assert!(
+            !none.contains('\u{1b}'),
+            "source name must be sanitized: {none}"
+        );
+    }
+
+    // spec: PROF-8
+    #[test]
+    fn profile_flag_on_item_link_names_the_flag() {
+        let msg = MindError::ProfileFlagOnItemLink {
+            flag: "--all-profiles".into(),
+        }
+        .to_string();
+        assert!(
+            msg.starts_with("--all-profiles cannot be used with an item link"),
+            "{msg}"
+        );
+    }
+
+    // spec: PROF-14
+    #[test]
+    fn profile_errors_strip_escapes_from_every_echoed_field() {
+        let e = MindError::InvalidProfileName {
+            name: "\u{1b}[31mBad".into(),
+            reason: "it is bad".into(),
+        }
+        .to_string();
+        assert!(!e.contains('\u{1b}'), "{e:?}");
+        assert!(e.contains("Bad") && e.contains("it is bad"), "{e}");
+
+        let e = MindError::ProfileNotFound {
+            profile: "\u{1b}[31mnope".into(),
+            source_name: "\u{1b}[2Jo/r".into(),
+            declared: vec!["a\u{1b}[0m".into(), "b".into()],
+        }
+        .to_string();
+        assert!(!e.contains('\u{1b}'), "{e:?}");
+        assert!(
+            e.contains("declared profiles: a, b"),
+            "declared list, in order: {e}"
+        );
+        assert!(e.contains("'nope'") && e.contains("'o/r'"), "{e}");
+
+        // The no-declared branch sanitizes the queried profile as well.
+        let e = MindError::ProfileNotFound {
+            profile: "\u{1b}[31mnope".into(),
+            source_name: "o/r".into(),
+            declared: vec![],
+        }
+        .to_string();
+        assert!(!e.contains('\u{1b}'), "{e:?}");
+        assert!(e.contains("declares no profiles"), "{e}");
+        assert!(!e.contains("declared profiles:"), "{e}");
     }
 
     // spec: CLI-212 CLI-213

@@ -213,6 +213,46 @@ error at meld. To keep a grouped name or a nested layout, declare the item
 with an `[[items]]` entry (`kind`/`name`/`path`, plus a `link` when the
 subdirectory itself must be preserved); see [Source layout](source-layout.md).
 
+## `[profiles]` - install profiles
+
+A profile is a named set of a source's items that a consumer can enable at
+`meld` or `learn`, like cargo features. Each key is a profile name and each value
+is an array of members.
+
+```toml
+[profiles]
+default = ["basic"]
+basic   = ["skill:review", "skill:test", "rule:style"]
+full    = ["basic", "agent:*", "skill:deploy"]
+all     = ["*"]
+```
+
+- **Names** match `[a-z0-9][a-z0-9_-]*` and are at most 64 bytes. Anything else,
+  including a name with `:`, is an error (PROF-2).
+- **Members** are one of: an item pattern `kind:name` where `name` is a bare name
+  or a glob (`agent:*`, `skill:pdf-*`); `"*"` for every item the source offers;
+  or the name of another profile, which includes its members. A member splits at
+  its first `:`, so `command:frontend:build` is the `command` named
+  `frontend:build`. Write bare names; a namespace in effect is applied at install
+  (PROF-3).
+- **No cycles.** A profile that includes itself, directly or through others, is
+  an error naming the cycle (PROF-4).
+- **Misses.** An exact `kind:name` that the source does not offer is an error
+  when the profile is expanded. A glob that matches nothing is not, so a source
+  can list `agent:*` before it ships an agent (PROF-5).
+- **`default`** names the profile enabled when the consumer names none and does
+  not opt out. A plain `meld` then offers the `default` expansion instead of
+  every item. If `[profiles]` has no `default`, `meld` still offers to install
+  everything and the profiles are opt-in only (PROF-7).
+- **Root file only.** Profiles are read from the repo's root `mind.toml`. A
+  scoped item `mind.toml` that declares `[profiles]` is an error (PROF-8).
+- **Not authoritative.** `[profiles]` is metadata like `[source]`: it does not
+  turn off convention scanning, and a profile can only select items the source
+  already offers (PROF-1).
+
+Consumers pick profiles with `meld --profile`, `learn --profile`, and
+`forget --profile` (see [Commands](commands.md#install-profiles)).
+
 ## `[discover].sources` - curated super-source
 
 A repo can list other repos to meld, acting as a curated registry. Melding it
@@ -256,6 +296,13 @@ install = true
   expanded here (`install-items = ["skill:*"]` fails at meld), unlike the
   consumer-side `meld --learn <NAME|GLOB>`, which does accept globs and matches
   an item's bare or effective name (see [Commands](commands.md#installing-part-of-a-source)).
+- **`profiles`** and **`default-profile`**: install directive for the nested
+  source's [profiles](#profiles---install-profiles). `profiles = ["full"]`
+  enables those profiles, and `default-profile = false` leaves `default` out, as
+  `meld --profile` and `--no-default-profile` do. `profiles` with `install = true`
+  is an error; with `install-items` it installs the union. An `install = true`
+  entry whose nested source declares `default` offers the `default` expansion. A
+  profile name the nested source does not declare is an error at meld (PROF-26).
 - **`kind`**: `"agent"`, `"rule"`, or `"command"` -- declares what an [item
   link](commands.md#item-links-install-one-item-by-url)'s linked file is, the
   curator-side form of `meld --kind`. Only valid when `source` is itself an

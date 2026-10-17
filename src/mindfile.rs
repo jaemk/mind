@@ -86,6 +86,10 @@ pub struct MindToml {
     /// Declared hooks in declaration order (HOOK-51).
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    /// Install profiles (PROF-1): profile name to members. Metadata like
+    /// `[source]`: it never makes the file authoritative. Validated at load
+    /// (PROF-2..4) by [`crate::profile::validate_table`].
+    pub profiles: Option<crate::profile::ProfileTable>,
 }
 
 /// Repo-level metadata.
@@ -308,6 +312,11 @@ impl ItemDecl {
 pub struct ItemToml {
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    /// Accepted by the parser only so [`ItemToml::load`] can refuse it with a
+    /// message naming the root-only rule (PROF-8), instead of the generic
+    /// unknown-key error. Never read otherwise.
+    #[serde(default)]
+    profiles: Option<toml::Value>,
 }
 
 impl ItemToml {
@@ -344,6 +353,16 @@ impl ItemToml {
                 crate::sanitize::strip_ansi(&e.to_string())
             ),
         })?;
+        // spec: PROF-8 -- profiles select among a source's items, so only the
+        // root mind.toml may declare them.
+        if parsed.profiles.is_some() {
+            return Err(MindError::MindToml {
+                path: sanitized_path(&file),
+                msg: "[profiles] is not allowed in an item manifest; profiles are read from the \
+                      source's root mind.toml only"
+                    .to_string(),
+            });
+        }
         Ok(Some(parsed))
     }
 
@@ -495,6 +514,15 @@ pub struct NestedSource {
     /// (DSC-64).
     #[serde(rename = "install-items", default)]
     pub install_items: Option<Vec<String>>,
+    /// Profiles of the nested source to enable at install (PROF-26), as if
+    /// given as `--profile`. Composes with `install-items` (the union is
+    /// installed); setting it alongside `install = true` is an error.
+    #[serde(default)]
+    pub profiles: Option<Vec<String>>,
+    /// `false` acts as `--no-default-profile` for the nested source (PROF-26).
+    /// `None` and `Some(true)` keep `default` enabled.
+    #[serde(rename = "default-profile", default)]
+    pub default_profile: Option<bool>,
     /// Curator-supplied pin: track a named branch (DSC-59, DSC-41 one-of).
     #[serde(rename = "follow-branch", default)]
     pub follow_branch: Option<String>,
@@ -589,6 +617,34 @@ impl NestedSource {
                     self.source
                 ),
             });
+        }
+        // spec: PROF-26 -- `profiles` is a subset directive like
+        // `install-items`, so it conflicts with `install = true` the same way
+        // (DSC-64), and each name must be well formed (PROF-2).
+        if let Some(profiles) = &self.profiles {
+            if self.install && !profiles.is_empty() {
+                return Err(MindError::MindToml {
+                    path: toml_path.to_path_buf(),
+                    msg: format!(
+                        "nested source '{}': install = true and profiles are mutually exclusive; \
+                         use profiles alone to offer those profiles, or install = true to offer \
+                         the source's default",
+                        crate::sanitize::strip_ansi(&self.source)
+                    ),
+                });
+            }
+            for name in profiles {
+                if let Some(reason) = crate::profile::name_problem(name) {
+                    return Err(MindError::MindToml {
+                        path: toml_path.to_path_buf(),
+                        msg: format!(
+                            "nested source '{}': profile name '{}' {reason}",
+                            crate::sanitize::strip_ansi(&self.source),
+                            crate::sanitize::strip_ansi(name)
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -927,6 +983,12 @@ impl MindToml {
         // they can reach `glob_paths` and the filesystem.
         if let Some(discover) = &parsed.discover {
             validate_discover_patterns(discover, &file)?;
+        }
+        // spec: PROF-2 PROF-3 PROF-4 -- the profile table's syntax, members,
+        // and inclusion graph are checked here; an exact member's referent
+        // needs the catalog and is checked at expansion (PROF-5).
+        if let Some(profiles) = &parsed.profiles {
+            crate::profile::validate_table(profiles, &sanitized_path(&file))?;
         }
         // spec: DSC-92 -- a curated `[discover].sources` entry's relative local
         // `source` (`./rel/path`, `../rel/path`) is resolved against the
@@ -2473,6 +2535,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: Some("develop".into()),
             pin_tag: None,
             pin_ref: None,
@@ -2498,6 +2562,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -2647,6 +2713,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -2679,6 +2747,8 @@ mod tests {
                 alias: None,
                 install: false,
                 install_items: None,
+                profiles: None,
+                default_profile: None,
                 follow_branch: Some(branch.into()),
                 pin_tag: None,
                 pin_ref: None,
@@ -2865,6 +2935,8 @@ mod tests {
             alias: None,
             install: true,
             install_items: Some(vec!["skill:review".into()]),
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -2904,6 +2976,8 @@ mod tests {
             alias: None,
             install: true,
             install_items: Some(vec![]), // empty is fine
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -2930,6 +3004,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -3126,6 +3202,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: Some("--upload-pack=touch /tmp/pwned".into()),
             pin_tag: None,
             pin_ref: None,
@@ -3152,6 +3230,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: Some("-evil".into()),
             pin_ref: None,
@@ -3178,6 +3258,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("--depth=1".into()),
@@ -3204,6 +3286,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: Some("main branch".into()),
             pin_tag: None,
             pin_ref: None,
@@ -3230,6 +3314,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("main..HEAD".into()),
@@ -3256,6 +3342,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
@@ -3481,6 +3569,8 @@ mod tests {
             alias: None,
             install: false,
             install_items: None,
+            profiles: None,
+            default_profile: None,
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
@@ -3625,5 +3715,248 @@ mod tests {
             Some("jk"),
             "legacy prefix key must still work: {parsed:?}"
         );
+    }
+
+    // ---- PROF: install profiles ---------------------------------------------
+
+    /// A fresh temp dir holding `mind.toml` = `body`.
+    fn prof_dir(body: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-prof-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), body).unwrap();
+        dir
+    }
+
+    // spec: PROF-1
+    #[test]
+    fn profiles_table_parses_and_is_not_authoritative() {
+        let dir = prof_dir(
+            "[profiles]\ndefault = [\"basic\"]\nbasic = [\"skill:review\", \"rule:style\"]\n\
+             full = [\"basic\", \"agent:*\"]\nall = [\"*\"]\n",
+        );
+        let mt = MindToml::load(&dir).unwrap().unwrap();
+        assert!(
+            !mt.is_authoritative(),
+            "[profiles] alone must keep convention discovery"
+        );
+        assert!(!mt.declares_scan_layout());
+        let p = mt.profiles.as_ref().expect("profiles parsed");
+        assert_eq!(p["full"], vec!["basic", "agent:*"]);
+        assert_eq!(p.len(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Alongside [[items]], authority comes from [[items]], not [profiles].
+        let dir = prof_dir(
+            "[profiles]\np = [\"rule:style\"]\n\
+             [[items]]\nkind = \"rule\"\nname = \"style\"\npath = \"r.md\"\n",
+        );
+        assert!(MindToml::load(&dir).unwrap().unwrap().is_authoritative());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // No [profiles]: None.
+        let dir = prof_dir("[source]\ndescription = \"x\"\n");
+        assert!(MindToml::load(&dir).unwrap().unwrap().profiles.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec: PROF-2 PROF-3 PROF-4
+    #[test]
+    fn invalid_profiles_table_fails_load_as_mindtoml() {
+        for (body, needle) in [
+            ("[profiles]\nBad = []\n", "profile name 'Bad'"),
+            ("[profiles]\np = [\"widget:x\"]\n", "unknown kind 'widget'"),
+            ("[profiles]\np = [\"nope\"]\n", "does not declare"),
+            ("[profiles]\np = [\"p\"]\n", "cycle: p -> p"),
+        ] {
+            let dir = prof_dir(body);
+            match MindToml::load(&dir) {
+                Err(MindError::MindToml { msg, .. }) => {
+                    assert!(msg.starts_with("[profiles]: "), "{msg}");
+                    assert!(msg.contains(needle), "{body:?}: {msg}");
+                }
+                other => panic!("{body:?}: expected MindToml, got {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // spec: PROF-8
+    #[test]
+    fn profiles_in_a_scoped_item_manifest_are_rejected() {
+        let dir = prof_dir("[profiles]\nbasic = [\"skill:x\"]\n");
+        match ItemToml::load(&dir) {
+            Err(MindError::MindToml { msg, .. }) => {
+                assert!(msg.contains("[profiles]"), "{msg}");
+                assert!(msg.contains("root mind.toml only"), "{msg}");
+            }
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        // Hooks alone still load.
+        let dir = prof_dir("[[hooks]]\nrun = \"true\"\n");
+        assert!(ItemToml::load(&dir).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn nested(body: &str) -> NestedSource {
+        let mt: MindToml = toml::from_str(body).expect("parse");
+        mt.discover.unwrap().sources.into_iter().next().unwrap()
+    }
+
+    // spec: PROF-26
+    #[test]
+    fn nested_profiles_parse_and_validate() {
+        let ns = nested(
+            "[discover]\nsources = [{ source = \"o/r\", profiles = [\"full\"], \
+             default-profile = false, install-items = [\"skill:x\"] }]\n",
+        );
+        assert_eq!(ns.profiles.as_deref(), Some(&["full".to_string()][..]));
+        assert_eq!(ns.default_profile, Some(false));
+        ns.validate(Path::new("mind.toml"))
+            .expect("profiles with install-items is allowed (the union installs)");
+        let sel = crate::profile::Selection::from_nested(&ns);
+        assert!(!sel.include_default);
+        assert_eq!(sel.named, vec!["full"]);
+
+        let plain = nested("[discover]\nsources = [{ source = \"o/r\" }]\n");
+        assert_eq!(plain.profiles, None);
+        assert_eq!(plain.default_profile, None);
+        assert!(crate::profile::Selection::from_nested(&plain).include_default);
+
+        let both = nested(
+            "[discover]\nsources = [{ source = \"o/r\", install = true, profiles = [\"full\"] }]\n",
+        );
+        match both.validate(Path::new("mind.toml")) {
+            Err(MindError::MindToml { msg, .. }) => {
+                assert!(msg.contains("mutually exclusive"), "{msg}");
+                assert!(msg.contains("o/r"), "{msg}");
+            }
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+
+        let bad = nested("[discover]\nsources = [{ source = \"o/r\", profiles = [\"Full\"] }]\n");
+        match bad.validate(Path::new("mind.toml")) {
+            Err(MindError::MindToml { msg, .. }) => assert!(msg.contains("'Full'"), "{msg}"),
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+    }
+
+    // spec: PROF-26
+    #[test]
+    fn nested_profiles_edge_cases() {
+        let p = Path::new("mind.toml");
+        // An empty profiles list with install = true is not a conflict.
+        nested("[discover]\nsources = [{ source = \"o/r\", install = true, profiles = [] }]\n")
+            .validate(p)
+            .expect("empty profiles does not conflict with install");
+        // default-profile alone, and = true, keep default enabled.
+        let t = nested("[discover]\nsources = [{ source = \"o/r\", default-profile = true }]\n");
+        t.validate(p).unwrap();
+        assert!(crate::profile::Selection::from_nested(&t).include_default);
+        // install = true with default-profile = false is allowed.
+        let f = nested(
+            "[discover]\nsources = [{ source = \"o/r\", install = true, default-profile = false }]\n",
+        );
+        f.validate(p).unwrap();
+        assert!(!crate::profile::Selection::from_nested(&f).include_default);
+        // A name with ':' (an item pattern) and an empty name are refused.
+        for bad in ["skill:x", ""] {
+            let n = nested(&format!(
+                "[discover]\nsources = [{{ source = \"o/r\", profiles = [\"{bad}\"] }}]\n"
+            ));
+            assert!(
+                matches!(n.validate(p), Err(MindError::MindToml { .. })),
+                "{bad:?}"
+            );
+        }
+        // One bad name among good ones is still refused; ANSI is stripped.
+        let n = nested(
+            "[discover]\nsources = [{ source = \"o/\\u001b[31mr\", profiles = [\"ok\", \"\\u001b[31mBad\"] }]\n",
+        );
+        match n.validate(p) {
+            Err(MindError::MindToml { msg, .. }) => {
+                assert!(!msg.contains('\u{1b}'), "{msg:?}");
+                assert!(msg.contains("Bad"), "{msg}");
+            }
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+        // profiles must be an array of strings: a scalar fails to parse.
+        assert!(
+            toml::from_str::<MindToml>(
+                "[discover]\nsources = [{ source = \"o/r\", profiles = \"full\" }]\n"
+            )
+            .is_err()
+        );
+    }
+
+    // spec: PROF-1 PROF-2
+    #[test]
+    fn profiles_table_load_edge_cases() {
+        // An empty [profiles] table is valid and present.
+        let dir = prof_dir("[profiles]\n");
+        let mt = MindToml::load(&dir).unwrap().unwrap();
+        assert_eq!(mt.profiles.as_ref().map(|p| p.len()), Some(0));
+        assert!(!mt.is_authoritative());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A profile with an empty member list is valid.
+        let dir = prof_dir("[profiles]\nnone = []\n");
+        assert!(MindToml::load(&dir).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A member that is not a string fails to parse (not a panic).
+        let dir = prof_dir("[profiles]\np = [1]\n");
+        assert!(MindToml::load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A profile name over 64 bytes is a MindToml error.
+        let dir = prof_dir(&format!("[profiles]\n{} = []\n", "a".repeat(65)));
+        match MindToml::load(&dir) {
+            Err(MindError::MindToml { msg, .. }) => assert!(msg.contains("64 bytes"), "{msg}"),
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A quoted name containing ':' is rejected as a profile name.
+        let dir = prof_dir("[profiles]\n\"skill:x\" = []\n");
+        match MindToml::load(&dir) {
+            Err(MindError::MindToml { msg, .. }) => assert!(msg.contains("contains ':'"), "{msg}"),
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A multi-profile cycle is named through load.
+        let dir = prof_dir("[profiles]\na = [\"b\"]\nb = [\"a\"]\n");
+        match MindToml::load(&dir) {
+            Err(MindError::MindToml { msg, .. }) => {
+                assert!(msg.contains("cycle: a -> b -> a"), "{msg}")
+            }
+            other => panic!("expected MindToml, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec: PROF-8
+    #[test]
+    fn item_manifest_rejects_any_profiles_shape_even_with_hooks() {
+        for body in [
+            "[profiles]\n",
+            "profiles = []\n",
+            "profiles = \"x\"\n",
+            "[[hooks]]\nrun = \"true\"\n[profiles]\nb = []\n",
+        ] {
+            let dir = prof_dir(body);
+            match ItemToml::load(&dir) {
+                Err(MindError::MindToml { msg, .. }) => {
+                    assert!(msg.contains("root mind.toml only"), "{body:?}: {msg}")
+                }
+                other => panic!("{body:?}: expected MindToml, got {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

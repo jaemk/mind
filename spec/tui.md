@@ -146,6 +146,17 @@ manifest, and store.
   install-items confirmation (CLI-23), and any SSH passphrase or host-key prompt
   (TUI-45) -- behave exactly as they do from the CLI. No preview is pre-cloned: the
   source is already named. This is the interactive form of `meld`.
+- `TUI-77` The meld input (TUI-30) takes a repo spec followed by any `meld`
+  flags (`--pin`, `--profile`, `--no-default-profile`, `--all-profiles`,
+  `--namespace`, `--learn`, `--kind`, ...), parsed by the same argument
+  definition `mind meld` uses, split on whitespace. The global flags (`--yes`,
+  `--json`) are not accepted. A line clap rejects, or one with no repo spec, is
+  shown as an inline error (TUI-24) and the input stays open with its text;
+  nothing is cloned. An accepted line runs the same end-to-end `meld` the CLI
+  runs, without `--yes`: register (or re-meld, where `--pin` re-pins, CLI-209),
+  then the install offer the flags select (CLI-23, CLI-236, PROF-9..13),
+  suspended per TUI-44. A confirmed registry preview (TUI-31) runs it with no
+  flags.
 - `TUI-31` The Available registry of suggested, not-yet-melded sources is the
   union of the `[discover].sources` entries declared by all melded sources
   (DSC-38), de-duplicated by URL and excluding sources already melded. Expanding a
@@ -209,6 +220,21 @@ manifest, and store.
   its clone. When any of the source's items are installed the namespace is shown
   read-only with a note that it is locked until those items are forgotten (NS-30,
   CLI-161).
+- `TUI-78` For a source that declares profiles (PROF-1), the source details
+  dialog (TUI-26) lists the declared profiles and marks the enabled ones
+  (PROF-29), and offers one action per declared profile: Enable for one that is
+  not enabled (`learn <source> --profile <name>`, PROF-17) and Disable for one
+  that is (`forget <source> --profile <name>`, PROF-25), placed ahead of Unmeld.
+  Before the confirm modal is drawn the TUI computes, read-only under a shared
+  lock (TUI-25), what the change does and appends it to the confirm
+  description: the keys enabling installs, or the keys disabling forgets plus
+  those kept for a dependent (DEP-60). A preview that fails (an undeclared
+  name, a broken table) cancels the action with an inline error. The confirmed
+  change runs like the TUI's other installs (TUI-20): stdout captured, `yes`,
+  and a link conflict surfaced as an error. The installed-item dialog names the
+  profiles the item was installed for, noting an item also asked for by name.
+  Installing a single item from the TUI marks it explicit (PROF-20), as `learn`
+  of an exact ref does; a bulk install (a glob) does not.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.

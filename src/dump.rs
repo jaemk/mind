@@ -87,6 +87,15 @@ struct DumpEntry {
     #[serde(rename = "pin-ref", skip_serializing_if = "Option::is_none")]
     pin_ref: Option<String>,
 
+    /// A profile-tracked source's enabled profiles minus `default` (PROF-28).
+    /// Never alongside `install = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profiles: Option<Vec<String>>,
+
+    /// `false` when a profile-tracked source has `default` disabled (PROF-28).
+    #[serde(rename = "default-profile", skip_serializing_if = "Option::is_none")]
+    default_profile: Option<bool>,
+
     // Exactly one of these two is emitted per entry (never both, never neither).
     // When install_items is Some the install bool is absent; when install_items
     // is None the bool is emitted. The filtering logic guarantees mutual
@@ -251,6 +260,8 @@ fn build_link_entry(
         add_roots: None,
         flat_skills: None,
         pin_ref: source.commit.clone(),
+        profiles: None,
+        default_profile: None,
         install,
         install_items,
     }))
@@ -343,11 +354,18 @@ fn build_entry(
     let pin_ref = source.commit.clone();
 
     // spec: DUMP-2 / DUMP-3 — item filtering.
-    let (install, install_items) = if whole_sources {
+    // spec: PROF-28 -- a profile-tracked source emits its enabled profiles and
+    // the explicit extras instead of an install directive (never `install =
+    // true` alongside `profiles`). `--whole-sources` is unchanged (DUMP-3).
+    let (install, install_items, profiles, default_profile) = if whole_sources {
         // spec: DUMP-3 — --whole-sources: always install = true.
-        (Some(true), None)
+        (Some(true), None, None, None)
+    } else if source.is_profile_tracked() {
+        let (profiles, default_profile, extras) = profile_directive(source, manifest);
+        (None, extras, Some(profiles), default_profile)
     } else {
-        compute_install_directive(paths, source, manifest)?
+        let (install, install_items) = compute_install_directive(paths, source, manifest)?;
+        (install, install_items, None, None)
     };
 
     Ok(DumpEntry {
@@ -359,9 +377,48 @@ fn build_entry(
         add_roots,
         flat_skills,
         pin_ref,
+        profiles,
+        default_profile,
         install,
         install_items,
     })
+}
+
+/// The profile directive for a profile-tracked source (PROF-28):
+/// `(profiles, default_profile, install_items)`.
+///
+/// `profiles` is the recorded enabled set minus `default`; `default_profile` is
+/// `Some(false)` when `default` is not enabled; `install_items` lists the
+/// source's installed items that are explicit and whose bare `kind:name` is
+/// outside the recorded snapshot (`None` when there are none). Reads only the
+/// recorded state, never the catalog, so it stays pure.
+fn profile_directive(
+    source: &Source,
+    manifest: &Manifest,
+) -> (Vec<String>, Option<bool>, Option<Vec<String>>) {
+    let enabled = source.profiles.as_deref().unwrap_or_default();
+    let default_on = enabled.iter().any(|p| p == crate::profile::DEFAULT);
+    let profiles: Vec<String> = enabled
+        .iter()
+        .filter(|p| *p != crate::profile::DEFAULT)
+        .cloned()
+        .collect();
+    let snapshot: BTreeSet<&str> = source
+        .profile_snapshot
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let extras: BTreeSet<String> = manifest
+        .items
+        .values()
+        .filter(|item| item.source == source.name && item.is_explicit())
+        .map(|item| format!("{}:{}", item.kind.as_str(), item.bare_name))
+        .filter(|key| !snapshot.contains(key.as_str()))
+        .collect();
+    let extras = (!extras.is_empty()).then(|| extras.into_iter().collect());
+    (profiles, (!default_on).then_some(false), extras)
 }
 
 /// Compute the effective namespace prefix for a source, mirroring the
@@ -494,6 +551,8 @@ mod tests {
             install_hooks: vec![],
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 
@@ -511,6 +570,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         }
     }
 
@@ -531,6 +592,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(true),
             install_items: None,
         };
@@ -567,6 +630,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(false),
             install_items: None,
         };
@@ -608,6 +673,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: None,
             install_items: Some(items.clone()),
         };
@@ -655,6 +722,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(false),
             install_items: None, // None, not Some([])
         };
@@ -694,6 +763,8 @@ mod tests {
                         add_roots: Some(vec!["extra".into()]),
                         flat_skills: Some(true),
                         pin_ref: Some("deadbeefdeadbeef1234".into()),
+                        profiles: None,
+                        default_profile: None,
                         install: Some(true),
                         install_items: None,
                     },
@@ -705,6 +776,8 @@ mod tests {
                         add_roots: None,
                         flat_skills: None,
                         pin_ref: None,
+                        profiles: None,
+                        default_profile: None,
                         install: None,
                         install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
                     },
@@ -817,6 +890,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: Some("deadbeefdeadbeef".into()),
+            profiles: None,
+            default_profile: None,
             install: Some(true),
             install_items: None,
         };
@@ -828,6 +903,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(false),
             install_items: None,
         };
@@ -919,6 +996,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(true),
             install_items: None,
         };
@@ -960,6 +1039,8 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            profiles: None,
+            default_profile: None,
             install: Some(true),
             install_items: None,
         };
@@ -994,6 +1075,172 @@ mod tests {
             ns.alias.is_none(),
             "emitted namespace key must NOT populate NestedSource::alias"
         );
+    }
+
+    // ----- PROF-28: profile-tracked sources -----
+
+    const PSRC: &str = "local/test/prof";
+
+    fn tracked(profiles: &[&str], snapshot: &[&str]) -> Source {
+        let mut s = make_source(PSRC, "/p/prof", Some("abc"));
+        s.profiles = Some(profiles.iter().map(|p| p.to_string()).collect());
+        s.profile_snapshot = Some(snapshot.iter().map(|p| p.to_string()).collect());
+        s
+    }
+
+    /// An installed item of `PSRC` with the given profile reasons / explicit flag.
+    fn prof_item(name: &str, profiles: &[&str], explicit: bool) -> InstalledItem {
+        let mut i = make_installed(ItemKind::Skill, &format!("pfx:{name}"), name, PSRC);
+        i.profiles = profiles.iter().map(|p| p.to_string()).collect();
+        i.explicit = explicit;
+        i
+    }
+
+    fn manifest_of(items: Vec<InstalledItem>) -> Manifest {
+        let mut m = Manifest::default();
+        for i in items {
+            m.items.insert(i.key().into(), i);
+        }
+        m
+    }
+
+    /// Emit and re-parse the `[[discover.sources]]` entry the tracked branch of
+    /// `build_entry` produces for `source`.
+    fn emit_tracked(
+        source: &Source,
+        manifest: &Manifest,
+    ) -> (String, crate::mindfile::NestedSource) {
+        let (profiles, default_profile, extras) = profile_directive(source, manifest);
+        let entry = DumpEntry {
+            source: source.url.clone(),
+            namespace: None,
+            kind: None,
+            roots: None,
+            add_roots: None,
+            flat_skills: None,
+            pin_ref: source.commit.clone(),
+            profiles: Some(profiles),
+            default_profile,
+            install: None,
+            install_items: extras,
+        };
+        let text = toml::to_string(&DumpDoc {
+            source: DumpSource {
+                description: "t".into(),
+            },
+            discover: DumpDiscover {
+                sources: vec![entry],
+            },
+        })
+        .unwrap();
+        let back: MindToml = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("profile entry must parse as MindToml: {e}\n{text}"));
+        let ns = back.discover.unwrap().sources.remove(0);
+        (text, ns)
+    }
+
+    #[test]
+    fn tracked_source_with_default_enabled_emits_profiles_without_default() {
+        // spec: PROF-28
+        let s = tracked(&["default", "full"], &["skill:a", "skill:b"]);
+        let m = manifest_of(vec![
+            prof_item("a", &["default", "full"], false),
+            prof_item("b", &["full"], false),
+        ]);
+        let (text, ns) = emit_tracked(&s, &m);
+        assert_eq!(ns.profiles.as_deref(), Some(&["full".to_string()][..]));
+        assert_eq!(ns.default_profile, None, "default enabled: key omitted");
+        assert!(ns.install_items.is_none(), "no explicit extras: {text}");
+        assert!(!ns.install, "never install = true with profiles: {text}");
+        assert!(!text.contains("install = true"), "{text}");
+        ns.validate(std::path::Path::new("mind.toml"))
+            .expect("valid entry");
+    }
+
+    #[test]
+    fn tracked_source_with_default_disabled_emits_default_profile_false() {
+        // spec: PROF-28
+        let s = tracked(&["full"], &["skill:a"]);
+        let m = manifest_of(vec![prof_item("a", &["full"], false)]);
+        let (text, ns) = emit_tracked(&s, &m);
+        assert_eq!(ns.profiles.as_deref(), Some(&["full".to_string()][..]));
+        assert_eq!(ns.default_profile, Some(false), "{text}");
+    }
+
+    #[test]
+    fn tracked_source_with_only_default_emits_empty_profiles() {
+        // spec: PROF-28
+        let s = tracked(&["default"], &["skill:a"]);
+        let m = manifest_of(vec![prof_item("a", &["default"], false)]);
+        let (_, ns) = emit_tracked(&s, &m);
+        assert_eq!(ns.profiles.as_deref(), Some(&[][..]));
+        assert_eq!(ns.default_profile, None);
+    }
+
+    #[test]
+    fn tracked_source_emits_explicit_items_outside_the_snapshot() {
+        // spec: PROF-28
+        let s = tracked(&["default"], &["skill:member", "skill:forgotten-member"]);
+        let m = manifest_of(vec![
+            // Profile member, installed for the profile: not explicit.
+            prof_item("member", &["default"], false),
+            // Explicit AND a member (in the snapshot): inside the expansion.
+            prof_item("explicit-member", &["default"], true),
+            // Hand-installed, no reasons (implicitly explicit), outside it.
+            prof_item("extra", &[], false),
+            // Explicit with reasons, outside the snapshot.
+            prof_item("extra2", &["default"], true),
+            // Another source's item never leaks in.
+            {
+                let mut o = prof_item("other", &[], false);
+                o.source = "local/test/other".into();
+                o
+            },
+        ]);
+        let mut s = s;
+        s.profile_snapshot
+            .as_mut()
+            .unwrap()
+            .push("skill:explicit-member".into());
+        let (text, ns) = emit_tracked(&s, &m);
+        assert_eq!(
+            ns.install_items.as_deref(),
+            Some(&["skill:extra".to_string(), "skill:extra2".to_string()][..]),
+            "{text}"
+        );
+        assert!(!text.contains("install = true"), "{text}");
+    }
+
+    #[test]
+    fn untracked_source_is_not_given_profile_keys() {
+        // spec: PROF-28 -- a source with no recorded profile state is emitted
+        // exactly as before: the tracked branch is gated on is_profile_tracked.
+        let s = make_source(PSRC, "/p/prof", Some("abc"));
+        assert!(!s.is_profile_tracked());
+        let entry = DumpEntry {
+            source: s.url.clone(),
+            namespace: None,
+            kind: None,
+            roots: None,
+            add_roots: None,
+            flat_skills: None,
+            pin_ref: None,
+            profiles: None,
+            default_profile: None,
+            install: Some(true),
+            install_items: None,
+        };
+        let text = toml::to_string(&DumpDoc {
+            source: DumpSource {
+                description: "t".into(),
+            },
+            discover: DumpDiscover {
+                sources: vec![entry],
+            },
+        })
+        .unwrap();
+        assert!(!text.contains("profiles"), "{text}");
+        assert!(!text.contains("default-profile"), "{text}");
     }
 
     #[test]

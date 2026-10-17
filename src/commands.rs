@@ -4790,6 +4790,1468 @@ pub fn install_source_items_subset(
     Ok(())
 }
 
+// ----- Install profiles (spec/profiles.md) -----
+
+/// What [`install_source_profiles`] installs for one registered source
+/// (PROF-9..15): the expansion of the profiles `selection` enables, unioned
+/// with the `--learn` matches (PROF-15).
+pub(crate) struct ProfileInstall<'a> {
+    /// The registered source identity (STO-58).
+    pub source_name: &'a str,
+    /// The consumer's selection (flags, the PROF-13 picker, or a curator
+    /// entry via [`crate::profile::Selection::from_nested`]).
+    pub selection: &'a crate::profile::Selection,
+    /// `meld --learn` patterns (CLI-236) whose matches join the batch.
+    pub learn_patterns: &'a [String],
+    /// Offer only expansion members missing from the source's recorded
+    /// snapshot (PROF-21, PROF-23, PROF-27): `curate` sets this so a member
+    /// the consumer forgot is not re-proposed.
+    pub only_missing_from_snapshot: bool,
+}
+
+/// The result of [`install_source_profiles`] / its `--json` twin.
+#[derive(Debug, Default)]
+pub(crate) struct ProfileInstallOutcome {
+    /// The enabled profile names, sorted (PROF-18).
+    pub enabled: Vec<String>,
+    /// Effective keys installed in this call, closure items included.
+    pub installed_keys: Vec<String>,
+    /// Whether the install was applied and recorded on the source (PROF-19):
+    /// false for a declined prompt, a non-TTY run without `--yes`, a `--json`
+    /// run without `--yes`, and an empty enabled set (PROF-10).
+    pub applied: bool,
+}
+
+/// One item of a profile install batch.
+struct ProfileMember {
+    target: LearnTarget,
+    /// The bare `kind:name` key in source truth (PROF-3), recorded in the
+    /// snapshot. `None` for a `--learn`-only match outside the expansion.
+    bare_key: Option<String>,
+    /// The enabled profiles this member came through; empty for a
+    /// `--learn`-only match.
+    profiles: BTreeSet<String>,
+    /// Matched a `--learn` pattern: named by the consumer (PROF-20).
+    by_name: bool,
+    /// Already installed before this call (tagged, not reinstalled).
+    installed: bool,
+}
+
+/// A resolved profile install, before any gate.
+struct ProfilePlan {
+    /// The declared profile names, sorted (for the PROF-12 header).
+    declared: Vec<String>,
+    enabled: Vec<String>,
+    members: Vec<ProfileMember>,
+    /// Effective key -> the profiles of every fresh member whose closure
+    /// reaches it (PROF-6: a closure item carries its member's reasons).
+    reasons: std::collections::BTreeMap<String, BTreeSet<String>>,
+    /// The union of the fresh members' closures, first-seen order (PROF-18).
+    pending: Vec<String>,
+    /// Dependency trees of the fresh members that add dependencies (DEP-31).
+    trees: Vec<String>,
+}
+
+impl ProfilePlan {
+    fn fresh(&self) -> impl Iterator<Item = &ProfileMember> {
+        self.members.iter().filter(|m| !m.installed)
+    }
+}
+
+/// The `[profiles]` table of a registered source's root `mind.toml` (PROF-1),
+/// or `None` when it declares none. An item-link instance has none (PROF-8).
+pub(crate) fn source_profile_table(
+    paths: &Paths,
+    source: &crate::source::Source,
+) -> Result<Option<crate::profile::ProfileTable>> {
+    if source.item_path.is_some() {
+        return Ok(None);
+    }
+    Ok(MindToml::load(&source.clone_dir(paths))?.and_then(|m| m.profiles))
+}
+
+/// Whether a meld of `source_name` routes through the profile install
+/// (PROF-9, PROF-12) rather than the CLI-23 install-all offer: a profile flag
+/// was given, or the source declares a `default` profile. A source with no
+/// `[profiles]`, or one whose table has no `default`, keeps install-all when
+/// no flag is given (PROF-7).
+pub(crate) fn meld_uses_profiles(
+    paths: &Paths,
+    source_name: &str,
+    flags_given: bool,
+) -> Result<bool> {
+    if flags_given {
+        return Ok(true);
+    }
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(false);
+    };
+    Ok(source_profile_table(paths, source)?
+        .is_some_and(|t| t.contains_key(crate::profile::DEFAULT)))
+}
+
+/// Whether `repo` is an item link (spec/item-link.md): a deep tree/blob URL
+/// that registers a single-item source, which has no profiles (PROF-8).
+pub fn is_item_link_spec(repo: &str) -> bool {
+    parse_spec_quiet(repo).is_ok_and(|s| s.item_path.is_some())
+}
+
+/// The PROF-13 profile picker: on an interactive meld with no profile flag
+/// and no `--yes`, of a source declaring a `default` and at least one other
+/// profile, ask which profiles to enable, `default` preselected. An empty
+/// answer keeps `selection`; otherwise the answer is the enabled set, exactly
+/// as `--no-default-profile --profile <answer>` would give it (list `default`
+/// to keep it). Every other case returns `selection` unchanged (PROF-12).
+pub(crate) fn pick_profiles(
+    paths: &Paths,
+    source_name: &str,
+    selection: crate::profile::Selection,
+    flags_given: bool,
+    yes: bool,
+) -> Result<crate::profile::Selection> {
+    // spec: PROF-13
+    if flags_given || yes || json_mode() || !crate::hook::is_tty() {
+        return Ok(selection);
+    }
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(selection);
+    };
+    let Some(table) = source_profile_table(paths, source)? else {
+        return Ok(selection);
+    };
+    if !table.contains_key(crate::profile::DEFAULT)
+        || !table.keys().any(|k| k != crate::profile::DEFAULT)
+    {
+        return Ok(selection);
+    }
+    let declared: Vec<&str> = table.keys().map(String::as_str).collect();
+    println!(
+        "{} declares profiles: {}",
+        strip_ansi(source_name),
+        declared.join(", ")
+    );
+    let answer = prompt_line("enable which profiles? (comma-separated; Enter keeps: default): ")?;
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Ok(selection);
+    }
+    let named = crate::profile::parse_cli_names(&[answer.to_string()])?;
+    Ok(crate::profile::Selection {
+        include_default: false,
+        named,
+        all: false,
+    })
+}
+
+/// Resolve a profile install for `req` (PROF-5, PROF-6, PROF-15): the enabled
+/// set, the expansion's members plus the `--learn` matches, which of them are
+/// already installed, and each fresh member's dependency closure.
+fn plan_profile_install(paths: &Paths, req: &ProfileInstall<'_>) -> Result<ProfilePlan> {
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(req.source_name) else {
+        return Err(MindError::SourceNotFound {
+            name: req.source_name.to_string(),
+        });
+    };
+    let table = source_profile_table(paths, source)?;
+    // spec: PROF-14 -- an undeclared name is ProfileNotFound, after the clone.
+    let enabled = crate::profile::enabled_set(table.as_ref(), req.selection, req.source_name)?;
+    let items = scan_one(paths, source)?;
+    // spec: PROF-5 -- an exact member naming no item is BadReference here.
+    let expansion = match &table {
+        Some(t) if !enabled.is_empty() => {
+            crate::profile::expand(t, &enabled, &items, req.source_name)?
+        }
+        _ => crate::profile::Expansion::default(),
+    };
+    let snapshot: BTreeSet<String> = if req.only_missing_from_snapshot {
+        source
+            .profile_snapshot
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let bare = |it: &CatalogItem| format!("{}:{}", it.kind.as_str(), it.name);
+    let manifest = Manifest::load(paths)?;
+    let mut members: Vec<ProfileMember> = Vec::new();
+    for (key, profiles) in &expansion.keys {
+        if snapshot.contains(key) {
+            continue;
+        }
+        let Some(it) = items.iter().find(|it| bare(it) == *key) else {
+            continue;
+        };
+        let target = LearnTarget {
+            source: req.source_name.to_string(),
+            key: it.key().as_str().to_string(),
+        };
+        members.push(ProfileMember {
+            installed: manifest.items.contains_key(&target.key),
+            target,
+            bare_key: Some(key.clone()),
+            profiles: profiles.clone(),
+            by_name: false,
+        });
+    }
+    // spec: PROF-15 -- the batch is the union of the expansion and the
+    // `--learn` matches; a pattern matching nothing is still an error
+    // (CLI-236).
+    if !req.learn_patterns.is_empty() {
+        let (matched, _fresh) = learn_targets(paths, req.source_name, req.learn_patterns)?;
+        for t in matched {
+            if let Some(m) = members.iter_mut().find(|m| m.target == t) {
+                m.by_name = true;
+                continue;
+            }
+            members.push(ProfileMember {
+                installed: manifest.items.contains_key(&t.key),
+                target: t,
+                bare_key: None,
+                profiles: BTreeSet::new(),
+                by_name: true,
+            });
+        }
+    }
+    let mut reasons: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut trees: Vec<String> = Vec::new();
+    for m in members.iter().filter(|m| !m.installed) {
+        // spec: PROF-6 -- each member resolves through the ordinary learn
+        // path, so its closure is DEP-30's.
+        let plan = learn_plan(paths, Selection::Exact(&m.target))?;
+        for key in &plan.keys {
+            reasons
+                .entry(key.clone())
+                .or_default()
+                .extend(m.profiles.iter().cloned());
+            if !pending.contains(key) {
+                pending.push(key.clone());
+            }
+        }
+        if plan.adds_dependencies {
+            trees.push(plan.tree);
+        }
+    }
+    Ok(ProfilePlan {
+        declared: table
+            .as_ref()
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default(),
+        enabled,
+        members,
+        reasons,
+        pending,
+        trees,
+    })
+}
+
+/// Install a plan's fresh members, then record the outcome (PROF-19, PROF-20):
+/// tag every installed key (closure items too) with its member's profiles,
+/// tag each already-installed member (marking a by-name one explicit first),
+/// mark `--learn` matches explicit, and union the enabled set and the applied
+/// members' bare keys into the source's registry entry.
+///
+/// `collect` installs silently (the `--json` path); otherwise each member goes
+/// through `learn`, which narrates. Either way `flow.yes` must already be set
+/// by the caller's gate. A failure part-way still records what installed.
+fn apply_profile_plan(
+    paths: &Paths,
+    source_name: &str,
+    plan: &ProfilePlan,
+    flow: InstallFlow,
+    collect: bool,
+) -> Result<Vec<String>> {
+    let before: HashSet<String> = Manifest::load(paths)?.items.keys().cloned().collect();
+    let mut failure: Option<MindError> = None;
+    for m in plan.fresh() {
+        let r = if collect {
+            learn_collecting_exact(paths, &m.target, flow).map(|_| ())
+        } else {
+            learn_exact(paths, &m.target, false, flow)
+        };
+        if let Err(e) = r {
+            failure = Some(e);
+            break;
+        }
+    }
+    let mut manifest = Manifest::load(paths)?;
+    let installed_keys: Vec<String> = plan
+        .pending
+        .iter()
+        .filter(|k| !before.contains(*k) && manifest.items.contains_key(*k))
+        .cloned()
+        .collect();
+    // spec: PROF-20 -- a closure item carries the profiles of the member that
+    // pulled it in (PROF-6).
+    for key in &installed_keys {
+        if let (Some(entry), Some(reasons)) = (manifest.items.get_mut(key), plan.reasons.get(key)) {
+            crate::profile::tag_reasons(entry, reasons, false);
+        }
+    }
+    let mut applied_keys: Vec<String> = Vec::new();
+    for m in &plan.members {
+        let Some(entry) = manifest.items.get_mut(&m.target.key) else {
+            continue; // not installed (failed, or skipped by policy)
+        };
+        if m.installed {
+            crate::profile::tag_reasons(entry, &m.profiles, true);
+        }
+        if m.by_name {
+            crate::profile::mark_explicit(entry);
+        }
+        if let Some(bare) = &m.bare_key {
+            applied_keys.push(bare.clone());
+        }
+    }
+    manifest.save(paths)?;
+    if !plan.enabled.is_empty() {
+        // spec: PROF-19 -- only keys actually present are snapshotted, so a
+        // member that did not install is offered again later (PROF-21).
+        let mut registry = Registry::load(paths)?;
+        if let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) {
+            crate::profile::record_applied(source, &plan.enabled, &applied_keys);
+            registry.save(paths)?;
+        }
+    }
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(installed_keys),
+    }
+}
+
+/// The PROF-12 preview header: the enabled profiles, the other declared ones,
+/// and how to enable more.
+fn print_profile_header(source_name: &str, plan: &ProfilePlan) {
+    if plan.declared.is_empty() {
+        return;
+    }
+    let enabled = if plan.enabled.is_empty() {
+        "none".to_string()
+    } else {
+        plan.enabled.join(", ")
+    };
+    println!("profiles of {}: enabled {enabled}", strip_ansi(source_name));
+    let others: Vec<&str> = plan
+        .declared
+        .iter()
+        .filter(|d| !plan.enabled.contains(d))
+        .map(String::as_str)
+        .collect();
+    if !others.is_empty() {
+        println!(
+            "  not enabled: {} (enable with --profile <name>, or --all-profiles)",
+            others.join(", ")
+        );
+    }
+}
+
+/// The pasteable command that installs `plan` later (PROF-9, PROF-10).
+fn profile_remedy(source_name: &str, plan: &ProfilePlan) -> String {
+    let quoted_source = crate::error::shell_quote(&strip_ansi(source_name));
+    let mut steps: Vec<String> = Vec::new();
+    if plan.enabled.is_empty() {
+        if plan.members.is_empty() {
+            steps.push(format!("mind learn {quoted_source} --profile <name>"));
+        }
+    } else {
+        steps.push(format!(
+            "mind learn {quoted_source} --profile {}",
+            plan.enabled.join(",")
+        ));
+    }
+    for m in plan.fresh().filter(|m| m.profiles.is_empty()) {
+        steps.push(format!(
+            "mind learn {}",
+            crate::error::shell_quote(&m.target.display())
+        ));
+    }
+    steps.join(" && ")
+}
+
+/// Print the batch preview (DEP-31 trees, then the union list) for a plan.
+fn print_profile_preview(paths: &Paths, plan: &ProfilePlan) -> Result<()> {
+    let out = crate::render::ctx();
+    for tree in &plan.trees {
+        print!("{tree}");
+    }
+    println!("would learn {} item(s):", plan.pending.len());
+    let registry = Registry::load(paths)?;
+    let items = catalog::scan(paths, &registry)?;
+    let rows = plan
+        .pending
+        .iter()
+        .map(|k| {
+            let src = items
+                .iter()
+                .find(|i| i.key().as_str() == k)
+                .map(|i| strip_ansi(&i.source))
+                .unwrap_or_default();
+            vec![strip_ansi(k), src]
+        })
+        .collect::<Vec<_>>();
+    out.print_rows(&rows);
+    Ok(())
+}
+
+/// Install a source's enabled profiles (PROF-9..15) under the CLI-23 meld
+/// gate, in place of the install-all offer: one preview and one prompt on a
+/// TTY, `--yes` installs unprompted, a non-TTY run without `--yes` installs
+/// nothing and names `mind learn <source> --profile <name>`. Each member goes
+/// through the ordinary `learn` path (PROF-6); an already-installed member is
+/// tagged, not reinstalled. The enabled set and snapshot are recorded only
+/// when the install is applied (PROF-19).
+// spec: PROF-9 PROF-10 PROF-12 PROF-15
+pub(crate) fn install_source_profiles(
+    paths: &Paths,
+    req: &ProfileInstall<'_>,
+    flow: InstallFlow,
+) -> Result<ProfileInstallOutcome> {
+    let plan = plan_profile_install(paths, req)?;
+    let mut outcome = ProfileInstallOutcome {
+        enabled: plan.enabled.clone(),
+        ..ProfileInstallOutcome::default()
+    };
+    let json = json_mode();
+    if !json {
+        print_profile_header(req.source_name, &plan);
+    }
+    if plan.members.is_empty() {
+        if plan.enabled.is_empty() {
+            // spec: PROF-10 -- nothing enabled, nothing offered.
+            if !json {
+                println!(
+                    "note: no profile enabled; nothing installed from {}; run `{}` to install a \
+                     profile later",
+                    strip_ansi(req.source_name),
+                    profile_remedy(req.source_name, &plan)
+                );
+            }
+        } else {
+            // Every member was in the snapshot (curate): nothing to propose.
+            // Applying still records the enabled set.
+            apply_profile_plan(paths, req.source_name, &plan, flow, json)?;
+            outcome.applied = true;
+        }
+        return Ok(outcome);
+    }
+    if plan.pending.is_empty() {
+        // Every member is installed already (CLI-157): tag and record.
+        if !json {
+            println!(
+                "already installed; nothing to do ({} item(s))",
+                plan.members.len()
+            );
+        }
+        apply_profile_plan(paths, req.source_name, &plan, flow, json)?;
+        outcome.applied = true;
+        return Ok(outcome);
+    }
+    if flow.yes {
+        outcome.installed_keys = apply_profile_plan(paths, req.source_name, &plan, flow, json)?;
+        outcome.applied = true;
+        return Ok(outcome);
+    }
+    let remedy = profile_remedy(req.source_name, &plan);
+    if json || !crate::hook::is_tty() {
+        if !json {
+            println!(
+                "note: registered only, nothing installed (not a TTY); {} has {} item(s) to \
+                 install; run `{remedy}` (or re-meld with --yes)",
+                strip_ansi(req.source_name),
+                plan.pending.len()
+            );
+        }
+        return Ok(outcome);
+    }
+    print_profile_preview(paths, &plan)?;
+    if confirm_default_yes(&format!(
+        "install these {} item(s) now?",
+        plan.pending.len()
+    ))? {
+        outcome.installed_keys = apply_profile_plan(
+            paths,
+            req.source_name,
+            &plan,
+            InstallFlow { yes: true, ..flow },
+            false,
+        )?;
+        outcome.applied = true;
+    } else {
+        println!("skipped; run `{remedy}` to install later");
+    }
+    Ok(outcome)
+}
+
+/// The `--json` twin of [`install_source_profiles`] (CLI-156, PROF-18):
+/// installs silently under `--yes` and returns the outcome plus the pending
+/// count, which without `--yes` is the union of the expansion, the `--learn`
+/// matches, and their closures, each item once. Nothing is recorded without
+/// `--yes`.
+// spec: PROF-18 CLI-156
+pub(crate) fn install_source_profiles_for_json(
+    paths: &Paths,
+    req: &ProfileInstall<'_>,
+    flow: InstallFlow,
+) -> Result<(ProfileInstallOutcome, usize)> {
+    let plan = plan_profile_install(paths, req)?;
+    let mut outcome = ProfileInstallOutcome {
+        enabled: plan.enabled.clone(),
+        ..ProfileInstallOutcome::default()
+    };
+    if plan.members.is_empty() && plan.enabled.is_empty() {
+        return Ok((outcome, 0));
+    }
+    if plan.pending.is_empty() || flow.yes {
+        outcome.installed_keys = apply_profile_plan(paths, req.source_name, &plan, flow, true)?;
+        outcome.applied = true;
+        return Ok((outcome, 0));
+    }
+    Ok((outcome, plan.pending.len()))
+}
+
+/// Resolve a CLI-36 source selector (no `#` part) to exactly one registered
+/// source identity, for `learn`/`forget <source> --profile` (PROF-17,
+/// PROF-25).
+fn resolve_profile_source(paths: &Paths, source_ref: &str) -> Result<String> {
+    let source_ref = source_ref.trim();
+    if source_ref.contains('#') {
+        return Err(MindError::InvalidItemRef {
+            name: source_ref.to_string(),
+        });
+    }
+    let registry = Registry::load(paths)?;
+    let matching: Vec<String> = registry
+        .sources
+        .iter()
+        .filter(|s| source_matches(&s.name, source_ref))
+        .map(|s| s.name.clone())
+        .collect();
+    match matching.as_slice() {
+        [] => Err(MindError::SourceNotFound {
+            name: source_ref.to_string(),
+        }),
+        [only] => Ok(only.clone()),
+        many => Err(MindError::AmbiguousSource {
+            query: source_ref.to_string(),
+            candidates: many.iter().map(|n| strip_ansi(n)).collect(),
+        }),
+    }
+}
+
+/// `forget <source> --profile <NAME>` (PROF-25): disable one enabled profile
+/// of a source. NAME leaves the recorded set; each installed item whose
+/// recorded reasons are now only disabled profiles, and that is not explicit,
+/// is forgotten, except one another installed item depends on, which is kept
+/// and named (DEP-60). Kept items lose the disabled name from their reasons,
+/// and the snapshot is recomputed from the remaining enabled set (both source
+/// fields are cleared when none remains). Removing more than one item goes
+/// through `forget`'s glob gate (CLI-42, LIFE-45). A NAME that is not enabled
+/// changes nothing.
+// spec: PROF-25
+pub fn forget_source_profile(
+    paths: &Paths,
+    source_ref: &str,
+    profile: &str,
+    yes: bool,
+    dangerously_skip: bool,
+) -> Result<()> {
+    let out = crate::render::ctx();
+    let names = crate::profile::parse_cli_names(&[profile.to_string()])?;
+    let [name] = names.as_slice() else {
+        return Err(MindError::InvalidProfileName {
+            name: profile.trim().to_string(),
+            reason: "forget --profile takes one profile name".to_string(),
+        });
+    };
+    let source_name = resolve_profile_source(paths, source_ref)?;
+    let safe_source = strip_ansi(&source_name);
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(&source_name) else {
+        return Err(MindError::SourceNotFound { name: source_name });
+    };
+    let recorded: Vec<String> = source.profiles.clone().unwrap_or_default();
+    if !recorded.iter().any(|p| p == name) {
+        if out.json {
+            let mut r = MutationResult::new("forget", source_ref, "no-op");
+            r.profiles = Some(recorded);
+            return print_json(&r);
+        }
+        let enabled = if recorded.is_empty() {
+            "none".to_string()
+        } else {
+            recorded.join(", ")
+        };
+        println!(
+            "profile '{name}' is not enabled for {safe_source} (enabled: {enabled}); nothing changed"
+        );
+        return Ok(());
+    }
+    let ProfileDisable {
+        plan,
+        remove,
+        kept,
+        mut manifest,
+        catalog,
+    } = resolve_profile_disable(paths, &registry, source, name, true)?;
+
+    if remove.len() > 1 && !yes {
+        if !out.json {
+            println!(
+                "disabling profile '{name}' of {safe_source} would remove {} item(s):",
+                remove.len()
+            );
+            for key in &remove {
+                println!("  {} {}", out.warn(), strip_ansi(key));
+            }
+        }
+        // spec: LIFE-45 -- `--json` is non-interactive.
+        if !crate::hook::is_tty() || out.json {
+            return Err(MindError::ConfirmationRequired {
+                action: json_confirmation_action(
+                    format!(
+                        "disabling profile '{name}' of '{safe_source}' (removes {} items)",
+                        remove.len()
+                    ),
+                    out.json,
+                ),
+            });
+        }
+        if !confirm("remove these item(s)?")? {
+            println!("cancelled; nothing changed");
+            return Ok(());
+        }
+    }
+
+    // Strip the disabled name from every kept item's reasons; an item kept
+    // only for a dependent keeps its reasons, so it stays removable later.
+    for (key, reasons) in &plan.strip {
+        if let Some(entry) = manifest.items.get_mut(key) {
+            entry.profiles = reasons.clone();
+        }
+    }
+    let mut removed: Vec<String> = Vec::new();
+    for key in &remove {
+        let Some(item) = manifest.items.remove(key) else {
+            continue;
+        };
+        let uninstall_hooks: Vec<&crate::mindfile::ResolvedHook> =
+            item_catalog_match(&catalog, &item)
+                .map(|c| c.uninstall_hooks())
+                .unwrap_or_default();
+        let commit = source.commit.clone().unwrap_or_default();
+        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, dangerously_skip) {
+            manifest.items.insert(key.clone(), item);
+            // spec: LIFE-48 -- a save failure here must not mask `e`.
+            if let Err(se) = manifest.save(paths) {
+                warn_manifest_save_also_failed(&se);
+            }
+            return Err(e);
+        }
+        let key_display = strip_ansi(key);
+        if !out.json {
+            println!("{} forgot {key_display}", out.ok());
+        }
+        removed.push(key_display);
+    }
+    manifest.save(paths)?;
+    let mut registry = Registry::load(paths)?;
+    if let Some(s) = registry.sources.iter_mut().find(|s| s.name == source_name) {
+        s.profiles = plan.remaining_enabled.clone();
+        s.profile_snapshot = plan.new_snapshot.clone();
+    }
+    registry.save(paths)?;
+
+    let kept_lines: Vec<String> = kept
+        .iter()
+        .map(|(k, deps)| {
+            format!(
+                "{} (needed by {})",
+                strip_ansi(k),
+                deps.iter()
+                    .map(|d| strip_ansi(d))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    if out.json {
+        let mut r = MutationResult::new("forget", source_ref, "disabled");
+        r.removed = removed;
+        r.kept = kept_lines;
+        r.profiles = Some(plan.remaining_enabled.unwrap_or_default());
+        return print_json(&r);
+    }
+    for line in &kept_lines {
+        println!("{} kept {line}", out.warn());
+    }
+    let left = match &plan.remaining_enabled {
+        Some(v) if !v.is_empty() => format!("enabled: {}", v.join(", ")),
+        _ => "no profile enabled".to_string(),
+    };
+    println!(
+        "{} disabled profile '{name}' of {safe_source} ({left})",
+        out.ok()
+    );
+    Ok(())
+}
+
+/// What disabling one profile of a source resolves to (PROF-25), before any
+/// gate: the plan, the keys to forget, and the `(key, dependents)` pairs kept
+/// because another installed item depends on them (DEP-60).
+struct ProfileDisable {
+    plan: crate::profile::DisablePlan,
+    remove: Vec<String>,
+    kept: Vec<(String, Vec<String>)>,
+    manifest: Manifest,
+    catalog: Vec<CatalogItem>,
+}
+
+/// Resolve disabling `name` on `source` (PROF-25). A broken remaining table
+/// (an exact member naming no item, PROF-5) keeps the old snapshot, warning
+/// when `warn` is set, so disabling always works.
+fn resolve_profile_disable(
+    paths: &Paths,
+    registry: &Registry,
+    source: &crate::source::Source,
+    name: &str,
+    warn: bool,
+) -> Result<ProfileDisable> {
+    let source_name = &source.name;
+    let table = source_profile_table(paths, source)?.unwrap_or_default();
+    let remaining: Vec<String> = source
+        .profiles
+        .iter()
+        .flatten()
+        .filter(|p| *p != name)
+        .cloned()
+        .collect();
+    let items = scan_one(paths, source)?;
+    let (expansion, expand_failed) =
+        match crate::profile::expand(&table, &remaining, &items, source_name) {
+            Ok(e) => (e, false),
+            Err(e) => {
+                if warn {
+                    crate::render::warn(format!(
+                        "could not expand the remaining profiles of {}: {}; keeping its \
+                         snapshot unchanged",
+                        strip_ansi(source_name),
+                        strip_ansi(&e.to_string())
+                    ));
+                }
+                (crate::profile::Expansion::default(), true)
+            }
+        };
+    let manifest = Manifest::load(paths)?;
+    let mut plan = {
+        let of_source: Vec<&crate::manifest::InstalledItem> = manifest
+            .items
+            .values()
+            .filter(|m| m.source == *source_name)
+            .collect();
+        crate::profile::disable_plan(source, &of_source, name, &expansion)
+    };
+    if expand_failed && plan.remaining_enabled.is_some() {
+        plan.new_snapshot = source.profile_snapshot.clone();
+    }
+
+    // spec: DEP-60 -- an item another installed item (not itself being
+    // removed) depends on is kept and named.
+    let catalog = catalog::scan(paths, registry).unwrap_or_default();
+    let graph = crate::deps::installed_graph(
+        &catalog,
+        |it| {
+            manifest
+                .items
+                .get(it.key().as_str())
+                .is_some_and(|m| m.source == it.source)
+        },
+        read_item_text,
+    );
+    let mut remove: Vec<String> = plan.removable.clone();
+    let mut kept: Vec<(String, Vec<String>)> = Vec::new();
+    loop {
+        let blocked = remove.iter().find_map(|k| {
+            let deps: Vec<String> = graph
+                .dependents(k)
+                .into_iter()
+                .filter(|d| !remove.contains(d))
+                .collect();
+            (!deps.is_empty()).then(|| (k.clone(), deps))
+        });
+        match blocked {
+            Some((k, deps)) => {
+                remove.retain(|r| *r != k);
+                kept.push((k, deps));
+            }
+            None => break,
+        }
+    }
+    Ok(ProfileDisable {
+        plan,
+        remove,
+        kept,
+        manifest,
+        catalog,
+    })
+}
+
+/// What changing one profile of a melded source would do, for the probe
+/// TUI's confirm modal (TUI-78): the effective keys enabling `profile` would
+/// install, or the keys disabling it would forget plus the keys kept for a
+/// dependent (DEP-60). Read-only; the change itself runs through
+/// [`learn_source_profiles`] / [`forget_source_profile`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProfileChangePreview {
+    pub install: Vec<String>,
+    pub remove: Vec<String>,
+    pub kept: Vec<String>,
+}
+
+/// Preview enabling (`enable`) or disabling `profile` on `source_name`
+/// (TUI-78, PROF-17, PROF-25). Disabling a profile that is not enabled
+/// previews nothing.
+pub(crate) fn profile_change_preview(
+    paths: &Paths,
+    source_name: &str,
+    profile: &str,
+    enable: bool,
+) -> Result<ProfileChangePreview> {
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Err(MindError::SourceNotFound {
+            name: source_name.to_string(),
+        });
+    };
+    if enable {
+        let selection = crate::profile::Selection {
+            include_default: false,
+            named: vec![profile.to_string()],
+            all: false,
+        };
+        let req = ProfileInstall {
+            source_name,
+            selection: &selection,
+            learn_patterns: &[],
+            only_missing_from_snapshot: false,
+        };
+        let plan = plan_profile_install(paths, &req)?;
+        return Ok(ProfileChangePreview {
+            install: plan.pending.iter().map(|k| strip_ansi(k)).collect(),
+            ..ProfileChangePreview::default()
+        });
+    }
+    if !source.profiles.iter().flatten().any(|p| p == profile) {
+        return Ok(ProfileChangePreview::default());
+    }
+    let d = resolve_profile_disable(paths, &registry, source, profile, false)?;
+    Ok(ProfileChangePreview {
+        install: Vec::new(),
+        remove: d.remove.iter().map(|k| strip_ansi(k)).collect(),
+        kept: d.kept.iter().map(|(k, _)| strip_ansi(k)).collect(),
+    })
+}
+
+/// `learn <source> --profile <NAME>` / `--all-profiles` (PROF-17): install the
+/// selected profiles' expansion for an already-melded source and add them to
+/// its recorded set. `source_ref` is a CLI-36 source selector. The gate is
+/// `learn`'s: `--dry-run` previews, and a closure that adds dependencies is
+/// shown and confirmed (default no) unless `--yes`.
+// spec: PROF-17 PROF-18
+pub fn learn_source_profiles(
+    paths: &Paths,
+    source_ref: &str,
+    selection: &crate::profile::Selection,
+    dry_run: bool,
+    flow: InstallFlow,
+) -> Result<()> {
+    let source_name = resolve_profile_source(paths, source_ref)?;
+    let req = ProfileInstall {
+        source_name: &source_name,
+        selection,
+        learn_patterns: &[],
+        only_missing_from_snapshot: false,
+    };
+    let plan = plan_profile_install(paths, &req)?;
+    let out = crate::render::ctx();
+    let result = |outcome: &'static str, installed: Vec<String>| {
+        let mut r = MutationResult::new("learn", &source_name, outcome);
+        r.installed = installed.iter().map(|k| strip_ansi(k)).collect();
+        r.profiles = Some(plan.enabled.clone());
+        r
+    };
+    if !out.json {
+        print_profile_header(&source_name, &plan);
+    }
+    if plan.enabled.is_empty() {
+        // `--all-profiles` on a source that declares none.
+        if out.json {
+            return print_json(&result("up-to-date", Vec::new()));
+        }
+        println!(
+            "note: {} declares no profiles; nothing to do",
+            strip_ansi(&source_name)
+        );
+        return Ok(());
+    }
+    if dry_run {
+        if out.json {
+            return print_json(&result("dry-run", plan.pending.clone()));
+        }
+        return print_profile_preview(paths, &plan);
+    }
+    if plan.pending.is_empty() {
+        apply_profile_plan(paths, &source_name, &plan, flow, out.json)?;
+        if out.json {
+            return print_json(&result("up-to-date", Vec::new()));
+        }
+        println!("already installed; nothing to do");
+        return Ok(());
+    }
+    // spec: DEP-31 -- the dependency-closure confirmation, as for any learn.
+    if !plan.trees.is_empty() && !flow.yes {
+        if out.json {
+            return Err(MindError::ConfirmationRequired {
+                action: json_confirmation_action(
+                    format!(
+                        "installing the dependency closure of profile(s) {} of '{}'",
+                        plan.enabled.join(", "),
+                        strip_ansi(&source_name)
+                    ),
+                    true,
+                ),
+            });
+        }
+        for tree in &plan.trees {
+            print!("{tree}");
+        }
+        if !confirm("install this dependency closure?")? {
+            println!("cancelled; nothing installed");
+            return Ok(());
+        }
+    }
+    let installed = apply_profile_plan(
+        paths,
+        &source_name,
+        &plan,
+        InstallFlow { yes: true, ..flow },
+        out.json,
+    )?;
+    if out.json {
+        return print_json(&result("installed", installed));
+    }
+    Ok(())
+}
+
+/// The selection a re-meld applies (PROF-16), or `None` to keep the CLI-12
+/// install-all path. A profile flag, a profile-tracked source, or a source
+/// declaring `default` routes through profiles. The recorded set is always
+/// re-enabled (a re-meld never disables, PROF-16); recorded names the source
+/// no longer declares are left to `upgrade` (PROF-24). On a tracked source
+/// `default` is re-enabled only when it is recorded or named.
+fn remeld_profile_selection(
+    paths: &Paths,
+    source_name: &str,
+    flags: Option<&crate::profile::Selection>,
+) -> Result<Option<crate::profile::Selection>> {
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(None);
+    };
+    let table = source_profile_table(paths, source)?;
+    let tracked = source.is_profile_tracked();
+    let has_default = table
+        .as_ref()
+        .is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
+    if flags.is_none() && !tracked && !has_default {
+        return Ok(None);
+    }
+    let mut sel = flags.cloned().unwrap_or(crate::profile::Selection {
+        include_default: true,
+        named: Vec::new(),
+        all: false,
+    });
+    if tracked {
+        sel.include_default = false;
+        for p in source.profiles.iter().flatten() {
+            let declared = table.as_ref().is_some_and(|t| t.contains_key(p));
+            if declared && !sel.named.contains(p) {
+                sel.named.push(p.clone());
+            }
+        }
+    }
+    Ok(Some(sel))
+}
+
+/// The curator-entry form of the profile flags (PROF-26), or `None` to keep
+/// the DSC-58/62 install path: an entry naming `profiles`, or an
+/// `install = true` entry whose nested source declares `default` (or that
+/// opts out with `default-profile = false`). A profile name the nested source
+/// does not declare is `BadReference` naming the curator.
+fn curated_profile_selection(
+    paths: &Paths,
+    registry: &Registry,
+    entry: &crate::mindfile::NestedSource,
+    nested_name: &str,
+    curator: &str,
+) -> Result<Option<crate::profile::Selection>> {
+    let Some(source) = registry.find(nested_name) else {
+        return Ok(None);
+    };
+    Ok(curated_profile_route(paths, source, entry, curator)?.map(|(sel, _)| sel))
+}
+
+/// The routing rule behind [`curated_profile_selection`], for a registered
+/// `source` (PROF-26, PROF-27): `None` keeps the DSC-58/62 path; otherwise the
+/// entry's selection and the enabled set it resolves to. Shared with `curate`
+/// so meld and curate route an entry identically. An undeclared profile name
+/// is `BadReference` naming the curator.
+pub(crate) fn curated_profile_route(
+    paths: &Paths,
+    source: &crate::source::Source,
+    entry: &crate::mindfile::NestedSource,
+    curator: &str,
+) -> Result<Option<(crate::profile::Selection, Vec<String>)>> {
+    let table = source_profile_table(paths, source)?;
+    let names_profiles = entry.profiles.as_ref().is_some_and(|p| !p.is_empty());
+    let has_default = table
+        .as_ref()
+        .is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
+    let via_install = entry.install && (has_default || entry.default_profile == Some(false));
+    if !names_profiles && !via_install {
+        return Ok(None);
+    }
+    let sel = crate::profile::Selection::from_nested(entry);
+    // spec: PROF-26 PROF-27 -- an undeclared name is BadReference.
+    let enabled =
+        crate::profile::enabled_set_for_curator(table.as_ref(), &sel, &source.name, curator)?;
+    Ok(Some((sel, enabled)))
+}
+
+/// A curator entry's `install-items` that name a real item of the nested
+/// source, as bare `kind:name` patterns, so they union with the entry's
+/// profiles (PROF-26) under the same silent-skip rule DSC-62 applies.
+fn curated_install_item_patterns(
+    paths: &Paths,
+    registry: &Registry,
+    nested_name: &str,
+    refs: Option<&Vec<String>>,
+) -> Result<Vec<String>> {
+    let Some(refs) = refs.filter(|r| !r.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let Some(source) = registry.find(nested_name) else {
+        return Ok(Vec::new());
+    };
+    let items = catalog::scan(paths, &single(source))?;
+    Ok(select_by_bare_refs(&items, refs)
+        .into_iter()
+        .map(|it| format!("{}:{}", it.kind.as_str(), it.name))
+        .collect())
+}
+
+/// A by-name `learn <item>` marks an installed item explicit (PROF-20), so
+/// disabling its profiles later keeps it. A glob or `--all` selection is not
+/// by name. Resolution misses are ignored: `learn` itself already reported.
+pub fn mark_learned_explicit(paths: &Paths, item_ref: &str) -> Result<()> {
+    // spec: PROF-20
+    let Ok(parsed) = parse_item_ref(item_ref) else {
+        return Ok(());
+    };
+    if is_glob(&parsed.name) {
+        return Ok(());
+    }
+    // Nothing carries a profile reason: nothing to mark, so skip the scan.
+    if Manifest::load(paths)?
+        .items
+        .values()
+        .all(|i| i.profiles.is_empty())
+    {
+        return Ok(());
+    }
+    let registry = Registry::load(paths)?;
+    let Ok(items) = catalog::scan(paths, &registry) else {
+        return Ok(());
+    };
+    let Ok(item) = resolve(&items, &parsed, registry.sources.len()) else {
+        return Ok(());
+    };
+    let mut manifest = Manifest::load(paths)?;
+    if let Some(entry) = manifest.items.get_mut(item.key().as_str()) {
+        let was = entry.explicit;
+        crate::profile::mark_explicit(entry);
+        if entry.explicit != was {
+            manifest.save(paths)?;
+        }
+    }
+    Ok(())
+}
+
+/// A source's declared profiles for display (PROF-29), or `None` when it
+/// declares none (or its `mind.toml` cannot be read: display never fails on
+/// it).
+fn display_profile_table(
+    paths: &Paths,
+    source: &crate::source::Source,
+) -> Option<crate::profile::ProfileTable> {
+    source_profile_table(paths, source)
+        .ok()
+        .flatten()
+        .filter(|t| !t.is_empty())
+}
+
+/// The declared profiles as one line, each enabled one marked (PROF-29):
+/// `basic, default (enabled), full`.
+fn profile_summary(table: &crate::profile::ProfileTable, enabled: &[String]) -> String {
+    table
+        .keys()
+        .map(|p| {
+            if enabled.contains(p) {
+                format!("{p} (enabled)")
+            } else {
+                p.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Print the `profiles:` block of `recall --sources` / `probe --no-tui`
+/// (PROF-29): one line per source that declares profiles. Nothing at all
+/// when none does.
+fn print_profile_block(paths: &Paths, sources: &[&crate::source::Source]) {
+    let lines: Vec<String> = sources
+        .iter()
+        .filter_map(|s| {
+            let table = display_profile_table(paths, s)?;
+            let enabled = s.profiles.clone().unwrap_or_default();
+            Some(format!(
+                "  {}: {}",
+                strip_ansi(&s.name),
+                profile_summary(&table, &enabled)
+            ))
+        })
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    println!("profiles:");
+    for l in lines {
+        println!("{l}");
+    }
+}
+
+/// Insert PROF-29's `profiles` (profile name -> declared members, members
+/// sanitized) and `enabled_profiles` into a source's `--json` object. A source
+/// that declares no profiles and has none enabled is left unchanged; the
+/// registry's own `profiles` field (the enabled set) is replaced either way so
+/// the key has one meaning in the document.
+fn insert_profile_json(
+    paths: &Paths,
+    source: &crate::source::Source,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    obj.remove("profiles");
+    let table = display_profile_table(paths, source);
+    let enabled = source.profiles.clone().unwrap_or_default();
+    if table.is_none() && enabled.is_empty() {
+        return;
+    }
+    let declared: serde_json::Map<String, serde_json::Value> = table
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, members)| {
+            (
+                name,
+                serde_json::Value::Array(
+                    members
+                        .iter()
+                        .map(|m| serde_json::Value::String(strip_ansi(m)))
+                        .collect(),
+                ),
+            )
+        })
+        .collect();
+    obj.insert("profiles".into(), serde_json::Value::Object(declared));
+    obj.insert(
+        "enabled_profiles".into(),
+        serde_json::Value::Array(enabled.into_iter().map(serde_json::Value::String).collect()),
+    );
+}
+
+/// One profile addition an `upgrade` proposes (PROF-21), as the report and the
+/// `--json` result's `profile_additions` carry it.
+#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
+struct ProfileAddition {
+    /// The effective `kind:name` key the item installs under.
+    key: String,
+    source: String,
+    /// The enabled profiles the item is a member of.
+    profiles: Vec<String>,
+}
+
+/// One snapshot key that left its source's expansion (PROF-22), as the report
+/// and the `--json` result's `profile_departures` carry it.
+#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
+struct ProfileDeparture {
+    /// The effective `kind:name` key when the item is installed or still
+    /// offered, else the bare snapshot key.
+    key: String,
+    source: String,
+    /// The profile(s) it left: the installed item's recorded reasons, else the
+    /// source's enabled set before this pass.
+    profiles: Vec<String>,
+    installed: bool,
+    /// `mind forget <key>`, when the item is installed for profiles only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forget: Option<String>,
+}
+
+/// What the upgrade pass's profile tracking found (PROF-21..24): the
+/// fresh additions still to install under the gate, per source, and what was
+/// reported and already persisted.
+#[derive(Default)]
+struct ProfileTracking {
+    /// Per source: the plan of its fresh (not installed) additions.
+    plans: Vec<(String, ProfilePlan)>,
+    additions: Vec<ProfileAddition>,
+    /// Closure items the additions pull in beyond the members themselves.
+    extra_closure: usize,
+    departures: Vec<ProfileDeparture>,
+}
+
+impl ProfileTracking {
+    fn has_additions(&self) -> bool {
+        !self.plans.is_empty()
+    }
+}
+
+/// The installed entry of `source_name` whose stable identity is the bare
+/// snapshot key `bare` (`kind:name`), if any.
+fn installed_by_bare_key<'a>(
+    manifest: &'a Manifest,
+    source_name: &str,
+    bare: &str,
+) -> Option<&'a crate::manifest::InstalledItem> {
+    let (kind_word, name) = bare.split_once(':')?;
+    let kind = ItemKind::parse(kind_word)?;
+    manifest
+        .items
+        .values()
+        .find(|m| m.source == source_name && m.kind == kind && m.bare_name == name)
+}
+
+/// The upgrade pass's profile tracking (PROF-5, PROF-21..24), run for each
+/// profile-tracked source in `sources` before the gate.
+///
+/// For each source: an enabled profile the source no longer declares is
+/// dropped from the recorded set with a warning (PROF-24); the remaining set
+/// is expanded against `catalog` (an exact-member miss is `BadReference`,
+/// PROF-5) and diffed against the snapshot. A departed key is reported once
+/// and removed from the snapshot, never uninstalled (PROF-22); both of those
+/// are persisted now, whatever the gate later decides. An addition that is
+/// already installed is snapshotted and tagged now; the rest are returned for
+/// the caller to install under its gate, and stay out of the snapshot until
+/// they do (PROF-21). A member the consumer forgot is still in the snapshot,
+/// so it is not an addition (PROF-23).
+// spec: PROF-5 PROF-21 PROF-22 PROF-23 PROF-24
+fn track_profiles_for_upgrade(
+    paths: &Paths,
+    sources: &[String],
+    catalog: &[CatalogItem],
+) -> Result<ProfileTracking> {
+    let mut tracking = ProfileTracking::default();
+    for name in sources {
+        let mut registry = Registry::load(paths)?;
+        let Some(source) = registry.find(name) else {
+            continue;
+        };
+        if !source.is_profile_tracked() {
+            continue;
+        }
+        let table = source_profile_table(paths, source)?.unwrap_or_default();
+        let recorded: Vec<String> = source.profiles.clone().unwrap_or_default();
+        let (kept, dropped): (Vec<String>, Vec<String>) = recorded
+            .iter()
+            .cloned()
+            .partition(|p| table.contains_key(p));
+        let safe_source = strip_ansi(name);
+        for p in &dropped {
+            // spec: PROF-24
+            crate::render::warn(format!(
+                "profile '{}' is no longer declared by {safe_source}; removed from its enabled \
+                 profiles",
+                strip_ansi(p)
+            ));
+        }
+        let expansion = crate::profile::expand(&table, &kept, catalog, name)?;
+        let snapshot: Vec<String> = source.profile_snapshot.clone().unwrap_or_default();
+        let diff = crate::profile::diff(&snapshot, &expansion);
+
+        let manifest = Manifest::load(paths)?;
+        for bare in &diff.departures {
+            // spec: PROF-22 -- reported once, then dropped from the snapshot.
+            let entry = installed_by_bare_key(&manifest, name, bare);
+            let key = match entry {
+                Some(e) => e.key().as_str().to_string(),
+                None => catalog
+                    .iter()
+                    .find(|c| {
+                        c.source == *name && format!("{}:{}", c.kind.as_str(), c.name) == *bare
+                    })
+                    .map(|c| c.key().as_str().to_string())
+                    .unwrap_or_else(|| bare.clone()),
+            };
+            let safe_key = strip_ansi(&key);
+            let profiles = match entry {
+                Some(e) if !e.profiles.is_empty() => e.profiles.clone(),
+                _ => recorded.clone(),
+            };
+            let forget = entry
+                .filter(|e| !e.is_explicit())
+                .map(|_| format!("mind forget {}", crate::error::shell_quote(&safe_key)));
+            let mut line = format!(
+                "{safe_key} left profile {} of {safe_source}",
+                profiles.join(", ")
+            );
+            if entry.is_some() {
+                line.push_str("; it stays installed");
+            }
+            if let Some(cmd) = &forget {
+                line.push_str(&format!("; run `{cmd}` to remove it"));
+            }
+            crate::render::note(format!("note: {line}"));
+            tracking.departures.push(ProfileDeparture {
+                key: safe_key,
+                source: safe_source.clone(),
+                profiles,
+                installed: entry.is_some(),
+                forget,
+            });
+        }
+        if !dropped.is_empty() || !diff.departures.is_empty() {
+            if let Some(s) = registry.sources.iter_mut().find(|s| s.name == *name) {
+                s.profiles = Some(kept.clone());
+                s.profile_snapshot = Some(
+                    snapshot
+                        .iter()
+                        .filter(|k| !diff.departures.contains(k))
+                        .cloned()
+                        .collect(),
+                );
+            }
+            registry.save(paths)?;
+        }
+
+        if diff.additions.is_empty() || kept.is_empty() {
+            continue;
+        }
+        let selection = crate::profile::Selection {
+            include_default: false,
+            named: kept.clone(),
+            all: false,
+        };
+        let req = ProfileInstall {
+            source_name: name,
+            selection: &selection,
+            learn_patterns: &[],
+            only_missing_from_snapshot: true,
+        };
+        let plan = plan_profile_install(paths, &req)?;
+        let ProfilePlan {
+            declared,
+            enabled,
+            members,
+            reasons,
+            pending,
+            trees,
+        } = plan;
+        let (present, fresh): (Vec<ProfileMember>, Vec<ProfileMember>) =
+            members.into_iter().partition(|m| m.installed);
+        if !present.is_empty() {
+            // An addition already installed is snapshotted and tagged, not
+            // proposed (PROF-21).
+            let now = ProfilePlan {
+                declared: declared.clone(),
+                enabled: enabled.clone(),
+                members: present,
+                reasons: std::collections::BTreeMap::new(),
+                pending: Vec::new(),
+                trees: Vec::new(),
+            };
+            apply_profile_plan(
+                paths,
+                name,
+                &now,
+                InstallFlow {
+                    yes: true,
+                    clobber: Clobber::Error,
+                    dangerously_skip: false,
+                    dangerously_skip_build: false,
+                },
+                true,
+            )?;
+        }
+        if fresh.is_empty() {
+            continue;
+        }
+        for m in &fresh {
+            tracking.additions.push(ProfileAddition {
+                key: strip_ansi(&m.target.key),
+                source: safe_source.clone(),
+                profiles: m.profiles.iter().cloned().collect(),
+            });
+        }
+        tracking.extra_closure += pending.len().saturating_sub(fresh.len());
+        tracking.plans.push((
+            name.clone(),
+            ProfilePlan {
+                declared,
+                enabled,
+                members: fresh,
+                reasons,
+                pending,
+                trees,
+            },
+        ));
+    }
+    Ok(tracking)
+}
+
+/// The profile-additions section of the upgrade report (PROF-21).
+fn print_profile_additions(tracking: &ProfileTracking) {
+    if tracking.additions.is_empty() {
+        return;
+    }
+    let out = crate::render::ctx();
+    let n = tracking.additions.len();
+    println!(
+        "{n} {} newly in an enabled profile:\n",
+        if n == 1 { "item is" } else { "items are" }
+    );
+    for a in &tracking.additions {
+        println!(
+            "  {} {} {}  (profile {})",
+            out.warn(),
+            a.key,
+            out.dim(&format!("[{}]", a.source)),
+            a.profiles.join(", ")
+        );
+    }
+    if tracking.extra_closure > 0 {
+        println!(
+            "  plus {} dependency item(s) they require",
+            tracking.extra_closure
+        );
+    }
+    println!();
+}
+
 /// Install all items from a provisioned source headlessly, for the policy
 /// `auto_meld` `install = true` path (POL-58/59/60).
 ///
@@ -4935,6 +6397,7 @@ pub fn remeld(
     ignored_flags: &[&str],
     pin: PinRequest,
     learn_patterns: &[String],
+    profile_flags: Option<&crate::profile::Selection>,
 ) -> Result<()> {
     // `yes` rides inside `flow` for the install calls; remeld itself only needs
     // the clobber (hook force-rerun) and the dangerously-skip flag.
@@ -5021,6 +6484,45 @@ pub fn remeld(
         }
     }
 
+    if !link_only
+        && let Some(selection) = remeld_profile_selection(paths, &source_name, profile_flags)?
+    {
+        // spec: PROF-16 -- a re-meld honors the profile flags, adding to the
+        // recorded set; the curated chain is walked as for install-all, but
+        // not under `--learn` (CLI-236).
+        let req = ProfileInstall {
+            source_name: &source_name,
+            selection: &selection,
+            learn_patterns,
+            only_missing_from_snapshot: false,
+        };
+        if out.json {
+            let (outcome, pending) = install_source_profiles_for_json(paths, &req, flow)?;
+            let mut installed = outcome.installed_keys;
+            if learn_patterns.is_empty() {
+                installed.extend(install_curated_sources_for_json(
+                    paths,
+                    &source_name,
+                    recursive,
+                    flow,
+                )?);
+            }
+            let mut result = MutationResult::new("meld", &source_name, "already-melded");
+            result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
+            if pending > 0 {
+                result.pending_items = Some(pending);
+            }
+            result.profiles = Some(outcome.enabled);
+            return print_json(&result);
+        }
+        install_source_profiles(paths, &req, flow)?;
+        if learn_patterns.is_empty() {
+            install_curated_sources(paths, &source_name, recursive, flow)?;
+        } else {
+            note_learn_ignores_recursive(recursive);
+        }
+        return source_status(paths, &source_name);
+    }
     if !link_only {
         // spec: CLI-217 CLI-156 -- the `--json` re-meld installs through the
         // SILENT helpers `meld`'s fresh branch uses, then answers with ONE
@@ -5292,6 +6794,27 @@ pub fn install_curated_sources(
                 // - `install = true`: install all of the nested source
                 if all {
                     install_source_items(paths, &spec.name, flow)?;
+                } else if let Some(selection) =
+                    curated_profile_selection(paths, &registry, &ns, &spec.name, &name)?
+                {
+                    // spec: PROF-26 -- the entry's profiles / default-profile
+                    // apply like the flags; `install-items` joins the batch.
+                    let patterns = curated_install_item_patterns(
+                        paths,
+                        &registry,
+                        &spec.name,
+                        ns.install_items.as_ref(),
+                    )?;
+                    install_source_profiles(
+                        paths,
+                        &ProfileInstall {
+                            source_name: &spec.name,
+                            selection: &selection,
+                            learn_patterns: &patterns,
+                            only_missing_from_snapshot: false,
+                        },
+                        flow,
+                    )?;
                 } else if let Some(refs) = &ns.install_items {
                     // DSC-62: install_items governs; refs is the subset to offer.
                     install_source_items_subset(paths, &spec.name, refs, flow)?;
@@ -5422,6 +6945,27 @@ pub(crate) fn install_curated_sources_for_json(
                 if all {
                     let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
                     all_keys.extend(keys);
+                } else if let Some(selection) =
+                    curated_profile_selection(paths, &registry, &ns, &spec.name, &name)?
+                {
+                    // spec: PROF-26 -- the json twin of the profile branch above.
+                    let patterns = curated_install_item_patterns(
+                        paths,
+                        &registry,
+                        &spec.name,
+                        ns.install_items.as_ref(),
+                    )?;
+                    let (outcome, _) = install_source_profiles_for_json(
+                        paths,
+                        &ProfileInstall {
+                            source_name: &spec.name,
+                            selection: &selection,
+                            learn_patterns: &patterns,
+                            only_missing_from_snapshot: false,
+                        },
+                        flow,
+                    )?;
+                    all_keys.extend(outcome.installed_keys);
                 } else if let Some(refs) = &ns.install_items {
                     if !refs.is_empty() && flow.yes {
                         for item_ref in refs {
@@ -5464,12 +7008,17 @@ pub(crate) fn install_curated_sources_for_json(
 /// `installed` contains the effective keys installed in this call.
 /// `pending` is non-zero when `--yes` was absent and items remain to install.
 // spec: CLI-153 CLI-156
+///
+/// `profiles` is the enabled profile set when the install went through
+/// profiles (PROF-18), `None` otherwise.
 pub(crate) fn emit_meld_json_result(
     summary: MeldSummary,
     installed: Vec<String>,
     pending: usize,
+    profiles: Option<Vec<String>>,
 ) -> Result<()> {
     let mut result = MutationResult::new("meld", &summary.source_name, "melded");
+    result.profiles = profiles;
     result.count = Some(summary.added);
     result.skipped = summary.skipped;
     // spec: DSC-95 -- `installed` rides straight off `learn_collecting`'s raw
@@ -7757,6 +9306,38 @@ fn upgrade_inner_scoped(
             }
         }
     }
+    // spec: PROF-21 PROF-22 PROF-23 PROF-24 -- re-expand each profile-tracked
+    // source's enabled set. Only an unscoped pass or a source-scoped one
+    // (`sync <source> --upgrade`, `curate`) tracks profiles: an `upgrade
+    // <item>` filter or the TUI's confirmed-key apply names items, and an
+    // addition is by definition an item it did not name.
+    let profile_sources: Vec<String> = if filter.is_none() && key_scope.is_none() {
+        registry
+            .sources
+            .iter()
+            .filter(|s| {
+                s.is_profile_tracked()
+                    && source_scope.as_ref().is_none_or(|sc| sc.contains(&s.name))
+                    && !unscannable.contains(&s.name)
+                    && policy
+                        .as_ref()
+                        .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
+            })
+            .map(|s| s.name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let tracking = track_profiles_for_upgrade(paths, &profile_sources, &catalog)?;
+    // Tracking may have persisted snapshot/tag changes; read them back so the
+    // pass below (and its manifest save) starts from them.
+    let manifest = if profile_sources.is_empty() {
+        manifest
+    } else {
+        registry = Registry::load(paths)?;
+        Manifest::load(paths)?
+    };
+
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
@@ -7841,8 +9422,13 @@ fn upgrade_inner_scoped(
     // when the manifest already holds a DIFFERENT stable identity
     // `(source, kind, bare_name)` under the rename's target key.
     let target = item_ref.unwrap_or("all");
+    let with_profiles = |mut r: MutationResult| {
+        r.profile_additions = tracking.additions.clone();
+        r.profile_departures = tracking.departures.clone();
+        r
+    };
 
-    if pending.is_empty() {
+    if pending.is_empty() && !tracking.has_additions() {
         // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
         // items it would have contributed were never compared. Report the
         // sources that could not be checked instead of the plain up-to-date line.
@@ -7850,7 +9436,7 @@ fn upgrade_inner_scoped(
             if out.json {
                 let mut result = MutationResult::new("upgrade", target, "incomplete");
                 result.count = Some(unscannable.len());
-                return Ok(Some(result));
+                return Ok(Some(with_profiles(result)));
             }
             println!(
                 "no pending upgrades among the source(s) that could be checked; {} source(s) could not be checked: {}",
@@ -7860,14 +9446,18 @@ fn upgrade_inner_scoped(
             return Ok(None);
         }
         if out.json {
-            return Ok(Some(MutationResult::new("upgrade", target, "up-to-date")));
+            return Ok(Some(with_profiles(MutationResult::new(
+                "upgrade",
+                target,
+                "up-to-date",
+            ))));
         }
         println!("everything is up to date");
         return Ok(None);
     }
 
     if !out.json {
-        print_upgrade_report(&registry, &pending);
+        print_upgrade_report(&registry, &pending, &tracking);
     }
 
     // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
@@ -8022,6 +9612,9 @@ fn upgrade_inner_scoped(
                 // upgrade too, so it reflects the version now on disk (an
                 // upstream edit may have added or removed such an entry).
                 i.dropped_requires = dropped_requires;
+                // spec: PROF-20 -- the install path builds a fresh entry, so
+                // the old one's install reasons are carried over by hand.
+                crate::profile::carry_reasons(&mut i, &up.old);
                 i
             }
             Err(e) => {
@@ -8113,11 +9706,24 @@ fn upgrade_inner_scoped(
     // store copies and compare against the whole installed set. Advisory only:
     // an upgrade is never failed or altered by one.
     warn_workflows(paths, &manifest, &applied_keys);
+    // spec: PROF-21 -- the profile additions install under the same gate,
+    // through the learn path (so the dependency closure applies), and are
+    // tagged and snapshotted as they land.
+    for (source_name, plan) in &tracking.plans {
+        let flow = InstallFlow {
+            yes: true,
+            clobber: Clobber::Prompt,
+            dangerously_skip: dangerously_skip_hook_check,
+            dangerously_skip_build: dangerously_skip_build_hook_check,
+        };
+        let keys = apply_profile_plan(paths, source_name, plan, flow, out.json)?;
+        applied.extend(keys.iter().map(|k| strip_ansi(k)));
+    }
     if out.json {
         let outcome = if renamed { "renamed" } else { "upgraded" };
         let mut result = MutationResult::new("upgrade", target, outcome);
         result.installed = applied;
-        return Ok(Some(result));
+        return Ok(Some(with_profiles(result)));
     }
     Ok(None)
 }
@@ -8527,9 +10133,14 @@ struct Upgrade {
     new_name: String,
 }
 
-fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
+fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &ProfileTracking) {
     let out = crate::render::ctx();
+    // spec: PROF-21 -- additions are listed with the profile they joined.
+    print_profile_additions(tracking);
     let n = pending.len();
+    if n == 0 {
+        return;
+    }
     let (noun, verb) = if n == 1 {
         ("item", "has")
     } else {
@@ -8685,8 +10296,22 @@ pub fn recall(
     if sources {
         let registry = Registry::load(paths)?;
         if json {
+            // spec: PROF-29 -- each source carries its declared profiles and
+            // the enabled ones; a source without profiles is unchanged.
+            let docs = registry
+                .sources
+                .iter()
+                .map(|s| {
+                    let mut v = serde_json::to_value(s)
+                        .map_err(|e| MindError::json("recall sources", e))?;
+                    if let Some(obj) = v.as_object_mut() {
+                        insert_profile_json(paths, s, obj);
+                    }
+                    Ok(v)
+                })
+                .collect::<Result<Vec<_>>>()?;
             // spec: CLI-167 - array wrapped in versioned envelope.
-            return print_json_envelope(&registry.sources);
+            return print_json_envelope(&docs);
         }
         if registry.sources.is_empty() {
             // spec: CLI-187
@@ -8726,6 +10351,8 @@ pub fn recall(
             })
             .collect::<Vec<_>>();
         out.print_rows(&rows);
+        // spec: PROF-29
+        print_profile_block(paths, &registry.sources.iter().collect::<Vec<_>>());
         return Ok(());
     }
 
@@ -8782,6 +10409,24 @@ pub fn recall(
             println!("  {}{d}", out.dim("desc    "));
         }
         println!("  {}{}", out.dim("source  "), found.source);
+        // spec: PROF-29 -- the profiles the item was installed for.
+        if !found.profiles.is_empty() {
+            let also = if found.explicit {
+                " (also learned by name)"
+            } else {
+                ""
+            };
+            println!(
+                "  {}{}{also}",
+                out.dim("profile "),
+                found
+                    .profiles
+                    .iter()
+                    .map(|p| strip_ansi(p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         println!("  {}{}", out.dim("commit  "), short(&found.commit));
         println!("  {}{}", out.dim("hash    "), short(&found.hash));
         // DSC-95: store/link paths embed the source-controlled bare name.
@@ -9156,6 +10801,20 @@ pub fn probe(
         // O(catalog) index build plus an O(catalog) position scan each time,
         // i.e. quadratic in the catalog for a verb that lists every match.
         let dep_index = crate::deps::DepIndex::new(&items);
+        // spec: PROF-29 -- each row of a source that declares profiles
+        // carries the source's `profiles` and `enabled_profiles`.
+        let profile_docs: std::collections::BTreeMap<
+            &str,
+            serde_json::Map<String, serde_json::Value>,
+        > = registry
+            .sources
+            .iter()
+            .map(|s| {
+                let mut obj = serde_json::Map::new();
+                insert_profile_json(paths, s, &mut obj);
+                (s.name.as_str(), obj)
+            })
+            .collect();
         let mut rows: Vec<ProbeRow> = hits
             .iter()
             .map(|(node, it)| {
@@ -9184,6 +10843,10 @@ pub fn probe(
                         .map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
+                    source_profiles: profile_docs
+                        .get(it.source.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -9198,6 +10861,7 @@ pub fn probe(
                 when_to_use: None,
                 unmanaged: true,
                 dependencies: Vec::new(),
+                source_profiles: serde_json::Map::new(),
             });
         }
         // spec: CLI-167 - array wrapped in versioned envelope.
@@ -9301,6 +10965,13 @@ pub fn probe(
         ]);
     }
     out.print_rows(&rows);
+    // spec: PROF-29 -- the declared profiles of each source with a hit.
+    let hit_sources: Vec<&crate::source::Source> = registry
+        .sources
+        .iter()
+        .filter(|s| hits.iter().any(|(_, it)| it.source == s.name))
+        .collect();
+    print_profile_block(paths, &hit_sources);
     Ok(())
 }
 
@@ -9330,6 +11001,11 @@ struct ProbeRow<'a> {
     /// the vec is empty so existing consumers that do not need deps see no change.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     dependencies: Vec<String>,
+    /// The row's source's declared `profiles` (name -> members) and
+    /// `enabled_profiles` (PROF-29). Empty, so no keys, for a source that
+    /// declares none and for unmanaged rows.
+    #[serde(flatten)]
+    source_profiles: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One diagnostic finding from `introspect`. `kind` is a stable machine tag;
@@ -10576,6 +12252,21 @@ struct MutationResult {
     /// The managed `kind:name` key after a successful absorb (ABS-11).
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
+    /// The enabled install profiles (PROF-18), set by a `meld`/`learn` that
+    /// went through a profile install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profiles: Option<Vec<String>>,
+    /// Items newly in an enabled profile that `upgrade` proposed (PROF-21).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profile_additions: Vec<ProfileAddition>,
+    /// Snapshot keys that left their profile, reported by `upgrade`
+    /// (PROF-22).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profile_departures: Vec<ProfileDeparture>,
+    /// Items `forget <source> --profile` kept because another installed item
+    /// depends on them (PROF-25, DEP-60), each naming its dependents.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    kept: Vec<String>,
 }
 
 impl MutationResult {
@@ -10592,6 +12283,10 @@ impl MutationResult {
             skipped: Vec::new(),
             pending_items: None,
             key: None,
+            profiles: None,
+            profile_additions: Vec::new(),
+            profile_departures: Vec::new(),
+            kept: Vec::new(),
         }
     }
 }
@@ -10860,6 +12555,247 @@ pub(crate) fn confirm(prompt: &str) -> Result<bool> {
 /// path and the action is reversible (the meld install-items prompt, CLI-23).
 pub(crate) fn confirm_default_yes(prompt: &str) -> Result<bool> {
     read_confirm(prompt, "[Y/n]", true)
+}
+
+/// The `meld` verb end to end: register (or re-meld) the source, then run
+/// the install offer the flags select (CLI-23, CLI-236, PROF-9..13). Shared
+/// by the CLI dispatch and the probe TUI's meld input (TUI-77), so a TUI
+/// meld takes exactly the flags and flow `mind meld` does.
+pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: bool) -> Result<()> {
+    let crate::cli::MeldArgs {
+        repo,
+        alias,
+        roots,
+        add_roots,
+        flat_skills,
+        pin,
+        follow_branch,
+        pin_tag,
+        pin_ref,
+        install_hook,
+        dangerously_skip_install_hook_check,
+        dangerously_skip_build_hook_check,
+        register_only,
+        kind,
+        learn_patterns,
+        profiles,
+        no_default_profile,
+        all_profiles,
+        recursive,
+        force,
+        local,
+    } = args;
+    // spec: HARN-20/HARN-21 -- `--local` restricts the install fan-out to
+    // the registered project lobe containing the cwd; without it, plain
+    // meld/learn inside such a lobe gets a one-line note that --local is
+    // available. The guard lives for the whole arm so every install path
+    // (fresh meld, re-meld, curated chain) is scoped.
+    let _local_guard = apply_local_scope(paths, local)?;
+    // spec: CLI-17, CLI-200..202 -- fold the pin flag (and deprecated
+    // aliases) into one request; more than one is a structured
+    // ConflictingPin error rather than a clap usage string.
+    let pin = parse_pin_flags(pin, follow_branch, pin_tag, pin_ref)?;
+    // spec: CLI-239 -- `--kind` declares a file link's item kind; a bad
+    // value, or one passed with a plain repo spec, is refused before the
+    // clone. Resolved after `repo` is defaulted below.
+    // spec: CLI-236 -- reject an unusable `--learn` value before the
+    // clone, so a typo does not leave a registered source behind.
+    validate_learn_patterns(&learn_patterns)?;
+    // spec: PROF-14 -- a malformed `--profile` name is refused before
+    // the clone, for the same reason.
+    let profile_names = crate::profile::parse_cli_names(&profiles)?;
+    let profile_flags =
+        crate::profile::flags_given(&profile_names, no_default_profile, all_profiles);
+    let profile_selection = crate::profile::Selection {
+        include_default: !no_default_profile,
+        named: profile_names,
+        all: all_profiles,
+    };
+    // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
+    // current directory. Resolve it to an absolute path so `parse_spec`
+    // derives a sensible `local/<parent>/<dir>` identity.
+    let repo = match repo.as_deref() {
+        None | Some(".") | Some("./") => std::env::current_dir()
+            .map_err(|e| crate::error::MindError::io(".", e))?
+            .to_string_lossy()
+            .into_owned(),
+        Some(r) => r.to_string(),
+    };
+    let item_kind = parse_link_kind(kind, &repo)?;
+    // spec: PROF-8 -- an item link is a single item: no profiles.
+    if is_item_link_spec(&repo) {
+        crate::profile::reject_on_item_link(&profile_flags)?;
+    }
+    // CLI-34: `--force` overwrites a conflicting target; otherwise a
+    // conflict prompts on a TTY (Clobber::Prompt).
+    let clobber = if force {
+        Clobber::Force
+    } else {
+        Clobber::Prompt
+    };
+    let flow = InstallFlow {
+        yes,
+        clobber,
+        dangerously_skip: dangerously_skip_install_hook_check,
+        dangerously_skip_build: dangerously_skip_build_hook_check,
+    };
+    // spec: STO-58 -- the alias is part of the source identity, so the
+    // instance a re-meld/install targets is `host/owner/repo@<alias>`.
+    // Computed before `alias` is moved into meld/remeld.
+    let source_ident = instance_name(&repo, alias.as_deref()).unwrap_or_else(|_| repo.clone());
+    // CLI-12: re-melding an already-melded source is not an error; it
+    // ensures the items are installed, else reports their status.
+    if is_melded(paths, &repo, alias.as_deref())? {
+        // spec: CLI-206 -- name every discovery flag this invocation
+        // carries; remeld() cannot apply any of them (it never
+        // re-clones or re-registers) and reports so explicitly.
+        let mut ignored_flags: Vec<&str> = Vec::new();
+        if !roots.is_empty() {
+            ignored_flags.push("--root");
+        }
+        if !add_roots.is_empty() {
+            ignored_flags.push("--add-root");
+        }
+        if flat_skills {
+            ignored_flags.push("--flat-skills");
+        }
+        if install_hook.is_some() {
+            ignored_flags.push("--install-hook");
+        }
+        if item_kind.is_some() {
+            ignored_flags.push("--kind");
+        }
+        // spec: CLI-209 -- unlike the discovery flags above, `--pin`
+        // IS honored on a re-meld: it re-pins the source instead of
+        // being a silent no-op.
+        remeld(
+            paths,
+            &repo,
+            alias,
+            register_only,
+            flow,
+            recursive,
+            &ignored_flags,
+            pin,
+            &learn_patterns,
+            // spec: PROF-16
+            (!profile_flags.is_empty()).then_some(&profile_selection),
+        )?;
+    } else {
+        let meld_sum = meld(
+            paths,
+            &repo,
+            alias,
+            roots,
+            add_roots,
+            flat_skills,
+            pin,
+            install_hook,
+            dangerously_skip_install_hook_check,
+            item_kind,
+        )?;
+        // CLI-23: by default, offer to install the melded source's items
+        // right away (preview + prompt). `--register-only` stops at registering.
+        //
+        // CLI-156: in json mode the entire meld+install outcome is folded
+        // into ONE JSON object emitted here. Human output is unchanged.
+        // spec: PROF-9 PROF-12 -- a profile flag, or a source that
+        // declares `default`, routes the install offer through
+        // profiles; otherwise the CLI-23/CLI-236 paths run unchanged
+        // (PROF-7).
+        let use_profiles =
+            !register_only && meld_uses_profiles(paths, &source_ident, !profile_flags.is_empty())?;
+        if use_profiles {
+            // spec: PROF-13 -- an interactive meld with no profile flag
+            // asks which profiles to enable first.
+            let selection = pick_profiles(
+                paths,
+                &source_ident,
+                profile_selection,
+                !profile_flags.is_empty(),
+                yes,
+            )?;
+            let req = ProfileInstall {
+                source_name: &source_ident,
+                selection: &selection,
+                learn_patterns: &learn_patterns,
+                only_missing_from_snapshot: false,
+            };
+            if json {
+                let (outcome, pend) = install_source_profiles_for_json(paths, &req, flow)?;
+                let mut inst = outcome.installed_keys;
+                if learn_patterns.is_empty() {
+                    inst.extend(install_curated_sources_for_json(
+                        paths,
+                        &source_ident,
+                        recursive,
+                        flow,
+                    )?);
+                }
+                emit_meld_json_result(meld_sum, inst, pend, Some(outcome.enabled))?;
+            } else {
+                install_source_profiles(paths, &req, flow)?;
+                if learn_patterns.is_empty() {
+                    install_curated_sources(paths, &source_ident, recursive, flow)?;
+                } else {
+                    note_learn_ignores_recursive(recursive);
+                }
+            }
+        } else if !register_only {
+            if json {
+                // Install silently (no separate JSON from learn), collect keys.
+                // spec: CLI-236 -- `--learn <glob>` narrows the install to
+                // the matching subset in place of the whole set.
+                let (mut inst, pend) = if learn_patterns.is_empty() {
+                    install_source_items_for_json(paths, &source_ident, flow)?
+                } else {
+                    // spec: STO-58 -- the same instance identity the
+                    // text arm installs against; the two arms of one
+                    // feature must not disagree on which identity they
+                    // trust, even where the two spellings coincide.
+                    // The two spellings are provably equal today, and
+                    // using one variable keeps a future change to
+                    // either derivation from breaking only the
+                    // `--learn` arm.
+                    install_source_items_matching_for_json(
+                        paths,
+                        &source_ident,
+                        &learn_patterns,
+                        flow,
+                    )?
+                };
+                // Also walk the curated chain silently (DSC-54/55/58) --
+                // but not under `--learn`, whose patterns are an
+                // explicit, top-source-scoped selection (CLI-236).
+                if learn_patterns.is_empty() {
+                    let curated =
+                        install_curated_sources_for_json(paths, &source_ident, recursive, flow)?;
+                    inst.extend(curated);
+                }
+                emit_meld_json_result(meld_sum, inst, pend, None)?;
+            } else if !learn_patterns.is_empty() {
+                // spec: CLI-236 -- the named subset only: the curated
+                // chain (DSC-54/55/58) is not walked, since a pattern
+                // selects within the source being melded. Say so when
+                // `--recursive` was passed, rather than dropping it
+                // silently (the CLI-206 ignored-flag discipline).
+                note_learn_ignores_recursive(recursive);
+                install_source_items_matching(paths, &source_ident, &learn_patterns, flow)?;
+            } else {
+                install_source_items(paths, &source_ident, flow)?;
+                // DSC-54 installs only the top-level source by default. Walk the
+                // curated chain and install each nested source the curator
+                // flagged `install = true` (DSC-58), or every nested source with
+                // `--recursive` (DSC-55).
+                install_curated_sources(paths, &source_ident, recursive, flow)?;
+            }
+        } else if json {
+            // register-only + json: register only, emit the meld result now.
+            emit_meld_json_result(meld_sum, vec![], 0, None)?;
+        }
+    }
+    // DSC-56: suggest `mind probe` after melding a curated super-source.
+    maybe_probe_hint(paths, &source_ident)
 }
 
 #[cfg(test)]
@@ -11311,6 +13247,8 @@ mod tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 
@@ -11832,6 +13770,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         }
     }
 
@@ -13009,6 +14949,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         });
         manifest.save(paths).expect("save manifest");
     }
@@ -13575,6 +15517,8 @@ mod tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 

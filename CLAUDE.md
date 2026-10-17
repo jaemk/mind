@@ -54,10 +54,10 @@ maintained by hand.
 
 | command | does |
 |---------|------|
-| `meld <repo>` | clone a source repo and register it; `--learn <glob>` installs only the matching items instead of offering the whole set (CLI-236); `--add-root <dir>` composes extra convention scan roots with the source's own discovery (a plugin manifest or authoritative mind.toml keeps its items, DSC-84); `<repo>` may be a deep tree/blob skill URL (an item link, spec/item-link.md) |
+| `meld <repo>` | clone a source repo and register it; `--learn <glob>` installs only the matching items instead of offering the whole set (CLI-236); `--add-root <dir>` composes extra convention scan roots with the source's own discovery (a plugin manifest or authoritative mind.toml keeps its items, DSC-84); `<repo>` may be a deep tree/blob skill URL (an item link, spec/item-link.md); `--profile <name>` / `--no-default-profile` / `--all-profiles` select a source's `[profiles]` (spec/profiles.md) |
 | `unmeld <name>` | drop a source |
-| `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step |
-| `forget <item>` | remove symlink + store copy |
+| `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step; `learn <source> --profile <name>` enables a profile on a melded source |
+| `forget <item>` | remove symlink + store copy; `forget <source> --profile <name>` disables a profile and forgets the items only it wanted |
 | `sync [source] [--upgrade]` | fetch every source (or only those matching `[source]`), refresh recorded commit (`--upgrade` then runs an upgrade pass) |
 | `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
 | `hooks run <target>` / `hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect; reuses the meld/learn consent machinery |

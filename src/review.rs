@@ -319,10 +319,15 @@ fn run_checks(
     let mindfile = match MindToml::load(source_dir) {
         Ok(mf) => mf,
         Err(e) => {
-            hard.push(Finding::hard(
-                "toml-parse-error",
-                format!("mind.toml error: {e}"),
-            ));
+            // spec: PROF-30 -- a [profiles] violation (PROF-2..4) is its own
+            // finding kind; validate_table prefixes every such message.
+            let kind = match &e {
+                MindError::MindToml { msg, .. } if msg.starts_with("[profiles]: ") => {
+                    "invalid-profile"
+                }
+                _ => "toml-parse-error",
+            };
+            hard.push(Finding::hard(kind, format!("mind.toml error: {e}")));
             return Ok(ReviewResult {
                 hard,
                 advisory,
@@ -489,6 +494,38 @@ fn run_checks(
             });
         }
     };
+
+    // --- Check 3b: profile members against the catalog (PROF-30) ---
+    // An exact member naming an item the source does not offer is hard
+    // (PROF-5); a glob matching nothing and a profile expanding to nothing
+    // are advisory. Finding::hard/advisory sanitize the message (CLI-224).
+    if let Some(table) = mindfile.as_ref().and_then(|mf| mf.profiles.as_ref()) {
+        let lint = crate::profile::lint(table, &items, &source.name);
+        for (profile, member) in &lint.missing_exact {
+            hard.push(Finding::hard(
+                "bad-profile-member",
+                format!(
+                    "profile '{profile}': member '{}' names an item the source does not offer",
+                    crate::sanitize::strip_ansi(member)
+                ),
+            ));
+        }
+        for (profile, member) in &lint.empty_globs {
+            advisory.push(Finding::advisory(
+                "empty-profile-member",
+                format!(
+                    "profile '{profile}': member '{}' matches no item the source offers",
+                    crate::sanitize::strip_ansi(member)
+                ),
+            ));
+        }
+        for profile in &lint.empty_profiles {
+            advisory.push(Finding::advisory(
+                "empty-profile",
+                format!("profile '{profile}' expands to no items"),
+            ));
+        }
+    }
 
     // --- Check 4: missing descriptions (advisory) ---
     // CLI-132: missing description is advisory only.
@@ -1481,6 +1518,8 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
+        profiles: None,
+        profile_snapshot: None,
     }
 }
 
@@ -1774,6 +1813,8 @@ mod tests {
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
+            profiles: None,
+            profile_snapshot: None,
         }
     }
 

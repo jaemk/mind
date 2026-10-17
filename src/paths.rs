@@ -2566,6 +2566,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         };
 
         // A lobe whose PARENT directory does not exist -- freshly added, not yet

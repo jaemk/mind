@@ -261,6 +261,8 @@ pub fn install(
         // LNK-18 reconciliation decided what to drop; this function only ever
         // sees the already-reconciled item.
         dropped_requires: Vec::new(),
+        profiles: Vec::new(),
+        explicit: false,
     })
 }
 
@@ -1320,6 +1322,8 @@ mod tests {
             description: None,
             install_hooks: Vec::new(),
             dropped_requires: Vec::new(),
+            profiles: Vec::new(),
+            explicit: false,
         };
 
         let fixed = relink(&paths, &item).unwrap();

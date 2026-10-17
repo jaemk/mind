@@ -94,6 +94,13 @@ enum Action {
         source: String,
         refs: Option<Vec<String>>,
     },
+    /// Install an entry's profile members missing from the source's snapshot
+    /// (PROF-27) and record the entry's profiles on the source.
+    InstallProfiles {
+        source: String,
+        selection: crate::profile::Selection,
+        install_items: Option<Vec<String>>,
+    },
     /// Re-pin a curated source to the entry's directive (CUR-5).
     Repin { source: String, pin: Pin },
     /// Upgrade a curated source's out-of-date items (CUR-6).
@@ -633,13 +640,40 @@ fn apply(
                 }
                 // spec: CUR-3 -- and install what the entry declares, in the
                 // same run. This is the half `sync`'s re-walk does not do.
-                install_declared(paths, &change.source, entry, flow)?;
+                install_declared(paths, &change.source, curator, entry, flow, &mut skipped)?;
                 applied.push(format!("register:{}", change.source));
             }
             Action::Install { source, refs } => {
                 match refs {
                     Some(list) => commands::install_source_items_subset(paths, source, list, flow)?,
                     None => commands::install_source_items(paths, source, flow)?,
+                }
+                applied.push(format!("install:{source}"));
+            }
+            Action::InstallProfiles {
+                source,
+                selection,
+                install_items,
+            } => {
+                // spec: PROF-27 -- the profile install, recording the enabled
+                // set; only members missing from the snapshot are offered.
+                let registry = Registry::load(paths)?;
+                if let Some(reg) = registry.find(source)
+                    && let Err(e) = install_entry_profiles(
+                        paths,
+                        reg,
+                        selection,
+                        install_items.as_ref(),
+                        flow,
+                        true,
+                    )
+                {
+                    warn_skip(source, "could not install the entry's profiles", &e);
+                    skipped.push(SkippedEntry::new(
+                        source.clone(),
+                        "profile_selection_invalid",
+                    ));
+                    continue;
                 }
                 applied.push(format!("install:{source}"));
             }
@@ -700,9 +734,47 @@ fn apply(
 fn install_declared(
     paths: &Paths,
     source: &str,
+    curator: &str,
     entry: &NestedSource,
     flow: InstallFlow,
+    skipped: &mut Vec<SkippedEntry>,
 ) -> Result<()> {
+    // spec: PROF-26 -- an entry routed to profiles installs through them, the
+    // same rule `meld` applies to the entry.
+    let registry = Registry::load(paths)?;
+    if let Some(reg) = registry.find(source) {
+        match commands::curated_profile_route(paths, reg, entry, curator) {
+            Ok(Some((selection, _))) => {
+                return match install_entry_profiles(
+                    paths,
+                    reg,
+                    &selection,
+                    entry.install_items.as_ref(),
+                    flow,
+                    false,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        warn_skip(source, "could not install the entry's profiles", &e);
+                        skipped.push(SkippedEntry::new(
+                            source.to_string(),
+                            "profile_selection_invalid",
+                        ));
+                        Ok(())
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn_skip(source, "could not install the entry's profiles", &e);
+                skipped.push(SkippedEntry::new(
+                    source.to_string(),
+                    "profile_selection_invalid",
+                ));
+                return Ok(());
+            }
+        }
+    }
     match declared_installs(entry) {
         Some(Some(refs)) => commands::install_source_items_subset(paths, source, &refs, flow),
         Some(None) => commands::install_source_items(paths, source, flow),
@@ -719,6 +791,91 @@ fn declared_installs(entry: &NestedSource) -> Option<Option<Vec<String>>> {
         None if entry.install => Some(None),
         None => None,
     }
+}
+
+/// The members a profile-routed entry would install now (PROF-27): the
+/// expansion of its enabled set minus the source's snapshot (PROF-23: a member
+/// the consumer forgot stays in the snapshot and is not re-proposed) minus what
+/// is installed, plus any `install-items` the entry names that are not
+/// installed. `None` when the entry is not routed to profiles; the second
+/// element is the enabled profile names.
+fn pending_profile_installs(
+    paths: &Paths,
+    manifest: &Manifest,
+    source: &Source,
+    entry: &NestedSource,
+    curator: &str,
+) -> Result<Option<(Vec<String>, Vec<String>)>> {
+    let Some((_, enabled)) = commands::curated_profile_route(paths, source, entry, curator)? else {
+        return Ok(None);
+    };
+    let items = catalog::scan(paths, &commands::single(source))?;
+    let table = commands::source_profile_table(paths, source)?;
+    let expansion = match &table {
+        Some(t) if !enabled.is_empty() => {
+            // spec: PROF-5 -- an exact member naming no item is BadReference.
+            crate::profile::expand(t, &enabled, &items, &source.name)?
+        }
+        _ => crate::profile::Expansion::default(),
+    };
+    let snapshot = source.profile_snapshot.clone().unwrap_or_default();
+    let diff = crate::profile::diff(&snapshot, &expansion);
+    let mut pending: Vec<String> = Vec::new();
+    for (key, _) in &diff.additions {
+        if let Some(it) = items
+            .iter()
+            .find(|it| format!("{}:{}", it.kind.as_str(), it.name) == *key)
+            && !manifest.items.contains_key(it.key().as_str())
+        {
+            pending.push(it.display_key());
+        }
+    }
+    if let Some(refs) = entry.install_items.as_ref().filter(|r| !r.is_empty()) {
+        pending.extend(pending_installs(
+            paths,
+            manifest,
+            source,
+            &Some(refs.clone()),
+        )?);
+    }
+    pending.sort();
+    pending.dedup();
+    Ok(Some((pending, enabled)))
+}
+
+/// Apply a profile-routed entry (PROF-27): the profile install with
+/// `only_missing_from_snapshot` and the entry's selection, recording the
+/// entry's profiles on the source. `only_missing` is false at first
+/// registration, when there is no snapshot to honor.
+fn install_entry_profiles(
+    paths: &Paths,
+    source: &Source,
+    selection: &crate::profile::Selection,
+    install_items: Option<&Vec<String>>,
+    flow: InstallFlow,
+    only_missing: bool,
+) -> Result<()> {
+    // `install-items` joins the batch as bare patterns (DSC-62 silent-skip).
+    let mut patterns: Vec<String> = Vec::new();
+    if let Some(refs) = install_items.filter(|r| !r.is_empty()) {
+        let items = catalog::scan(paths, &commands::single(source))?;
+        patterns = crate::resolve::select_by_bare_refs(&items, refs)
+            .into_iter()
+            .map(|it| format!("{}:{}", it.kind.as_str(), it.name))
+            .collect();
+    }
+    let req = commands::ProfileInstall {
+        source_name: &source.name,
+        selection,
+        learn_patterns: &patterns,
+        only_missing_from_snapshot: only_missing,
+    };
+    if crate::render::ctx().json {
+        commands::install_source_profiles_for_json(paths, &req, flow)?;
+    } else {
+        commands::install_source_profiles(paths, &req, flow)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -961,6 +1118,13 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 // plan (or `--json`'s `detail`) sees what is about to be
                 // cloned, not just the curator and the item refs.
                 let detail = match declared_installs(&entry) {
+                    // spec: PROF-26 -- name the profiles an entry installs through.
+                    _ if entry.profiles.as_ref().is_some_and(|p| !p.is_empty()) => format!(
+                        "listed by {}; register {} and install profiles {}",
+                        strip_ansi(&curator.name),
+                        strip_ansi(&spec.url),
+                        strip_ansi(&entry.profiles.clone().unwrap_or_default().join(", "))
+                    ),
                     Some(Some(refs)) => format!(
                         "listed by {}; register {} and install {}",
                         strip_ansi(&curator.name),
@@ -1017,8 +1181,75 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
             }
             curated.push(registered.name.clone());
 
+            // spec: CUR-4 PROF-27 -- an entry routed to profiles proposes its
+            // members missing from the snapshot instead of the ordinary rule.
+            let profile_result =
+                pending_profile_installs(paths, &manifest, registered, &entry, &curator.name);
+            let routed = !matches!(profile_result, Ok(None));
+            match profile_result {
+                Ok(Some((pending, enabled))) if !pending.is_empty() => {
+                    plan.push(Change::new(
+                        "install",
+                        curator.name.clone(),
+                        registered.name.clone(),
+                        format!(
+                            "{} declares {} not installed: {} (profiles: {})",
+                            strip_ansi(&curator.name),
+                            pending.len(),
+                            strip_ansi(&pending.join(", ")),
+                            strip_ansi(&enabled.join(", "))
+                        ),
+                        Action::InstallProfiles {
+                            source: registered.name.clone(),
+                            selection: crate::profile::Selection::from_nested(&entry),
+                            install_items: entry.install_items.clone(),
+                        },
+                    ));
+                }
+                // spec: PROF-27 PROF-19 -- every member is installed already
+                // but the enabled profiles are not all recorded: still record
+                // them, as `meld` does.
+                Ok(Some((_, enabled)))
+                    if !enabled.is_empty()
+                        && !enabled.iter().all(|p| {
+                            registered.profiles.as_ref().is_some_and(|r| r.contains(p))
+                        }) =>
+                {
+                    plan.push(Change::new(
+                        "install",
+                        curator.name.clone(),
+                        registered.name.clone(),
+                        format!(
+                            "{} records profiles {} (members already installed)",
+                            strip_ansi(&curator.name),
+                            strip_ansi(&enabled.join(", "))
+                        ),
+                        Action::InstallProfiles {
+                            source: registered.name.clone(),
+                            selection: crate::profile::Selection::from_nested(&entry),
+                            install_items: entry.install_items.clone(),
+                        },
+                    ));
+                }
+                Ok(_) => {}
+                // spec: CUR-15 PROF-5 -- an undeclared profile or a missing
+                // exact member is a per-entry failure: reported and skipped.
+                Err(e) => {
+                    warn_skip(&registered.name, "could not check the entry's profiles", &e);
+                    skipped.push(SkippedEntry::new(
+                        registered.name.clone(),
+                        "profile_selection_invalid",
+                    ));
+                }
+            }
+
             // spec: CUR-4 -- declared items that are not installed.
-            if let Some(declared) = declared_installs(&entry) {
+            let ordinary = if routed {
+                None
+            } else {
+                declared_installs(&entry)
+            };
+            if let Some(declared) = ordinary {
                 match pending_installs(paths, &manifest, registered, &declared) {
                     Ok(pending) if !pending.is_empty() => {
                         plan.push(Change::new(

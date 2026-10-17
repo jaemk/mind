@@ -2251,3 +2251,253 @@ fn dump_link_and_ordinary_source_together_roundtrip() {
         "the ordinary source's skill must also install in the reproduced env: {fresh_claude:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PROF-28: profile-tracked sources
+// ---------------------------------------------------------------------------
+
+const PROF_TOML: &str = "[profiles]\n\
+default = [\"rule:style\"]\n\
+full = [\"skill:review\", \"agent:*\"]\n";
+
+/// A source with skill `review`, agent `dev`, rule `style`, skill `extra`
+/// (in no profile) and a `[profiles]` table.
+fn profiled(name: &str) -> Sandbox {
+    let sb = Sandbox::new(name);
+    sb.write_and_commit(
+        "skills/extra/SKILL.md",
+        "---\nname: extra\ndescription: Extra skill\n---\n# extra\n",
+    );
+    sb.write_and_commit("mind.toml", PROF_TOML);
+    sb
+}
+
+/// The `[[discover.sources]]` entries of the dump `text`.
+fn dump_entries(text: &str) -> Vec<toml::value::Table> {
+    let v: toml::Value =
+        toml::from_str(text).unwrap_or_else(|e| panic!("dump is TOML: {e}\n{text}"));
+    v.get("discover")
+        .and_then(|d| d.get("sources"))
+        .and_then(|s| s.as_array())
+        .map(|a| a.iter().filter_map(|e| e.as_table().cloned()).collect())
+        .unwrap_or_default()
+}
+
+fn str_list(t: &toml::value::Table, key: &str) -> Option<Vec<String>> {
+    t.get(key).map(|v| {
+        v.as_array()
+            .unwrap_or_else(|| panic!("{key} is an array"))
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    })
+}
+
+/// (enabled profiles, installed manifest keys) of the home at `mind_home`,
+/// reading the one profile-tracked source.
+fn recorded(mind_home: &Path) -> (Vec<String>, Vec<String>) {
+    let src: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mind_home.join("sources.json")).unwrap())
+            .unwrap();
+    let list = src
+        .get("sources")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .or_else(|| src.as_array().cloned())
+        .unwrap_or_default();
+    let profs: Vec<String> = list
+        .iter()
+        .find_map(|s| s["profiles"].as_array())
+        .map(|a| a.iter().map(|p| p.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default();
+    let man: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let mut keys: Vec<String> = man["items"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    (profs, keys)
+}
+
+#[test]
+fn dump_of_a_profile_tracked_source_emits_profiles_not_install() {
+    // spec: PROF-28 -- enabled profiles minus `default`; no install directive,
+    // no default-profile key (default is enabled), no extras.
+    let sb = profiled("psrc");
+    let m = sb.mind(&["meld", &sb.source_spec(), "--profile", "full", "--yes"]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+
+    let r = sb.mind(&["dump"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let entries = dump_entries(&r.stdout);
+    assert_eq!(entries.len(), 1, "{}", r.stdout);
+    let e = &entries[0];
+    assert_eq!(str_list(e, "profiles"), Some(vec!["full".to_string()]));
+    assert!(!e.contains_key("default-profile"), "{}", r.stdout);
+    assert!(!e.contains_key("install"), "{}", r.stdout);
+    assert!(!e.contains_key("install-items"), "{}", r.stdout);
+}
+
+#[test]
+fn dump_of_a_default_only_tracked_source_emits_empty_profiles() {
+    // spec: PROF-28 -- only `default` enabled -> `profiles = []`, still no
+    // install directive (tracked sources never fall back to install = true).
+    let sb = profiled("psrc");
+    let m = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    let r = sb.mind(&["dump"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let entries = dump_entries(&r.stdout);
+    assert_eq!(entries.len(), 1, "{}", r.stdout);
+    assert_eq!(str_list(&entries[0], "profiles"), Some(vec![]));
+    assert!(!entries[0].contains_key("install"), "{}", r.stdout);
+    assert!(!entries[0].contains_key("default-profile"), "{}", r.stdout);
+}
+
+#[test]
+fn dump_emits_default_profile_false_when_default_is_disabled() {
+    // spec: PROF-28
+    let sb = profiled("psrc");
+    let m = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--no-default-profile",
+        "--profile",
+        "full",
+        "--yes",
+    ]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    let r = sb.mind(&["dump"]);
+    let entries = dump_entries(&r.stdout);
+    assert_eq!(entries.len(), 1, "{}", r.stdout);
+    assert_eq!(
+        str_list(&entries[0], "profiles"),
+        Some(vec!["full".to_string()])
+    );
+    assert_eq!(
+        entries[0].get("default-profile").and_then(|v| v.as_bool()),
+        Some(false),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn dump_lists_only_explicit_items_outside_the_expansion_as_install_items() {
+    // spec: PROF-28 PROF-20 -- a by-name install of an item in no profile is an
+    // extra; a by-name install of a profile member (inside the snapshot) is not.
+    let sb = profiled("psrc");
+    let m = sb.mind(&["meld", &sb.source_spec(), "--profile", "full", "--yes"]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    let l = sb.mind(&["learn", "skill:extra"]);
+    assert!(l.success, "{} {}", l.stdout, l.stderr);
+    let l = sb.mind(&["learn", "skill:review"]);
+    assert!(l.success, "{} {}", l.stdout, l.stderr);
+
+    let r = sb.mind(&["dump"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let entries = dump_entries(&r.stdout);
+    assert_eq!(entries.len(), 1, "{}", r.stdout);
+    assert_eq!(
+        str_list(&entries[0], "install-items"),
+        Some(vec!["skill:extra".to_string()]),
+        "{}",
+        r.stdout
+    );
+    assert!(!entries[0].contains_key("install"), "{}", r.stdout);
+}
+
+#[test]
+fn dump_whole_sources_emits_no_profile_keys_for_a_tracked_source() {
+    // spec: PROF-28 DUMP-3 -- --whole-sources is unchanged: install = true, and
+    // no profiles / default-profile / install-items.
+    let sb = profiled("psrc");
+    let m = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--no-default-profile",
+        "--profile",
+        "full",
+        "--yes",
+    ]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    sb.mind(&["learn", "skill:extra"]);
+    let r = sb.mind(&["dump", "--whole-sources"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let entries = dump_entries(&r.stdout);
+    assert_eq!(entries.len(), 1, "{}", r.stdout);
+    let e = &entries[0];
+    assert_eq!(e.get("install").and_then(|v| v.as_bool()), Some(true));
+    for k in ["profiles", "default-profile", "install-items"] {
+        assert!(!e.contains_key(k), "{k} leaked: {}", r.stdout);
+    }
+}
+
+/// Dump `sb`, commit the dump as a super-source, meld it into a fresh home and
+/// return that home's `mind_home`.
+fn remeld_dump(sb: &Sandbox, tag: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("prof-super-{tag}-{n}"));
+    std::fs::create_dir_all(&super_dir).unwrap();
+    let dump_path = super_dir.join("mind.toml");
+    let dr = sb.mind(&["dump", "--output", &dump_path.to_string_lossy()]);
+    assert!(dr.success, "{} {}", dr.stdout, dr.stderr);
+    git_init(&super_dir);
+    let fresh = sb.base.join(format!("prof-fresh-{tag}-{n}"));
+    std::fs::create_dir_all(&fresh).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_dir.to_string_lossy(), "--yes"])
+        .env("MIND_HOME", fresh.join("mind"))
+        .env("CLAUDE_HOME", fresh.join("claude"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    assert!(
+        out.status.success(),
+        "remeld failed: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fresh.join("mind")
+}
+
+#[test]
+fn dump_of_a_profile_tracked_source_roundtrips_enabled_profiles_and_items() {
+    // spec: PROF-28 PROF-26 -- the dumped mind.toml re-melded as a curator
+    // reproduces the same enabled profiles and the same installed set,
+    // including an explicit extra outside every profile.
+    let sb = profiled("psrc");
+    let m = sb.mind(&["meld", &sb.source_spec(), "--profile", "full", "--yes"]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    let l = sb.mind(&["learn", "skill:extra"]);
+    assert!(l.success, "{} {}", l.stdout, l.stderr);
+
+    let original = recorded(&sb.mind_home);
+    let fresh = remeld_dump(&sb, "a");
+    assert_eq!(recorded(&fresh), original);
+}
+
+#[test]
+fn dump_roundtrips_a_disabled_default_profile() {
+    // spec: PROF-28 PROF-26 -- `default-profile = false` survives the round
+    // trip: default (rule:style) stays disabled, only `full` is enabled.
+    let sb = profiled("psrc");
+    let m = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--no-default-profile",
+        "--profile",
+        "full",
+        "--yes",
+    ]);
+    assert!(m.success, "{} {}", m.stdout, m.stderr);
+    let original = recorded(&sb.mind_home);
+    assert_eq!(original.0, vec!["full".to_string()]);
+    assert!(!original.1.contains(&"rule:style".to_string()));
+    let fresh = remeld_dump(&sb, "b");
+    assert_eq!(recorded(&fresh), original);
+}

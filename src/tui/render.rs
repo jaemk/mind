@@ -544,11 +544,12 @@ fn draw_hints(frame: &mut Frame, area: Rect) {
 }
 
 /// Draw the spec-input box (TUI-30): a small centered dialog where the user
-/// types a repo spec to preview.
-// spec: TUI-30
+/// types a repo spec, optionally followed by `meld` flags (TUI-77).
+// spec: TUI-30 TUI-77
 fn draw_spec_input(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = "Enter a repo spec then press Enter. Esc to cancel.\n\
-                Examples: /path/to/repo  |  file:///path/to/repo  |  owner/repo  |  https://github.com/owner/repo  |  git@github.com:owner/repo";
+    let hint = "Enter a repo spec, optionally followed by meld flags, then press Enter. Esc to cancel.\n\
+                Examples: owner/repo  |  /path/to/repo  |  https://github.com/owner/repo  |  git@github.com:owner/repo\n\
+                Flags: --pin branch=NAME|tag=NAME|REF  --profile NAME  --no-default-profile  --all-profiles  --namespace PREFIX  --learn GLOB";
     let input = format!("\u{276f} {}", app.spec_input_text);
     draw_input_modal(frame, area, "Meld: enter repo spec", hint, &input);
 }

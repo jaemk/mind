@@ -75,7 +75,12 @@ errors are shown inline.
 - **Forget**: uninstall the selected Installed item.
 - **Meld / unmeld**: meld the selected or entered source; unmeld a melded source.
   The TUI's unmeld uninstalls the source's installed items by default and
-  confirms first.
+  confirms first. The `m` input takes a repo spec followed by any `mind meld`
+  flags, parsed exactly as the CLI parses them, for example
+  `owner/repo --pin branch=dev --profile full`. A flag the CLI would reject is
+  shown as an error and the input stays open with your text. The meld then runs
+  the CLI's full flow on the normal terminal: registering, the profile picker,
+  and the install offer.
 - **Sync**: sync all or the selected source.
 - **Upgrade**: upgrade pending items (or the selected item), showing the same
   deltas the CLI would and confirming before applying. Unlike the CLI's plain
@@ -95,8 +100,11 @@ Pressing `Enter` on a source or item opens a centered details dialog describing
 the node and listing the actions valid for it as a selectable list, each run
 through the normal confirm-and-execute path.
 
-- For an item: its kind, source, the commit when installed, and the description.
-  It offers Install when the item is not installed, else Forget.
+- For an item: its kind, source, the commit when installed, the
+  [install profiles](commands.md#install-profiles) it was installed for, and the
+  description. It offers Install when the item is not installed, else Forget.
+  Installing a single item this way counts as asking for it by name, so
+  disabling its profiles later keeps it.
 - For a source: its name and installed/available item counts, and Install all
   available items, Uninstall all installed items, and Unmeld. While the source
   has no installed items, a **Set namespace** action is also offered: it opens
@@ -104,6 +112,12 @@ through the normal confirm-and-execute path.
   It disappears once any item from the source is installed (a source's prefix
   locks once items are installed). An action is omitted when it would do
   nothing.
+- For a source that declares profiles: the declared profiles, with the enabled
+  ones marked, and an **Enable profile** or **Disable profile** action for each.
+  The confirm lists the items enabling installs, or the items disabling forgets
+  and any it keeps because another installed item depends on them. These run
+  `mind learn <source> --profile <name>` and `mind forget <source> --profile
+  <name>`.
 
 In the dialog, `j` / `k` move the highlight, `Enter` or `y` runs the highlighted
 action, and `Esc`, `q`, or `n` dismisses without acting. On a group header, kind

@@ -313,9 +313,26 @@ pub struct Source {
     /// re-emitted once migrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hook_commit: Option<String>,
+    /// The enabled install profiles (PROF-19), `default` recorded by name.
+    /// `Some` marks the source profile-tracked. Absent for a source registered
+    /// before profiles, or installed by the CLI-23 install-all offer; needs no
+    /// schema bump (STO-50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<String>>,
+    /// The bare `kind:name` keys the enabled profiles expanded to when last
+    /// applied (PROF-19). `upgrade` offers a member missing from it (PROF-21)
+    /// and reports a key that left the expansion (PROF-22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_snapshot: Option<Vec<String>>,
 }
 
 impl Source {
+    /// Whether this source is profile-tracked (PROF-19): either profile field
+    /// is recorded. An untracked source is outside PROF-21..24.
+    pub fn is_profile_tracked(&self) -> bool {
+        self.profiles.is_some() || self.profile_snapshot.is_some()
+    }
+
     /// Whether this is a local-path source (`host == "local"`).
     pub fn is_local(&self) -> bool {
         self.host == "local"
@@ -1132,6 +1149,8 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
+        profiles: None,
+        profile_snapshot: None,
     })
 }
 
@@ -2890,6 +2909,64 @@ mod tests {
             !json.contains("\"plugin_version\""),
             "plugin_version must be absent from JSON when None"
         );
+    }
+
+    // spec: PROF-19
+    // The enabled profiles and the snapshot round-trip through sources.json,
+    // a legacy entry without them reads back untracked, and an untracked
+    // source writes neither key (so no schema bump is needed).
+    #[test]
+    fn profile_fields_round_trip_and_default_absent() {
+        let mut s = parse_spec("acme/tools").unwrap();
+        s.profiles = Some(vec!["default".into(), "full".into()]);
+        s.profile_snapshot = Some(vec!["skill:review".into()]);
+        assert!(s.is_profile_tracked());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.profiles, s.profiles);
+        assert_eq!(back.profile_snapshot, s.profile_snapshot);
+        assert!(back.is_profile_tracked());
+
+        let legacy = r#"{"name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"}"#;
+        let src: Source = serde_json::from_str(legacy).unwrap();
+        assert_eq!(src.profiles, None);
+        assert_eq!(src.profile_snapshot, None);
+        assert!(!src.is_profile_tracked());
+
+        let json = serde_json::to_string(&parse_spec("acme/tools").unwrap()).unwrap();
+        assert!(!json.contains("\"profiles\""), "{json}");
+        assert!(!json.contains("\"profile_snapshot\""), "{json}");
+
+        // Either field alone marks the source tracked.
+        let mut snap_only = parse_spec("acme/tools").unwrap();
+        snap_only.profile_snapshot = Some(vec![]);
+        assert!(snap_only.is_profile_tracked());
+
+        let mut profiles_only = parse_spec("acme/tools").unwrap();
+        profiles_only.profiles = Some(vec![]);
+        assert!(profiles_only.is_profile_tracked());
+    }
+
+    // spec: PROF-19
+    // An empty-but-present set is distinct from absent: it serializes and
+    // reads back as `Some(vec![])`, so "tracked with nothing enabled" survives
+    // a registry round-trip.
+    #[test]
+    fn empty_profile_set_round_trips_as_tracked() {
+        let mut s = parse_spec("acme/tools").unwrap();
+        s.profiles = Some(vec![]);
+        s.profile_snapshot = Some(vec![]);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"profiles\":[]"), "{json}");
+        assert!(json.contains("\"profile_snapshot\":[]"), "{json}");
+        let back: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.profiles, Some(vec![]));
+        assert_eq!(back.profile_snapshot, Some(vec![]));
+        assert!(back.is_profile_tracked());
+        // An explicit null reads as absent.
+        let legacy = r#"{"name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b","profiles":null}"#;
+        let src: Source = serde_json::from_str(legacy).unwrap();
+        assert!(!src.is_profile_tracked());
     }
 
     // ---- STO-50/STO-51: schema version in sources.json ----------------------

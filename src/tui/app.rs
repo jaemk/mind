@@ -92,14 +92,20 @@ fn item_detail(
 
 /// What kind of action is being confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Meld is used by the interactive meld flow (TUI-30/31)
 pub enum ActionKind {
     /// Install an available item (TUI-20).
     Learn { item_key: String, source: String },
     /// Uninstall an installed item (TUI-20).
     Forget { item_key: String },
-    /// Meld a source (TUI-21). Used when user confirms an ad-hoc or preview meld.
-    Meld { spec: String },
+    /// Meld a source (TUI-21) with the full `meld` flag set (TUI-77). Used when
+    /// the user submits the meld input or confirms a preview meld.
+    Meld { args: Box<crate::cli::MeldArgs> },
+    /// Enable a declared profile of a melded source (`learn <source>
+    /// --profile <name>`, TUI-78, PROF-17).
+    EnableProfile { source: String, profile: String },
+    /// Disable an enabled profile of a melded source (`forget <source>
+    /// --profile <name>`, TUI-78, PROF-25).
+    DisableProfile { source: String, profile: String },
     /// Unmeld a source (TUI-21).
     Unmeld { name: String, forget: bool },
     /// Sync all sources (TUI-22).
@@ -120,6 +126,54 @@ pub enum ActionKind {
     SetNamespace { source: String },
 }
 
+impl ActionKind {
+    /// A Meld of `spec` with no flags: what confirming a preview meld runs
+    /// (TUI-31).
+    pub fn meld(spec: impl Into<String>) -> Self {
+        ActionKind::Meld {
+            args: Box::new(crate::cli::MeldArgs {
+                repo: Some(spec.into()),
+                ..Default::default()
+            }),
+        }
+    }
+}
+
+/// The `meld` input line parsed with the CLI's own `meld` arguments (TUI-77),
+/// so every flag `mind meld` takes works here with the same meaning and
+/// validation. No binary name and no global flags: `--yes` or `--json` in the
+/// line is an unknown argument.
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "meld",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct MeldLine {
+    #[command(flatten)]
+    args: crate::cli::MeldArgs,
+}
+
+/// Parse the meld input: a repo spec, then any `meld` flags (TUI-77). Words
+/// split on whitespace (no quoting: a spec, ref, or profile name never holds a
+/// space). A clap error is reduced to its first line; a line with flags but no
+/// repo spec is refused, since the TUI has no current directory to default to.
+// spec: TUI-77
+pub fn parse_meld_line(line: &str) -> std::result::Result<crate::cli::MeldArgs, String> {
+    use clap::Parser as _;
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let parsed = MeldLine::try_parse_from(words).map_err(|e| {
+        let text = e.to_string();
+        let first = text.lines().next().unwrap_or_default();
+        first.strip_prefix("error: ").unwrap_or(first).to_string()
+    })?;
+    if parsed.args.repo.is_none() {
+        return Err("enter a repo spec before the flags".to_string());
+    }
+    Ok(parsed.args)
+}
+
 /// A details-and-actions dialog, opened with Enter on a source or item (TUI-26).
 /// It describes the focused node and offers the actions valid for it; choosing
 /// one runs it through the normal confirm-and-execute path (TUI-24).
@@ -133,6 +187,16 @@ pub struct Dialog {
     pub actions: Vec<DialogAction>,
     /// Index of the highlighted action.
     pub selected: usize,
+}
+
+/// A profile change whose preview the event loop computes before the confirm
+/// modal is drawn (TUI-78).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfilePreviewRequest {
+    pub source: String,
+    pub profile: String,
+    /// True to enable the profile, false to disable it.
+    pub enable: bool,
 }
 
 /// An action that can be executed for a given node: the kind, description, and
@@ -232,6 +296,11 @@ pub struct App {
     /// onto the pending Learn action so the confirm modal can show it (DEP-40).
     // spec: DEP-40
     pub pending_learn_ref: Option<String>,
+    /// Set by `activate_dialog` for a profile change; the event loop consumes
+    /// it to compute what the change installs or forgets (I/O) and appends
+    /// that to the pending action's confirm description (TUI-78).
+    // spec: TUI-78
+    pub pending_profile_preview: Option<ProfilePreviewRequest>,
 
     // --- lobe management state (TUI-23) ---
     /// True when the lobes management modal is open (list + add/remove).
@@ -320,6 +389,7 @@ impl App {
             active_preview: None,
             pending_preview_spec: None,
             pending_learn_ref: None,
+            pending_profile_preview: None,
             lobes_modal_visible: false,
             lobes: Vec::new(),
             lobes_selected: 0,
@@ -586,14 +656,18 @@ impl App {
                 }
             }
             // spec: TUI-30
+            // Editing clears a TUI-77 parse error, so it never describes a
+            // line the user has since changed.
             Intent::SpecInputChar(c) => {
                 if self.spec_input_active {
                     self.spec_input_text.push(c);
+                    self.error = None;
                 }
             }
             Intent::SpecInputBackspace => {
                 if self.spec_input_active {
                     self.spec_input_text.pop();
+                    self.error = None;
                 }
             }
             // SpecInputSubmit: the event loop will call preview() and wire the result.
@@ -608,10 +682,8 @@ impl App {
                 self.spec_input_active = false;
                 // Active preview already set by the event loop.
                 let desc = format!("Preview: {} - confirm meld?", name);
-                self.pending_action = Some(PendingAction::new(
-                    ActionKind::Meld { spec: spec.clone() },
-                    desc,
-                ));
+                self.pending_action =
+                    Some(PendingAction::new(ActionKind::meld(spec.clone()), desc));
                 self.modal_visible = true;
                 self.status = None;
                 self.error = None;
@@ -1079,7 +1151,9 @@ impl App {
         // Open the spec-input box for the user to type a repo spec (TUI-30).
         self.spec_input_active = true;
         self.spec_input_text.clear();
-        self.set_status("Enter repo spec and press Enter to preview. Esc to cancel.".to_string());
+        self.set_status(
+            "Enter a repo spec (plus any meld flags) and press Enter. Esc to cancel.".to_string(),
+        );
     }
 
     /// Initiate a LobeAdd action from the current lobe_input_text (TUI-23).
@@ -1214,15 +1288,26 @@ impl App {
                     .into_iter()
                     .map(|a| DialogAction::from_item_action("Forget".to_string(), a))
                     .collect();
+                let mut detail = item_detail(
+                    it.kind,
+                    &it.source,
+                    Some(&it.commit),
+                    it.stale,
+                    it.description.as_deref(),
+                );
+                // spec: TUI-78 PROF-29 -- name the profiles the item was
+                // installed for, as `recall <item>` does, ahead of the
+                // description block.
+                if let Some(line) = self.item_profiles_line(&it.key) {
+                    let at = detail
+                        .iter()
+                        .position(String::is_empty)
+                        .unwrap_or(detail.len());
+                    detail.insert(at, line);
+                }
                 Some(Dialog {
                     title: it.name.clone(),
-                    detail: item_detail(
-                        it.kind,
-                        &it.source,
-                        Some(&it.commit),
-                        it.stale,
-                        it.description.as_deref(),
-                    ),
+                    detail,
                     actions,
                     selected: 0,
                 })
@@ -1283,6 +1368,26 @@ impl App {
         if installed > 0 {
             detail.push("  locked: forget all items to change namespace".to_string());
         }
+        // spec: TUI-78 PROF-29 -- the declared profiles, enabled ones marked.
+        let profiles = self
+            .last_snapshot
+            .as_ref()
+            .and_then(|s| s.source_profiles.get(name))
+            .cloned();
+        if let Some(p) = &profiles {
+            let listed: Vec<String> = p
+                .declared
+                .iter()
+                .map(|d| {
+                    if p.enabled.contains(d) {
+                        format!("{d} (enabled)")
+                    } else {
+                        d.clone()
+                    }
+                })
+                .collect();
+            detail.push(format!("profiles:  {}", listed.join(", ")));
+        }
 
         // Build the actions list. When no items are installed, offer "Set namespace"
         // first so the user can set the prefix before installing (NS-30).
@@ -1331,12 +1436,71 @@ impl App {
             .collect();
         actions.extend(standard);
 
+        // spec: TUI-78 -- one Enable or Disable action per declared profile,
+        // ahead of Unmeld so the destructive source action stays last.
+        if let Some(p) = &profiles {
+            let at = actions
+                .iter()
+                .position(|a| matches!(a.kind, ActionKind::Unmeld { .. }))
+                .unwrap_or(actions.len());
+            let profile_actions = p.declared.iter().map(|d| {
+                if p.enabled.contains(d) {
+                    DialogAction {
+                        label: format!("Disable profile {d}"),
+                        kind: ActionKind::DisableProfile {
+                            source: name.to_string(),
+                            profile: d.clone(),
+                        },
+                        description: format!(
+                            "Disable profile '{d}' of {name}? Items installed only for \
+                             disabled profiles are forgotten."
+                        ),
+                        learn_ref: None,
+                    }
+                } else {
+                    DialogAction {
+                        label: format!("Enable profile {d}"),
+                        kind: ActionKind::EnableProfile {
+                            source: name.to_string(),
+                            profile: d.clone(),
+                        },
+                        description: format!("Enable profile '{d}' of {name}?"),
+                        learn_ref: None,
+                    }
+                }
+            });
+            let tail = actions.split_off(at);
+            actions.extend(profile_actions);
+            actions.extend(tail);
+        }
+
         Dialog {
             title: name.to_string(),
             detail,
             actions,
             selected: 0,
         }
+    }
+
+    /// The item dialog's profiles line (TUI-78, PROF-29): the profiles an
+    /// installed item was installed for, noting when it was also asked for by
+    /// name (PROF-20). `None` for an item no profile installed.
+    fn item_profiles_line(&self, key: &str) -> Option<String> {
+        let it = self
+            .last_snapshot
+            .as_ref()?
+            .installed
+            .iter()
+            .find(|i| i.key == key)?;
+        if it.profiles.is_empty() {
+            return None;
+        }
+        let by_name = if it.explicit {
+            " (also installed by name)"
+        } else {
+            ""
+        };
+        Some(format!("profiles: {}{by_name}", it.profiles.join(", ")))
     }
 
     /// Count a source's installed items and its not-yet-installed available items
@@ -1410,8 +1574,72 @@ impl App {
         if let Some(lr) = &action.learn_ref {
             self.pending_learn_ref = Some(lr.clone());
         }
+        // TUI-78: a profile change arms its install/removal preview, computed
+        // by the event loop (I/O) before the confirm modal is drawn.
+        if let ActionKind::EnableProfile { source, profile }
+        | ActionKind::DisableProfile { source, profile } = &action.kind
+        {
+            self.pending_profile_preview = Some(ProfilePreviewRequest {
+                source: source.clone(),
+                profile: profile.clone(),
+                enable: matches!(action.kind, ActionKind::EnableProfile { .. }),
+            });
+        }
         self.pending_action = Some(PendingAction::new(action.kind, action.description));
         self.modal_visible = true;
+    }
+
+    /// Append a profile change's preview (TUI-78) to the pending action's
+    /// confirm description: what enabling installs, or what disabling forgets
+    /// and keeps for a dependent (DEP-60). An error (a profile the source no
+    /// longer declares, a broken table) cancels the action and is surfaced
+    /// inline (TUI-24), so the user never confirms a change that cannot run.
+    // spec: TUI-78
+    pub fn apply_profile_preview(
+        &mut self,
+        preview: crate::error::Result<crate::commands::ProfileChangePreview>,
+    ) {
+        let preview = match preview {
+            Ok(p) => p,
+            Err(e) => {
+                self.pending_action = None;
+                self.modal_visible = false;
+                self.set_error(format!("{e}"));
+                return;
+            }
+        };
+        let Some(action) = self.pending_action.as_mut() else {
+            return;
+        };
+        let mut extra = String::new();
+        let section = |title: &str, keys: &[String]| {
+            let mut s = format!("\n\n{title}:");
+            for k in keys {
+                s.push_str("\n  ");
+                s.push_str(k);
+            }
+            s
+        };
+        match &action.kind {
+            ActionKind::EnableProfile { .. } if preview.install.is_empty() => {
+                extra.push_str("\n\nNothing new to install; the profile is recorded.");
+            }
+            ActionKind::EnableProfile { .. } => {
+                extra.push_str(&section("Installs", &preview.install));
+            }
+            ActionKind::DisableProfile { .. } => {
+                if preview.remove.is_empty() {
+                    extra.push_str("\n\nNo items are forgotten.");
+                } else {
+                    extra.push_str(&section("Forgets", &preview.remove));
+                }
+                if !preview.kept.is_empty() {
+                    extra.push_str(&section("Kept (another item depends on it)", &preview.kept));
+                }
+            }
+            _ => {}
+        }
+        action.description.push_str(&extra);
     }
 
     /// User pressed Enter/Return to confirm the pending action.
@@ -1486,6 +1714,8 @@ mod tests {
                 path: None,
                 recorded_hash: String::new(),
                 ignore: vec![],
+                profiles: vec![],
+                explicit: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -1502,6 +1732,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -2060,6 +2291,8 @@ mod tests {
             path: None,
             recorded_hash: String::new(),
             ignore: vec![],
+            profiles: vec![],
+            explicit: false,
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2245,6 +2478,8 @@ mod tests {
             path: None,
             recorded_hash: String::new(),
             ignore: vec![],
+            profiles: vec![],
+            explicit: false,
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2609,7 +2844,7 @@ mod tests {
             .as_ref()
             .expect("pending action should be set");
         assert!(
-            matches!(&action.kind, ActionKind::Meld { spec } if spec == "github.com/a/repo"),
+            matches!(&action.kind, ActionKind::Meld { args } if args.repo.as_deref() == Some("github.com/a/repo")),
             "pending action should be Meld with the submitted spec"
         );
     }
@@ -2650,9 +2885,7 @@ mod tests {
         // Simulate a live preview (SourcePreview::Drop removes temp dir, but since
         // we can't create a real temp clone in a unit test we just check state).
         app.pending_action = Some(PendingAction::new(
-            ActionKind::Meld {
-                spec: "some/repo".to_string(),
-            },
+            ActionKind::meld("some/repo"),
             "Meld some/repo?".to_string(),
         ));
         app.modal_visible = true;
@@ -3405,6 +3638,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: ns,
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -3519,6 +3753,8 @@ mod tests {
                 path: None,
                 recorded_hash: String::new(),
                 ignore: vec![],
+                profiles: vec![],
+                explicit: false,
             }],
             available: vec![],
             unmanaged: vec![],
@@ -3526,6 +3762,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: ns,
+            source_profiles: std::collections::HashMap::new(),
         });
 
         let src_idx = app
@@ -4261,6 +4498,273 @@ mod tests {
         );
     }
 
+    // --- TUI-77: the meld input takes `meld` flags ---
+
+    #[test]
+    fn parse_meld_line_takes_meld_flags() {
+        // spec: TUI-77 - the spec and its flags parse with `mind meld`'s own
+        // argument definition.
+        let args = parse_meld_line(
+            "owner/repo --pin branch=dev --profile full,extra --no-default-profile",
+        )
+        .expect("parse");
+        assert_eq!(args.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(args.pin.as_deref(), Some("branch=dev"));
+        assert_eq!(args.profiles, vec!["full,extra".to_string()]);
+        assert!(args.no_default_profile);
+        let args = parse_meld_line("  owner/repo  ").expect("a bare spec parses");
+        assert_eq!(
+            args,
+            crate::cli::MeldArgs {
+                repo: Some("owner/repo".to_string()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_meld_line_rejects_what_meld_rejects() {
+        // spec: TUI-77 - an unknown flag, a global flag, a clap conflict, and
+        // a missing spec are each an error naming the problem.
+        let err = parse_meld_line("owner/repo --bogus").unwrap_err();
+        assert!(err.contains("--bogus"), "{err}");
+        assert!(
+            !err.starts_with("error:"),
+            "the clap prefix is stripped: {err}"
+        );
+        assert!(!err.contains('\n'), "one line: {err}");
+        assert!(parse_meld_line("owner/repo --yes").is_err());
+        assert!(parse_meld_line("owner/repo --json").is_err());
+        let err = parse_meld_line("owner/repo --register-only --profile full").unwrap_err();
+        assert!(
+            err.contains("--register-only") || err.contains("--profile"),
+            "{err}"
+        );
+        let err = parse_meld_line("--pin branch=dev").unwrap_err();
+        assert!(err.contains("repo spec"), "{err}");
+    }
+
+    #[test]
+    fn editing_the_meld_input_clears_a_parse_error() {
+        // spec: TUI-77 - the inline error describes the submitted line only.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_intent(Intent::ActionMeld);
+        app.set_error("unexpected argument '--bogus' found".to_string());
+        app.apply_intent(Intent::SpecInputBackspace);
+        assert!(app.error.is_none());
+        app.set_error("again".to_string());
+        app.apply_intent(Intent::SpecInputChar('x'));
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn preview_meld_runs_with_no_flags() {
+        // spec: TUI-77 - a confirmed registry preview melds with no flags.
+        let ActionKind::Meld { args } = ActionKind::meld("github.com/a/repo") else {
+            panic!("meld() builds a Meld");
+        };
+        assert_eq!(
+            *args,
+            crate::cli::MeldArgs {
+                repo: Some("github.com/a/repo".to_string()),
+                ..Default::default()
+            }
+        );
+    }
+
+    // --- TUI-78: profiles in the details dialogs ---
+
+    fn profile_snapshot() -> Snapshot {
+        let mut snap = make_snapshot();
+        snap.source_profiles.insert(
+            "local/agents".to_string(),
+            crate::tui::data::SourceProfiles {
+                declared: vec!["default".to_string(), "full".to_string()],
+                enabled: vec!["default".to_string()],
+            },
+        );
+        snap.installed[0].profiles = vec!["default".to_string()];
+        snap
+    }
+
+    fn open_source_dialog(snap: Snapshot) -> App {
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snap);
+        select_node(&mut app, |n| matches!(n, TreeNode::Source(_)));
+        app.apply_intent(Intent::OpenDialog);
+        app
+    }
+
+    #[test]
+    fn source_dialog_lists_profiles_and_offers_toggles_before_unmeld() {
+        // spec: TUI-78 - declared profiles with enabled ones marked, and one
+        // Enable/Disable action each, ahead of Unmeld.
+        let app = open_source_dialog(profile_snapshot());
+        let d = app.dialog.as_ref().expect("a source dialog must open");
+        assert!(
+            d.detail
+                .iter()
+                .any(|l| l == "profiles:  default (enabled), full"),
+            "{:?}",
+            d.detail
+        );
+        let labels: Vec<&str> = d.actions.iter().map(|a| a.label.as_str()).collect();
+        let disable = labels.iter().position(|l| *l == "Disable profile default");
+        let enable = labels.iter().position(|l| *l == "Enable profile full");
+        let unmeld = labels.iter().position(|l| *l == "Unmeld");
+        assert!(disable.is_some() && enable.is_some(), "{labels:?}");
+        assert!(disable < unmeld && enable < unmeld, "{labels:?}");
+        assert_eq!(
+            unmeld,
+            Some(labels.len() - 1),
+            "Unmeld stays last: {labels:?}"
+        );
+        let kinds: Vec<&ActionKind> = d.actions.iter().map(|a| &a.kind).collect();
+        assert!(kinds.iter().any(|k| matches!(
+            k,
+            ActionKind::EnableProfile { source, profile }
+                if source == "local/agents" && profile == "full"
+        )));
+        assert!(kinds.iter().any(|k| matches!(
+            k,
+            ActionKind::DisableProfile { source, profile }
+                if source == "local/agents" && profile == "default"
+        )));
+    }
+
+    #[test]
+    fn source_dialog_without_profiles_is_unchanged() {
+        // spec: TUI-78 - a source with no profiles adds no line and no action.
+        let app = open_source_dialog(make_snapshot());
+        let d = app.dialog.as_ref().unwrap();
+        assert!(!d.detail.iter().any(|l| l.starts_with("profiles:")));
+        assert!(!d.actions.iter().any(|a| matches!(
+            a.kind,
+            ActionKind::EnableProfile { .. } | ActionKind::DisableProfile { .. }
+        )));
+    }
+
+    #[test]
+    fn activating_a_profile_action_arms_its_preview() {
+        // spec: TUI-78 - choosing Enable/Disable opens the confirm modal and
+        // asks the event loop for the change's preview.
+        let mut app = open_source_dialog(profile_snapshot());
+        let idx = app
+            .dialog
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| a.label == "Enable profile full")
+            .unwrap();
+        app.dialog.as_mut().unwrap().selected = idx;
+        app.activate_dialog();
+        assert!(app.modal_visible);
+        assert_eq!(
+            app.pending_profile_preview,
+            Some(ProfilePreviewRequest {
+                source: "local/agents".to_string(),
+                profile: "full".to_string(),
+                enable: true,
+            })
+        );
+        assert!(matches!(
+            app.pending_action.as_ref().unwrap().kind,
+            ActionKind::EnableProfile { .. }
+        ));
+    }
+
+    #[test]
+    fn apply_profile_preview_appends_installs_and_removals() {
+        // spec: TUI-78 - the confirm description lists what the change does.
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::EnableProfile {
+                source: "s".to_string(),
+                profile: "full".to_string(),
+            },
+            "Enable profile 'full' of s?".to_string(),
+        ));
+        app.apply_profile_preview(Ok(crate::commands::ProfileChangePreview {
+            install: vec!["skill:b".to_string(), "skill:c".to_string()],
+            ..Default::default()
+        }));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().description,
+            "Enable profile 'full' of s?\n\nInstalls:\n  skill:b\n  skill:c"
+        );
+
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::DisableProfile {
+                source: "s".to_string(),
+                profile: "full".to_string(),
+            },
+            "Disable?".to_string(),
+        ));
+        app.apply_profile_preview(Ok(crate::commands::ProfileChangePreview {
+            remove: vec!["skill:c".to_string()],
+            kept: vec!["skill:b".to_string()],
+            ..Default::default()
+        }));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().description,
+            "Disable?\n\nForgets:\n  skill:c\n\nKept (another item depends on it):\n  skill:b"
+        );
+
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::DisableProfile {
+                source: "s".to_string(),
+                profile: "full".to_string(),
+            },
+            "Disable?".to_string(),
+        ));
+        app.apply_profile_preview(Ok(Default::default()));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().description,
+            "Disable?\n\nNo items are forgotten."
+        );
+    }
+
+    #[test]
+    fn apply_profile_preview_error_cancels_the_action() {
+        // spec: TUI-78 TUI-24 - a failed preview cancels and shows the error.
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::EnableProfile {
+                source: "s".to_string(),
+                profile: "nope".to_string(),
+            },
+            "Enable?".to_string(),
+        ));
+        app.modal_visible = true;
+        app.apply_profile_preview(Err(crate::error::MindError::SourceNotFound {
+            name: "s".to_string(),
+        }));
+        assert!(app.pending_action.is_none());
+        assert!(!app.modal_visible);
+        assert!(app.error.is_some());
+    }
+
+    #[test]
+    fn installed_item_dialog_names_its_profiles() {
+        // spec: TUI-78 PROF-29 - the item dialog names the profiles an item
+        // was installed for, and notes a by-name install.
+        let mut snap = profile_snapshot();
+        snap.installed[0].explicit = true;
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snap);
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("item dialog");
+        let at = d
+            .detail
+            .iter()
+            .position(|l| l == "profiles: default (also installed by name)")
+            .unwrap_or_else(|| panic!("{:?}", d.detail));
+        let blank = d.detail.iter().position(String::is_empty).unwrap();
+        assert!(at < blank, "ahead of the description: {:?}", d.detail);
+    }
+
     #[test]
     fn enter_on_source_offers_bulk_actions_and_unmeld() {
         // spec: TUI-26 - a source dialog offers install-all, uninstall-all, and
@@ -4356,6 +4860,8 @@ mod tests {
                 path: None,
                 recorded_hash: String::new(),
                 ignore: vec![],
+                profiles: vec![],
+                explicit: false,
             }],
             available: vec![],
             unmanaged: vec![],
@@ -4363,6 +4869,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -4386,6 +4893,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -4740,6 +5248,8 @@ mod tests {
                     path: None,
                     recorded_hash: String::new(),
                     ignore: vec![],
+                    profiles: vec![],
+                    explicit: false,
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -4754,6 +5264,8 @@ mod tests {
                     path: None,
                     recorded_hash: String::new(),
                     ignore: vec![],
+                    profiles: vec![],
+                    explicit: false,
                 },
             ],
             available: vec![],
@@ -4762,6 +5274,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -4912,6 +5425,8 @@ mod tests {
                 path: None,
                 recorded_hash: String::new(),
                 ignore: vec![],
+                profiles: vec![],
+                explicit: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "skill:review".to_string(),
@@ -4928,6 +5443,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 
@@ -4977,6 +5493,8 @@ mod tests {
                     path: None,
                     recorded_hash: String::new(),
                     ignore: vec![],
+                    profiles: vec![],
+                    explicit: false,
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -4991,6 +5509,8 @@ mod tests {
                     path: None,
                     recorded_hash: String::new(),
                     ignore: vec![],
+                    profiles: vec![],
+                    explicit: false,
                 },
                 SnapshotInstalled {
                     key: "skill:build".to_string(),
@@ -5005,6 +5525,8 @@ mod tests {
                     path: None,
                     recorded_hash: String::new(),
                     ignore: vec![],
+                    profiles: vec![],
+                    explicit: false,
                 },
             ],
             available: vec![],
@@ -5013,6 +5535,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_profiles: std::collections::HashMap::new(),
         }
     }
 

@@ -64,7 +64,7 @@ impl KindArg {
 /// `skill`/`tool`: a file link can never resolve to a directory kind, LNK-21)
 /// so an invalid value is rejected by clap before any clone, with real shell
 /// completions, rather than parsed by hand and only caught after a clone.
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LinkKindArg {
     Agent,
     Rule,
@@ -151,196 +151,7 @@ EXAMPLES:
     mind meld owner/repo --learn review --yes
     mind meld . --register-only"
     )]
-    Meld {
-        /// Repo spec to meld. Supported forms:
-        ///
-        /// - Local path:   `/path/to/repo`  or  `file:///path/to/repo`  or  `.`
-        ///
-        /// - GitHub HTTPS: `owner/repo`  or  `https://github.com/owner/repo`
-        ///
-        /// - GitHub SSH:   `git@github.com:owner/repo`
-        ///
-        /// - Any git URL:  `https://example.com/repo.git`
-        ///
-        /// - Item link:    `https://host/owner/repo/tree/<ref>/<path>` (or the
-        ///   `blob/.../SKILL.md` form): registers a single-item source offering
-        ///   just that skill. A `blob/.../<file>.md` link does the same for one
-        ///   agent, rule, or command (see `--kind`)
-        ///
-        /// Defaults to the current directory (`.`) when omitted.
-        repo: Option<String>,
-
-        /// Namespace every item from this source under this prefix
-        /// (overrides the repo's own `[source].prefix`). The prefix is part of
-        /// the source's identity: melding an already-melded repo under a
-        /// different prefix registers a distinct `host/owner/repo@<prefix>`
-        /// instance that coexists with the original, rather than re-prefixing it.
-        /// `--as` is a hidden deprecated alias for backwards compatibility.
-        // spec: CLI-163 - short moved to -N (uppercase); -n is reserved for --dry-run.
-        #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
-        alias: Option<String>,
-
-        /// Set the version this source tracks (overrides the repo's [source] pin
-        /// directive). Takes one required value. `HEAD` freezes the current
-        /// resolved tip (the point that would otherwise be melded) to its commit.
-        /// A bare `<tag|sha|branch>` resolves that ref to its current commit and
-        /// freezes it (a snapshot, not a track). `branch=<name>` follows that
-        /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
-        /// (re-points on `sync` if it moves). With no `--pin`, the repo's
-        /// `[source]` pin directive (else the remote default branch) applies.
-        /// Unlike the discovery flags below, this ALSO takes effect against an
-        /// already-melded source: a re-meld with `--pin` re-pins it, re-checking
-        /// out the clone if the resolved commit differs and reporting what changed.
-        // spec: CLI-200, CLI-201, CLI-209
-        #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
-        pin: Option<String>,
-
-        /// Deprecated: use `--pin branch=<name>`.
-        // spec: CLI-202
-        #[arg(long, value_name = "BRANCH", hide = true)]
-        follow_branch: Option<String>,
-
-        /// Deprecated: use `--pin tag=<name>`.
-        // spec: CLI-202
-        #[arg(long, value_name = "TAG", hide = true)]
-        pin_tag: Option<String>,
-
-        /// Deprecated: use `--pin <commit>`.
-        // spec: CLI-202
-        #[arg(long, value_name = "COMMIT", hide = true)]
-        pin_ref: Option<String>,
-
-        /// Set the source's convention-scan roots to one or more repo-root-relative
-        /// directories (repeatable). Overrides `[source].roots` in mind.toml.
-        /// Persisted on the source and used by later scans and sync. Only takes
-        /// effect at the meld that registers the source: passing it against an
-        /// already-melded source is ignored (a note lists it and points at
-        /// `unmeld` + `meld` to change it).
-        // spec: CLI-206
-        #[arg(long = "root", value_name = "DIR")]
-        roots: Vec<String>,
-
-        /// Add convention-scan roots that compose with the source's own
-        /// discovery (repeatable): a plugin/marketplace manifest or an
-        /// authoritative mind.toml keeps its items and each added root is
-        /// convention-scanned in addition, so items the source does not
-        /// declare become installable. Unlike --root, this does not override
-        /// or suppress anything. Persisted on the source and used by later
-        /// scans and sync. Only takes effect at the meld that registers the
-        /// source: passing it against an already-melded source is ignored (a
-        /// note lists it and points at `unmeld` + `meld` to change it).
-        // spec: CLI-206
-        #[arg(long = "add-root", value_name = "DIR")]
-        add_roots: Vec<String>,
-
-        /// Force-enable flat skill discovery: skills are bare-name directories at
-        /// each scan root, with no `skills/` container. Turns the layout on for a
-        /// source that did not declare `[source].flat-skills`; there is no way to
-        /// disable a source's declared flat layout. Applies to skills only (agent,
-        /// rule, command, workflow, and tool discovery are unaffected) and to convention discovery
-        /// only (ignored for an authoritative `mind.toml`). Persisted on the source
-        /// and used by later scans and sync. Only takes effect at the meld that
-        /// registers the source: passing it against an already-melded source is
-        /// ignored (a note lists it and points at `unmeld` + `meld` to change it).
-        // spec: CLI-206
-        #[arg(long)]
-        flat_skills: bool,
-
-        /// Supply or override the source's install hook: a shell command run
-        /// after checkout to build the tooling its items rely on. Before it runs,
-        /// a prompt offers three choices: run it (the default, a bare Enter),
-        /// skip it but still install the source, or abort and install nothing.
-        /// Overriding a declared `[source].install` is shown loudly in that
-        /// prompt. The command replaces the source's declared install and
-        /// update hooks: `upgrade` offers your command in place of the
-        /// author's for either event.
-        /// Use `mind review <repo>` to see a source's declared hook
-        /// before melding. Only takes effect at the meld that registers the
-        /// source: passing it against an already-melded source is ignored (a
-        /// note lists it and points at `unmeld` + `meld` to change it).
-        // spec: CLI-206
-        #[arg(long, value_name = "CMD")]
-        install_hook: Option<String>,
-
-        /// Run the install hook without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run (CI, scripts) skips the hook and just
-        /// prints a note, so the tooling is not built; pass this to run it unattended.
-        #[arg(long)]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run item build hooks without the safety prompt during the install-all
-        /// pass. This executes arbitrary code from the source; only use it for a
-        /// source you trust. Without this flag, a non-TTY run skips build hooks
-        /// and prints a note, so the item's tooling is not built.
-        #[arg(long)]
-        dangerously_skip_build_hook_check: bool,
-
-        /// Only register the source; do not prompt to install its items. By
-        /// default, `meld` previews the source's items and offers to install them
-        /// all (the interactive form of `learn '<source>#*'`).
-        // spec: CLI-165 - canonical name; --link-only is a hidden deprecated alias.
-        #[arg(long, alias = "link-only")]
-        register_only: bool,
-
-        /// Declare what kind of item a `blob` item link's file is: `agent`,
-        /// `rule`, or `command`. Only needed for a file that neither sits under
-        /// an `agents/`, `rules/`, or `commands/` directory nor declares
-        /// `kind:` in its frontmatter. Item links only. A workflow cannot be
-        /// item-linked (a blob link takes a `.md` file, a tree link a skill
-        /// directory); meld the repo, or use `learn workflow:<name>` instead.
-        // spec: CLI-239, LNK-21
-        #[arg(long)]
-        kind: Option<LinkKindArg>,
-
-        /// Install only the items matching this name or glob instead of
-        /// offering the source's whole set (repeatable). The pattern selects
-        /// within the source being melded, so pass just an item name or glob
-        /// (`review`, `skill:*`, `pdf-*`), never a source-qualified ref; quote
-        /// a glob so the shell does not expand it first.
-        /// `*`, `?`, and `[` are always glob syntax here, so an item whose
-        /// name contains one of them cannot be selected as a literal.
-        /// A name matches whether or not the source namespaces its items, so
-        /// `--learn review` finds an item that installs as `team:review`.
-        /// Each match installs through the ordinary `learn` path, so its
-        /// intra-source dependencies come with it, and `--yes` (or a TTY
-        /// prompt) still gates the install. A pattern matching nothing in
-        /// the source is an error. Scoped to the melded
-        /// source's own items: the sources a super-source curates are still
-        /// registered, but none of their items are installed. Conflicts with
-        /// `--register-only`.
-        // spec: CLI-236
-        #[arg(
-            long = "learn",
-            value_name = "NAME|GLOB",
-            conflicts_with = "register_only"
-        )]
-        learn_patterns: Vec<String>,
-
-        /// Offer to install the items of every nested source a super-source
-        /// curates (`[discover].sources`), not just the super-source's own items
-        /// and the nested sources the curator marked `install = true`.
-        #[arg(short = 'r', long)]
-        recursive: bool,
-
-        /// When installing, overwrite link targets that already exist and are not
-        /// managed by mind. Without it, a conflict prompts on a TTY. On a re-meld
-        /// of an already-melded source, `--force` ALSO re-offers every one of the
-        /// source's install hooks, even those already run at the current commit
-        /// (not just the pending ones an ordinary re-meld re-offers).
-        // spec: HOOK-60
-        #[arg(short = 'f', long)]
-        force: bool,
-
-        /// Install the source's item(s) into ONLY the current project's lobe --
-        /// a registered lobe whose directory lives under the current working
-        /// directory -- instead of fanning them into every configured agent
-        /// home (the default). Errors when the current directory is not inside
-        /// any registered project lobe.
-        // spec: HARN-20 HARN-21
-        #[arg(long)]
-        local: bool,
-    },
+    Meld(MeldArgs),
 
     /// Scaffold a `mind.toml` and report the references among a source's items.
     ///
@@ -456,8 +267,31 @@ EXAMPLES:
 
         /// Install every item of the source named by the ref. Shorthand for the
         /// `<source>#*` selector; rejected if the ref already has a `#` selector.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["profiles", "all_profiles"])]
         all: bool,
+
+        /// Install this profile of the source named by the ref (an
+        /// already-melded source, selected as for `--all`) and add it to the
+        /// source's enabled profiles (repeatable; a comma-separated list is
+        /// accepted). Only the named profiles are installed; `default` is not
+        /// added. The dependency-closure prompt and `--dry-run` apply as for
+        /// any `learn`.
+        // spec: PROF-17
+        #[arg(long = "profile", value_name = "NAME")]
+        profiles: Vec<String>,
+
+        /// Accepted for symmetry with `meld`; `learn` never enables the
+        /// `default` profile on its own, so it changes nothing here.
+        // spec: PROF-17
+        #[arg(long)]
+        no_default_profile: bool,
+
+        /// Install every profile the source named by the ref declares, and add
+        /// them all to its enabled profiles. Unlike `--all`, an item in no
+        /// profile is not installed.
+        // spec: PROF-17
+        #[arg(long)]
+        all_profiles: bool,
 
         /// For a deep tree/blob URL, freeze the link's branch ref to its current
         /// commit when registering the single-item source, so the instance is an
@@ -525,14 +359,25 @@ EXAMPLES:
 EXAMPLES:
     mind forget review
     mind forget 'skill:*' --yes
-    mind forget --unmanaged"
+    mind forget --unmanaged
+    mind forget owner/repo --profile full"
     )]
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
         /// omit to remove every unmanaged item across all lobes.
+        /// With `--profile`: the melded source whose profile to disable.
         #[arg(required_unless_present = "unmanaged")]
         item: Option<String>,
+
+        /// Disable this install profile of the source named by `<item>`: drop
+        /// it from the source's enabled profiles and forget each item that was
+        /// installed only for disabled profiles (an item you learned by name,
+        /// or one another installed item depends on, is kept). `--profile
+        /// default` disables the default profile.
+        // spec: PROF-25
+        #[arg(long, value_name = "NAME", conflicts_with = "unmanaged")]
+        profile: Option<String>,
 
         /// Scope removal to unmanaged lobe items only (the deliberate inverse of the
         /// default, which matches managed items only). With no ref it removes every
@@ -968,6 +813,231 @@ EXAMPLES:
         #[arg(short = 'f', long)]
         force: bool,
     },
+}
+
+// The `meld` verb's arguments, split out of `Command` so the probe TUI's
+// meld input can parse the same flags (TUI-77). A plain comment, not a doc
+// comment: the variant's doc comment above stays the subcommand's about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+pub struct MeldArgs {
+    /// Repo spec to meld. Supported forms:
+    ///
+    /// - Local path:   `/path/to/repo`  or  `file:///path/to/repo`  or  `.`
+    ///
+    /// - GitHub HTTPS: `owner/repo`  or  `https://github.com/owner/repo`
+    ///
+    /// - GitHub SSH:   `git@github.com:owner/repo`
+    ///
+    /// - Any git URL:  `https://example.com/repo.git`
+    ///
+    /// - Item link:    `https://host/owner/repo/tree/<ref>/<path>` (or the
+    ///   `blob/.../SKILL.md` form): registers a single-item source offering
+    ///   just that skill. A `blob/.../<file>.md` link does the same for one
+    ///   agent, rule, or command (see `--kind`)
+    ///
+    /// Defaults to the current directory (`.`) when omitted.
+    pub repo: Option<String>,
+
+    /// Namespace every item from this source under this prefix
+    /// (overrides the repo's own `[source].prefix`). The prefix is part of
+    /// the source's identity: melding an already-melded repo under a
+    /// different prefix registers a distinct `host/owner/repo@<prefix>`
+    /// instance that coexists with the original, rather than re-prefixing it.
+    /// `--as` is a hidden deprecated alias for backwards compatibility.
+    // spec: CLI-163 - short moved to -N (uppercase); -n is reserved for --dry-run.
+    #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
+    pub alias: Option<String>,
+
+    /// Set the version this source tracks (overrides the repo's [source] pin
+    /// directive). Takes one required value. `HEAD` freezes the current
+    /// resolved tip (the point that would otherwise be melded) to its commit.
+    /// A bare `<tag|sha|branch>` resolves that ref to its current commit and
+    /// freezes it (a snapshot, not a track). `branch=<name>` follows that
+    /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
+    /// (re-points on `sync` if it moves). With no `--pin`, the repo's
+    /// `[source]` pin directive (else the remote default branch) applies.
+    /// Unlike the discovery flags below, this ALSO takes effect against an
+    /// already-melded source: a re-meld with `--pin` re-pins it, re-checking
+    /// out the clone if the resolved commit differs and reporting what changed.
+    // spec: CLI-200, CLI-201, CLI-209
+    #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
+    pub pin: Option<String>,
+
+    /// Deprecated: use `--pin branch=<name>`.
+    // spec: CLI-202
+    #[arg(long, value_name = "BRANCH", hide = true)]
+    pub follow_branch: Option<String>,
+
+    /// Deprecated: use `--pin tag=<name>`.
+    // spec: CLI-202
+    #[arg(long, value_name = "TAG", hide = true)]
+    pub pin_tag: Option<String>,
+
+    /// Deprecated: use `--pin <commit>`.
+    // spec: CLI-202
+    #[arg(long, value_name = "COMMIT", hide = true)]
+    pub pin_ref: Option<String>,
+
+    /// Set the source's convention-scan roots to one or more repo-root-relative
+    /// directories (repeatable). Overrides `[source].roots` in mind.toml.
+    /// Persisted on the source and used by later scans and sync. Only takes
+    /// effect at the meld that registers the source: passing it against an
+    /// already-melded source is ignored (a note lists it and points at
+    /// `unmeld` + `meld` to change it).
+    // spec: CLI-206
+    #[arg(long = "root", value_name = "DIR")]
+    pub roots: Vec<String>,
+
+    /// Add convention-scan roots that compose with the source's own
+    /// discovery (repeatable): a plugin/marketplace manifest or an
+    /// authoritative mind.toml keeps its items and each added root is
+    /// convention-scanned in addition, so items the source does not
+    /// declare become installable. Unlike --root, this does not override
+    /// or suppress anything. Persisted on the source and used by later
+    /// scans and sync. Only takes effect at the meld that registers the
+    /// source: passing it against an already-melded source is ignored (a
+    /// note lists it and points at `unmeld` + `meld` to change it).
+    // spec: CLI-206
+    #[arg(long = "add-root", value_name = "DIR")]
+    pub add_roots: Vec<String>,
+
+    /// Force-enable flat skill discovery: skills are bare-name directories at
+    /// each scan root, with no `skills/` container. Turns the layout on for a
+    /// source that did not declare `[source].flat-skills`; there is no way to
+    /// disable a source's declared flat layout. Applies to skills only (agent,
+    /// rule, command, workflow, and tool discovery are unaffected) and to convention discovery
+    /// only (ignored for an authoritative `mind.toml`). Persisted on the source
+    /// and used by later scans and sync. Only takes effect at the meld that
+    /// registers the source: passing it against an already-melded source is
+    /// ignored (a note lists it and points at `unmeld` + `meld` to change it).
+    // spec: CLI-206
+    #[arg(long)]
+    pub flat_skills: bool,
+
+    /// Supply or override the source's install hook: a shell command run
+    /// after checkout to build the tooling its items rely on. Before it runs,
+    /// a prompt offers three choices: run it (the default, a bare Enter),
+    /// skip it but still install the source, or abort and install nothing.
+    /// Overriding a declared `[source].install` is shown loudly in that
+    /// prompt. The command replaces the source's declared install and
+    /// update hooks: `upgrade` offers your command in place of the
+    /// author's for either event.
+    /// Use `mind review <repo>` to see a source's declared hook
+    /// before melding. Only takes effect at the meld that registers the
+    /// source: passing it against an already-melded source is ignored (a
+    /// note lists it and points at `unmeld` + `meld` to change it).
+    // spec: CLI-206
+    #[arg(long, value_name = "CMD")]
+    pub install_hook: Option<String>,
+
+    /// Run the install hook without the safety prompt. This executes
+    /// arbitrary code from the source; only use it for a source you trust.
+    /// Without this flag, a non-TTY run (CI, scripts) skips the hook and just
+    /// prints a note, so the tooling is not built; pass this to run it unattended.
+    #[arg(long)]
+    pub dangerously_skip_install_hook_check: bool,
+
+    /// Run item build hooks without the safety prompt during the install-all
+    /// pass. This executes arbitrary code from the source; only use it for a
+    /// source you trust. Without this flag, a non-TTY run skips build hooks
+    /// and prints a note, so the item's tooling is not built.
+    #[arg(long)]
+    pub dangerously_skip_build_hook_check: bool,
+
+    /// Only register the source; do not prompt to install its items. By
+    /// default, `meld` previews the source's items and offers to install them
+    /// all (the interactive form of `learn '<source>#*'`).
+    // spec: CLI-165 - canonical name; --link-only is a hidden deprecated alias.
+    #[arg(long, alias = "link-only")]
+    pub register_only: bool,
+
+    /// Declare what kind of item a `blob` item link's file is: `agent`,
+    /// `rule`, or `command`. Only needed for a file that neither sits under
+    /// an `agents/`, `rules/`, or `commands/` directory nor declares
+    /// `kind:` in its frontmatter. Item links only. A workflow cannot be
+    /// item-linked (a blob link takes a `.md` file, a tree link a skill
+    /// directory); meld the repo, or use `learn workflow:<name>` instead.
+    // spec: CLI-239, LNK-21
+    #[arg(long)]
+    pub kind: Option<LinkKindArg>,
+
+    /// Install only the items matching this name or glob instead of
+    /// offering the source's whole set (repeatable). The pattern selects
+    /// within the source being melded, so pass just an item name or glob
+    /// (`review`, `skill:*`, `pdf-*`), never a source-qualified ref; quote
+    /// a glob so the shell does not expand it first.
+    /// `*`, `?`, and `[` are always glob syntax here, so an item whose
+    /// name contains one of them cannot be selected as a literal.
+    /// A name matches whether or not the source namespaces its items, so
+    /// `--learn review` finds an item that installs as `team:review`.
+    /// Each match installs through the ordinary `learn` path, so its
+    /// intra-source dependencies come with it, and `--yes` (or a TTY
+    /// prompt) still gates the install. A pattern matching nothing in
+    /// the source is an error. Scoped to the melded
+    /// source's own items: the sources a super-source curates are still
+    /// registered, but none of their items are installed. Conflicts with
+    /// `--register-only`.
+    // spec: CLI-236
+    #[arg(
+        long = "learn",
+        value_name = "NAME|GLOB",
+        conflicts_with = "register_only"
+    )]
+    pub learn_patterns: Vec<String>,
+
+    /// Enable this install profile of the source in addition to its
+    /// `default` profile (repeatable; a comma-separated list is accepted).
+    /// A profile is a named set of the source's items declared in its
+    /// `mind.toml` `[profiles]` table; the install offer then covers the
+    /// enabled profiles' items instead of the whole source. Composes with
+    /// `--learn` (the union is offered). A name the source does not declare
+    /// is an error that lists the declared ones. Conflicts with
+    /// `--register-only`.
+    // spec: PROF-9 PROF-14 PROF-15
+    #[arg(
+        long = "profile",
+        value_name = "NAME",
+        conflicts_with = "register_only"
+    )]
+    pub profiles: Vec<String>,
+
+    /// Do not enable the source's `default` profile. With no `--profile`,
+    /// nothing is installed: the source is registered and `mind learn
+    /// <source> --profile <name>` installs a profile later.
+    // spec: PROF-10
+    #[arg(long)]
+    pub no_default_profile: bool,
+
+    /// Enable every profile the source declares. An item in no profile is
+    /// still not installed; `mind learn <source> --all` installs the whole
+    /// source. Conflicts with `--register-only`.
+    // spec: PROF-11 PROF-15
+    #[arg(long, conflicts_with = "register_only")]
+    pub all_profiles: bool,
+
+    /// Offer to install the items of every nested source a super-source
+    /// curates (`[discover].sources`), not just the super-source's own items
+    /// and the nested sources the curator marked `install = true`.
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+
+    /// When installing, overwrite link targets that already exist and are not
+    /// managed by mind. Without it, a conflict prompts on a TTY. On a re-meld
+    /// of an already-melded source, `--force` ALSO re-offers every one of the
+    /// source's install hooks, even those already run at the current commit
+    /// (not just the pending ones an ordinary re-meld re-offers).
+    // spec: HOOK-60
+    #[arg(short = 'f', long)]
+    pub force: bool,
+
+    /// Install the source's item(s) into ONLY the current project's lobe --
+    /// a registered lobe whose directory lives under the current working
+    /// directory -- instead of fanning them into every configured agent
+    /// home (the default). Errors when the current directory is not inside
+    /// any registered project lobe.
+    // spec: HARN-20 HARN-21
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Debug, Subcommand)]
