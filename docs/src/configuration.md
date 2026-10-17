@@ -1,222 +1,38 @@
-# Configuration
+# Configuration and paths
 
-## Agent homes (lobes)
-
-`learn` links items into every configured install-target directory (a *lobe*).
-A lobe is any directory mind links items into -- a global agent home such as
-`~/.claude` or `~/.gemini/config`, or a project subdirectory such as `.windsurf`
-inside a project root. Each item is linked under its kind subdirectory: `skills/`,
-`agents/`, `rules/`. The default lobe is `~/.claude`. Configure more in
-`~/.mind/config.toml`:
-
-```toml
-lobes = ["~/.claude", "~/.config/some-other-agent"]
-```
-
-The file is created with the default lobe (`~/.claude`) on first use. For a single
-invocation, set `MIND_AGENT_HOMES` to a `:`-separated path list instead.
-
-**Lobe precedence (STO-14):** `MIND_AGENT_HOMES` wins over `lobes` in
-`config.toml`, which wins over the default `~/.claude`. An unknown key in
-`config.toml` is a hard error.
-
-Use `mind config lobes add <path>` and `mind config lobes remove <path>` to
-manage lobes without hand-editing the file; see [Commands](commands.md) for the
-full verb list.
-
-### Kinds filter
-
-A lobe may carry a `kinds` list so only items of the listed kinds link into it.
-A lobe without a `kinds` field receives all kinds (existing behavior; a bare string
-is equivalent):
+`mind` reads its settings from `~/.mind/config.toml`, created on first use. An
+unknown key is an error. `mind config show` prints the file's location and the
+settings in effect.
 
 ```toml
 lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
-```
-
-Linking an item into a lobe whose `kinds` excludes its kind is a no-op for that
-lobe, not an error. The manifest records only the lobes that actually received a
-link, so `forget`, `upgrade`, and `introspect` never expect a link a filtered lobe
-was never given (HARN-1, HARN-2).
-
-### Cross-harness lobes
-
-Skills (`skills/<n>/SKILL.md`) and agents (`agents/<n>.md`) use layouts that are
-now cross-harness conventions. mind links them verbatim -- no content transform is
-needed. Rules (`rules/<name>.md`) have no cross-harness directory equivalent (the
-analog in other harnesses is a single concatenated context file like `AGENTS.md`
-or `GEMINI.md`, not a directory of per-rule files), so rules are Claude-only and
-are never linked into a lobe added via a non-Claude preset (HARN-3). Commands
-(`commands/<name>.md`) are not linked by the presets either, though for a
-different reason: Gemini and Codex do have command/prompt concepts, but the
-presets admit skills only today. A command links into the default Claude
-lobe, into any lobe with no `kinds` filter (which receives all kinds, see
-above), and into any lobe whose `kinds` names `command`.
-
-Workflows (`workflows/<name>.js`) are Claude-only for the same reason as
-commands, and the filter rule is the same: a workflow links into the default
-Claude lobe, into any lobe with no `kinds` filter, and into any lobe whose
-`kinds` names `workflow`. Nothing else links one. In particular
-`link-project` can never produce a project lobe that links a workflow: it
-resolves to a preset (windsurf by default) or, with `--subdir`, to a
-skill-only filter, and every preset in the table above admits skills alone
-(WF-13). There is no `claude` preset, so no preset closes this. To link
-workflows into a project's `.claude/`, register the lobe directly and either
-name the kind or leave the lobe unfiltered:
-
-```
-mind config lobes add ./.claude              # no kinds filter: all kinds link
-```
-
-`config lobes add` has no flag for the filter, so a `kinds`-limited lobe is
-written by hand in `~/.mind/config.toml`:
-
-```toml
-lobes = ["~/.claude", { path = "./.claude", kinds = ["workflow"] }]
-```
-
-Per-harness path table:
-
-| Harness | Skills dir | Agents dir | mind lobe (parent) |
-|---------|------------|------------|--------------------|
-| Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
-| Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
-| Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
-| Windsurf | `<project>/.windsurf/skills/` | - | `<project>/.windsurf` |
-
-`~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path, so
-one `~/.agents` lobe serves Codex and any harness that follows the same convention.
-
-Windsurf has no global skills directory; it reads skills only from a project's
-`.windsurf/skills/` folder. A Windsurf lobe is therefore a project lobe, not a
-global one. Use `mind link-project` (or `mind config lobes add . --preset windsurf`)
-in a project root to register one. Windsurf is detected via `~/.codeium/windsurf`;
-see the Presets section below for how `config lobes detect` handles it.
-
-### Presets
-
-`mind config lobes add [<dir>] --preset <name>` adds a lobe at the preset's target
-path with its `kinds` filter in one step. `--preset` and a base `<dir>` are
-composable:
-
-| preset | target path | kinds |
-|--------|-------------|-------|
-| `gemini` | `~/.gemini/config` | skill |
-| `codex` | `~/.agents` | skill |
-| `universal` | `~/.agents` | skill |
-| `windsurf` | `<dir>/.windsurf` (default: `<cwd>/.windsurf`) | skill |
-
-`gemini`, `codex`, and `universal` target a fixed global path. `windsurf` is
-project-scoped: `mind config lobes add --preset windsurf` (no `<dir>`) targets the
-current directory.
-
-Adding a managed lobe (anything but `--snapshot`) creates its target directory
-immediately, so a preset for a harness that is not installed yet still
-registers and is reachable right away (HARN-15). Already-installed items of the
-kinds the lobe admits link into the new lobe as part of the same command; no
-separate `introspect --fix` step is needed (HARN-17).
-
-Additional flags for `config lobes add`:
-
-- `--subdir <rel>` - target an arbitrary subdirectory under `<dir>` (e.g.
-  `--subdir .cursor` for a Cursor project directory) instead of the preset's default.
-- `--snapshot` - materialize a one-time frozen copy (real files, not symlinks) into
-  the target and do not register a lobe. A snapshot is not managed: no
-  auto-propagation on future `mind learn`, and the copied files are committable to
-  the repo. Managed lobes use symlinks into `~/.mind/store` and should be gitignored.
-- `--force` - overwrite a colliding foreign file at the target path.
-
-Examples:
-
-```
-mind config lobes add --preset gemini
-# + added gemini lobe ~/.gemini/config [skill]
-
-mind config lobes add . --preset windsurf
-# + added windsurf lobe ./.windsurf [skill]
-```
-
-`mind config lobes remove <path> [--snapshot]` unregisters a lobe. `--snapshot`
-detaches a managed lobe: it replaces the managed symlinks with frozen real-file
-copies and then unregisters the lobe.
-
-> **Note (migration):** The `gemini` preset path changed from `~/.gemini` to
-> `~/.gemini/config` in a previous release. If you added this preset earlier, your
-> `~/.mind/config.toml` may still have the old path. Update it by running:
-> ```
-> mind config lobes remove ~/.gemini && mind config lobes add --preset gemini
-> ```
-> Or hand-edit `~/.mind/config.toml` and replace `~/.gemini` with `~/.gemini/config`.
-
-`mind config lobes detect` detects which known harness homes exist on the machine
-and reports the matching presets it could add. It never mutates config on its own:
-it only adds a lobe with `--yes` or an interactive TTY confirm. `--json` emits the
-detection result as structured JSON (HARN-5). Windsurf is detected via
-`~/.codeium/windsurf`; because Windsurf is project-scoped, `detect` prints guidance
-to run `mind link-project` in the project root rather than auto-adding a lobe.
-
-`mind config lobes list` shows the `kinds` filter for each lobe (e.g.
-`~/.gemini/config [skill]`); a lobe with no filter shows just the path. `mind
-config show` uses the same format.
-
-### link-project
-
-`mind link-project [<dir>] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]`
-is a convenience alias for `config lobes add`, with `<dir>` defaulting to the current
-directory and `--preset` defaulting to `windsurf`. Running it in a project root links
-installed skills into `./.windsurf/skills/` and registers a managed lobe so future
-`mind learn` fans new skills into it automatically:
-
-```
-cd ~/projects/myapp
-mind link-project
-# + added windsurf lobe ./.windsurf [skill]
-```
-
-Managed lobes use symlinks into `~/.mind/store`; add `.windsurf/` to the project's
-`.gitignore`. Use `--snapshot` to materialize real-file copies instead (committable
-to the repo without gitignoring).
-
-### Frontmatter portability
-
-mind links skill and agent files verbatim. Frontmatter portability across
-harnesses -- for example, Gemini's `mcp_*` tool-permission wildcards vs Claude's
-`tools:` schema -- is the author's responsibility; mind does not rewrite
-frontmatter to fit a target harness (HARN-6). An item whose frontmatter uses
-Claude-specific keys will link into a Gemini or Codex lobe correctly, but those
-keys may be ignored or produce a warning in the target harness.
-
-## Absorb destination
-
-`mind absorb` moves an unmanaged item into a version-controlled source you own.
-The destination source is resolved from three places, in order -- the first one
-set wins:
-
-1. `--to <path>` flag on the command line.
-2. `MIND_ABSORB_TO` environment variable.
-3. `absorb-to` key in `~/.mind/config.toml`.
-
-When none of the three is set and the run is interactive, `absorb` prompts and
-offers `~/.mind/personal` as the default. That directory is created and
-`git init`-ed on demand if it does not exist. After an interactive resolution,
-`absorb` offers to save the chosen path as `absorb-to` in `config.toml` so
-future runs skip the prompt. A `--to` flag, `MIND_ABSORB_TO`, or an existing
-`absorb-to` value is used as-is and never triggers a save.
-
-A non-TTY run with no destination configured (none of the three sources set) is
-an error; there is no silent default to assume.
-
-Set the persistent default in `~/.mind/config.toml`:
-
-```toml
+ssh = true
 absorb-to = "~/dev/my-agent-library"
+max-metadata-size = "32MiB"
 ```
 
-`~` is expanded at use. The destination must be a git repository; a path that is
-not a git repo is an error.
+| key | meaning | see |
+|-----|---------|-----|
+| `lobes` | agent homes to link into, each optionally limited by `kinds` | [Use more than one agent](lobes.md) |
+| `ssh` | clone the `owner/repo` shorthand over SSH | [SSH cloning](#ssh-cloning) |
+| `absorb-to` | default destination for `mind absorb` | [Adopt items you placed by hand](unmanaged.md#where-it-goes) |
+| `max-metadata-size` | cap on each metadata file read from a source | [Metadata size cap](#metadata-size-cap) |
 
-Note: the legacy key spelling `absorb_to` (underscore) is still accepted when
-reading the file. New writes and the interactive save always use `absorb-to`.
+The legacy spelling `absorb_to` is still read.
+
+## Environment variables
+
+| variable | effect |
+|----------|--------|
+| `MIND_HOME` | root of the `~/.mind` tree |
+| `MIND_DEFAULT_LOBE` | the default lobe instead of `~/.claude` (`CLAUDE_HOME` is a legacy alias) |
+| `MIND_AGENT_HOMES` | a `:`-separated list of lobes for this command, replacing `lobes` |
+| `MIND_ABSORB_TO` | destination for `mind absorb`, above `absorb-to` |
+| `MIND_MAX_METADATA_SIZE` | metadata size cap, above `max-metadata-size` |
+| `MIND_POLICY_FILE` | a managed policy file, used only when none exists at the system path |
+| `MIND_HTTP_TIMEOUT_SECS` | request budget for `mind evolve` (default 15) |
+| `GH_TOKEN`, `GITHUB_TOKEN` | token `evolve` sends to `api.github.com` |
+| `NO_COLOR` | plain output |
 
 ## SSH cloning
 
@@ -263,17 +79,6 @@ Only the workflow kind treats an over-cap file as recoverable: it lists with no
 description and installs, as any workflow whose `meta` cannot be read does. For
 every other kind an over-cap file fails the scan of its source.
 
-## Config example
-
-A single `~/.mind/config.toml` may contain any combination of the keys:
-
-```toml
-lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
-ssh = true
-absorb-to = "~/dev/my-agent-library"
-max-metadata-size = "32MiB"
-```
-
 ## Paths
 
 ```
@@ -302,25 +107,20 @@ A global advisory lock (`~/.mind/.lock`) is held by every mutating command
 the first finishes. The lock is released when the holding process exits, even on
 crash, so an aborted run never wedges the next one. Read-only commands (`recall`,
 `probe`, `introspect`, `config show`) take a shared lock and proceed concurrently
-with each other, but never observe a writer mid-update (STO-40..43).
+with each other, but never observe a writer mid-update.
 
 ## Install and upgrade are transactional
 
 A failed `learn` or `upgrade` never leaves you worse off. The new copy is built
 in a staging directory first; the previous version is moved to a backup and only
 dropped after the swap succeeds. A failure at any point restores the previous
-version from backup (LIFE-1..4).
+version from backup.
 
-When an installed item's effective name changes (for example the one-time
-`-`->`:` namespace-separator migration), `upgrade` reports `rename old -> new`
-and handles it the same way: the new name is installed before the old one is
-removed (LIFE-14). This is normal, not an error. Note that adding `--namespace
-<prefix>` (or `--as`) to an already-melded repo does not rename it: a `--as`
-prefix is part of the source's identity, so a different `--as` melds a distinct
-`host/owner/repo@<prefix>` instance that coexists with the original. That
-`host/owner/repo@<prefix>` identity is also the handle for addressing this
-instance later, e.g. `mind unmeld host/owner/repo@<prefix>` or `mind upgrade
-host/owner/repo@<prefix>`.
+When an installed item's effective name changes, `upgrade` reports
+`rename old -> new` and handles it the same way: the new name is installed
+before the old one is removed. A different `--namespace` on an already-melded
+repo does not rename anything; it registers a separate instance (see
+[Fix name collisions](collisions.md)).
 
 For diagnosing a failed install or broken links, see
 [Troubleshooting](troubleshooting.md).

@@ -13,12 +13,12 @@ There are four discovery layers, in precedence order:
 2. **Frontmatter** (always read): each item's `description` (and a tool's
    `bin` / `build`) come from the frontmatter it already carries -- except a
    workflow, which has no frontmatter at all; its description and
-   `whenToUse` come from its `export const meta` object instead (WF-4/WF-5).
+   `whenToUse` come from its `export const meta` object instead.
 3. **Claude plugin manifest** (optional): a `.claude-plugin/plugin.json` or
    `.claude-plugin/marketplace.json` in the repo is read as a discovery input. It
    is authoritative for the items it declares (convention scanning is skipped for
    the paths it covers) but an authoritative `mind.toml` overrides it. See
-   [Claude plugin marketplaces](marketplace.md).
+   [Claude plugins and marketplaces](marketplace.md).
 4. **`mind.toml`** (optional): `[source]` metadata is read regardless. Declaring
    `[[items]]` or `[discover]` item globs makes the file **authoritative**:
    convention scanning and the plugin-manifest layer are both turned off and only
@@ -43,7 +43,7 @@ When a repo has no authoritative `mind.toml` but does carry a Claude
 `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json`, that manifest
 supplies the items instead of convention scanning. An authoritative `mind.toml`
 overrides it (and `meld` notes the manifest was ignored). See
-[Claude plugin marketplaces](marketplace.md).
+[Claude plugins and marketplaces](marketplace.md).
 
 ## `[source]` - repo metadata
 
@@ -65,11 +65,8 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   (identity, store path, symlink, and ref), except an agent's harness link, which
   stays bare. A consumer's `meld --namespace <ns>` overrides it; `meld --namespace ''`
   removes it. See [namespacing](namespacing.md). The old key `prefix` still parses
-  as a deprecated alias; new sources should use `namespace`.
-
-> **Note (migration):** `[source].prefix` is deprecated in favor of `[source].namespace`.
-> Both keys parse and behave identically. `mind dump` and `mind init-source` now emit
-> `namespace`. Update your `mind.toml` at any time; no re-install is needed.
+  as a deprecated alias with identical behavior; new sources should use
+  `namespace`.
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
@@ -77,7 +74,7 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref`**: how `sync` tracks upstream. Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
-  [Pinning a source version](commands.md#pinning-a-source-version)).
+  [Pinning a source version](pinning.md)).
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
@@ -132,7 +129,7 @@ shorthand for one required install hook (still parsed); use `[[hooks]]` instead.
 
 An install hook re-runs whenever the source advances, so write it to be
 idempotent; declare an `event = "update"` hook for a step that cannot be. See
-[Install hooks](install-hooks.md#update-hooks).
+[Run setup with hooks](install-hooks.md#update-hooks).
 
 ## `[[items]]` - explicit inventory (authoritative)
 
@@ -174,13 +171,13 @@ event = "install"
   declare its own, next to the item: a scoped `mind.toml` in a skill or tool
   directory (`[[hooks]]` only), or the `install:` / `update:` / `uninstall:`
   frontmatter keys in the item's own file. See
-  [Install hooks](install-hooks.md#where-an-item-declares-its-hooks). A hook
+  [Run setup with hooks](install-hooks.md#where-an-item-declares-its-hooks). A hook
   runs in the item's store directory for a skill or a tool, and in the shared
   `~/.mind/store/<kind>/` directory for a single-file kind (agent, rule,
   command, workflow), so a relative `./script` only works for a
   directory-backed item. A workflow's hooks can come only from a root
   `[[items]]` entry: a `.js` has no frontmatter, and a single-file kind has no
-  directory for a scoped `mind.toml` (WF-50).
+  directory for a scoped `mind.toml`.
 - **`ignore`** on an item REPLACES `[source].ignore` for that item rather than
   adding to it; the built-in VCS-directory set (`.git`, `.hg`, `.svn`, `.bzr`)
   still applies either way. `ignore = []` is the only way to opt one item out of
@@ -228,30 +225,29 @@ all     = ["*"]
 ```
 
 - **Names** match `[a-z0-9][a-z0-9_-]*` and are at most 64 bytes. Anything else,
-  including a name with `:`, is an error (PROF-2).
+  including a name with `:`, is an error.
 - **Members** are one of: an item pattern `kind:name` where `name` is a bare name
   or a glob (`agent:*`, `skill:pdf-*`); `"*"` for every item the source offers;
   or the name of another profile, which includes its members. A member splits at
   its first `:`, so `command:frontend:build` is the `command` named
-  `frontend:build`. Write bare names; a namespace in effect is applied at install
-  (PROF-3).
+  `frontend:build`. Write bare names; a namespace in effect is applied at install.
 - **No cycles.** A profile that includes itself, directly or through others, is
-  an error naming the cycle (PROF-4).
+  an error naming the cycle.
 - **Misses.** An exact `kind:name` that the source does not offer is an error
   when the profile is expanded. A glob that matches nothing is not, so a source
-  can list `agent:*` before it ships an agent (PROF-5).
+  can list `agent:*` before it ships an agent.
 - **`default`** names the profile enabled when the consumer names none and does
   not opt out. A plain `meld` then offers the `default` expansion instead of
   every item. If `[profiles]` has no `default`, `meld` still offers to install
-  everything and the profiles are opt-in only (PROF-7).
+  everything and the profiles are opt-in only.
 - **Root file only.** Profiles are read from the repo's root `mind.toml`. A
-  scoped item `mind.toml` that declares `[profiles]` is an error (PROF-8).
+  scoped item `mind.toml` that declares `[profiles]` is an error.
 - **Not authoritative.** `[profiles]` is metadata like `[source]`: it does not
   turn off convention scanning, and a profile can only select items the source
-  already offers (PROF-1).
+  already offers.
 
 Consumers pick profiles with `meld --profile`, `learn --profile`, and
-`forget --profile` (see [Commands](commands.md#install-profiles)).
+`forget --profile` (see [Commands](choosing-items.md#install-profiles)).
 
 ## `[discover].sources` - curated super-source
 
@@ -260,7 +256,7 @@ recursively melds each listed source (skipping any already registered; cycles
 terminate). Each nested source is registered independently and tracks its own
 upstream commit. `mind dump` generates exactly this shape of `mind.toml` from
 your installed state, so you can author a super-source automatically rather than
-by hand (see [dump](commands.md#dump)).
+by hand (see [dump](dump.md)).
 
 ```toml
 [discover]
@@ -295,16 +291,16 @@ install = true
   This is source truth and takes literal `kind:name` refs only: globs are not
   expanded here (`install-items = ["skill:*"]` fails at meld), unlike the
   consumer-side `meld --learn <NAME|GLOB>`, which does accept globs and matches
-  an item's bare or effective name (see [Commands](commands.md#installing-part-of-a-source)).
+  an item's bare or effective name (see [Commands](choosing-items.md#install-items-by-name-or-pattern)).
 - **`profiles`** and **`default-profile`**: install directive for the nested
   source's [profiles](#profiles---install-profiles). `profiles = ["full"]`
   enables those profiles, and `default-profile = false` leaves `default` out, as
   `meld --profile` and `--no-default-profile` do. `profiles` with `install = true`
   is an error; with `install-items` it installs the union. An `install = true`
   entry whose nested source declares `default` offers the `default` expansion. A
-  profile name the nested source does not declare is an error at meld (PROF-26).
+  profile name the nested source does not declare is an error at meld.
 - **`kind`**: `"agent"`, `"rule"`, or `"command"` -- declares what an [item
-  link](commands.md#item-links-install-one-item-by-url)'s linked file is, the
+  link](item-links.md)'s linked file is, the
   curator-side form of `meld --kind`. Only valid when `source` is itself an
   item link (a deep `tree`/`blob` URL); on an ordinary `source` it is a
   `LinkKindMismatch` error. Without it, the kind comes from the file's
@@ -316,7 +312,7 @@ By default a melded super-source registers the whole chain but installs only its
 own items plus the `install = true` (or `install-items`) entries.
 `meld --recursive` (`-r`) offers every nested source for install.
 
-### Adopting un-onboarded sources (DSC-59/60/61)
+### Adopting un-onboarded sources
 
 A `[[discover.sources]]` entry may supply configuration for a nested source that
 has no `mind.toml` of its own:
@@ -324,12 +320,12 @@ has no `mind.toml` of its own:
 - **`follow-branch`** / **`pin-tag`** / **`pin-ref`**: curator-supplied pin
   directive for the nested source. Declare at most one; two is an error. `sync`
   uses whichever is set, the same as if the source had declared it in its own
-  `[source]` table (DSC-41). A consumer's explicit `meld --pin` still overrides
+  `[source]` table. A consumer's explicit `meld --pin` still overrides
   this.
 - **`roots`**: convention scan roots for the nested source, for a monorepo or
-  subtree layout (DSC-50).
+  subtree layout.
 - **`add-roots`**: extra convention scan roots that compose with the nested
-  source's own discovery, the curator-side form of `meld --add-root` (DSC-84).
+  source's own discovery, the curator-side form of `meld --add-root`.
 - **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested
   source. Each entry has the same shape as a source's own `[[hooks]]` entry: a
   required `run` field, and optional `name`, `optional`, and `event` fields. They
@@ -343,22 +339,22 @@ are ignored (a warning is emitted). The gate is whole-file: a nested
 `mind.toml`, even one declaring none of them, suppresses all four. `add-roots`
 is gated even though the consumer-side `meld --add-root` is not, so a curator
 cannot reach past a nested source's authoritative export control on the
-consumer's behalf (DSC-88).
+consumer's behalf.
 
 The pin directive is NOT gated: it is authoritative whether or not the nested
-source ships a `mind.toml`, overriding that source's own `[source]` pin
-(DSC-65). `namespace` and `install` are likewise unaffected; they always apply.
+source ships a `mind.toml`, overriding that source's own `[source]` pin.
+`namespace` and `install` are likewise unaffected; they always apply.
 
 ```toml
 # Adopt a source that has no mind.toml: supply config it lacks.
 # follow-branch, roots, and [[discover.sources.hooks]] apply only because
-# this source ships no mind.toml of its own (DSC-60).
+# this source ships no mind.toml of its own.
 [[discover.sources]]
 source = "owner/unonboarded"
-follow-branch = "main"           # track this branch (DSC-41)
-roots = ["packages/agents"]      # scan under this subdir, not the repo root (DSC-50)
+follow-branch = "main"           # track this branch
+roots = ["packages/agents"]      # scan under this subdir, not the repo root
 
-[[discover.sources.hooks]]       # build hook, same shape as [[hooks]] (HOOK-50)
+[[discover.sources.hooks]]       # build hook, same shape as [[hooks]]
 run = "make build"
 name = "build tooling"
 event = "install"

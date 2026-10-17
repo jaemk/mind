@@ -1,26 +1,40 @@
 # Introduction
 
-`mind` is a manager for agent tooling: skills, agents, rules, commands,
-workflows, and tools. It melds arbitrary git repos and links the items they
-offer into one or more agent homes (default `~/.claude`).
+`mind` installs agent tooling (skills, agents, rules, commands, workflows, and
+tools) from git repos into your agent homes, and keeps it up to date.
 
-- A *source* is a melded git repo (`mind meld`). It offers *items*: skills,
-  agents, rules, commands, workflows, and tools, found by convention or
-  declared in a `mind.toml`.
-- `mind learn <item>` copies an item into the *store* (`~/.mind/store`) and
-  symlinks it into each *lobe* (agent home). A *tool* is the exception: store-only
-  helper tooling reached by reference, not linked into a lobe by default. Lobes can
-  be non-Claude homes (Gemini CLI, Codex CLI, Antigravity, Windsurf) with a
-  per-kind filter so only the compatible item types link in. Windsurf is
-  project-scoped (a project lobe, not a global one); see
-  [Configuration](configuration.md#cross-harness-lobes).
-- `mind recall` and `mind probe` inspect what is installed and what is available;
-  `mind sync` and `mind upgrade` keep sources and installed items current.
-- For authoring, `mind init-source` and `mind review` scaffold and validate a
-  source for publishing.
+Point it at any repo that ships agent tooling and it finds the items by their
+layout, with no manifest required. It copies the items you choose into a store
+it manages and links them into `~/.claude` (or Gemini CLI, Codex CLI,
+Windsurf, or any directory you name). Later it tells you what changed upstream
+and upgrades on your say-so.
 
-This site is the reference for installing, using, and authoring `mind`. Start
-with [Install](install.md) and the [Quickstart](quickstart.md); [Commands](commands.md)
-is the full verb reference. For authoring a source, see [Source layout](source-layout.md)
-and [Authoring a source](authoring.md). The normative behavior is the
-[spec](https://github.com/jaemk/mind/tree/main/spec).
+```
+mind meld anthropics/skills     # register a repo and pick items to install
+mind probe                      # browse everything your repos offer
+mind upgrade                    # pull upstream changes into installed items
+```
+
+## Who it is for
+
+- **People using agent tooling.** Install skills from several repos without
+  copying files around, see what is installed and where it came from, update or
+  roll back, and keep more than one agent harness in step.
+- **Teams.** Share one curated set of sources, reproduce a setup on a new
+  machine with one command, and (for an organization) restrict which sources
+  may be installed.
+- **People publishing agent tooling.** Any repo is installable as it is. An
+  optional `mind.toml` adds a namespace, install profiles, hooks, or an
+  explicit inventory.
+
+## Where to go next
+
+- New here: [Install](install.md), then the [Quickstart](quickstart.md).
+- The words `mind` uses (meld, learn, lobe, store): [Core concepts](concepts.md).
+- A specific task: the **Using mind** section in the sidebar, one page per goal.
+- Publishing a repo: [Publish your first source](authoring.md).
+- Every verb and flag: the [Commands](commands.md) reference.
+
+The normative behavior is the
+[spec](https://github.com/jaemk/mind/tree/main/spec); these pages describe the
+same behavior for people using it.

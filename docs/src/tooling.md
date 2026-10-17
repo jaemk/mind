@@ -1,4 +1,4 @@
-# Tools and path tokens
+# Share helper scripts
 
 Some agent libraries ship helper scripts or compiled binaries that their skills
 and agents call at runtime. `mind` handles this with two mechanisms:
@@ -11,26 +11,26 @@ and agents call at runtime. `mind` handles this with two mechanisms:
 See the [worked example](https://github.com/jaemk/mind/tree/main/examples/tooling)
 for a complete source you can browse.
 
-## The `tool` kind (TOOL-1..7)
+## The `tool` kind
 
 A `tool` is a fourth item kind alongside skill, agent, and rule. Its purpose is
 to be referenced by other items; unlike a skill, by default it is not linked into
-an agent home and the Claude harness does not discover it directly (TOOL-3). A
-tool can opt in to a link with an explicit `link` field (TOOL-4, below).
+an agent home and the Claude harness does not discover it directly. A
+tool can opt in to a link with an explicit `link` field (below).
 
-**Convention discovery** (TOOL-1): every immediate subdirectory of a `tools/`
+**Convention discovery**: every immediate subdirectory of a `tools/`
 directory under a scan root is a tool. The whole directory is the item; no anchor
 file is required. A bare `tools/detect/` is a tool named `detect`.
 
 **Store path**: `~/.mind/store/tool/<effective-name>/`. The manifest records the
 store path with an empty `links` set. `forget` removes the store copy; `recall`
-reports it as installed (TOOL-3).
+reports it as installed.
 
 **Optional link**: a tool can declare an explicit `link` field in `mind.toml`
 `[[items]]` to also surface it under an agent home, but the default is
-store-only (TOOL-4).
+store-only.
 
-**Namespacing** (TOOL-6): a prefix gives a tool the effective name
+**Namespacing**: a prefix gives a tool the effective name
 `<prefix>:<name>`, the same as a skill or rule (agents are the exception and keep
 their bare link name). Stable identity is `(source, kind, bare_name)`, so a
 prefix change is a rename matched by `upgrade`/`introspect`.
@@ -50,7 +50,7 @@ need to be a tool. Put it in the skill directory and address it with `{{self}}`
 `duplicate-tooling` advisory (informational), suggesting it as a `tool`
 candidate. Keeping per-item copies is equally valid.
 
-### `TOOL.md` frontmatter (TOOL-2, TOOL-5)
+### `TOOL.md` frontmatter
 
 Place a `TOOL.md` in the tool directory to declare metadata:
 
@@ -65,10 +65,10 @@ build: make
 | key | meaning |
 |-----|---------|
 | `description` | shown in `recall` / `probe` |
-| `bin` | the entrypoint; what `{{tools:name}}` resolves to (TOOL-5) |
-| `build` | per-item build command run in staging at install (HOOK-70..73) |
+| `bin` | the entrypoint; what `{{tools:name}}` resolves to |
+| `build` | per-item build command run in staging at install |
 
-The entrypoint resolution order is (TOOL-5):
+The entrypoint resolution order is:
 
 1. `mind.toml` `[[items]].bin`
 2. `TOOL.md` frontmatter `bin:`
@@ -83,31 +83,31 @@ has no description and no explicit `bin` or `build`. For the `[[items]]` form an
 [The `mind.toml` file](mind-toml.md).
 
 The `bin` and `build` fields are valid only on a `tool`; on any other kind they
-are a `mind.toml` schema error (TOOL-7).
+are a `mind.toml` schema error.
 
 ### Build hooks for compiled tooling
 
 The common case is a source-level install hook (`[[hooks]]` in `mind.toml`) that
 builds all tooling once at `meld`, producing artifacts in the working tree; the
-tool directory is then copied as its final state at `learn` (TOOL-1). Use a
+tool directory is then copied as its final state at `learn`. Use a
 per-item `build` when you want an isolated, rollback-safe build that runs in
-staging before the store swap. See [Install hooks](install-hooks.md) for the full
-hook model (HOOK-70..73).
+staging before the store swap. See [Run setup with hooks](install-hooks.md) for the full
+hook model.
 
 ---
 
-## Path-reference tokens (TOOL-10..16)
+## Path-reference tokens
 
 Tokens expand at install to stable store paths. Expansion runs in the same
 staging pass that expands `{{ns:}}` (see
 [spec/namespacing.md](https://github.com/jaemk/mind/blob/main/spec/namespacing.md)),
 so a bad reference fails before the live install is touched. The recorded content
 hash is of the token (source) form, so drift detection compares source with
-source (TOOL-13).
+source.
 
 A token expands in a file when the file has a markdown extension, or the item
-is of the `workflow` kind, or the file is on the item's NS-57 `expand:` list
-(TOOL-14, TOOL-19). "Markdown extension" means `md`, `markdown`, `mdown`, or
+is of the `workflow` kind, or the file is on the item's `expand:` list.
+"Markdown extension" means `md`, `markdown`, `mdown`, or
 `mkd`, case-insensitively. A token in an ordinary non-markdown bundled file --
 a script, data -- is left exactly as written unless the item is a workflow or
 the file is `expand:`-listed; the designed use of a path token is prose, e.g. a
@@ -117,9 +117,9 @@ verbatim; non-UTF-8 files are not scanned. To expand tokens in a specific
 script, list it in `expand:` (below).
 
 References resolve within the same source only: ship a tool in the same source
-as the items that use it (TOOL-15).
+as the items that use it.
 
-### Expanding tokens in a script: `expand:` (NS-57, TOOL-20)
+### Expanding tokens in a script: `expand:`
 
 A bundled script that must call a sibling tool or reach an adjacent file can opt
 that file into expansion, so its tokens resolve at install instead of being left
@@ -157,7 +157,7 @@ that works because the tool ships in the same source. A script needing a tool
 from a different source has no token mechanism; ship the tool alongside its
 callers.
 
-### `{{self}}` (TOOL-10)
+### `{{self}}`
 
 Expands to the item's own store directory. Available in every kind.
 
@@ -169,10 +169,10 @@ A skill addresses its bundled resources with `{{self}}` without hardcoding its
 installed name. Without `{{self}}`, a prefix rename (e.g. `voice` to `jk:voice`)
 would silently point at the wrong path.
 
-### `{{tools:name}}` (TOOL-12)
+### `{{tools:name}}`
 
 Expands to a sibling tool's entrypoint: the tool's store directory joined with
-its resolved `bin` (TOOL-5). The plural `tools:` is distinct from the `tool:`
+its resolved `bin`. The plural `tools:` is distinct from the `tool:`
 kind-qualifier used in `{{path:}}`.
 
 ```
@@ -182,7 +182,7 @@ kind-qualifier used in `{{path:}}`.
 A `name` that is not a sibling tool, or a tool with no resolvable `bin`, is a
 `BadReference` error.
 
-### `{{path:ref}}` (TOOL-11)
+### `{{path:ref}}`
 
 Expands to a sibling item's store directory, for reaching non-entrypoint files.
 `ref` is a bare sibling name, optionally kind-qualified:
@@ -198,7 +198,7 @@ error. A `ref` matching no sibling is also a `BadReference` error.
 `{{tools:name}}` is shorthand for `{{path:tool:name}}/<bin>`: use `{{tools:name}}`
 when you want the entrypoint, `{{path:tool:name}}` when you want the directory.
 
-### Tilde rendering (TOOL-16)
+### Tilde rendering
 
 A token renders the store root with a leading `~` when the store is under the
 user's home directory (the default `~/.mind/store`). This keeps the expansion
@@ -250,14 +250,14 @@ bin: detect.sh
 After `mind learn scan`:
 
 - `{{tools:detect}}` expands to `~/.mind/store/tool/detect/detect.sh` -- the
-  entrypoint from `bin:` (TOOL-5, TOOL-12).
+  entrypoint from `bin:`.
 - `{{path:tool:detect}}` expands to `~/.mind/store/tool/detect` -- the store
-  directory, for non-entrypoint files (TOOL-11).
+  directory, for non-entrypoint files.
 - `{{self}}` expands to `~/.mind/store/skill/scan` -- the skill's own store
-  directory (TOOL-10).
+  directory.
 
 All three use tilde syntax so a `Bash(~/.mind/store/**)` permission rule covers
-them (TOOL-16).
+them.
 
 Under a prefix (`meld --namespace jk`), `{{tools:detect}}` expands to
 `~/.mind/store/tool/jk:detect/detect.sh` -- no edits to the skill needed.

@@ -107,7 +107,7 @@ mind meld owner/repo --add-root community --add-root experimental
 Lobes (install targets) can be global agent homes (Claude Code, Gemini CLI
 (shared with Antigravity), Codex CLI) or project directories (Windsurf reads
 skills from `<project>/.windsurf/skills/`). See
-[configuration](https://jaemk.github.io/mind/guide/configuration.html#cross-harness-lobes)
+[configuration](https://jaemk.github.io/mind/guide/lobes.html)
 for details.
 
 The [documentation](https://jaemk.github.io/mind/) is the full reference: the

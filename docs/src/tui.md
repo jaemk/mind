@@ -1,9 +1,18 @@
-# Interactive TUI
+# Browse in the terminal UI
 
 `mind probe` opens an interactive terminal UI: a browsable, searchable view of
-every source and item, and the interactive front end for the rest of the CLI
-(meld, learn, sync, upgrade, config). For the `probe` verb and its flags, see
-[Commands](commands.md).
+every source and item, from which you can meld, install, remove, sync, upgrade,
+and manage agent homes. For the `probe` verb's flags, see
+[Commands](commands.md#probe).
+
+```
+mind probe                 # open it
+mind probe review          # open it with the search set to "review"
+mind probe --kind skill    # open it filtered to skills
+```
+
+Quick keys: arrows move, `Enter` opens a details dialog with the actions for
+the selected source or item, `m` melds a new source, `q` quits.
 
 ## Opening it
 
@@ -27,7 +36,7 @@ Two top-level groups, each an independently collapsible tree:
   de-duplicated.
 
 A third **Unmanaged** group appears below them when the agent home holds items
-mind did not install. See [Unmanaged items](unmanaged.md).
+mind did not install. See [Adopt items you placed by hand](unmanaged.md).
 
 Under each group the hierarchy is source -> kind (skills, agents, rules,
 commands, tools) -> item -> detail. Expanding an item shows its description
@@ -92,7 +101,7 @@ errors are shown inline.
 - **Config lobes**: view and manage agent homes (list / add / remove).
 
 An install preview arms the same dependency closure as the direct install
-action. See [Dependencies](dependencies.md).
+action. See [Find and install items](installing.md#items-that-depend-on-other-items).
 
 ## Details dialog
 
@@ -101,7 +110,7 @@ the node and listing the actions valid for it as a selectable list, each run
 through the normal confirm-and-execute path.
 
 - For an item: its kind, source, the commit when installed, the
-  [install profiles](commands.md#install-profiles) it was installed for, and the
+  [install profiles](choosing-items.md#install-profiles) it was installed for, and the
   description. It offers Install when the item is not installed, else Forget.
   Installing a single item this way counts as asking for it by name, so
   disabling its profiles later keeps it.

@@ -256,7 +256,7 @@ this super-source: `mind sync` would register a newly listed entry but never
 install it, and neither `sync` nor `upgrade` notice a changed pin directive or
 an entry the curator dropped. `mind curate --check` reports all of that in one
 plan; `mind curate --yes` applies it (`--prune` to also uninstall an entry the
-curator dropped). See [Commands](../../docs/src/commands.md#curate-follow-your-curators)
+curator dropped). See [Commands](../../docs/src/curate.md)
 and [spec/curate.md](../../spec/curate.md).
 
 `curate` only ever changes a source it (or a curator) actually registered.

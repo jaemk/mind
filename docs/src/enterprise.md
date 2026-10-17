@@ -1,4 +1,4 @@
-# Restricted networks and enterprise
+# Restricted networks
 
 `mind` makes network calls in two places. Source operations (`meld`, `sync`,
 `upgrade`) are `git` subprocesses spawned with the parent environment inherited,
@@ -293,109 +293,11 @@ git config --global http.lowSpeedLimit 1000
 git config --global http.lowSpeedTime 30
 ```
 
-## Managed-policy provisioning
+## Fleet setup
 
-A managed policy file constrains `mind` machine-wide: it restricts the client to
-a trusted source allowlist, can require every source to be pinned, and can
-auto-provision a base set of sources on `sync`. The file lives at a fixed system
-path an administrator controls (see [Managed policy](policy.md) for the per-OS
-paths and full schema). A worked example:
-
-```toml
-[sources]
-# Only sources under these identities may be melded.
-allow = ["github.example.com/platform/*"]
-# Refuse any meld outside the allowlist (without lock, allow is advisory).
-lock = true
-# Every source must resolve to a tag or ref; no floating branches.
-pinned = true
-
-# Provision a baseline source automatically during `sync` and install its items.
-# `install = true` runs the item install pass after provisioning (headless, --yes).
-# `run-build-hooks = true` also runs item build hooks (arbitrary code; only for
-# sources you control).
-[[sources.auto_meld]]
-repo = "https://github.example.com/platform/agent-baseline"
-tag = "v1.4.0"
-install = true
-
-[binary]
-# Block user-initiated binary updates.
-self-update = false
-
-[lobes]
-# The effective agent home is exactly ~/.claude; config lobes edits are refused.
-lock = true
-targets = ["~/.claude"]
-```
-
-Auto-meld runs during `sync`, melding any listed source not already present at
-its declared pin (it is idempotent). Provisioning failures are soft: an
-`auto_meld` entry that fails to provision does not block the rest, already-melded
-sources still sync normally, and `sync` exits non-zero after the run if any
-provisioning entry failed. Validate a policy before deploying it with
-`mind review --policy <path>`.
-
-**Policy schema and deployment ordering.** A policy file must only use keys the
-oldest deployed binary understands. Upgrading binaries before deploying a policy
-that uses new keys prevents "unknown field" errors on old binaries (which fail
-closed per POL-5). Starting with 0.15.0, a policy can declare
-`min-mind-version = "0.15.0"` at the top level; an old binary that reads it
-reports a clear version error instead of an opaque field error. See
-[Schema evolution](policy.md#schema-evolution-and-deployment-ordering) in the
-policy reference for the full constraint and the `min-mind-version` key.
-
-**Policy file permissions.** `mind` warns to stderr when the system policy file
-or its parent directory is group/world-writable or not root-owned. See
-[Deploying the policy file](policy.md#deploying-the-policy-file) for the
-recommended `chown`/`chmod` steps and an Ansible snippet.
-
-## Team / CI provisioning recipe
-
-To provision a fleet of machines from a curated source, commit a `mind.toml`
-super-source to a private repo and meld it in CI. See [The mind.toml
-file](mind-toml.md) for the super-source format.
-
-1. In a private repo, commit a `mind.toml` listing the sources and items the team
-   should have (a super-source with a `[discover].sources` list, or a single
-   source's own inventory). `mind dump` can generate one from a reference
-   machine.
-
-2. In CI, meld it non-interactively and install its items. If this is the first
-   SSH connection to the host in this environment, pre-seed `known_hosts` first;
-   a headless clone fails on host-key verification otherwise:
-
-   ```
-   ssh-keyscan -H github.example.com >> ~/.ssh/known_hosts
-   mind meld git@github.example.com:platform/agent-config --yes
-   ```
-
-   `--yes` installs without prompting. A non-TTY `meld` without `--yes` registers
-   the source only and exits 0 without installing anything, so CI that wants items
-   installed must pass `--yes`. If the sources are trusted and you
-   want their install and build hooks to run unattended, add
-   `--dangerously-skip-install-hook-check` and
-   `--dangerously-skip-build-hook-check` (both execute arbitrary code from the
-   source; only for sources you trust).
-
-3. Verify the result as structured JSON:
-
-   ```
-   mind recall --json
-   ```
-
-   `recall --json` nests items under each source; use `jq` to find uninstalled
-   items across all sources:
-
-   ```
-   mind recall --json | jq '.items[].items[] | select(.installed | not)'
-   ```
-
-   Branch on that output (or a non-zero exit) to fail the job if an expected item
-   is missing.
-
-Under a managed policy with `auto_meld` and `install = true`, a CI step is as
-small as `mind sync` followed by `mind recall --json`. The `sync` provisions each
-listed source and installs its items headlessly; the recall confirms the result.
-See [Managed-policy provisioning](#managed-policy-provisioning) for the schema and
-`install`/`run-build-hooks` field reference.
+- To restrict sources, require pins, lock agent homes, or provision a baseline
+  source on every machine, deploy a [managed policy](policy.md). Validate it
+  first with `mind review --policy <path>`.
+- To give a team one shared set of sources without a policy, see
+  [Share a setup with your team](team-setup.md).
+- For CI jobs, see [Scripts and CI](scripting.md).

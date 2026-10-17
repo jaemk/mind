@@ -12,20 +12,20 @@
 //! could otherwise reach the network.
 //!
 //! Claims covered:
-//!   - docs/src/authoring.md + docs/src/commands.md: `review` reads a target
+//!   - docs/src/validate.md: `review` reads a target
 //!     naming an existing directory as that local path (CLI-214) -- including
 //!     the two-segment relative form the docs single out, and the registry
 //!     precedence the docs' "always" wording omits.
 //!   - docs/src/troubleshooting.md: the dead-local-source recovery recipe
 //!     (`mind recall --sources`, then `mind unmeld <name>`) actually works
 //!     end to end after the directory is gone (CLI-213).
-//!   - docs/src/configuration.md: `config lobes add` backfills already-installed
+//!   - docs/src/lobes.md: `config lobes add` backfills already-installed
 //!     items into a new lobe only for the kinds the lobe admits (HARN-17), not
 //!     every installed item.
-//!   - docs/src/configuration.md: `config lobes add` creates its target
+//!   - docs/src/lobes.md: `config lobes add` creates its target
 //!     directory immediately only on the managed (non-`--snapshot`) path
 //!     (HARN-15).
-//!   - docs/src/configuration.md: the hand-written `kinds = ["workflow"]` lobe
+//!   - docs/src/lobes.md: the hand-written `kinds = ["workflow"]` lobe
 //!     the workflow section tells a reader to write admits a workflow and
 //!     nothing else (WF-12).
 
@@ -140,7 +140,7 @@ fn stub_git(bin_dir: &Path, log: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// docs/src/authoring.md:75-78 and docs/src/commands.md:112 --
+// docs/src/validate.md --
 // "A target naming an existing directory is always read as that local path,
 // even when it also looks like a valid `owner/repo` spec".
 // ---------------------------------------------------------------------------
@@ -242,8 +242,7 @@ fn review_relative_path_to_a_clean_local_source_exits_zero_without_cloning() {
 /// "exact/suffix registry match > existing local directory > remote spec".
 ///
 /// This test pins that precedence so the behavior cannot drift, and stands as
-/// the counterexample to the word "always" in docs/src/authoring.md:76 and
-/// docs/src/commands.md:112.
+/// the counterexample to the word "always" in docs/src/validate.md.
 #[test]
 fn review_registry_selector_wins_over_an_identically_named_local_directory() {
     // spec: CLI-214
@@ -305,7 +304,7 @@ fn review_local_directory_wins_when_no_source_is_registered() {
 }
 
 // ---------------------------------------------------------------------------
-// docs/src/troubleshooting.md:84-88 -- the dead-local-source recovery recipe.
+// docs/src/troubleshooting.md -- the dead-local-source recovery recipe.
 // ---------------------------------------------------------------------------
 
 /// The documented recovery steps, executed verbatim: after the melded
@@ -406,7 +405,7 @@ fn unmeld_of_a_vanished_source_does_not_require_the_directory_to_exist() {
 }
 
 // ---------------------------------------------------------------------------
-// docs/src/configuration.md:88-89 -- "Already-installed items link into the
+// docs/src/lobes.md -- "Already-installed items link into the
 // new lobe as part of the same command" omits that the lobe's `kinds` filter
 // still applies (HARN-17): a skill-only lobe backfills no rule.
 // ---------------------------------------------------------------------------
@@ -464,7 +463,7 @@ fn config_lobes_add_backfills_only_the_kinds_the_lobe_admits() {
 }
 
 // ---------------------------------------------------------------------------
-// docs/src/configuration.md:86 -- "Adding a lobe creates its target directory
+// docs/src/lobes.md -- "Adding a lobe creates its target directory
 // immediately" omits that this is true only on the managed (non-`--snapshot`)
 // path (HARN-15).
 // ---------------------------------------------------------------------------
@@ -507,7 +506,7 @@ fn config_lobes_add_creates_target_dir_only_on_the_managed_path() {
 }
 
 // ---------------------------------------------------------------------------
-// docs/src/configuration.md -- "a workflow links into ... any lobe whose
+// docs/src/lobes.md -- "a workflow links into ... any lobe whose
 // `kinds` names `workflow`", shown as the hand-written
 // `{ path = "./.claude", kinds = ["workflow"] }` recipe. The no-filter and
 // skills-only halves of WF-12 are covered elsewhere (cli_lobes.rs,

@@ -1,53 +1,74 @@
 # Quickstart
 
+This page installs a first skill, shows where it went, and points at what to
+do next. It assumes `mind` and `git` are installed ([Install](install.md)).
+
 <script src="https://asciinema.org/a/qcAxP5PD7H6cuLTE.js" id="asciicast-qcAxP5PD7H6cuLTE" async="true"></script>
 
-Meld a source and install its items:
+## 1. Meld a source
 
 ```
-mind meld jaemk/mind   # clone this repo, prompt to install its items
-mind recall            # list what's installed
+mind meld jaemk/mind
 ```
 
-`mind meld jaemk/mind` registers the `hello-mind` example skill plus two
-curated sources it points at, `anthropics/skills` and
-`ComposioHQ/awesome-claude-skills`, without installing their items. Melding
-any other repo works the same way:
+`meld` clones the repo, lists the items it offers, and asks whether to install
+them. Confirm to install all of them, or pick individually. For this repo that
+is one example skill, `hello-mind`. It also registers two sources the repo
+recommends, `anthropics/skills` and `ComposioHQ/awesome-claude-skills`, without
+installing anything from them.
+
+Any repo that ships agent tooling works the same way:
 
 ```
-mind meld owner/repo   # clone and prompt to install items
-mind recall            # list what's installed
+mind meld owner/repo
+mind meld https://gitlab.example.com/team/agent-tools
+mind meld ~/dev/my-skills
 ```
 
-`meld` presents available items and prompts to install. Confirm to install all, or
-select individually. To register without installing and choose items later:
+## 2. See what is installed
 
 ```
-mind meld owner/repo --register-only   # register only, skip install prompt
-mind probe                              # browse available items (interactive TUI)
-mind learn <item>                       # install a specific item
-mind recall                             # list what's installed
-```
-
-Agent homes can be Claude Code, Gemini CLI, Codex CLI, Antigravity, or Windsurf
--- not just `~/.claude`. Run `mind config lobes detect` to find which of these
-are installed and add matching lobes (Windsurf is project-scoped, so it gets a
-`mind link-project` hint instead of an auto-added lobe). See
-[Configuration](configuration.md#cross-harness-lobes) for the per-harness path
-table and preset commands.
-
-To try mind's install flow against a source you can inspect and edit freely,
-clone the repo and meld the bundled starter example (a plain convention
-layout, see
-[examples/starter/](https://github.com/jaemk/mind/tree/main/examples/starter)):
-
-```
-git clone --depth 1 https://github.com/jaemk/mind /tmp/mind-repo
-cp -r /tmp/mind-repo/examples/starter /tmp/starter
-cd /tmp/starter && git init -q && git add -A && git commit -qm init
-mind meld /tmp/starter   # prompts to install; confirm to install all five
 mind recall
 ```
 
-[Commands](commands.md) is the full verb reference. [Source layout](source-layout.md)
-covers how a source repo exposes items.
+`recall` lists each source with its items, marked installed or available. The
+skill is now linked at `~/.claude/skills/hello-mind`, and Claude Code offers it
+as `/hello-mind`.
+
+## 3. Browse and install more
+
+```
+mind probe
+```
+
+`probe` opens an interactive browser over every melded source: search, read
+descriptions, and install or remove items. See
+[Browse in the terminal UI](tui.md). To install by name instead:
+
+```
+mind learn skill-creator          # one item
+mind learn 'anthropics/skills#*'  # every item of one source
+```
+
+## 4. Keep it current
+
+```
+mind upgrade
+```
+
+`upgrade` fetches the sources your installed items came from, shows what
+changed, and asks before applying anything.
+
+## Where next
+
+- Install into Gemini CLI, Codex CLI, or Windsurf too:
+  [Use more than one agent](lobes.md). `mind config lobes detect` finds the
+  harnesses on this machine.
+- Install only part of a large repo:
+  [Choose what a source installs](choosing-items.md).
+- Install a single skill from a GitHub link:
+  [Install one item from a link](item-links.md).
+- Learn the vocabulary: [Core concepts](concepts.md).
+- Try `mind` against a source you can edit: the
+  [starter example](https://github.com/jaemk/mind/tree/main/examples/starter)
+  and the other [example sources](examples.md).

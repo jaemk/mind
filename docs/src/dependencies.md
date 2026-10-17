@@ -1,7 +1,7 @@
-# Within-source dependency resolution
+# Dependencies between items
 
 Items in a source can reference siblings via `{{ns:name}}` tokens (see
-[Namespacing](namespacing.md)). Those tokens are
+[Namespaces and references](namespacing.md)). Those tokens are
 dependency edges. When you install a partial selection, `mind` follows those
 edges to the full transitive closure so you get a working set, not a dangling
 one.
@@ -14,7 +14,7 @@ and the closure that `learn` installs is their union.
 **`{{ns:name}}` tokens** -- a token appearing in a file where it expands names a
 sibling as a dependency. A token expands in a file when the file has a markdown
 extension, or the item is of the `workflow` kind, or the file is on the item's
-NS-57 `expand:` list. In practice that means the whole skill directory's
+`expand:` list. In practice that means the whole skill directory's
 `.md`/`.markdown`/`.mdown`/`.mkd` files, or the agent/rule file, as before, plus
 a workflow's own `.js` file: a `{{ns:}}` token there forms a dependency edge the
 same as one in markdown does, because the dependency scan reads exactly the files
@@ -23,7 +23,7 @@ non-markdown
 bundled file (a shell script, a data file) still forms no dependency edge. This
 is the inline form: the reference lives in the prose (or, for a workflow, the
 `meta.name` field or body) and is also rewritten to the effective name on
-install. See [Namespacing](namespacing.md) for token expansion rules.
+install. See [Namespaces and references](namespacing.md) for token expansion rules.
 
 **`requires:` frontmatter key** -- a top-level scalar in the item's frontmatter
 (`SKILL.md` for a skill, the `.md` for an agent or rule), listing
@@ -50,7 +50,7 @@ ambiguous bare name, or source-qualified ref) is a hard error at install.
 Dependencies never cross sources; both `{{ns:}}` tokens and `requires:` entries
 are always resolved within the one source.
 
-One consequence: an [item link](commands.md#item-links-install-one-item-by-url)
+One consequence: an [item link](item-links.md)
 offers a single item (a skill, or -- for a file link -- an agent, rule, or
 command), so a reference to a sibling has nothing to resolve against. A
 `requires:` entry there is dropped and the item still installs; the drop is
@@ -62,13 +62,13 @@ kind-qualified remedy: `mind unmeld <identity> --yes && mind meld <repo-url>
 when the repo's own inventory does not declare the item). For a file link
 whose parent directory is not its kind's container, no whole-repo meld can
 reach the item at all, so no command is printed; see [Item
-links](commands.md#item-links-install-one-item-by-url) for that case and the
+links](item-links.md) for that case and the
 full command for every other form.
 
 ## Partial `learn` pulls in the closure
 
 When `learn` selects every item in a source (e.g. `learn owner/repo#*`),
-resolution is a no-op: every referent installs anyway (DEP-10). The work is for
+resolution is a no-op: every referent installs anyway. The work is for
 a partial selection.
 
 Example: a source ships `skill:review`, `agent:dev`, and `agent:test`. `review`
@@ -79,12 +79,12 @@ mind learn skill:review
 ```
 
 `mind` resolves the closure -- `review` -> `dev` -> `test` -- and installs all
-three, dependencies first (DEP-11, DEP-21, DEP-30).
+three, dependencies first.
 
 ## What you see before install
 
 When the closure adds items beyond your explicit selection, `mind` prints the
-dependency tree and prompts before changing anything (DEP-31):
+dependency tree and prompts before changing anything:
 
 ```
 skill:review  [selected]
@@ -94,34 +94,33 @@ skill:review  [selected]
 Install these 3 items? [y/N]
 ```
 
-Nodes already in the manifest are marked `[installed]` and are not re-installed
-(DEP-23). Cycles are shown as marked back-edges rather than expanded again
-(DEP-22).
+Nodes already in the manifest are marked `[installed]` and are not re-installed.
+Cycles are shown as marked back-edges rather than expanded again.
 
 `--yes` (or answering `y`) confirms without prompting. Under `--json` there is no
 prompt at all: `--yes` is mandatory whenever the closure adds items beyond the
 explicit selection, and `learn --json` without it refuses with
 `confirmation-required` instead of installing unprompted. See
-[Commands - learn](commands.md) for the full flag reference.
+[Commands](commands.md#learn) for the full flag reference.
 
 ## `--dry-run` preview
 
 `--dry-run` renders the same dependency tree and lists the full closure that
-would be installed, then exits without installing anything (DEP-32):
+would be installed, then exits without installing anything:
 
 ```
 mind learn --dry-run skill:review
 ```
 
-## Interactive TUI (`probe`)
+## In the terminal UI
 
 Choosing to install an available item in `mind probe` shows the same dependency
 tree in the confirm step before applying, with the same selected / dependency /
 already-installed distinction. Confirming installs the whole closure in
-dependency-first order; declining installs nothing (DEP-40, DEP-41).
+dependency-first order; declining installs nothing.
 
 ## `forget` does not cascade
 
 `forget` removes exactly the one named item. It does not automatically remove
 its dependencies, because a dependency may be shared by another installed item.
-Uninstall is always a per-item operation (DEP-50).
+Uninstall is always a per-item operation.

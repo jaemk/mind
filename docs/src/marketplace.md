@@ -1,4 +1,4 @@
-# Claude plugin marketplaces
+# Claude plugins and marketplaces
 
 Claude Code ships its own plugin system: a repo can carry a
 `.claude-plugin/plugin.json` (a single plugin) or a `.claude-plugin/marketplace.json`
@@ -99,7 +99,7 @@ the marketplace overrides the plugin manifest).
 
 The post-meld `probe` hint and the `sync` re-walk apply to a marketplace exactly
 as they do to any super-source. A melded catalog is a curator for
-[`mind curate`](commands.md#curate-follow-your-curators) too: its listed
+[`mind curate`](curate.md) too: its listed
 entries count toward what is still listed (so one is never proposed for
 `unlist` while the catalog still names it), and a registered one joins the
 `upgrade` sweep once you own it. A catalog entry declares no install
@@ -138,7 +138,7 @@ because you named the exact path:
 mind learn https://github.com/owner/marketplace-repo/tree/main/community/foo
 ```
 
-See [item links](commands.md#item-links-install-one-item-by-url).
+See [item links](item-links.md).
 
 ## Precedence: when a plugin manifest is used
 
@@ -249,5 +249,4 @@ Two runnable fixtures live in the repo:
 - [examples/marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog)
   - a catalog listing two in-repo plugins, each with its own name and items.
 
-The normative behavior is [spec/marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md)
-(MKT-1..11).
+The normative behavior is [spec/marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md).

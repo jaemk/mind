@@ -1,4 +1,4 @@
-# Install hooks
+# Run setup with hooks
 
 A source can declare install hooks in `mind.toml`: shell commands that build or
 install the tooling its items rely on. A user can supply or override them with
@@ -96,7 +96,7 @@ install --force`.
 The same applies per item: an item that declares an update hook runs it in
 place of its install hooks when the item is re-installed over an existing
 install, which in practice is `upgrade`'s in-place swap. A `learn` naming an
-already-installed item is a no-op and runs no hook (HOOK-125); to run an
+already-installed item is a no-op and runs no hook; to run an
 item's update hooks on demand, use `mind hooks run <source>#<item> --event
 update`. A `build` hook is unaffected and always runs, since it produces the
 item's content.
@@ -140,7 +140,7 @@ hook for each in turn. `--event` selects the lifecycle event (`install`,
 hooks run, and `--force` runs them all.
 
 An item-link instance's own identity is `owner/repo#<path>` (see
-[Item links](commands.md#item-links-install-one-item-by-url)), which is spelled
+[Item links](item-links.md)), which is spelled
 the same way as "item `<path>` in source `owner/repo`". When a target matches
 both a registered source and an installed item, `mind` refuses it rather than
 picking one, and names both disambiguated forms. Force either reading:

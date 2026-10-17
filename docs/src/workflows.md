@@ -131,7 +131,7 @@ with many same-named workflows produces one bounded message rather than one
 report per file.
 
 A workflow has no frontmatter, so the `requires:` key
-([Dependencies](dependencies.md)) is not available to it. Its only dependency
+([Dependencies between items](dependencies.md)) is not available to it. Its only dependency
 channel is a `{{ns:}}` token in its body: that is the one token family that
 pulls a referenced sibling into the install closure, the way `requires:` does
 for a markdown item. All four token families still expand in a workflow file,

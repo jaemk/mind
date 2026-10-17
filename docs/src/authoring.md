@@ -1,131 +1,85 @@
-# Authoring a source
+# Publish your first source
 
-A source is a git repo. Publishing one is mostly "lay the items out and push";
-`mind` melds arbitrary repos with no config, so there is no manifest to write and
-nothing to register.
+A source is a git repo. `mind` melds any repo with no configuration, so
+publishing one is: lay the items out by convention and push.
 
-## Publish in two minutes
-
-A repo with a `skills/` directory is already a source. Nothing else is required.
+## A minimal source
 
 ```
 myrepo/
-  skills/greet/SKILL.md      # a skill (the directory is the item)
+  skills/greet/SKILL.md      # a skill (the whole directory is the item)
   agents/reviewer.md         # optional: an agent
   rules/style.md             # optional: a rule
 ```
 
-Push it, and anyone can meld it:
+`skills/greet/SKILL.md`:
+
+```markdown
+---
+name: greet
+description: Greet the user by name and summarize the current directory.
+---
+
+When asked to greet someone, ...
+```
+
+The `description` in each item's frontmatter is what `mind probe` and
+`mind recall` show, so write it for someone deciding whether to install.
+
+Push it, and anyone can install from it:
 
 ```
-mind meld owner/myrepo       # discovers the items by convention
-mind probe                   # they show up, ready to learn
+mind meld owner/myrepo       # finds the items by convention, offers to install
+```
+
+Check what a meld will find before you push, from inside the repo:
+
+```
+mind review                  # validate the source in the current directory
+mind meld . --register-only  # register it locally and browse with mind probe
 ```
 
 See [examples/starter](https://github.com/jaemk/mind/tree/main/examples/starter)
-for a minimal repo of this shape and [Source layout](source-layout.md) for the
-full convention.
+for a minimal repo of this shape, and
+[Source layout and item kinds](source-layout.md) for every kind and path.
 
-### Flat skill layout
+## Skills at the repo root
 
-If your repo keeps skill directories at the root with no `skills/` container
-(`<repo>/greet/SKILL.md`), set `[source].flat-skills` so convention discovery
-finds them:
+If your skill directories sit at the root with no `skills/` container
+(`<repo>/greet/SKILL.md`), declare a flat layout:
 
 ```toml
+# mind.toml
 [source]
 flat-skills = true
 ```
 
-A consumer can also force it at meld time with `mind meld owner/repo
---flat-skills` (useful for adopting a flat-layout repo that has not set the flag
-itself). It applies to skills only; agents, rules, and tools keep their
-`agents/` / `rules/` / `tools/` directories. See [DSC-74..77](https://github.com/jaemk/mind/blob/main/spec/discovery.md).
+It applies to skills only; agents, rules, and tools keep their directories. A
+consumer can force it for a repo that has not declared it with
+`mind meld owner/repo --flat-skills`.
 
-### A Claude plugin or marketplace
+## Already a Claude plugin?
 
-A repo published for Claude Code's plugin system is meldable as-is: a
-`.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
-discovery source, no `mind.toml` needed. See [Authoring a plugin or
-marketplace](marketplace.md#authoring-a-plugin-or-marketplace).
+A repo with `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json`
+is meldable as it is, with no `mind.toml`. See
+[Claude plugins and marketplaces](marketplace.md).
 
-## Preparing a source
+## What to add when you need it
 
-Two commands help a maintainer prepare a repo for melding: `init-source`
-scaffolds and reports, `review` validates.
+Everything below is optional. A `mind.toml` at the repo root enables it; see
+[The mind.toml file](mind-toml.md) for the full schema.
 
-### init-source
+| you want to | see |
+|-------------|-----|
+| describe the source and set a default namespace | [`[source]`](mind-toml.md#source---repo-metadata) |
+| let consumers pick a basic or full set | [Offer install profiles](authoring-profiles.md) |
+| have items reference each other safely | [Namespaces and references](namespacing.md) |
+| share a script between several skills | [Share helper scripts](tooling.md) |
+| build or install tooling when the source is melded | [Run setup with hooks](install-hooks.md) |
+| make one item pull in another | [Dependencies between items](dependencies.md) |
+| ship only some files, or use a non-standard layout | [`[[items]]` and `[discover]`](mind-toml.md#items---explicit-inventory-authoritative) |
+| list other people's repos as a collection | [Curate other repos](curating.md) |
+| require a minimum `mind` version | `min-mind-version` in [`[source]`](mind-toml.md#source---repo-metadata) |
 
-Run `mind init-source` in the repo. It discovers the items the repo offers
-(exactly as melding would), reports the references among them, scaffolds a
-`mind.toml` if none exists, and surfaces advisories:
-
-```
-mind init-source                 # report + scaffold
-mind init-source --template      # also rewrite bare sibling refs to {{ns:}}
-```
-
-It is read-only except for creating an absent `mind.toml` and, with
-`--template`, editing item files. It registers nothing and touches no agent home.
-
-### review
-
-`mind review <target>` validates a source for publishing without changing
-anything (`--fix` is the one exception). `<target>` is a melded source name, a
-local path, or a repo spec; with no target it reviews the current directory. A
-target naming an existing directory is read as that local path unless it first
-matches a melded source's identity, even when it also looks like a valid
-`owner/repo` spec, so the same relative path `init-source` scaffolded works
-unchanged with `review` (CLI-214, CLI-215).
-
-Findings are **hard** (non-zero exit) or **advisory**:
-
-- hard: a malformed `mind.toml`, an unknown item kind, a `min-mind-version` the
-  running `mind` does not meet, or an unresolved `{{ns:}}` / `{{self}}` /
-  `{{tools:}}` / `{{path:}}` token.
-- advisory: a missing description, a hardcoded install path (`hardcoded-path`,
-  classified by what it resolves to), a sibling tool named in prose without a
-  token, a misplaced `{{ns:}}` token, a helper script duplicated across items
-  (`duplicate-tooling`), a deprecated `[source].install` field (`deprecated-field`,
-  pointing to the `[[hooks]]` form), and each declared source or item hook,
-  whichever event (so a consumer sees the source will run code).
-
-```
-mind review                      # review the current dir
-mind review owner/repo           # review a melded source or repo spec
-mind review . --fix              # rewrite confidently-mapped findings in place
-```
-
-`--fix` rewrites a local working tree only: recognized hardcoded paths become
-tokens, misplaced `{{ns:}}` tokens are un-wrapped, and bare sibling names are
-templatized. Structural advisories like `duplicate-tooling` are left for you to
-resolve by hand.
-
-## Resources and tooling
-
-Where an item's resources and shared tooling belong (bundled with `{{self}}`, put
-in a known location by an install hook, or shared through the store as a `tool`
-item) is covered in [Source layout](source-layout.md). `mind review`'s
-`duplicate-tooling`, `bare-tool-reference`, and `hardcoded-path` findings are
-advisory: each of those layouts is valid.
-
-## Namespacing
-
-Most sources give their items unique, descriptive names and are never prefixed, so
-this does not come up. A *prefix* exists only for the collision case: two sources
-that both ship a `review` would land at the same path, so a prefix namespaces one
-(`<prefix>:<name>`). The effective prefix is, in order: the consumer's
-`meld --namespace <prefix>`, the repo's `[source].prefix`, else none.
-
-A prefix renames items, so if a prefixed source's items reference each other by
-name, those references must be tokens: `{{ns:name}}` in prose, and the path tokens
-(`{{self}}` / `{{tools:name}}` / `{{path:ref}}`) for code and paths. `mind`
-expands each at install. `review` and `init-source` warn (advisory) when a source
-that is being prefixed references a sibling in bare prose. An unprefixed source,
-or one with no intra-source references, needs none of this. Agents are the
-exception: they link under their bare name even under a prefix, so a reference to
-a sibling agent is not renamed and does not warn.
-
-See the [spec](https://github.com/jaemk/mind/tree/main/spec) for the normative
-rules and [examples/namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing)
-for a worked source.
+Before publishing, run [`mind review`](validate.md) to catch broken references,
+malformed configuration, and fragile paths.

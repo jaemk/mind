@@ -15,6 +15,11 @@ site-url = "/mind/guide/"
 additional-css = ["assets/custom.css"]
 additional-js = ["assets/custom.js"]
 
+# Pages merged into others keep their old URLs working.
+[output.html.redirect]
+"/absorb.html" = "unmanaged.html"
+"/init-source.html" = "validate.html"
+
 [output.html.fold]
 enable = true
 level = 1

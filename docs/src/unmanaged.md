@@ -1,99 +1,94 @@
-# Unmanaged items
+# Adopt items you placed by hand
 
-An agent home (lobe) often holds skills, agents, and rules that `mind` did not
-install: files written by hand or placed by another tool. `mind` surfaces these
-as *unmanaged* items so the listing reflects everything the agent actually sees,
-and lets `forget` remove one after a distinct confirmation.
+Agent homes often hold skills, agents, and rules that `mind` did not install:
+files you wrote yourself or another tool put there. `mind` lists these as
+*unmanaged* items, can remove them, and can move one into a git repo you own so
+it is versioned and managed from then on.
 
-Tools are store-only (not linked into a lobe by default), so unmanaged detection
-covers skills, agents, and rules only (spec UNM-1).
+```
+mind recall                         # unmanaged items are listed at the end
+mind absorb skill:my-skill          # move it into a source you own, then manage it
+mind forget skill:old-experiment    # or delete it
+```
 
 ## What counts as unmanaged
 
-A lobe entry is unmanaged when its path is not recorded in any manifest item's
-`links` (spec UNM-1). A managed symlink and an unmanaged file cannot occupy the
-same path simultaneously; a given path is always one or the other.
+Any entry in a lobe's `skills/`, `agents/`, `rules/`, `commands/`, or
+`workflows/` directory that is not one of `mind`'s own links. A path is always
+one or the other. An item present in several lobes is listed once with every
+path it occupies. Tools live only in the store, so they are never unmanaged.
 
-`mind` scans every configured lobe. An item present in more than one lobe is one
-logical item that records each occupied path.
+## List them
 
-## Listing unmanaged items
+- `mind recall` lists them after your sources, under "unmanaged: not installed
+  by mind", with each item's `kind:name` and lobe paths. `--kind` filters them;
+  `--source` hides them, since they have no source.
+- `mind probe` includes them in its listing and search. In `--json` each
+  carries `"unmanaged": true` and no `source` or `hash`. `recall --json` covers
+  managed items only.
+- The terminal UI shows an **Unmanaged** group.
 
-### recall
+## Move one into a source you own
 
-`mind recall` (no arguments) lists unmanaged items after the melded sources,
-in a group labeled "unmanaged: not installed by mind", one row per item showing
-`kind:name` and the lobe path(s) it occupies (spec UNM-2). No flag is needed to
-see them; `--kind` filters them the same way it filters managed items; `--source`
-excludes them because they have no source.
-
-`recall --json` covers managed sources only (its schema is unchanged); unmanaged
-items are exposed machine-readably through `probe --json` (spec UNM-2, UNM-3).
-
-### probe
-
-`mind probe` includes unmanaged items in its listing and substring search
-(spec UNM-3). In the non-interactive listing each unmanaged row is labeled. In
-`--json` output each carries `"unmanaged": true` with no `source` or `hash` field.
-`--kind` filters; `--source` excludes them.
-
-In the interactive TUI, unmanaged items appear under an **Unmanaged** group node,
-browsable and searchable like a source's items (spec UNM-6). See
-[Interactive TUI](tui.md).
-
-## Forgetting an unmanaged item
+`mind absorb <ref>` takes one unmanaged item, moves it into a git repo you own,
+commits it there, and replaces the lobe entry with a managed link. From then on
+it upgrades, syncs, and forgets like anything else.
 
 ```
-mind forget <kind:name>
+mind absorb skill:my-skill
+mind absorb agent:reviewer --to ~/dev/my-agent-library
 ```
 
-When the ref resolves to an unmanaged item, `forget` removes the lobe entry
-itself (the file or directory the user owns) and leaves the manifest unchanged
-(spec UNM-4).
+The ref must name exactly one item; globs are refused. Add a kind when a name
+exists in more than one.
 
-**Exact ref only.** An unmanaged item is matched only by its exact `kind:name`.
-A glob such as `forget '*'` removes managed items only and never deletes a user's
-own files (spec UNM-4).
+### Where it goes
 
-**Confirmation required.** Every unmanaged removal prompts first, regardless of
-count. The prompt states explicitly that the item is not managed by `mind` and
-that removal deletes the user's own file or directory, not a symlink (spec UNM-5).
+The first of these that is set wins:
 
-- `--yes` proceeds after displaying that statement.
-- A non-TTY run without `--yes` refuses with `ConfirmationRequired` and removes
-  nothing (spec UNM-5).
+1. `--to <path>`
+2. the `MIND_ABSORB_TO` environment variable
+3. `absorb-to` in `~/.mind/config.toml`
 
-The `--force` / clobber flags do not apply here; nothing is being overwritten.
+With none set, an interactive run asks, offering `~/.mind/personal` (created
+and `git init`-ed on demand), and then offers to save your answer as
+`absorb-to`. With `--yes` and no destination, it uses and saves
+`~/.mind/personal`. A non-interactive run with no destination is an error.
 
-When a bare name matches both a managed and an unmanaged item, add a kind prefix
-to disambiguate (for example `skill:review` vs `agent:review`). See
-[Commands](commands.md) for the full `forget` verb reference.
+The destination must already be a git repo, except `~/.mind/personal`. The item
+lands at its conventional path (`skills/<name>/`, `agents/<name>.md`,
+`rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`) and is committed
+as `absorb <kind>:<name>`. `mind` melds the destination first if it is not
+already a source. If the path is taken in the destination, `absorb` stops;
+`--force` overwrites it.
 
-## Bulk removal of unmanaged items
+### What it asks first
+
+If the item sits in several lobes, `absorb` takes the content from one and
+deletes the other copies so the managed link can replace them. It lists what it
+will move and delete and asks once, even for a single lobe, since it deletes
+files you own. `--yes` skips the question; a non-interactive run without `--yes`
+changes nothing.
+
+A failure before the install finishes leaves the original file in place and
+nothing recorded. `absorb` never loses the file.
+
+After absorbing, the item's name follows the destination source's namespace, if
+it has one.
+
+## Remove unmanaged items
 
 ```
-mind forget --unmanaged [<ref>]
+mind forget skill:old-experiment          # one item, by exact kind:name
+mind forget --unmanaged 'skill:*'         # every unmanaged skill
+mind forget --unmanaged                   # every unmanaged item in every lobe
 ```
 
-`--unmanaged` scopes removal to unmanaged lobe items only -- the deliberate
-opt-in inverse of the default, where a glob matches managed items only.
-Managed (`mind`-installed) items are never matched in this mode; it cannot
-delete a `mind`-installed link or store copy.
+`forget` deletes the file or directory itself, not a link. It always asks
+first and says that the item is not managed by `mind`; `--yes` skips the
+question, and a non-interactive run without `--yes` removes nothing.
 
-**Ref forms.**
-
-- With a glob `<ref>` (e.g. `'skill:*'`), every matching unmanaged item is
-  removed. A kind prefix composes with the glob.
-- With an exact `kind:name`, that single item is removed.
-- With no `<ref>`, every unmanaged item across all configured lobes is removed.
-
-A `<ref>` that matches no unmanaged item is an error.
-
-**Confirmation.** Before removing anything, `mind` lists all matched items and
-asks once to confirm, making clear these are not managed by `mind` and that
-removal deletes the user's own files or directories (not symlinks). `--yes`
-(`-y`) skips the prompt. A non-TTY run without `--yes` refuses with
-`ConfirmationRequired` and removes nothing.
-
-The manifest is not touched; these items were never in it. The `--force` /
-clobber flags do not apply.
+An ordinary glob such as `forget '*'` matches managed items only, so it never
+deletes your own files. Unmanaged items are reached by exact `kind:name`, or by
+`--unmanaged`, which matches unmanaged items only and can never remove a
+managed one.

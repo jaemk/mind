@@ -1,4 +1,4 @@
-# Source layout
+# Source layout and item kinds
 
 A source is a git repo `mind` melds. It offers items, discovered by convention or
 declared in a `mind.toml`. The convention layout, which works on any repo with no
@@ -25,7 +25,7 @@ The kinds:
   offers to its `Workflow` tool. See [Workflows](workflows.md).
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
-  agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
+  agent home (a tool can opt in with an explicit `link`, see [Share helper scripts](tooling.md)).
 
 The command scan is flat: `commands/<name>.md`, no subdirectories. Claude Code
 reads a grouped `commands/frontend/component.md` as `/frontend:component`, and
@@ -42,7 +42,7 @@ other item. Declare everything you ship, or reach the nested file another
 way. See [The mind.toml file](mind-toml.md). Note that Claude Code now treats
 custom commands as skills: a `commands/` file and a `skills/<name>/SKILL.md`
 both produce `/<name>`, and a skill is the better shape for something new.
-See [Commands](commands.md#mental-model) for what happens when a source ships
+See [Commands](concepts.md#sources-items-lobes-and-the-store) for what happens when a source ships
 both.
 
 A group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
@@ -61,7 +61,7 @@ A repo published for Claude Code's plugin system needs no changes either: a
 discovery input. The manifest supplies the plugin's name and metadata; `mind`
 maps the plugin root's conventional `skills/`, `agents/`, `commands/`, and
 `workflows/` directories to items. See
-[Claude plugin marketplaces](marketplace.md).
+[Claude plugins and marketplaces](marketplace.md).
 
 ## Where shared helpers belong
 
@@ -112,11 +112,11 @@ References resolve within the same source only: ship a tool in the same source a
 the items that use it.
 
 A token expands in a file when the file has a markdown extension, or the item is
-of the `workflow` kind, or the file is on the item's NS-57 `expand:` list. A
+of the `workflow` kind, or the file is on the item's `expand:` list. A
 token in an ordinary bundled script (a `resources/pr.py`) is left literal by
 default; list the file in the item's `expand:` frontmatter to expand it there,
 so a script can locate its tooling without a language-specific self-locate; see
-[Tooling and shared scripts](tooling.md).
+[Share helper scripts](tooling.md).
 
 The `workflow` kind's grant cuts both ways for an author. A workflow's `meta.name`
 is not frontmatter -- it is a plain JS object field -- so nothing stops you from
