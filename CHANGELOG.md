@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-10-17
+
 ### Added
 
 - Hooks run with `MIND_PROFILES` (the source's enabled profiles) and
@@ -1876,7 +1878,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.30.1...HEAD
+[0.30.1]: https://github.com/jaemk/mind/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/jaemk/mind/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/jaemk/mind/compare/v0.28.1...v0.29.0
 [0.28.1]: https://github.com/jaemk/mind/compare/v0.28.0...v0.28.1
