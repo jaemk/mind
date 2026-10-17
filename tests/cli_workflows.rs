@@ -538,7 +538,9 @@ fn a_path_token_in_a_workflow_renders_in_the_home_form() {
          agent(`read {{path:skill:review}}/SKILL.md`)\n",
     );
     assert!(sb.mind_under_home(&["meld", &sb.source_spec()]).success);
-    let r = sb.mind_under_home(&["learn", "workflow:review-changes"]);
+    // The `{{path:skill:review}}` token makes the skill a dependency (DEP-8),
+    // so confirm the closure.
+    let r = sb.mind_under_home(&["learn", "workflow:review-changes", "--yes"]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
 
     let installed = std::fs::read_to_string(sb.link("review-changes.js")).unwrap();

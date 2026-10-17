@@ -284,6 +284,8 @@ and verified.
 | Item-link skill and tool `TOOL.md` anchors are classified no-follow | done | [discovery.md](discovery.md) (DSC-115) |
 | The `meta` reader rejects expression-headed strings; blank workflow description/whenToUse read as absent | done | [workflows.md](workflows.md) (WF-63) |
 | Install profiles: a source declares named, composable item sets (`[profiles]`, cargo-feature style); `meld`/`learn --profile` installs them additively over `default`, the enabled set is recorded and tracked by `upgrade`/`curate`/`dump` | done | [profiles.md](profiles.md) (PROF-1..30) |
+| `resource` item kind: a store-only file or directory under `resources/`, offered by convention only when an item references it, reached by `{{resources:name}}` | done | [resources.md](resources.md) (RES-1..14) |
+| Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 
 ## Documents
 
@@ -314,6 +316,9 @@ and verified.
 - [tooling.md](tooling.md) - resource and helper tooling: the `tool` item kind,
   path-reference tokens (`{{self}}`, `{{tools:name}}`, `{{path:ref}}`), and how an
   item references the tooling it ships.
+- [resources.md](resources.md) - the `resource` item kind: a store-only file or
+  directory a source's items read, reached by `{{resources:name}}` and offered
+  by convention only when something references it.
 - [init-source.md](init-source.md) - `init-source`, the maintainer scaffolder:
   generate a `mind.toml`, report the intra-source reference graph, and add
   `{{ns:}}` templating.
@@ -356,7 +361,7 @@ and verified.
   when a defined ID is neither cited by a test nor in its ALLOWLIST. Adding a new
   requirement therefore forces a coverage decision: write a citing test, or
   allowlist it with a reason.
-- "item" means a skill, agent, rule, command, or tool. "source" means a melded
+- "item" means a skill, agent, rule, command, workflow, tool, or resource. "source" means a melded
   repo. "store" means `~/.mind/store`. "link" means a symlink under `~/.claude`.
 - Statements use present-tense declaratives ("`mind learn` installs ..."). Where
   ordering matters it is stated explicitly.

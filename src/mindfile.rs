@@ -446,6 +446,10 @@ pub struct Discover {
     /// anchor file: the matched directory is the tool.
     #[serde(default)]
     pub tools: KindGlobs,
+    /// Resource globs match the resource entry itself, a file or a directory
+    /// (resources.md RES-4).
+    #[serde(default)]
+    pub resources: KindGlobs,
     /// Other sources this repo curates. Melding this repo recursively melds each
     /// (see commands::meld), so a `mind.toml` can act as a registry / super-source.
     #[serde(default)]
@@ -711,7 +715,7 @@ impl Discover {
     /// [`Discover`] cannot be silently honored by one and skipped by the other
     /// (which is exactly how `commands` first landed: discovered by the scan,
     /// but neither authoritative nor validated).
-    fn kind_globs(&self) -> [&KindGlobs; 6] {
+    fn kind_globs(&self) -> [&KindGlobs; 7] {
         [
             &self.skills,
             &self.agents,
@@ -719,6 +723,7 @@ impl Discover {
             &self.commands,
             &self.workflows,
             &self.tools,
+            &self.resources,
         ]
     }
 

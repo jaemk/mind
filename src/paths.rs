@@ -306,7 +306,8 @@ impl Paths {
             // case-sensitively (WF-3), so a file installed under any other
             // spelling would never load.
             ItemKind::Workflow => Some(format!("{dir}/{name}.js")),
-            ItemKind::Tool => None,
+            // spec: RES-6
+            ItemKind::Tool | ItemKind::Resource => None,
         }
     }
 

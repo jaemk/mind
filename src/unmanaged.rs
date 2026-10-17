@@ -155,7 +155,8 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>
             .strip_suffix(".js")
             .filter(|_| entry.path().is_file())
             .map(str::to_string),
-        ItemKind::Tool => None,
+        // spec: RES-8 -- store-only kinds never sit in a lobe.
+        ItemKind::Tool | ItemKind::Resource => None,
     };
     let Some(derived) = derived else {
         return Ok(None);

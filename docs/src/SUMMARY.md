@@ -39,6 +39,7 @@
 - [Offer install profiles](authoring-profiles.md)
 - [Namespaces and references](namespacing.md)
 - [Share helper scripts](tooling.md)
+- [Share data files](resources.md)
 - [Run setup with hooks](install-hooks.md)
 - [Dependencies between items](dependencies.md)
 - [Claude plugins and marketplaces](marketplace.md)

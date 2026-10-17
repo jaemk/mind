@@ -77,6 +77,34 @@ fn item_edges(
         }
     }
 
+    // DEP-8: edges from path tokens. Each narrows to one kind
+    // (`{{tools:}}`, `{{resources:}}`, a qualified `{{path:kind:name}}`) or,
+    // for a bare `{{path:name}}`, names whichever single sibling matches. A
+    // bare name matching several kinds forms no edge: install rejects it as
+    // ambiguous (TOOL-18), so it can never reach the installed graph.
+    // `{{ns:}}` tokens are skipped here; they fan out across kinds above.
+    for r in namespace::sibling_reference_tokens(text) {
+        if r.token.starts_with("{{ns:") {
+            continue;
+        }
+        let Some(matches) = by_name.get(&(item.source.as_str(), r.name.as_str())) else {
+            continue;
+        };
+        let hits: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|&m| r.kind.is_none_or(|k| items[m].kind == k))
+            .collect();
+        if r.kind.is_none() && hits.len() > 1 {
+            continue;
+        }
+        for m in hits {
+            if m != node && !out.contains(&m) {
+                out.push(m);
+            }
+        }
+    }
+
     // DEP-4: union with explicit `requires` frontmatter entries. Source-
     // qualified entries (`owner/repo#name`) are skipped here; they are
     // rejected at install/review (DEP-5/6) but do not contribute edges in
@@ -122,6 +150,38 @@ fn item_edges(
     }
 
     out
+}
+
+/// Every node reachable from `roots` along dependency edges (DEP-1, DEP-4,
+/// DEP-8), excluding a root unless another reached node depends on it.
+///
+/// This is the RES-3 test of whether a convention resource is referenced: the
+/// catalog passes every item that is not a convention resource as a root, so
+/// a resource is kept when some item depends on it, directly or through
+/// another kept resource. Only reached nodes are expanded, so a resource that
+/// nothing references contributes no edges of its own.
+///
+/// `read` returns an item's token-expanding text, as for [`resolve`].
+pub(crate) fn reachable(
+    items: &[CatalogItem],
+    roots: &[usize],
+    read: impl Fn(&CatalogItem) -> String,
+) -> HashSet<usize> {
+    let by_name = make_by_name(items);
+    let mut reached: HashSet<usize> = HashSet::new();
+    let mut expanded: HashSet<usize> = HashSet::new();
+    let mut work: Vec<usize> = roots.to_vec();
+    while let Some(node) = work.pop() {
+        if !expanded.insert(node) {
+            continue;
+        }
+        for dep in item_edges(node, items, &by_name, &read(&items[node])) {
+            if reached.insert(dep) {
+                work.push(dep);
+            }
+        }
+    }
+    reached
 }
 
 /// Return the `kind:effective_name` keys of `item`'s direct dependencies
@@ -1056,6 +1116,90 @@ mod tests {
         // Dependency-first: agent (1) before skill (0).
         assert_eq!(r.install_order(), &[1, 0]);
         assert!(r.adds_dependencies());
+    }
+
+    #[test]
+    fn path_tokens_are_dependency_edges() {
+        // spec: DEP-8
+        // `{{tools:}}`, `{{resources:}}`, and a qualified `{{path:kind:}}` each
+        // pull in their referent; `{{self}}` pulls in nothing.
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Tool, "detect", "s"),
+            item(ItemKind::Resource, "allowlist.json", "s"),
+            item(ItemKind::Agent, "planner", "s"),
+            item(ItemKind::Rule, "unused", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert(
+            "skill:review".into(),
+            "{{self}}/x {{tools:detect}} {{ resources:allowlist.json }} {{path:agent:planner}}"
+                .into(),
+        );
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+        let mut order = r.install_order().to_vec();
+        order.sort();
+        assert_eq!(order, vec![0, 1, 2, 3], "rule:unused is not referenced");
+    }
+
+    #[test]
+    fn ambiguous_bare_path_token_forms_no_edge() {
+        // spec: DEP-8
+        // A bare `{{path:x}}` names the single sibling called x; when x is
+        // both a tool and a resource it forms no edge (install rejects it as
+        // ambiguous, TOOL-18). A kind-narrowed token still resolves, and a
+        // token naming a sibling of a different kind than it narrows to does not.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Tool, "x", "s"),
+            item(ItemKind::Resource, "x", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Tool, "only", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{path:x}}".into());
+        content.insert("skill:b".into(), "{{path:only}} {{resources:x}}".into());
+        content.insert("skill:c".into(), "{{resources:only}}".into());
+        let read = reader(content);
+        assert_eq!(
+            resolve(&items, &[0], &no_installed(), &read).install_order(),
+            &[0]
+        );
+        let mut order = resolve(&items, &[3], &no_installed(), &read)
+            .install_order()
+            .to_vec();
+        order.sort();
+        assert_eq!(order, vec![2, 3, 4]);
+        assert_eq!(
+            resolve(&items, &[5], &no_installed(), &read).install_order(),
+            &[5]
+        );
+    }
+
+    #[test]
+    fn reachable_follows_edges_from_roots_only() {
+        // spec: RES-3
+        // The roots' dependencies are reached, and theirs in turn; a node no
+        // root reaches contributes no edges, so its own referent stays out.
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Resource, "templates", "s"),
+            item(ItemKind::Resource, "footer.md", "s"),
+            item(ItemKind::Resource, "orphan", "s"),
+            item(ItemKind::Resource, "orphans-ref", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "{{resources:templates}}".into());
+        content.insert(
+            "resource:templates".into(),
+            "{{resources:footer.md}}".into(),
+        );
+        content.insert("resource:orphan".into(), "{{resources:orphans-ref}}".into());
+        let reached = reachable(&items, &[0], reader(content));
+        let mut got: Vec<usize> = reached.into_iter().collect();
+        got.sort();
+        assert_eq!(got, vec![1, 2]);
     }
 
     #[test]

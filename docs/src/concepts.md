@@ -11,7 +11,7 @@ docs use and shows what each step puts on disk.
 `~/.mind/sources.json`. Melding makes its items available; it does not have to
 install any. `mind sync` refreshes the clone later.
 
-**Item.** One thing a source offers, of one of six *kinds*:
+**Item.** One thing a source offers, of one of seven *kinds*:
 
 | kind | in a source repo | what the harness does with it |
 |------|------------------|-------------------------------|
@@ -21,6 +21,7 @@ install any. `mind sync` refreshes the clone later.
 | `command` | `commands/<name>.md` | a slash command, `/<name>` |
 | `workflow` | `workflows/<name>.js` | a script offered to the harness's `Workflow` tool (see [Workflows](workflows.md)) |
 | `tool` | `tools/<name>/` | nothing directly: a helper other items call (see [Share helper scripts](tooling.md)) |
+| `resource` | `resources/<file-or-dir>` | nothing directly: data other items read, offered only when something references it (see [Share data files](resources.md)) |
 
 Items are found by these conventional paths, by a Claude plugin manifest, or by
 an explicit list in the source's `mind.toml`. See

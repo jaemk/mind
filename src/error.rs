@@ -245,6 +245,9 @@ pub enum ItemKind {
     /// tool installs to the store but is not linked into an agent home by
     /// default: the harness does not discover it; items reach it by path token.
     Tool,
+    /// A file or directory other items read (resources.md RES-1). Store-only
+    /// like a tool, reached by `{{resources:name}}`, never linked.
+    Resource,
 }
 
 impl ItemKind {
@@ -256,6 +259,7 @@ impl ItemKind {
             ItemKind::Command => "command",
             ItemKind::Workflow => "workflow",
             ItemKind::Tool => "tool",
+            ItemKind::Resource => "resource",
         }
     }
 
@@ -268,6 +272,7 @@ impl ItemKind {
             "command" => Some(ItemKind::Command),
             "workflow" => Some(ItemKind::Workflow),
             "tool" => Some(ItemKind::Tool),
+            "resource" => Some(ItemKind::Resource),
             _ => None,
         }
     }
@@ -284,6 +289,7 @@ impl ItemKind {
             ItemKind::Command => "commands",
             ItemKind::Workflow => "workflows",
             ItemKind::Tool => "tools",
+            ItemKind::Resource => "resources",
         }
     }
 
@@ -296,12 +302,14 @@ impl ItemKind {
             "commands" => Some(ItemKind::Command),
             "workflows" => Some(ItemKind::Workflow),
             "tools" => Some(ItemKind::Tool),
+            "resources" => Some(ItemKind::Resource),
             _ => None,
         }
     }
 
-    /// The kinds linked into an agent home: every kind except `Tool`, which is
-    /// store-only and reached by reference (tooling.md TOOL-3). Also the "all
+    /// The kinds linked into an agent home: every kind except `Tool` and
+    /// `Resource`, which are store-only and reached by reference (tooling.md
+    /// TOOL-3, resources.md RES-6). Also the "all
     /// kinds" default for a lobe with no `kinds` filter (HARN-1).
     pub const LINKABLE: [ItemKind; 5] = [
         ItemKind::Skill,
@@ -313,16 +321,17 @@ impl ItemKind {
 
     /// Every kind, in declaration order. The one list the user-facing kind
     /// wording is built from (NS-25), so a new variant shows up in messages.
-    pub const ALL: [ItemKind; 6] = [
+    pub const ALL: [ItemKind; 7] = [
         ItemKind::Skill,
         ItemKind::Agent,
         ItemKind::Rule,
         ItemKind::Command,
         ItemKind::Workflow,
         ItemKind::Tool,
+        ItemKind::Resource,
     ];
 
-    /// "skill, agent, rule, command, workflow, tool".
+    /// "skill, agent, rule, command, workflow, tool, resource".
     pub fn word_list() -> String {
         Self::ALL
             .iter()
@@ -1828,7 +1837,7 @@ mod tests {
         }
         assert_eq!(
             ItemKind::word_list(),
-            "skill, agent, rule, command, workflow, tool"
+            "skill, agent, rule, command, workflow, tool, resource"
         );
         // An exhaustive match: adding a variant breaks the build here until
         // ALL (and this test) are updated.
@@ -1839,10 +1848,11 @@ mod tests {
                 | ItemKind::Rule
                 | ItemKind::Command
                 | ItemKind::Workflow
-                | ItemKind::Tool => {}
+                | ItemKind::Tool
+                | ItemKind::Resource => {}
             }
         }
-        assert_eq!(ItemKind::ALL.len(), 6);
+        assert_eq!(ItemKind::ALL.len(), 7);
     }
 
     /// LNK-20/WF-6: the two link-refusal messages carry the remedy and the

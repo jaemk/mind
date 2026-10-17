@@ -1,8 +1,8 @@
 # Dependencies between items
 
 Items in a source can reference siblings via `{{ns:name}}` tokens (see
-[Namespaces and references](namespacing.md)). Those tokens are
-dependency edges. When you install a partial selection, `mind` follows those
+[Namespaces and references](namespacing.md)) and path tokens like
+`{{tools:name}}`. Those tokens are dependency edges. When you install a partial selection, `mind` follows those
 edges to the full transitive closure so you get a working set, not a dangling
 one.
 
@@ -47,8 +47,15 @@ source-qualified ref (`owner/repo#name`) is rejected -- `requires` is
 intra-source only. An entry that resolves to no sibling (typo, unknown item,
 ambiguous bare name, or source-qualified ref) is a hard error at install.
 
-Dependencies never cross sources; both `{{ns:}}` tokens and `requires:` entries
-are always resolved within the one source.
+**Path tokens**: `{{tools:name}}`, `{{resources:name}}`, and
+`{{path:kind:name}}` are dependencies on the tool, resource, or item they name,
+under the same expansion rule as `{{ns:}}`. A bare `{{path:name}}` depends on
+the one sibling with that name; if several kinds share it, install rejects the
+token as ambiguous. `{{self}}` names the item itself and is not a dependency.
+See [Share helper scripts](tooling.md) and [Share data files](resources.md).
+
+Dependencies never cross sources; tokens and `requires:` entries are always
+resolved within the one source.
 
 One consequence: an [item link](item-links.md)
 offers a single item (a skill, or -- for a file link -- an agent, rule, or

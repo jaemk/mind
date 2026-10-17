@@ -13,8 +13,7 @@ for a complete source you can browse.
 
 ## The `tool` kind
 
-A `tool` is a fourth item kind alongside skill, agent, and rule. Its purpose is
-to be referenced by other items; unlike a skill, by default it is not linked into
+A `tool` is an item kind whose purpose is to be referenced by other items; unlike a skill, by default it is not linked into
 an agent home and the Claude harness does not discover it directly. A
 tool can opt in to a link with an explicit `link` field (below).
 
@@ -45,6 +44,9 @@ need to be a tool. Put it in the skill directory and address it with `{{self}}`
 - The helper stands alone and is not logically part of any one skill.
 - The helper must be compiled and the build belongs to the item rather than to a
   source-level install hook.
+
+For a data file items read rather than run (a JSON allowlist, a prompt
+template), use a [resource](resources.md) instead.
 
 `mind review` treats a byte-identical helper copied into several items as a
 `duplicate-tooling` advisory (informational), suggesting it as a `tool`
@@ -118,6 +120,10 @@ script, list it in `expand:` (below).
 
 References resolve within the same source only: ship a tool in the same source
 as the items that use it.
+
+Every path token except `{{self}}` is also a dependency: `mind learn` of an item
+that writes `{{tools:detect}}` installs the `detect` tool with it, showing the
+dependency tree and asking first (see [Dependencies](dependencies.md)).
 
 ### Expanding tokens in a script: `expand:`
 
@@ -247,7 +253,8 @@ bin: detect.sh
 3. Record the result: `{{self}}/resources/notes.md`
 ```
 
-After `mind learn scan`:
+`mind learn scan --yes` installs the skill and, because the skill's tokens
+name it, the `detect` tool. Afterwards:
 
 - `{{tools:detect}}` expands to `~/.mind/store/tool/detect/detect.sh` -- the
   entrypoint from `bin:`.

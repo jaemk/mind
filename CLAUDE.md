@@ -1,9 +1,9 @@
 # mind
 
-A manager for agent tooling (skills, agents, rules, commands, workflows, tools) that melds with
+A manager for agent tooling (skills, agents, rules, commands, workflows, tools, resources) that melds with
 arbitrary git repos and links installed items into one or more agent homes
-(default `~/.claude`; see `Paths::agent_homes`). A tool is store-only: it is
-referenced by other items, not linked into an agent home.
+(default `~/.claude`; see `Paths::agent_homes`). A tool or resource is
+store-only: it is referenced by other items, not linked into an agent home.
 
 The behavioral spec lives in [spec/](spec/) and is the reference to verify
 against. Each statement there has a stable ID (e.g. `LIFE-4`); tests cite the IDs
@@ -91,7 +91,8 @@ CLI surface and output:
 Sources and discovery:
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
 - `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`,
-  `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js`, `tools/<n>/`.
+  `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js`, `tools/<n>/`,
+  `resources/<entry>` (spec/resources.md).
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
 - `src/workflow_meta.rs` - minimal reader for a workflow's `export const meta` object (description, `whenToUse`, harness name).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
@@ -131,7 +132,9 @@ Three layers, in precedence order:
 1. **Convention** (default, no file). The scanner finds `skills/<n>/SKILL.md`,
    `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md` (a harness slash command,
    spec/commands.md), `workflows/<n>.js` (a harness workflow, spec/workflows.md),
-   and `tools/<n>/` (a tool dir needs no anchor file). Works
+   `tools/<n>/` (a tool dir needs no anchor file), and `resources/<entry>` (a
+   file or directory, offered only when a sibling references it with
+   `{{resources:name}}`, spec/resources.md). Works
    on any repo, including `~/dev/agents`.
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
@@ -162,7 +165,7 @@ min-mind-version = "0.2"    # version gate: meld refuses a source the binary is 
 # Explicit inventory (authoritative). Omit [[items]] and [discover] to keep
 # convention scanning while still supplying [source] metadata.
 [[items]]
-kind = "rule"                       # skill | agent | rule | command | workflow | tool
+kind = "rule"                       # skill | agent | rule | command | workflow | tool | resource
 name = "style"
 path = "guidelines/style.md"        # relative to repo root; a dir for skills
 link = "rules/style.md"             # optional: link target relative to ~/.claude

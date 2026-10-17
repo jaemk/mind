@@ -7302,8 +7302,8 @@ fn item_catalog_match<'a>(
 /// - command -> `commands/<name>.md` (CMD-8)
 /// - workflow -> `workflows/<name>.js` (WF-50)
 ///
-/// A tool is never unmanaged (it is store-only, so it is never linked into a
-/// lobe for `absorb` to find), and panics.
+/// A tool or resource is never unmanaged (each is store-only, so it is never
+/// linked into a lobe for `absorb` to find), and panics.
 fn convention_path_in_root(
     root: &std::path::Path,
     kind: ItemKind,
@@ -7318,6 +7318,10 @@ fn convention_path_in_root(
         // spec: WF-50
         ItemKind::Workflow => root.join("workflows").join(format!("{name}.js")),
         ItemKind::Tool => panic!("tools are never unmanaged; absorb should not reach this"),
+        // spec: RES-8
+        ItemKind::Resource => {
+            panic!("resources are never unmanaged; absorb should not reach this")
+        }
     }
 }
 

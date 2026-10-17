@@ -9890,10 +9890,10 @@ fn example_tooling_expands_path_tokens() {
     let meld = sb.mind(&["meld", &sb.source_spec()]);
     assert!(meld.success, "{}", meld.stderr);
 
-    // The `detect` tool is referenced by path tokens, not {{ns:}}, so it is not
-    // an install dependency; learn it explicitly alongside the skill.
-    assert!(sb.mind(&["learn", "detect"]).success);
-    assert!(sb.mind(&["learn", "scan"]).success);
+    // spec: DEP-8
+    // The skill's path tokens name the `detect` tool, so learning the skill
+    // pulls the tool in as a dependency (confirmed by `--yes`).
+    assert!(sb.mind(&["learn", "scan", "--yes"]).success);
     let skill = std::fs::read_to_string(sb.mind_home.join("store/skill/scan/SKILL.md")).unwrap();
     assert!(
         skill.contains("store/tool/detect/detect.sh"),

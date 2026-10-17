@@ -9,7 +9,8 @@ There are four discovery layers, in precedence order:
 
 1. **Convention** (default, no file): the scanner finds
    `skills/<name>/SKILL.md`, `agents/<name>.md`, `rules/<name>.md`,
-   `commands/<name>.md`, `workflows/<name>.js`, and `tools/<name>/`.
+   `commands/<name>.md`, `workflows/<name>.js`, `tools/<name>/`, and
+   `resources/<entry>` (a resource is offered only when an item references it).
 2. **Frontmatter** (always read): each item's `description` (and a tool's
    `bin` / `build`) come from the frontmatter it already carries -- except a
    workflow, which has no frontmatter at all; its description and

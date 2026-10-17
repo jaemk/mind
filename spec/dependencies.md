@@ -78,6 +78,16 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   agree instead of the install path collapsing all four into one wording. It is
   the `requires` counterpart of the `{{tools:name}}` cause split (tooling.md
   TOOL-17).
+- `DEP-8` A path token (tooling.md TOOL-10..12, resources.md RES-10) appearing
+  in a file where it expands (the DEP-1 gate) is also a dependency edge, so a
+  partial `learn` installs the tools and resources an item's tokens point at
+  rather than leaving the expanded path naming an empty store location.
+  `{{tools:name}}` depends on the sibling tool `name`, `{{resources:name}}` on
+  the sibling resource `name`, and `{{path:kind:name}}` on the sibling of that
+  kind. A bare `{{path:name}}` depends on the one sibling named `name`; when
+  several kinds match it forms no edge, since install rejects it as ambiguous
+  (TOOL-18). `{{self}}` names the item itself and forms no edge. Like every
+  other edge, these stay within the one source (DEP-2).
 
 ## When resolution applies
 
@@ -88,7 +98,8 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
 - `DEP-11` Resolution is transitive: the dependencies of a dependency are included
   as well, to the full closure. The closure is computed per source over that
   source's selected items.
-- `DEP-12` An item with no `{{ns:}}` tokens has no dependencies. A selection whose
+- `DEP-12` An item with no `{{ns:}}` tokens, path tokens (DEP-8), or
+  `requires` entries has no dependencies. A selection whose
   items reference nothing installs exactly the selected set, unchanged from a
   source with no references.
 

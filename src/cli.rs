@@ -33,7 +33,7 @@ pub enum HookEventArg {
 use crate::error::ItemKind;
 
 /// An item kind as accepted on the command line
-/// (`--kind skill|agent|rule|command|workflow|tool`).
+/// (`--kind skill|agent|rule|command|workflow|tool|resource`).
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum KindArg {
     Skill,
@@ -44,6 +44,7 @@ pub enum KindArg {
     // comment on a value variant as its help text.
     Workflow,
     Tool,
+    Resource,
 }
 
 impl KindArg {
@@ -55,6 +56,7 @@ impl KindArg {
             KindArg::Command => ItemKind::Command,
             KindArg::Workflow => ItemKind::Workflow,
             KindArg::Tool => ItemKind::Tool,
+            KindArg::Resource => ItemKind::Resource,
         }
     }
 }

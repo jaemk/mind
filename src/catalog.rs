@@ -252,6 +252,9 @@ impl CatalogItem {
             // file, so there is nothing under the item an ignore pattern could
             // match.
             ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => None,
+            // spec: RES-5 -- a resource has no anchor file; every file under it
+            // is content.
+            ItemKind::Resource => None,
         }
     }
 
@@ -386,7 +389,17 @@ pub(crate) fn scan_source_at(
     source: &Source,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let clone_root = clone_root.as_ref();
+    scan_source_reporting(clone_root.as_ref(), source, out).map(drop)
+}
+
+/// [`scan_source_at`], returning the convention resources the RES-3 pruning
+/// dropped from `out`, for `review`'s `unreferenced-resource` advisory
+/// (RES-14).
+pub(crate) fn scan_source_reporting(
+    clone_root: &Path,
+    source: &Source,
+    out: &mut Vec<CatalogItem>,
+) -> Result<Vec<CatalogItem>> {
     // spec: CLI-212 -- a linked source's working tree can vanish after meld (a
     // relocated or deleted /tmp fixture, a `cd` past a relative clean-up).
     // Detect it here, before `MindToml::load`'s NotFound-as-absent handling or
@@ -469,21 +482,103 @@ pub(crate) fn scan_source_at(
     // the [source] metadata handled above still apply.
     if let Some(item_path) = &source.item_path {
         scan_item_link(clone_root, source, &prefix, item_path, out)?;
-        return resolve_ignores(&mut out[scan_start..], &source_ignore);
+        resolve_ignores(&mut out[scan_start..], &source_ignore)?;
+        return Ok(Vec::new());
     }
 
     let base_start = out.len();
     let addroot_prefix = scan_source_layers(clone_root, source, &mindfile, &prefix, out)?;
+    let add_start = out.len();
     // spec: DSC-84 -- the consumer's --add-root roots compose with whatever
     // layer the match above found authoritative.
     // spec: DSC-86 -- add-root items use the layer's effective prefix: for a
     // single-plugin source that is the plugin-name default, so the whole meld
     // shares one namespace.
     scan_add_roots(clone_root, source, &addroot_prefix, base_start, out)?;
+    // spec: RES-3 RES-4 -- convention resources are offered only when
+    // referenced. An authoritative mind.toml's own items are declared, so
+    // only what the added roots contributed is convention there; otherwise
+    // (convention or a plugin manifest, which has no resources) everything
+    // from `base_start` on is.
+    let convention_from = if mindfile.as_ref().is_some_and(|m| m.is_authoritative()) {
+        add_start
+    } else {
+        base_start
+    };
+    let dropped = prune_unreferenced_resources(out, base_start, convention_from);
     // spec: IGN-1 -- one resolution point for every item this scan produced,
     // whatever discovery layer found it (convention, an authoritative
     // mind.toml, a plugin manifest, or an added root).
-    resolve_ignores(&mut out[scan_start..], &source_ignore)
+    resolve_ignores(&mut out[scan_start..], &source_ignore)?;
+    Ok(dropped)
+}
+
+/// The convention resources among `items` that no other item references
+/// (RES-3), as indices into `items`. `convention_from` is the index the
+/// convention-discovered part of `items` starts at (RES-4: a declared resource
+/// is never a candidate). Every item that is not a candidate is a root, so a
+/// candidate survives when a root depends on it, directly or through another
+/// surviving candidate (`deps::reachable`).
+fn unreferenced_resources(items: &[CatalogItem], convention_from: usize) -> Vec<usize> {
+    let is_candidate = |i: usize| i >= convention_from && items[i].kind == ItemKind::Resource;
+    if !(0..items.len()).any(is_candidate) {
+        return Vec::new();
+    }
+    let roots: Vec<usize> = (0..items.len()).filter(|&i| !is_candidate(i)).collect();
+    let reached = crate::deps::reachable(items, &roots, read_expanding_text);
+    (0..items.len())
+        .filter(|&i| is_candidate(i) && !reached.contains(&i))
+        .collect()
+}
+
+/// Remove the convention resources no item references from `out[start..]`
+/// (RES-3) and return them. Silent: an unreferenced entry under `resources/`
+/// is most often something unrelated to the source's items (a project's
+/// install script), so `review` is where an author hears about it (RES-14).
+fn prune_unreferenced_resources(
+    out: &mut Vec<CatalogItem>,
+    start: usize,
+    convention_from: usize,
+) -> Vec<CatalogItem> {
+    let drop: std::collections::HashSet<usize> =
+        unreferenced_resources(&out[start..], convention_from - start)
+            .into_iter()
+            .map(|i| i + start)
+            .collect();
+    if drop.is_empty() {
+        return Vec::new();
+    }
+    let mut dropped = Vec::new();
+    let mut kept = Vec::with_capacity(out.len() - drop.len());
+    for (i, item) in std::mem::take(out).into_iter().enumerate() {
+        if drop.contains(&i) {
+            dropped.push(item);
+        } else {
+            kept.push(item);
+        }
+    }
+    *out = kept;
+    dropped
+}
+
+/// All of an item's token-expanding text, concatenated: the files install
+/// expands tokens in (`namespace::item_expands_tokens`, NS-53/NS-57), read
+/// no-follow (DSC-108). The input to dependency edges at scan time (RES-3).
+fn read_expanding_text(item: &CatalogItem) -> String {
+    let mut buf = String::new();
+    for file in crate::review::item_files(item) {
+        if !namespace::item_expands_tokens(item, &item.path, &file) {
+            continue;
+        }
+        if !is_regular_file_nofollow(&file) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            buf.push_str(&content);
+            buf.push('\n');
+        }
+    }
+    buf
 }
 
 /// Re-word a `MindToml::load` failure that refused the source's declared
@@ -1180,7 +1275,13 @@ fn declared_path_is_own(
         });
     }
     match kind {
-        ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => {
+        // spec: RES-4 -- a declared resource is a file or a directory, like the
+        // entry a convention scan would find (RES-1); it has no anchor to check.
+        ItemKind::Agent
+        | ItemKind::Rule
+        | ItemKind::Command
+        | ItemKind::Workflow
+        | ItemKind::Resource => {
             let ft = md.file_type();
             if !ft.is_file() && !ft.is_dir() {
                 return drop_with(rel, "is not a regular file");
@@ -1233,6 +1334,17 @@ fn from_decl(
             msg: format!(
                 "item name '{safe_name}' is unsafe: it must be a single path component (no '/', \
                  '\\', '.', '..', NUL, a control character, or a bidi/zero-width Unicode code point)"
+            ),
+        });
+    }
+    // spec: RES-5 RES-6 -- a resource is store-only with no exception: it is
+    // data an item reads by token, never something an agent home offers.
+    if kind == ItemKind::Resource && decl.link.is_some() {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "`link` is not valid on a resource item ('{safe_name}'): a resource is store-only \
+                 and reached by {{{{resources:{safe_name}}}}}"
             ),
         });
     }
@@ -1635,14 +1747,21 @@ fn build_item(
     // L14: one capped read per item per scan. Each `frontmatter::field` call
     // below parses this text rather than re-reading the file, so adding a key
     // to the set an item may declare costs no additional I/O.
-    let meta_text = match frontmatter::text_capped(meta) {
-        Ok(text) => text,
-        // spec: WF-55 -- workflows only. Every other kind keeps DSC-91's hard
-        // failure: their meta file is a small header beside the content, and an
-        // 8 MiB one is a defect worth stopping on, not something to catalogue
-        // with a silently missing description.
-        Err(MindError::MetadataTooLarge { .. }) if kind == ItemKind::Workflow => String::new(),
-        Err(e) => return Err(e),
+    // spec: RES-5 -- a resource carries no metadata of its own, so nothing is
+    // read from it: no description, `requires`, `expand`, or hook scalars,
+    // whatever its extension, and a large data file cannot trip the cap.
+    let meta_text = if kind == ItemKind::Resource {
+        String::new()
+    } else {
+        match frontmatter::text_capped(meta) {
+            Ok(text) => text,
+            // spec: WF-55 -- workflows only. Every other kind keeps DSC-91's
+            // hard failure: their meta file is a small header beside the
+            // content, and an 8 MiB one is a defect worth stopping on, not
+            // something to catalogue with a silently missing description.
+            Err(MindError::MetadataTooLarge { .. }) if kind == ItemKind::Workflow => String::new(),
+            Err(e) => return Err(e),
+        }
     };
     // HOOK-132: exactly one declaration site supplies an item's hooks. A
     // `[[items]]` entry that declared any is authoritative and the caller passes
@@ -1781,6 +1900,23 @@ fn scan_globs(
             out.push(item);
         }
     }
+    // spec: RES-4 -- resource globs match the entry itself, a file or a
+    // directory; anything else a pattern matches (a fifo, a socket) is not one.
+    for entry in resolve_globs(root, &discover.resources, ItemKind::Resource)? {
+        if !(is_regular_file_nofollow(&entry) || is_dir_nofollow(&entry)) {
+            continue;
+        }
+        if let Some(item) = make_item(
+            root,
+            source,
+            prefix,
+            ItemKind::Resource,
+            entry.clone(),
+            &entry,
+        )? {
+            out.push(item);
+        }
+    }
     Ok(())
 }
 
@@ -1810,7 +1946,7 @@ fn kind_extension(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command => "md",
         ItemKind::Workflow => "js",
-        ItemKind::Skill | ItemKind::Tool => "",
+        ItemKind::Skill | ItemKind::Tool | ItemKind::Resource => "",
     }
 }
 
@@ -1898,6 +2034,29 @@ fn scan_convention(
             }
         }
     }
+
+    // spec: RES-1 -- every immediate entry of `resources/` that is a regular
+    // file or a directory, classified no-follow (DSC-108), and not a dot-entry
+    // (`.gitkeep`, `.DS_Store`). Whether each is offered is decided after the
+    // whole source is scanned (RES-3, `prune_unreferenced_resources`).
+    let resources_dir = root.join(ItemKind::Resource.dir());
+    for entry in read_container_opt(&resources_dir)? {
+        if file_name(&entry).starts_with('.') {
+            continue;
+        }
+        if (is_regular_file_nofollow(&entry) || is_dir_nofollow(&entry))
+            && let Some(item) = make_item(
+                root,
+                source,
+                prefix,
+                ItemKind::Resource,
+                entry.clone(),
+                &entry,
+            )?
+        {
+            out.push(item);
+        }
+    }
     Ok(())
 }
 
@@ -1927,6 +2086,9 @@ fn make_item(
     let bare = match kind {
         // Directory-shaped items take the directory name; file items the stem.
         ItemKind::Skill | ItemKind::Tool => file_name(&path),
+        // spec: RES-2 -- a resource keeps its full file name, extension
+        // included, so `allowlist.json` and `allowlist.yaml` stay distinct.
+        ItemKind::Resource => file_name(&path),
         // spec: WF-1 WF-21 -- a workflow's name is its file stem, as for every
         // other file-shaped kind, and NOT its `meta.name` (WF-20).
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => path
@@ -2322,6 +2484,9 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => {
             path.to_path_buf()
         }
+        // spec: RES-5 -- never read: `build_item` skips the metadata read for a
+        // resource, whose content is data rather than a frontmatter header.
+        ItemKind::Resource => path.to_path_buf(),
     }
 }
 
@@ -2412,6 +2577,9 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                         .and_then(|d| d.file_name())
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default()
+                } else if kind == ItemKind::Resource {
+                    // spec: RES-2 RES-4 -- the full file name, extension kept.
+                    file_name(&p)
                 } else {
                     p.file_stem()
                         .or_else(|| p.file_name())

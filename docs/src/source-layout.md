@@ -12,6 +12,7 @@ config:
   commands/<name>.md         a slash command
   workflows/<name>.js        a workflow the harness runs
   tools/<name>/              a tool (the whole directory; no anchor file)
+  resources/<entry>          a resource: a file or directory other items read
   mind.toml                  optional: metadata, export control, odd layouts
 ```
 
@@ -26,6 +27,10 @@ The kinds:
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
   agent home (a tool can opt in with an explicit `link`, see [Share helper scripts](tooling.md)).
+- **resource**: one file or directory under `resources/`, named by its full file
+  name (`resources/allowlist.json` is `resource:allowlist.json`). Store-only like
+  a tool, and offered only when another item in the source references it with
+  `{{resources:name}}`. See [Share data files](resources.md).
 
 The command scan is flat: `commands/<name>.md`, no subdirectories. Claude Code
 reads a grouped `commands/frontend/component.md` as `/frontend:component`, and
@@ -46,7 +51,7 @@ See [Commands](concepts.md#sources-items-lobes-and-the-store) for what happens w
 both.
 
 A group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
-`command`, `workflow`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
+`command`, `workflow`, `tool`, `resource`). `commands/tool:build.md` installs as `tool:build`, which
 an item ref reads as kind `tool`, name `build`, so `mind learn tool:build`
 fails with a not-found error naming `build`. Spell it `command:tool:build`,
 or pick another group name.
@@ -106,10 +111,13 @@ the name or a bundled path.
 | `{{ns:name}}` | a sibling item's effective name (use in prose, e.g. "hand off to `{{ns:dev}}`") |
 | `{{self}}` | the item's own store directory (its bundled resources) |
 | `{{tools:name}}` | a sibling tool's entrypoint |
+| `{{resources:name}}` | a sibling resource's store path (the file, or the directory) |
 | `{{path:ref}}` | a sibling item's store directory, for a non-entrypoint file (`{{path:tool:detect}}/lib.sh`) |
 
-References resolve within the same source only: ship a tool in the same source as
-the items that use it.
+References resolve within the same source only: ship a tool or resource in the
+same source as the items that use it. Every token except `{{self}}` is also a
+dependency, so `mind learn` of one skill installs the tools and resources it
+names.
 
 A token expands in a file when the file has a markdown extension, or the item is
 of the `workflow` kind, or the file is on the item's `expand:` list. A
@@ -136,8 +144,9 @@ key in the first place; the grant is unconditional for the whole file.
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
-`rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`). A tool is the exception: it is
-store-only and, by default, not linked into an agent home.
+`rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`). Tools and
+resources are the exception: they are store-only and, by default, not linked
+into an agent home.
 
 A path you control is fine: pointing at a location your install hook populates
 works as long as your hook and your items agree on it. What is fragile is

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::{CatalogItem, scan_source_at};
+use crate::catalog::{CatalogItem, scan_source_reporting};
 use crate::error::{MindError, Result};
 use crate::git;
 use crate::mindfile::MindToml;
@@ -454,8 +454,8 @@ fn run_checks(
 
     // Scan. IncompatibleVersion and unknown-kind are hard errors (CLI-132).
     let mut items: Vec<CatalogItem> = Vec::new();
-    match scan_source_at(source_dir, &source, &mut items) {
-        Ok(()) => {}
+    let unreferenced = match scan_source_reporting(source_dir, &source, &mut items) {
+        Ok(dropped) => dropped,
         Err(MindError::IncompatibleVersion {
             ref source_name,
             ref required,
@@ -494,6 +494,20 @@ fn run_checks(
             });
         }
     };
+
+    // --- Check 3a: convention resources nothing references (advisory) ---
+    // spec: RES-14 -- the scan drops these silently (RES-3); an author whose
+    // prose names `resources/<name>` without a token hears it here.
+    for item in &unreferenced {
+        let name = item.display_name();
+        advisory.push(Finding::advisory(
+            "unreferenced-resource",
+            format!(
+                "resources/{name} is not referenced by any item, so it is not offered; an item \
+                 reaches it by writing {{{{resources:{name}}}}}"
+            ),
+        ));
+    }
 
     // --- Check 3b: profile members against the catalog (PROF-30) ---
     // An exact member naming an item the source does not offer is hard
@@ -538,7 +552,12 @@ fn run_checks(
     // the harness actually applies, so the exemption collapses a double report
     // onto that single finding.
     for item in &items {
-        if item.kind == crate::error::ItemKind::Workflow {
+        // spec: RES-5 -- a resource has no frontmatter, so the message's
+        // "frontmatter" would name a site the kind does not have.
+        if matches!(
+            item.kind,
+            crate::error::ItemKind::Workflow | crate::error::ItemKind::Resource
+        ) {
             continue;
         }
         if item.description.is_none() {

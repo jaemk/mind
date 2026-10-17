@@ -614,6 +614,19 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
             None => Token::Bad(crate::error::BadRefReason::NoMatch),
         };
     }
+    // spec: RES-10 RES-11 -- a sibling resource's store path: the file for a
+    // file resource, the directory for a directory resource.
+    if let Some(name) = inner.strip_prefix("resources:") {
+        let name = name.trim();
+        return match ctx
+            .siblings
+            .iter()
+            .any(|s| s.kind == crate::error::ItemKind::Resource && s.name == name)
+        {
+            true => Token::Path(ctx.store_path(crate::error::ItemKind::Resource, name)),
+            false => Token::Bad(crate::error::BadRefReason::NoMatch),
+        };
+    }
     if let Some(reference) = inner.strip_prefix("path:") {
         let reference = reference.trim();
         let (want_kind, name) = match reference.split_once(':') {
@@ -781,6 +794,10 @@ fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
             return Some(format!("{{{{tools:{name}}}}}"));
         }
         return Some(join_token(&format!("{{{{path:tool:{name}}}}}"), &rest));
+    }
+    // spec: RES-13 -- a resource has its own token family.
+    if kind == crate::error::ItemKind::Resource {
+        return Some(join_token(&format!("{{{{resources:{name}}}}}"), &rest));
     }
     Some(join_token(
         &format!("{{{{path:{}:{}}}}}", kind.as_str(), name),
@@ -1060,6 +1077,12 @@ pub fn sibling_reference_tokens(content: &str) -> Vec<SiblingRef> {
             Some((name.trim().to_string(), None))
         } else if let Some(name) = inner.strip_prefix("tools:") {
             Some((name.trim().to_string(), Some(crate::error::ItemKind::Tool)))
+        } else if let Some(name) = inner.strip_prefix("resources:") {
+            // spec: RES-10
+            Some((
+                name.trim().to_string(),
+                Some(crate::error::ItemKind::Resource),
+            ))
         } else if let Some(reference) = inner.strip_prefix("path:") {
             let reference = reference.trim();
             // `{{path:kind:name}}` narrows by kind; a `kind` that does not parse
@@ -2169,6 +2192,76 @@ mod tests {
             expand_paths("{{self}}", &c).unwrap(),
             "/m/store/skill/jk:review"
         );
+    }
+
+    #[test]
+    fn resources_token_resolves_to_resource_store_path() {
+        // spec: RES-10 RES-12 RES-7
+        // A file resource expands to the file, a directory resource to the
+        // directory (a path joined after the token reaches inside it), the
+        // `{{path:resource:}}` spelling agrees, inner whitespace is trimmed,
+        // a prefix applies, and the store root renders with `~` under home.
+        let home = Path::new("/home/jk");
+        let store = Path::new("/home/jk/.mind/store");
+        let none = None;
+        let sibs = vec![
+            psib(ItemKind::Resource, "allowlist.json", None),
+            psib(ItemKind::Resource, "templates", None),
+        ];
+        let c = PathCtx {
+            store_root: store,
+            home: Some(home),
+            prefix: &none,
+            self_kind: ItemKind::Skill,
+            self_name: "review",
+            siblings: &sibs,
+        };
+        assert_eq!(
+            expand_paths("{{resources:allowlist.json}}", &c).unwrap(),
+            "~/.mind/store/resource/allowlist.json"
+        );
+        assert_eq!(
+            expand_paths("{{ resources:templates }}/pr.md", &c).unwrap(),
+            "~/.mind/store/resource/templates/pr.md"
+        );
+        assert_eq!(
+            expand_paths("{{path:resource:allowlist.json}}", &c).unwrap(),
+            "~/.mind/store/resource/allowlist.json"
+        );
+        let pfx = Some("jk".to_string());
+        let c = ctx(store, &pfx, ItemKind::Skill, "review", &sibs);
+        assert_eq!(
+            expand_paths("{{resources:allowlist.json}}", &c).unwrap(),
+            "/home/jk/.mind/store/resource/jk:allowlist.json"
+        );
+    }
+
+    #[test]
+    fn resources_token_miss_is_a_no_match_bad_reference() {
+        // spec: RES-11
+        // A tool of the same name is not a resource: the token narrows by kind.
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "detect", Some("detect"))];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        for text in ["{{resources:nope}}", "{{resources:detect}}"] {
+            let (token, reason) = expand_paths(text, &c).unwrap_err();
+            assert_eq!(token, text);
+            assert_eq!(reason, crate::error::BadRefReason::NoMatch);
+        }
+    }
+
+    #[test]
+    fn hardcoded_resource_store_path_maps_to_resources_token() {
+        // spec: RES-13
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Resource, "templates", None)];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        let (out, n) =
+            rewrite_hardcoded_paths("read ~/.mind/store/resource/templates/pr.md now", &c);
+        assert_eq!(n, 1);
+        assert_eq!(out, "read {{resources:templates}}/pr.md now");
     }
 
     #[test]
