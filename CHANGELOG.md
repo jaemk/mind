@@ -60,6 +60,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from the repo's `[source].prefix`; either way the remedy is `mind unmeld` and
   a re-meld under another prefix (RES-7, DSC-112).
 
+### Security
+
+- `rustls` updated to 0.23.46, clearing RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348, and RUSTSEC-2026-0349. `quinn-proto` updated to 0.11.19,
+  clearing RUSTSEC-2026-0338, RUSTSEC-2026-0340, and RUSTSEC-2026-0343. Both
+  are transitive: `rustls` backs the HTTP client `evolve` uses, and
+  `quinn-proto` is in the lockfile but not compiled into `mind`.
+
 ## [0.29.0] - 2026-10-02
 
 ### Added
