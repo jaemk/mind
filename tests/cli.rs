@@ -16472,15 +16472,27 @@ fn evolve_refuses_a_homebrew_managed_binary_and_check_points_at_brew() {
     let run = |args: &[&str]| {
         // A dead proxy, so a regression that reaches the network fails fast
         // instead of making a real request.
-        let out = Command::new(&linked)
-            .args(args)
-            .env("MIND_HOME", &sb.mind_home)
-            .env("CLAUDE_HOME", &sb.claude_home)
-            .env("HTTPS_PROXY", "http://127.0.0.1:9")
-            .env("https_proxy", "http://127.0.0.1:9")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run linked mind");
+        // A sibling test that forks while `fs::copy` still holds the copy's
+        // write fd keeps it open in the child until exec, so a spawn in that
+        // window fails with ETXTBSY. Retry briefly instead of flaking.
+        let mut attempts = 0;
+        let out = loop {
+            let res = Command::new(&linked)
+                .args(args)
+                .env("MIND_HOME", &sb.mind_home)
+                .env("CLAUDE_HOME", &sb.claude_home)
+                .env("HTTPS_PROXY", "http://127.0.0.1:9")
+                .env("https_proxy", "http://127.0.0.1:9")
+                .stdin(Stdio::null())
+                .output();
+            match res {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => break other.expect("run linked mind"),
+            }
+        };
         Run {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
