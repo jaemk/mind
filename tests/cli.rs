@@ -16454,6 +16454,81 @@ fn evolve_disabled_by_policy_rejects_both_check_and_run() {
 }
 
 #[test]
+fn evolve_refuses_a_homebrew_managed_binary_and_check_points_at_brew() {
+    // spec: CLI-243 -- a binary resolved through a Homebrew Cellar is brew's to
+    // replace: evolve refuses before any network call, and --check still reports
+    // with a `brew upgrade` pointer. The binary runs through a <prefix>/bin
+    // symlink, the way brew links it, so the check must canonicalize.
+    let sb = Sandbox::new();
+    let cellar_bin = sb.base.join("brew/Cellar/mind/0.0.0/bin");
+    std::fs::create_dir_all(&cellar_bin).unwrap();
+    let cellar_exe = cellar_bin.join("mind");
+    std::fs::copy(env!("CARGO_BIN_EXE_mind"), &cellar_exe).unwrap();
+    let prefix_bin = sb.base.join("brew/bin");
+    std::fs::create_dir_all(&prefix_bin).unwrap();
+    let linked = prefix_bin.join("mind");
+    std::os::unix::fs::symlink(&cellar_exe, &linked).unwrap();
+
+    let run = |args: &[&str]| {
+        // A dead proxy, so a regression that reaches the network fails fast
+        // instead of making a real request.
+        let out = Command::new(&linked)
+            .args(args)
+            .env("MIND_HOME", &sb.mind_home)
+            .env("CLAUDE_HOME", &sb.claude_home)
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("https_proxy", "http://127.0.0.1:9")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run linked mind");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: out.status.success(),
+        }
+    };
+
+    let r = run(&["evolve", "--yes", "--to", "9.9.9"]);
+    assert!(!r.success, "evolve must refuse: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("managed by Homebrew") && r.stderr.contains("brew upgrade mind"),
+        "refusal must name Homebrew and the remedy: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("Cellar"),
+        "refusal must name the resolved Cellar path: {}",
+        r.stderr
+    );
+
+    let r = run(&["--json", "evolve", "--yes", "--to", "9.9.9"]);
+    assert!(!r.success);
+    assert!(
+        r.stdout.contains("homebrew-managed") || r.stderr.contains("homebrew-managed"),
+        "--json refusal must carry the homebrew-managed kind: {} {}",
+        r.stdout,
+        r.stderr
+    );
+
+    let r = run(&["evolve", "--check", "--to", "9.9.9"]);
+    assert!(
+        r.success,
+        "--check must still report: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("brew upgrade mind"),
+        "--check must point at brew upgrade: {}",
+        r.stdout
+    );
+
+    // The same binary outside a Cellar is not refused: --check has no note.
+    let r = sb.mind(&["evolve", "--check", "--to", "9.9.9"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("Homebrew"), "{}", r.stdout);
+}
+
+#[test]
 fn evolve_pinned_by_policy_check_is_offline_and_names_pin() {
     // spec: POL-53 -- self-update = "<version>" forces that version as the target
     // without any API call. evolve --check with the pin set must succeed offline

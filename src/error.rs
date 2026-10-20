@@ -1205,6 +1205,14 @@ pub enum MindError {
     #[error("{detail}")]
     SelfUpdatePolicy { detail: String },
 
+    /// CLI-243: `evolve` refused to replace a binary that lives in a Homebrew
+    /// Cellar. Swapping it would leave brew's record of the installed version
+    /// stale, so the update belongs to `brew upgrade`.
+    #[error(
+        "{path} is managed by Homebrew; run `brew upgrade mind` to update it instead of `mind evolve`"
+    )]
+    HomebrewManaged { path: String },
+
     /// STO-77: the resolved `evolve` target version (an explicit `--to`, a
     /// managed-policy pin, or a fetched `releases/latest` tag) failed
     /// `mindfile::is_plausible_release_tag` (STO-76's URL-path-segment safety
@@ -1820,6 +1828,7 @@ impl MindError {
             MindError::DigestMismatch { .. } => "digest-mismatch",
             MindError::AttestationVerificationFailed { .. } => "attestation-verification-failed",
             MindError::SelfUpdatePolicy { .. } => "self-update-policy",
+            MindError::HomebrewManaged { .. } => "homebrew-managed",
             MindError::SelfUpdateInvalidTarget { .. } => "self-update-invalid-target",
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
@@ -2989,6 +2998,11 @@ mod tests {
         assert_eq!(
             MindError::SelfUpdatePolicy { detail: "d".into() }.kind(),
             "self-update-policy"
+        );
+        // spec: CLI-243
+        assert_eq!(
+            MindError::HomebrewManaged { path: "p".into() }.kind(),
+            "homebrew-managed"
         );
         assert_eq!(MindError::HomeDirNotFound.kind(), "home-dir-not-found");
         assert_eq!(MindError::GitNotFound.kind(), "git-not-found");

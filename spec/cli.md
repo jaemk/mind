@@ -1378,13 +1378,8 @@ release artifacts as the install script and the Homebrew formula.
   binary. A platform with no published artifact is an error and nothing is changed.
 - `CLI-143` The replacement is atomic: the new binary is downloaded and verified,
   then swapped for the running executable, so any failure leaves the existing
-  binary intact. `evolve` replaces whatever binary it runs from and does not
-  detect or coordinate with a package manager: there is no Homebrew (or other)
-  special case in the code, and a Cellar binary is user-writable on macOS, so
-  `evolve` will happily replace a brew-managed `mind`, which the next
-  `brew upgrade` then replaces again. Recommending `brew upgrade` for a
-  brew-managed install is install-path guidance, not behavior, and lives in
-  docs/src/install.md. A target path that is not writable is
+  binary intact. `evolve` replaces whatever binary it runs from, except a
+  Homebrew-managed one (CLI-243). A target path that is not writable is
   `TargetNotWritable` and nothing is changed.
 - `CLI-147` `evolve` never downgrades the binary. When `--to V` is given
   explicitly and V is strictly below the running version, `evolve` exits 0 without
@@ -1402,6 +1397,15 @@ release artifacts as the install script and the Homebrew formula.
   `evolve` read as a collision even though `evolve` disables the global flag
   for itself (`disable_version_flag`) and never actually conflicted at the
   parser level.
+- `CLI-243` `evolve` refuses to replace a Homebrew-managed binary: one whose
+  canonicalized path (so the `<prefix>/bin/mind` symlink resolves) has a
+  `Cellar` component. Replacing it would leave brew's record of the installed
+  version stale, so the update belongs to `brew upgrade`. The refusal is
+  `HomebrewManaged` (kind `homebrew-managed`), names the resolved path and
+  `brew upgrade mind`, and happens before any network call. `evolve --check`
+  is not refused: it reports as usual and, in human mode when an update is
+  available, adds a note pointing at `brew upgrade mind`. Other package
+  managers are not detected.
 
 ## config
 

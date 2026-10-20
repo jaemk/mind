@@ -19,6 +19,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused). Other verbs warn and carry on. Both point at `mind evolve`.
 - A `mind.toml` that fails to parse and declares a newer `min-mind-version`
   now reports the version gap and `mind evolve` along with the parse error.
+- `mind evolve` refuses to replace a Homebrew-managed binary (one resolved
+  under a `Cellar` directory) and points at `brew upgrade mind`. `evolve
+  --check` still reports, with the same pointer when an update is available.
 
 ## [0.30.1] - 2026-10-17
 

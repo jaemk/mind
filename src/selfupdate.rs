@@ -298,6 +298,23 @@ pub(crate) fn check_policy_for_evolve(
     }
 }
 
+/// Whether `exe`, the canonicalized path of the running binary, lives in a
+/// Homebrew Cellar (CLI-243). Homebrew installs every formula under
+/// `<prefix>/Cellar/<formula>/<version>/` and links it into `<prefix>/bin`, so a
+/// `Cellar` component in the resolved path means brew owns the binary.
+pub(crate) fn is_homebrew_install(exe: &Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "Cellar")
+}
+
+/// The running binary's path when Homebrew manages it, else `None`. The path is
+/// canonicalized first so the `<prefix>/bin/mind` symlink resolves to its Cellar
+/// target.
+fn homebrew_exe() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    is_homebrew_install(&exe).then_some(exe)
+}
+
 /// `mind evolve [--check] [--yes] [--version <v>]` — update the running binary.
 ///
 /// `--version` resolves the target WITHOUT any network call, so
@@ -324,6 +341,16 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
         } else {
             false
         };
+
+    // spec: CLI-243 -- a Homebrew-managed binary is brew's to replace. Refuse the
+    // swap before any network call; `--check` still reports, with a pointer at
+    // `brew upgrade`.
+    let brew_exe = homebrew_exe();
+    if let (Some(exe), false) = (&brew_exe, check) {
+        return Err(MindError::HomebrewManaged {
+            path: exe.display().to_string(),
+        });
+    }
 
     // Resolve the target version: an explicit --to (or a policy pin) bypasses the
     // network entirely; otherwise the latest published release is read through an
@@ -356,6 +383,9 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
             "{marker} {}",
             check_report(current, &target_version, &d, target)
         );
+        if brew_exe.is_some() && matches!(d, Decision::Update) {
+            println!("note: this mind is managed by Homebrew; update it with `brew upgrade mind`");
+        }
         // spec: POL-66 -- when running is above the policy pin, warn that the pin is
         // an upper bound and does not downgrade. Human mode only; --json already
         // returned above.
@@ -2050,6 +2080,26 @@ mod tests {
             !have("mind-no-such-binary-xyzzy"),
             "a nonexistent command must not be detected"
         );
+    }
+
+    // spec: CLI-243
+    #[test]
+    fn is_homebrew_install_matches_only_a_cellar_component() {
+        for p in [
+            "/opt/homebrew/Cellar/mind/0.30.1/bin/mind",
+            "/usr/local/Cellar/mind/0.30.1/bin/mind",
+            "/home/linuxbrew/.linuxbrew/Cellar/mind/0.30.1/bin/mind",
+        ] {
+            assert!(is_homebrew_install(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/home/u/.local/bin/mind",
+            "/home/u/.cargo/bin/mind",
+            "/home/u/Cellars/mind",
+            "/home/u/my-Cellar/bin/mind",
+        ] {
+            assert!(!is_homebrew_install(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

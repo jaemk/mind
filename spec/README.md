@@ -228,6 +228,7 @@ and verified.
 | `--dangerously-skip-hook-check` renamed from `--dangerously-skip-install-hook-check` for `unmeld`/`forget` (an uninstall-hook flag); old spelling kept as a hidden alias | done | CLI-227 |
 | `mind hooks run --rerun` is a visible alias for `--force` | done | CLI-228 |
 | `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |
+| `evolve` refuses a Homebrew-managed binary (canonical path under a `Cellar`) and points at `brew upgrade mind`; `--check` still reports | done | CLI-243 |
 | `unmeld` accepts `remove`/`rm` as additional visible aliases | done | CLI-230 |
 | `sync [source]` accepts an optional source filter, syncing every matching source | done | CLI-231 |
 | `sync <filter> --upgrade`'s upgrade pass and its hook re-run are scoped to the filter's matched sources | done | CLI-232 |

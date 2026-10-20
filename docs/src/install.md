@@ -80,6 +80,10 @@ artifact does not verify; it still proceeds, with a note, when `gh` itself
 could not complete the check (no network, or a `gh` build without the
 `attestation` subcommand).
 
+A Homebrew install is updated with `brew upgrade mind`. `evolve` refuses to
+replace a binary that resolves into a Homebrew `Cellar`, and `evolve --check`
+points at `brew upgrade mind` when an update is available.
+
 ## Uninstall
 
 Remove installed items and sources first, then the binary.
