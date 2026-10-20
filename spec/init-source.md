@@ -35,7 +35,7 @@ namespacing.md.
   honors an authoritative `mind.toml` (`[[items]]` / `[discover]`) exactly as a
   melded source would (discovery.md), so what it reports is what melding would
   install. A repo that requires a newer `mind` (`min-mind-version`, DSC-40) is
-  rejected here too.
+  scanned with the same warning.
 - `INIT-3` When `path` has no `mind.toml`, `init-source` creates one with a
   `[source]` table (a `description` placeholder and a commented-out `prefix`),
   leaving discovery to convention. An existing `mind.toml` is never overwritten:
@@ -135,3 +135,8 @@ install model. The generated file is an input to Claude's plugin system and to
   `skills` array in the generated marketplace plugin entry (INIT-10, MKT-14) so
   that Claude's plugin reader finds the same skill directories that `mind`'s flat
   discovery would.
+
+- `INIT-13` A `mind.toml` that `init-source` creates (INIT-3, or INIT-11/INIT-12
+  when the file is absent) declares `min-mind-version` set to the running
+  binary's version without any pre-release or build suffix (`0.31.0-dev`
+  writes `0.31.0`). An existing `mind.toml` is never given one.

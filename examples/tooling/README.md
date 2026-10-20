@@ -1,6 +1,6 @@
 # Tooling example
 
-Requires mind >= 0.7. (`min-mind-version` is a hard version gate: a binary older than the declared version refuses to scan the source.)
+Requires mind >= 0.7. (`min-mind-version`: an older binary warns and asks before melding the source.)
 
 A source that ships a shared `tool`, a shared `resource`, and a skill that
 references both through path-reference tokens.

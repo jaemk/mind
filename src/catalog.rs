@@ -373,6 +373,33 @@ fn first_reserved_warning(source_name: &str) -> bool {
     guard.insert(source_name.to_string())
 }
 
+/// Source names already warned about an unmet `min-mind-version` in this
+/// process (DSC-40), so the warning prints once per source per run.
+static WARNED_VERSION: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+/// True the first time it is called for `source_name` in this process. Meld
+/// calls it when it shows its own warning, so the scan after it stays quiet.
+///
+/// spec: DSC-40
+pub(crate) fn first_version_warning(source_name: &str) -> bool {
+    let set = WARNED_VERSION.get_or_init(Default::default);
+    let mut guard = set.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(source_name.to_string())
+}
+
+/// The warning for a source whose `min-mind-version` this binary does not
+/// meet (DSC-40, DSC-116).
+pub(crate) fn newer_mind_warning(source_name: &str, required: &str) -> String {
+    format!(
+        "warning: source '{}' requires mind >= {}, but this is mind {}; it may not work as \
+         expected. Run `mind evolve` to update",
+        crate::sanitize::strip_ansi(source_name),
+        required,
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
 pub(crate) fn scan_source(
     paths: &Paths,
     source: &Source,
@@ -417,18 +444,13 @@ pub(crate) fn scan_source_reporting(
     // Re-point it at the one thing an already-melded user can do.
     let mindfile = MindToml::load(clone_root).map_err(|e| melded_prefix_error(source, e))?;
 
-    // Reject a source that requires a newer `mind` than the one running, rather
-    // than scanning it against a format this version may predate (DSC-40).
-    if let Some(required) = mindfile
-        .as_ref()
-        .and_then(|m| m.source.min_mind_version.as_deref())
-        && !crate::mindfile::version_at_least(env!("CARGO_PKG_VERSION"), required)
+    // spec: DSC-40 -- a source that wants a newer `mind` is scanned anyway,
+    // with a warning: meld already asked before registering it (DSC-116), and
+    // failing every later verb would take the whole lobe down over it.
+    if let Some(required) = crate::mindfile::unmet_min_version(mindfile.as_ref())
+        && first_version_warning(&source.name)
     {
-        return Err(MindError::IncompatibleVersion {
-            source_name: source.name.clone(),
-            required: required.to_string(),
-            running: env!("CARGO_PKG_VERSION").to_string(),
-        });
+        crate::render::scan_warn(newer_mind_warning(&source.name, required));
     }
 
     // Effective prefix: consumer alias wins over the repo's own declaration. An

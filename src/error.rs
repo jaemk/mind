@@ -709,13 +709,28 @@ pub enum MindError {
     #[error("sync failed for {failed} of {total} source(s); see the messages above")]
     SyncFailed { failed: usize, total: usize },
 
+    /// A meld declined over `min-mind-version` (DSC-116): the user said no at
+    /// the prompt, or there was no terminal to ask on and no `--yes`.
     #[error(
-        "source '{source_name}' requires mind >= {required}, but this is mind {running}; run `mind evolve`"
+        "source '{source_name}' requires mind >= {required}, but this is mind {running}; run `mind evolve` to update, or pass --yes to meld it anyway"
     )]
     IncompatibleVersion {
         source_name: String,
         required: String,
         running: String,
+    },
+
+    /// A `mind.toml` this binary cannot parse that declares a newer
+    /// `min-mind-version` (DSC-117): the parse error is likely a key added
+    /// after this release.
+    #[error(
+        "mind.toml at {path} requires mind >= {required} and cannot be read by mind {running} ({msg}); run `mind evolve` to update"
+    )]
+    MindTomlTooNew {
+        path: PathBuf,
+        required: String,
+        running: String,
+        msg: String,
     },
 
     #[error(
@@ -1756,6 +1771,7 @@ impl MindError {
             MindError::NotInstalled { .. } => "not-installed",
             MindError::SyncFailed { .. } => "sync-failed",
             MindError::IncompatibleVersion { .. } => "incompatible-version",
+            MindError::MindTomlTooNew { .. } => "mind-toml-too-new",
             MindError::LinkOccupied { .. } => "link-occupied",
             MindError::BadReference { .. } => "bad-reference",
             MindError::Git { .. } => "git",

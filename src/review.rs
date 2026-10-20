@@ -452,28 +452,28 @@ fn run_checks(
     // standard sources/<host>/<owner>/<repo> location).
     let source = build_source(source_dir, &mindfile, alias);
 
-    // Scan. IncompatibleVersion and unknown-kind are hard errors (CLI-132).
+    // An unmet min-mind-version and an unknown kind are hard findings
+    // (CLI-132). The scan itself only warns on the version (DSC-40), so the
+    // finding is raised here and the scan's own warning is suppressed.
+    if let Some(required) = crate::mindfile::unmet_min_version(mindfile.as_ref()) {
+        crate::catalog::first_version_warning(&source.name);
+        hard.push(Finding::hard(
+            "incompatible-version",
+            format!(
+                "source '{}' requires mind >= {required}; this is mind {}",
+                source.name,
+                env!("CARGO_PKG_VERSION")
+            ),
+        ));
+        return Ok(ReviewResult {
+            hard,
+            advisory,
+            fixed: Vec::new(),
+        });
+    }
     let mut items: Vec<CatalogItem> = Vec::new();
     let unreferenced = match scan_source_reporting(source_dir, &source, &mut items) {
         Ok(dropped) => dropped,
-        Err(MindError::IncompatibleVersion {
-            ref source_name,
-            ref required,
-            ref running,
-        }) => {
-            hard.push(Finding::hard(
-                "incompatible-version",
-                format!(
-                    "source '{}' requires mind >= {required}; this is mind {running}",
-                    source_name
-                ),
-            ));
-            return Ok(ReviewResult {
-                hard,
-                advisory,
-                fixed: Vec::new(),
-            });
-        }
         Err(MindError::MindToml { ref msg, .. }) if msg.contains("unknown item kind") => {
             hard.push(Finding::hard(
                 "unknown-kind",

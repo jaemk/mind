@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `mind init-source` sets `[source].min-mind-version` to the running version
+  in the `mind.toml` it creates.
+
+### Changed
+
+- A source whose `min-mind-version` is newer than the running `mind` no longer
+  fails every verb. `meld` warns that it may not work as expected and asks
+  whether to continue (`--yes` continues; with no terminal and no `--yes` it is
+  refused). Other verbs warn and carry on. Both point at `mind evolve`.
+- A `mind.toml` that fails to parse and declares a newer `min-mind-version`
+  now reports the version gap and `mind evolve` along with the parse error.
+
 ## [0.30.1] - 2026-10-17
 
 ### Added

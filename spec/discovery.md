@@ -579,10 +579,13 @@ run = "make build"
   `"0.3-beta"`, `"abc"`, `""`, `"1.x"` are all rejected). The running
   binary's own version string (from the build environment) may carry a
   pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0 in
-  the version comparison only. The gate (`IncompatibleVersion`) is enforced when
-  the source is scanned: a binary older than the declared version refuses to
-  scan it, so `meld`, `sync`, `recall`, and `probe` all fail rather than operate
-  on a source the binary is too old for.
+  the version comparison only. A scan of a source whose declared version the
+  binary does not meet proceeds with a warning, printed once per source per
+  run, that names both versions, says the source may not work as expected, and
+  points at `mind evolve`. `sync`, `recall`, and `probe` therefore keep working
+  on a source the user chose to meld anyway; whether to meld it at all is
+  decided at meld time (DSC-116). `review` still reports it as a hard
+  `incompatible-version` finding (CLI-132).
 - `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
   `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives
@@ -1050,3 +1053,21 @@ field lets the curator opt in to named handling.
   links. A tool's `TOOL.md` is optional, but when present (convention scan or
   `[discover].tools` glob) it must be a regular non-symlink file; a tool whose
   `TOOL.md` is a symlink or other non-file is not offered.
+
+- `DSC-116` Before registering a source whose `[source].min-mind-version` the
+  running binary does not meet (DSC-40), `meld` prints the DSC-40 warning and
+  asks `continue melding <source> anyway? [y/N]`. Yes melds it as usual; no
+  (the default) removes any clone and fails with `IncompatibleVersion`, which
+  names both versions, `mind evolve`, and `--yes`. `meld --yes` skips the
+  question and melds with the warning, and the answer carries to the sources
+  that meld walks (`[discover].sources`, a marketplace's entries). With no
+  terminal to ask on and no `--yes`, the meld fails as if declined, and so do
+  the melds that `curate`, `sync`, and a policy auto-meld run on their own.
+  The check reads the `mind.toml` at the resolved pin.
+
+- `DSC-117` When `mind.toml` fails to parse and a lenient read finds a
+  well-formed `[source].min-mind-version` the running binary does not meet,
+  the error is `MindTomlTooNew`: it names the file, both versions, and the
+  parse error, and points at `mind evolve`, since the likely cause is a key
+  added after this release. A parse failure in a file whose declared version
+  is met, or that declares none, stays the plain `Toml` error.

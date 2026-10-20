@@ -54,7 +54,7 @@ and verified.
 | `recall` (no arg): source+item status view, install state per item | done | CLI-70, CLI-74, CLI-83 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
 | `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | done | CLI-86 |
-| Enforce `min-mind-version` | done | DSC-40 |
+| `min-mind-version`: scans warn, `meld` asks before melding (`--yes` carries on), an unparseable too-new `mind.toml` names the version gap, `init-source` writes the running version | done | DSC-40, DSC-116, DSC-117, INIT-13 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
 | `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92, CLI-189 |
 | Shell completions + man page | done | CLI-120, CLI-121 |

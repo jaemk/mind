@@ -60,11 +60,14 @@ pub fn meld(
         dangerously_skip_install_hook_check,
         item_kind,
         &mut MeldProfiles::None,
+        false,
     )
 }
 
 /// [`meld`] followed by a consumer profile install (HOOK-142): `profiles`
 /// resolves the selection before the source's install hooks run.
+/// `accept_newer_mind` is `meld --yes`: meld a source whose
+/// `min-mind-version` this binary does not meet without asking (DSC-116).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn meld_with_profiles(
     paths: &Paths,
@@ -78,6 +81,7 @@ pub(crate) fn meld_with_profiles(
     dangerously_skip_install_hook_check: bool,
     item_kind: Option<ItemKind>,
     profiles: &mut MeldProfiles<'_>,
+    accept_newer_mind: bool,
 ) -> Result<MeldSummary> {
     paths.ensure_layout()?;
     // POL-3: the managed policy is authoritative over user intent. Load it once
@@ -120,6 +124,7 @@ pub(crate) fn meld_with_profiles(
         item_kind, // spec: CLI-239 -- the consumer's `--kind` for a file link
         None,      // a top-level meld has no curator
         profiles,
+        accept_newer_mind,
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -641,6 +646,8 @@ pub(crate) fn curated_config_for(
 /// configuration.
 /// `yes` mirrors the CLI `--yes` flag (NS-45): when true, non-interactive mode
 /// is forced (the NS-43 collision prompt is skipped and hard-errors instead).
+/// `accept_newer_mind` is the consumer's `meld --yes` answer to the DSC-116
+/// question, carried to the sources this meld curates.
 #[allow(clippy::too_many_arguments)]
 fn meld_recursive(
     paths: &Paths,
@@ -663,6 +670,7 @@ fn meld_recursive(
     item_kind: Option<ItemKind>,
     curated_by: Option<String>,
     profiles: &mut MeldProfiles<'_>,
+    accept_newer_mind: bool,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
@@ -1017,6 +1025,30 @@ fn meld_recursive(
 
     source.pin = final_pin;
     source.commit = commit;
+
+    // spec: DSC-116 -- a source that declares a newer `min-mind-version` may
+    // not work under this binary. Warn and ask before registering it; with no
+    // terminal to ask on, only an explicit `--yes` carries on.
+    if let Some(required) = crate::mindfile::unmet_min_version(mindfile.as_ref()) {
+        let required = required.to_string();
+        let interactive = !yes && crate::hook::is_tty();
+        if accept_newer_mind || interactive {
+            eprintln!("{}", catalog::newer_mind_warning(&source.name, &required));
+            catalog::first_version_warning(&source.name);
+        }
+        let proceed = accept_newer_mind
+            || (interactive && confirm(&format!("continue melding {} anyway?", source.name))?);
+        if !proceed {
+            if !source.is_linked() {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            return Err(MindError::IncompatibleVersion {
+                source_name: source.name.clone(),
+                required,
+                running: env!("CARGO_PKG_VERSION").to_string(),
+            });
+        }
+    }
 
     // Persist the consumer's --root override (STO-17, DSC-51).
     // DSC-52: if --root is given for an authoritative source, print a note.
@@ -1524,6 +1556,7 @@ fn meld_recursive(
                 // spec: STO-82 -- provenance for `curate` (CUR-7).
                 Some(super_source_name.clone()),
                 &mut MeldProfiles::Curated(entry), // spec: HOOK-142
+                accept_newer_mind,                 // spec: DSC-116
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1702,6 +1735,7 @@ fn meld_recursive(
                 // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
                 Some(super_source_name.clone()),
                 &mut MeldProfiles::None,
+                accept_newer_mind, // spec: DSC-116
             ) {
                 Ok(n) => {
                     added += n;
@@ -3054,7 +3088,7 @@ pub fn init_source(
     } else if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        std::fs::write(&toml_path, crate::scaffold::SCAFFOLD)
+        std::fs::write(&toml_path, crate::scaffold::scaffold())
             .map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     }
@@ -8543,6 +8577,7 @@ pub fn sync_with_selector(
                     None, // a policy auto-meld names a repo, never an item link
                     None, // provisioned by policy, not by a curator (STO-82)
                     &mut MeldProfiles::None,
+                    false, // spec: DSC-116 -- no one to ask; refuse
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -8945,6 +8980,7 @@ pub fn sync_with_selector(
                 todo_kind,          // spec: DSC-100
                 Some(todo_curator), // spec: STO-82
                 &mut MeldProfiles::None,
+                false, // spec: DSC-116 -- no one to ask; refuse
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -9285,6 +9321,7 @@ pub(crate) fn meld_curated_entry(
         item_kind,
         Some(curator.to_string()),         // spec: STO-82
         &mut MeldProfiles::Curated(entry), // spec: HOOK-142
+        false,                             // spec: DSC-116 -- no one to ask; refuse
     )
 }
 
@@ -12954,6 +12991,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             dangerously_skip_install_hook_check,
             item_kind,
             &mut meld_profiles,
+            yes, // spec: DSC-116
         )?;
         // CLI-23: by default, offer to install the melded source's items
         // right away (preview + prompt). `--register-only` stops at registering.

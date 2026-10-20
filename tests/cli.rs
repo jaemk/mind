@@ -8485,12 +8485,14 @@ fn probe_and_recall_filter_by_kind_and_source() {
 
 #[test]
 fn meld_rejects_source_requiring_a_newer_mind() {
-    // spec: DSC-40
+    // spec: DSC-40, DSC-116 -- no terminal to ask on and no --yes: refuse.
     let sb = Sandbox::new();
     sb.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"9.0\"\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(!r.success, "should refuse a too-new source");
-    assert!(r.stderr.contains("requires mind"), "{}", r.stderr);
+    assert!(r.stderr.contains("requires mind >= 9.0"), "{}", r.stderr);
+    assert!(r.stderr.contains("mind evolve"), "{}", r.stderr);
+    assert!(r.stderr.contains("--yes"), "{}", r.stderr);
     // Rejected: the source is not registered.
     assert!(
         sb.mind(&["recall", "--sources"])
@@ -8501,7 +8503,87 @@ fn meld_rejects_source_requiring_a_newer_mind() {
     // A satisfiable floor melds fine.
     let ok = Sandbox::new();
     ok.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"0.0.1\"\n");
-    assert!(ok.mind(&["meld", &ok.source_spec()]).success);
+    let r = ok.mind(&["meld", &ok.source_spec()]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(!r.stderr.contains("requires mind"), "{}", r.stderr);
+}
+
+#[test]
+fn meld_yes_melds_a_source_requiring_a_newer_mind_with_a_warning() {
+    // spec: DSC-116 -- --yes carries on past the version question, warning.
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"9.0\"\n");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("may not work as expected"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("mind evolve"), "{}", r.stderr);
+    // One warning for the meld, not one per scan.
+    assert_eq!(
+        r.stderr.matches("requires mind >= 9.0").count(),
+        1,
+        "{}",
+        r.stderr
+    );
+    assert!(sb.claude_home.join("skills/review").exists());
+
+    // spec: DSC-40 -- later verbs scan the source with a warning, not an error.
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(probe.stdout.contains("review"), "{}", probe.stdout);
+    assert!(
+        probe.stderr.contains("requires mind >= 9.0"),
+        "{}",
+        probe.stderr
+    );
+}
+
+#[test]
+fn meld_asks_before_melding_a_source_requiring_a_newer_mind() {
+    // spec: DSC-116 -- on a terminal, warn and ask; the default is no.
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"9.0\"\n");
+    let spec = sb.source_spec();
+
+    let no = sb.run(&["meld", &spec], Some("\n"), &[("MIND_TTY", "1")]);
+    assert!(!no.success, "a bare Enter declines");
+    assert!(no.stdout.contains("anyway?"), "{}", no.stdout);
+    assert!(
+        no.stderr.contains("may not work as expected"),
+        "{}",
+        no.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
+
+    let yes = sb.run(&["meld", &spec], Some("y\n"), &[("MIND_TTY", "1")]);
+    assert!(yes.success, "{}", yes.stderr);
+    assert!(
+        !sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
+}
+
+#[test]
+fn meld_names_the_version_gap_when_a_newer_mind_toml_does_not_parse() {
+    // spec: DSC-117
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nmin-mind-version = \"9.0\"\nfuture-key = true\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(!r.success, "an unreadable mind.toml cannot be melded");
+    assert!(r.stderr.contains("requires mind >= 9.0"), "{}", r.stderr);
+    assert!(r.stderr.contains("future-key"), "{}", r.stderr);
+    assert!(r.stderr.contains("mind evolve"), "{}", r.stderr);
 }
 
 #[test]

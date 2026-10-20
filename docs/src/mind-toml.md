@@ -54,7 +54,7 @@ All keys are optional.
 [source]
 description = "James's agent library"   # shown in recall/probe
 namespace = "jk"                         # items install as jk:<name>
-min-mind-version = "0.5"                 # refuse to scan under an older mind
+min-mind-version = "0.5"                 # older mind versions warn before melding
 follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
 # pin-ref = "a1b2c3d"                     # ... or to an exact commit (pick one)
@@ -68,6 +68,12 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   removes it. See [namespacing](namespacing.md). The old key `prefix` still parses
   as a deprecated alias with identical behavior; new sources should use
   `namespace`.
+- **`min-mind-version`**: the oldest `mind` the source supports, as a dotted
+  numeric version. An older `mind` warns that the source may not work as
+  expected and asks before melding it (`meld --yes` carries on; with no
+  terminal and no `--yes` the meld is refused). Once melded, other verbs warn
+  and carry on. `mind init-source` writes the running version here when it
+  creates the file. Run `mind evolve` to update.
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it

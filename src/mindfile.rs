@@ -932,6 +932,31 @@ pub fn version_at_least(running: &str, required: &str) -> bool {
     true
 }
 
+/// The running binary's version without its pre-release or build suffix
+/// (`0.31.0-dev` -> `0.31.0`), the form `init-source` writes as a fresh
+/// `min-mind-version` (INIT-13) and the validator accepts (DSC-40).
+pub fn running_release_version() -> &'static str {
+    let v = env!("CARGO_PKG_VERSION");
+    &v[..v.find(['-', '+']).unwrap_or(v.len())]
+}
+
+/// The `[source].min-mind-version` a source declares when the running binary
+/// is older than it, else `None` (DSC-40).
+pub fn unmet_min_version(mindfile: Option<&MindToml>) -> Option<&str> {
+    mindfile
+        .and_then(|m| m.source.min_mind_version.as_deref())
+        .filter(|required| !version_at_least(env!("CARGO_PKG_VERSION"), required))
+}
+
+/// Pull a plausible `[source].min-mind-version` out of a `mind.toml` the
+/// strict parse rejected (DSC-117). Lenient on purpose: the file may use keys
+/// or tables this binary predates, which is the case worth explaining.
+fn probe_min_version(text: &str) -> Option<String> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    let v = table.get("source")?.get("min-mind-version")?.as_str()?;
+    is_plausible_version(v).then(|| v.to_string())
+}
+
 /// A path with ANSI/control/bidi code points stripped, for a message that will
 /// be printed (DSC-95). A clone directory carries source-controlled components
 /// (an owner, a repo, an item directory name), so a path is not inherently
@@ -961,9 +986,25 @@ impl MindToml {
         // `toml` crate's parse error quotes the offending input line, which is
         // source-controlled text, and a raw ESC byte in a TOML file is always a
         // parse error, so this snippet is always reachable from `meld`/`recall`.
-        let mut parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
-            path: sanitized_path(&file),
-            msg: crate::sanitize::strip_ansi(&e.to_string()),
+        let mut parsed: MindToml = toml::from_str(&text).map_err(|e| {
+            let msg = crate::sanitize::strip_ansi(&e.to_string());
+            // spec: DSC-117 -- a file written for a newer mind likely fails
+            // here on a key this binary predates; name the version gap and
+            // the update rather than leaving a bare schema error.
+            match probe_min_version(&text) {
+                Some(required) if !version_at_least(env!("CARGO_PKG_VERSION"), &required) => {
+                    MindError::MindTomlTooNew {
+                        path: sanitized_path(&file),
+                        required,
+                        running: env!("CARGO_PKG_VERSION").to_string(),
+                        msg,
+                    }
+                }
+                _ => MindError::Toml {
+                    path: sanitized_path(&file),
+                    msg,
+                },
+            }
         })?;
         // spec: DSC-40 — validate format of min-mind-version at parse time.
         if let Some(v) = &parsed.source.min_mind_version {
@@ -1530,6 +1571,62 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn unparseable_mind_toml_names_an_unmet_min_version() {
+        // spec: DSC-117 -- a key this binary predates plus a newer
+        // min-mind-version reads as "update mind", not a bare schema error.
+        let load = |name: &str, body: &str| {
+            let dir =
+                std::env::temp_dir().join(format!("mind-dsc117-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("mind.toml"), body).unwrap();
+            let r = MindToml::load(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            r
+        };
+        let err = load(
+            "new",
+            "[source]\nmin-mind-version = \"99.0\"\nfuture-key = true\n",
+        )
+        .unwrap_err();
+        match &err {
+            MindError::MindTomlTooNew { required, msg, .. } => {
+                assert_eq!(required, "99.0");
+                assert!(msg.contains("future-key"), "{msg}");
+            }
+            other => panic!("expected MindTomlTooNew, got {other:?}"),
+        }
+        assert!(err.to_string().contains("mind evolve"), "{err}");
+
+        // A satisfiable floor keeps the plain schema error: the typo is the
+        // author's, not a version gap.
+        let err = load(
+            "old",
+            "[source]\nmin-mind-version = \"0.0.1\"\nfuture-key = true\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, MindError::Toml { .. }), "{err:?}");
+        // No declared floor: plain schema error too.
+        let err = load("none", "[source]\nfuture-key = true\n").unwrap_err();
+        assert!(matches!(err, MindError::Toml { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn unmet_min_version_compares_against_the_running_binary() {
+        // spec: DSC-40
+        let with = |v: &str| -> MindToml {
+            toml::from_str(&format!("[source]\nmin-mind-version = \"{v}\"\n")).unwrap()
+        };
+        assert_eq!(unmet_min_version(Some(&with("99.0"))), Some("99.0"));
+        assert_eq!(unmet_min_version(Some(&with("0.0.1"))), None);
+        assert_eq!(
+            unmet_min_version(Some(&with(running_release_version()))),
+            None
+        );
+        assert_eq!(unmet_min_version(None), None);
     }
 
     #[test]

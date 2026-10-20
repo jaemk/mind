@@ -3,13 +3,15 @@
 //! Three public functions cover the three new behaviors; no filesystem I/O here.
 
 // The same scaffold text written by INIT-3; kept here so `patch_source_meta`
-// can start from it when no mind.toml exists yet.
+// can start from it when no mind.toml exists yet. `{version}` is filled in by
+// [`scaffold`] with the running release (INIT-13).
 // The `[source]` table accepts both `namespace` and `prefix` (DSC-82 alias).
 // On write, `namespace` is the canonical key (DSC-82); any active `prefix =`
 // line is stripped so a patched file never carries both keys.
-pub(crate) const SCAFFOLD: &str = concat!(
+const SCAFFOLD: &str = concat!(
     "[source]\n",
     "description = \"\"   # what this source offers\n",
+    "min-mind-version = \"{version}\"   # older mind versions warn before melding\n",
     "# namespace = \"prefix\"   # namespace items as prefix:<name>\n",
     "\n",
     "# Declare hooks that run when a consumer melds, upgrades, or unmelds this\n",
@@ -38,6 +40,12 @@ pub(crate) const SCAFFOLD: &str = concat!(
     "# event = \"uninstall\"\n",
     "# optional = true               # the user may decline this step (its failure still aborts)\n",
 );
+
+/// INIT-3 / INIT-13: the scaffold `init-source` writes for a new `mind.toml`,
+/// with `min-mind-version` set to the running release.
+pub(crate) fn scaffold() -> String {
+    SCAFFOLD.replace("{version}", crate::mindfile::running_release_version())
+}
 
 /// INIT-11: resolve the effective plugin name from the three-level priority.
 ///
@@ -101,8 +109,7 @@ pub fn patch_source_meta(
     flat_skills: bool,
     namespace: Option<&str>,
 ) -> String {
-    let base = existing_content.unwrap_or(SCAFFOLD);
-    let mut result = base.to_string();
+    let mut result = existing_content.map_or_else(scaffold, str::to_string);
 
     if flat_skills {
         result = set_key(&result, "flat-skills", "true");
@@ -397,7 +404,36 @@ mod tests {
     fn patch_source_meta_no_flags_returns_scaffold() {
         // Neither flag set: content is unchanged (just the scaffold).
         let out = patch_source_meta(None, false, None);
-        assert_eq!(out, SCAFFOLD, "no-op must return the scaffold unchanged");
+        assert_eq!(out, scaffold(), "no-op must return the scaffold unchanged");
+    }
+
+    #[test]
+    fn scaffold_declares_the_running_release_as_min_mind_version() {
+        // spec: INIT-13
+        let out = scaffold();
+        let line = format!(
+            "min-mind-version = \"{}\"",
+            crate::mindfile::running_release_version()
+        );
+        assert!(out.contains(&line), "{out}");
+        assert!(!out.contains("{version}"), "{out}");
+        // The scaffold must load: the value passes the DSC-40 validator even
+        // on a `-dev` build.
+        let dir = std::env::temp_dir().join(format!("mind-scaffold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), &out).unwrap();
+        let loaded = crate::mindfile::MindToml::load(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let loaded = loaded.expect("scaffold parses").expect("present");
+        assert!(crate::mindfile::unmet_min_version(Some(&loaded)).is_none());
+    }
+
+    #[test]
+    fn running_release_version_drops_the_prerelease_suffix() {
+        // spec: INIT-13
+        let v = crate::mindfile::running_release_version();
+        assert!(crate::mindfile::is_plausible_version(v), "{v}");
+        assert!(env!("CARGO_PKG_VERSION").starts_with(v));
     }
 
     #[test]
