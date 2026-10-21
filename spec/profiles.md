@@ -152,10 +152,11 @@ mind forget owner/repo --profile full       # disable it again
 
 ## Tracking
 
-PROF-21..24 run in a source-scoped upgrade pass: plain `upgrade`, `sync
-[source] --upgrade`, and `curate`'s upgrade change (CUR-6). They do not run for
-`upgrade <item>` or the TUI's confirmed-key apply, since an addition is never an
-item the user named.
+PROF-21..24 run in a source-scoped upgrade pass: plain `upgrade`, `upgrade
+--source <filter>` (CLI-244), `sync [source] --upgrade`, and `curate`'s upgrade
+change (CUR-6). They do not run for `upgrade <item>` (with or without
+`--source`) or the TUI's confirmed-key apply, since an addition is never an item
+the user named.
 
 - `PROF-21` `upgrade` re-expands each profile-tracked source's enabled set
   against the current catalog. An item in the new expansion and not in the

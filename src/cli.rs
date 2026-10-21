@@ -441,7 +441,8 @@ EXAMPLES:
         /// since a filter's blast radius can exceed what the name alone
         /// suggests; unlike the `[Y/n]` confirmation itself, this disclosure
         /// is NOT suppressed by `--yes`. Deprecated: prefer `mind upgrade`,
-        /// which now syncs first by default.
+        /// which now syncs first by default (`mind upgrade --source <filter>`
+        /// for a scoped sync and upgrade).
         // spec: CLI-169 CLI-232 CLI-233
         #[arg(long)]
         upgrade: bool,
@@ -480,6 +481,15 @@ EXAMPLES:
         /// source before the install-hook re-run pass -- even when nothing is
         /// pending -- and this disclosure is NOT suppressed by `--yes`.
         item: Option<String>,
+
+        /// Only sync and upgrade sources matching this filter: an exact name,
+        /// a trailing suffix (e.g. `owner/repo`), or a glob, the same filter
+        /// `sync <source>` takes. Every other source is neither fetched nor
+        /// upgraded, and its hooks do not run. Combines with `[item]` to
+        /// narrow further.
+        // spec: CLI-244
+        #[arg(long, value_name = "SOURCE")]
+        source: Option<String>,
 
         /// Skip the automatic source sync before computing deltas. By default,
         /// `upgrade` fetches each involved source before checking for changes.

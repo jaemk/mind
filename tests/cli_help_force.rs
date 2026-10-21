@@ -605,6 +605,27 @@ fn sync_upgrade_help_notes_the_pass_is_scoped_to_the_selector() {
     );
 }
 
+#[test]
+fn upgrade_help_documents_source_filter() {
+    // spec: CLI-244 -- `upgrade --help` documents `--source` as a sync and
+    // upgrade scope, and `sync --upgrade`'s deprecation points at it.
+    let sb = Sandbox::new();
+    let out = sb.help(&["upgrade", "--help"]);
+    let block = out
+        .split("--source")
+        .nth(1)
+        .expect("upgrade --help must document --source");
+    assert!(
+        block.contains("sync and upgrade") && block.contains("filter"),
+        "upgrade --help's --source doc must describe the scoped sync: {out}"
+    );
+    let sync = sb.help(&["sync", "--help"]);
+    assert!(
+        sync.contains("upgrade --source"),
+        "sync --help's --upgrade deprecation must point at `upgrade --source`: {sync}"
+    );
+}
+
 // ---- L20: `evolve --check`'s help must cover the prerelease rule ----------
 
 #[test]

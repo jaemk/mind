@@ -15689,6 +15689,162 @@ fn sync_source_upgrade_scopes_to_the_named_source_only() {
 }
 
 #[test]
+fn upgrade_source_syncs_and_upgrades_only_the_named_source() {
+    // spec: CLI-244 -- `upgrade --source alpha` fetches and upgrades alpha
+    // alone: beta's item is not upgraded, and beta's clone is not fetched, so a
+    // later `--no-sync` pass over beta still sees no delta.
+    let alpha = Sandbox::bare("alpha");
+    alpha.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let beta = Sandbox::bare("beta");
+    beta.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+
+    // --follow-branch makes each a real clone, so a sync is an actual fetch.
+    for spec in [alpha.source_spec(), beta.source_spec()] {
+        let m = alpha.mind(&["meld", &spec, "--follow-branch", "main", "--register-only"]);
+        assert!(m.success, "{} {}", m.stdout, m.stderr);
+    }
+    assert!(alpha.mind(&["learn", "skill:widget-a"]).success);
+    assert!(alpha.mind(&["learn", "skill:widget-b"]).success);
+
+    alpha.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    beta.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+
+    let r = alpha.mind(&["upgrade", "--source", "alpha", "--yes", "--json"]);
+    assert!(
+        r.success,
+        "upgrade --source alpha failed: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["outcome"], "upgraded", "{}", r.stdout);
+
+    let a_store =
+        std::fs::read_to_string(alpha.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
+    assert!(
+        a_store.contains("edited"),
+        "alpha's item must upgrade: {a_store}"
+    );
+    let b_store =
+        std::fs::read_to_string(alpha.mind_home.join("store/skill/widget-b/SKILL.md")).unwrap();
+    assert!(
+        !b_store.contains("edited"),
+        "beta's item must not upgrade under `--source alpha`: {b_store}"
+    );
+
+    // beta was never fetched: its clone is stale, so a no-sync pass sees nothing.
+    let stale = alpha.mind(&["upgrade", "--source", "beta", "--no-sync", "--json"]);
+    assert!(stale.success, "{} {}", stale.stdout, stale.stderr);
+    assert_eq!(
+        parse_json(&stale.stdout)["outcome"],
+        "up-to-date",
+        "`--source alpha` must not have fetched beta: {}",
+        stale.stdout
+    );
+
+    // A sync-first pass over beta now fetches and upgrades it.
+    let b = alpha.mind(&["upgrade", "--source", "beta", "--yes", "--json"]);
+    assert!(b.success, "{} {}", b.stdout, b.stderr);
+    assert_eq!(parse_json(&b.stdout)["outcome"], "upgraded", "{}", b.stdout);
+}
+
+#[test]
+fn upgrade_source_filter_matching_nothing_is_source_not_found() {
+    // spec: CLI-244 -- the filter follows CLI-231: no match is an error, so a
+    // typo is not reported as "everything is up to date".
+    let sb = Sandbox::bare("alpha");
+    sb.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["upgrade", "--source", "nope", "--yes"]);
+    assert!(!r.success, "an unmatched --source must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("nope"),
+        "error must name the filter: {}",
+        r.stderr
+    );
+
+    // A malformed glob is rejected before anything is fetched.
+    let bad = sb.mind(&["upgrade", "--source", "[bad", "--yes"]);
+    assert!(!bad.success, "a malformed glob must fail: {}", bad.stdout);
+    assert!(
+        bad.stderr.contains("not a valid glob selector"),
+        "expected invalid-pattern error: {}",
+        bad.stderr
+    );
+}
+
+#[test]
+fn upgrade_source_with_item_names_only_the_intersection() {
+    // spec: CLI-244 -- `[item]` and `--source` intersect: a suffix item ref
+    // matching two sources, narrowed by `--source`, upgrades one source and
+    // does not disclose the other as in scope (CLI-233).
+    let one = Sandbox::bare("skills");
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let two = Sandbox::bare("skills");
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+    assert!(one.mind(&["meld", &one.source_spec()]).success);
+    assert!(one.mind(&["meld", &two.source_spec()]).success);
+    assert!(one.mind(&["learn", "skill:widget-a"]).success);
+    assert!(one.mind(&["learn", "skill:widget-b"]).success);
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+
+    // Without --source the item ref spans both sources and discloses that.
+    let wide = one.mind(&["upgrade", "skills#*", "--no-sync"]);
+    assert!(wide.stdout.contains("matched 2 sources"), "{}", wide.stdout);
+
+    // A --source that still spans both: the note quotes both filters.
+    let both = one.mind(&["upgrade", "skills#*", "--source", "skills", "--no-sync"]);
+    assert!(
+        both.stdout
+            .contains("the filters \"skills#*\" and \"skills\" together matched 2 sources"),
+        "{}",
+        both.stdout
+    );
+
+    let one_id = format!("{}/skills", one.base_name());
+    let r = one.mind(&["upgrade", "skills#*", "--source", &one_id, "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let a_store =
+        std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
+    assert!(a_store.contains("edited"), "{a_store}");
+    let b_store =
+        std::fs::read_to_string(one.mind_home.join("store/skill/widget-b/SKILL.md")).unwrap();
+    assert!(!b_store.contains("edited"), "{b_store}");
+    assert!(
+        !r.stdout.contains("matched 2 sources"),
+        "the disclosure must not name a source outside the intersection: {}",
+        r.stdout
+    );
+}
+
+#[test]
 fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // spec: CLI-233 -- CLI-232 scoped `sync <filter> --upgrade` to the matched
     // sources, but a FILTER can match more sources than the user pictured while
@@ -16102,6 +16258,56 @@ fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
         "`sync agents --upgrade` (naming the hooked source) must re-run its \
          install hook: {} missing",
         marker.display()
+    );
+}
+
+#[test]
+fn upgrade_source_does_not_rerun_an_unrelated_sources_hook() {
+    // spec: CLI-244 HOOK-11 -- `upgrade --source tools` re-runs only tools'
+    // hooks; the advanced, hooked `agents` source is left alone until named.
+    let agents = sandbox_with_declared_hook("agents", "touch hookran");
+    let agents_spec = agents.source_spec();
+    assert!(
+        agents
+            .mind(&[
+                "meld",
+                &agents_spec,
+                "--dangerously-skip-install-hook-check"
+            ])
+            .success
+    );
+    let tools = Sandbox::named("tools");
+    assert!(agents.mind(&["meld", &tools.source_spec()]).success);
+
+    let marker = agents.source.clone().join("hookran");
+    assert!(marker.exists(), "the hook should have run on initial meld");
+    std::fs::remove_file(&marker).unwrap();
+    agents.edit_source();
+
+    let r = agents.mind(&[
+        "upgrade",
+        "--source",
+        "tools",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        !marker.exists(),
+        "`upgrade --source tools` must not re-run agents' hook"
+    );
+
+    let r2 = agents.mind(&[
+        "upgrade",
+        "--source",
+        "agents",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r2.success, "{} {}", r2.stdout, r2.stderr);
+    assert!(
+        marker.exists(),
+        "`upgrade --source agents` must re-run its hook"
     );
 }
 

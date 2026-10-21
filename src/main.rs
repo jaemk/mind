@@ -718,12 +718,24 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         ),
         Command::Upgrade {
             item,
+            source,
             no_sync,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         } => {
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
-            if no_sync {
+            if let Some(source) = source {
+                // spec: CLI-244 - scope the sync and the pass to one source.
+                commands::upgrade_source(
+                    paths,
+                    yes,
+                    item.as_deref(),
+                    &source,
+                    no_sync,
+                    dangerously_skip_install_hook_check,
+                    dangerously_skip_build_hook_check,
+                )
+            } else if no_sync {
                 commands::upgrade_no_sync(
                     paths,
                     yes,

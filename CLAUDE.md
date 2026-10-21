@@ -59,7 +59,7 @@ maintained by hand.
 | `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step; `learn <source> --profile <name>` enables a profile on a melded source |
 | `forget <item>` | remove symlink + store copy; `forget <source> --profile <name>` disables a profile and forgets the items only it wanted |
 | `sync [source] [--upgrade]` | fetch every source (or only those matching `[source]`), refresh recorded commit (`--upgrade` then runs an upgrade pass) |
-| `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
+| `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out; `--source <filter>` syncs and upgrades only the matched sources) |
 | `hooks run <target>` / `hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect; reuses the meld/learn consent machinery |
 | `curate [--check] [--yes] [--prune] [--adopt <identity>]` | apply what melded curators declare now: register + install newly listed entries, re-pin, upgrade curated sources, report entries a curator dropped (`--prune` applies those); `--adopt` brings a pre-existing source under a curator's ownership |
 | `evolve [--check] [--to V]` | update the `mind` binary itself to the latest release (or a pinned version) |
