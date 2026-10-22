@@ -653,8 +653,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   disclosure (CLI-235): unlike a `[Y/n]` prompt, this is not a confirmation
   step to skip.
 - `CLI-234` The multi-source disclosure's scope (CLI-233) is not
-  `sync <source> --upgrade`'s filter alone: it is the UNION of every scoping
-  mechanism in play for the pass -- a `sync`/`upgrade` source filter, an
+  `sync <source> --upgrade`'s filter alone: it covers every scoping
+  mechanism in play for the pass (their intersection when more than one
+  applies, CLI-244, since the pass touches only sources every one admits) --
+  a `sync`/`upgrade` source filter, an
   `upgrade <item>` item-ref filter (whose embedded `owner/repo#` qualifier is
   itself a filter over sources, CLI-63/CLI-5), and the TUI's confirmed-key
   scope (TUI-72/TUI-73) -- each of which can independently span more than one
@@ -688,6 +690,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   up contributing a pending upgrade, since the disclosure fires before
   `pending` is computed -- and ends by naming the remedy: narrow with a
   longer suffix, or the full `host/owner/repo` identity.
+- `CLI-244` `upgrade --source <filter>` syncs and upgrades the melded sources
+  the filter matches and no others. The filter is `sync`'s `[source]` filter
+  (CLI-231): an exact name, a trailing suffix, or a glob; one that matches
+  nothing is a `SourceNotFound` error and a malformed glob is
+  `InvalidPattern`. The pre-pass fetch (CLI-169) is limited to the matched
+  sources, so every other source's clone and recorded commit are untouched;
+  `--no-sync` still skips the fetch. The pass is the one `sync <filter>
+  --upgrade` runs (CLI-232): only items whose recorded source matched are
+  considered, only the matched sources' hooks re-run (HOOK-11), and their
+  profiles are re-expanded (PROF-21). An `[item]` argument narrows the pass
+  further: the scope is the intersection of the two, the multi-source
+  disclosure (CLI-233) names that intersection and quotes both filters'
+  text (CLI-235), and profiles are not
+  re-expanded (PROF-21's `upgrade <item>` rule).
 - `CLI-54` A per-source failure (e.g. a network error on one remote) does not
   abort the run: `sync` refreshes each source independently, persists the
   progress made (the recorded commits of the sources that succeeded), reports

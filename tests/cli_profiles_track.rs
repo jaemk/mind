@@ -969,6 +969,59 @@ fn sync_upgrade_scoped_to_another_source_leaves_this_one_untracked_for_now() {
 }
 
 #[test]
+fn upgrade_source_tracks_the_named_source_profiles() {
+    // spec: PROF-21 PROF-22 CLI-244 -- `upgrade --source <filter>` runs the
+    // same source-scoped pass as `sync <filter> --upgrade`.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(
+        "[profiles]\n\
+         default = [\"basic\"]\n\
+         basic = [\"skill:review\", \"skill:test\"]\n",
+    );
+    let r = sb.ok(&["upgrade", "--source", &sb.identity(), "--yes"]);
+    assert!(r.stdout.contains("skill:test"), "{}", r.all());
+    assert!(r.all().contains("rule:style left profile"), "{}", r.all());
+    assert!(sb.manifest_item("skill:test").is_some());
+    assert_eq!(
+        sb.recorded_snapshot(),
+        Some(svec(&["skill:review", "skill:test"]))
+    );
+}
+
+#[test]
+fn upgrade_source_scoped_to_another_source_leaves_this_one_untracked() {
+    // spec: PROF-21 CLI-244 -- a source outside `--source` is not re-expanded.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    let _other = register_other(&sb, "other", "");
+    sb.commit_toml(PROFILES_PLUS_TEST);
+    sb.ok(&["upgrade", "--source", "other", "--yes"]);
+    assert!(sb.manifest_item("skill:test").is_none());
+    assert_eq!(
+        sb.recorded_snapshot(),
+        Some(svec(&["rule:style", "skill:review"]))
+    );
+}
+
+#[test]
+fn upgrade_source_with_item_does_not_track_profiles() {
+    // spec: PROF-21 CLI-244 -- an `[item]` narrows `--source` to named items,
+    // so an addition (an item it did not name) is not installed.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(PROFILES_PLUS_TEST);
+    sb.ok(&[
+        "upgrade",
+        "skill:review",
+        "--source",
+        &sb.identity(),
+        "--yes",
+    ]);
+    assert!(sb.manifest_item("skill:test").is_none());
+}
+
+#[test]
 fn item_scoped_upgrade_does_not_track_profiles() {
     // spec: PROF-21 -- `upgrade <item>` names an item; an addition is by
     // definition one it did not name, and departures are not recorded either.

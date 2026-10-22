@@ -59,13 +59,14 @@ Quote globs so the shell does not expand them. A glob matches the installed
   bare item name given to `learn`, `forget`, or `upgrade` that exists in two
   kinds (`skill:greet` and `agent:greet`) must be qualified.
 - **Filters** act on every match: `sync [source]`, `--source <filter>` on
-  `recall` and `probe`, `hooks run <target>`, any glob, and the `owner/repo#`
-  part of an `upgrade` argument.
+  `upgrade`, `recall`, and `probe`, `hooks run <target>`, any glob, and the
+  `owner/repo#` part of an `upgrade` argument.
 - A source filter is an exact name, a trailing part (`repo`, `owner/repo`), or a
   glob over the full `host/owner/repo` identity.
 
-With no match: `sync` errors, `upgrade` reports up to date, `--source` lists
-nothing, and `meld --learn` errors with the source left melded.
+With no match: `sync` and `upgrade --source` error, `upgrade <item>` reports up
+to date, `recall`/`probe --source` list nothing, and `meld --learn` errors with
+the source left melded.
 
 ## meld
 
@@ -264,6 +265,7 @@ on confirmation. `ITEM` is a filter.
 
 | flag | effect |
 |------|--------|
+| `--source <filter>` | fetch and upgrade only the matching sources; combines with `ITEM` |
 | `--no-sync` | skip the fetch; compare against the clones on disk |
 | `--dangerously-skip-install-hook-check` | run install or update hook re-runs without asking |
 | `--dangerously-skip-build-hook-check` | run build hooks without asking |

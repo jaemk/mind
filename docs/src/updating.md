@@ -16,13 +16,18 @@ after. Nothing changes until you confirm.
 ```
 mind upgrade                       # everything
 mind upgrade skill:review          # one item
-mind upgrade 'owner/repo#*'        # every item from one source
+mind upgrade 'owner/repo#*'        # every installed item from one source
+mind upgrade --source owner/repo   # fetch and upgrade one source only
 mind upgrade --no-sync             # skip the fetch; compare against the clones on disk
 mind upgrade --yes                 # apply without asking
 ```
 
-A filter that matches no installed item reports that everything is up to date
-rather than erroring. Each upgrade is transactional: the new copy is built
+`--source` takes the same filter as `sync [source]` and leaves every other
+source unfetched and unchanged. Unlike `'owner/repo#*'`, it also offers items
+the source added to an enabled install profile. Add an item to narrow it further
+(`mind upgrade skill:review --source owner/repo`). A `--source` filter that
+matches no melded source is an error; an item filter that matches no installed
+item reports that everything is up to date. Each upgrade is transactional: the new copy is built
 first and the old one is kept until the swap succeeds, so a failed upgrade
 leaves the previous version in place.
 
@@ -30,7 +35,7 @@ leaves the previous version in place.
 
 - offers items a source added to an [install profile](choosing-items.md#install-profiles)
   you enabled, and reports items that left one without removing them. This
-  runs on a plain `upgrade` or a source-wide one, not on `upgrade <item>`.
+  runs on a plain `upgrade` or `upgrade --source`, not on `upgrade <item>`.
 - re-runs a source's install hooks when the source moved to a new commit, or
   its update hooks if it declares any. See [Run setup with hooks](install-hooks.md).
 - reports a rename when an item's installed name changed (for example after a

@@ -8465,6 +8465,25 @@ pub fn sync(
     )
 }
 
+/// Resolve a `[source]` filter (CLI-231) to the names of every melded source it
+/// matches: exactly, by trailing suffix, or by glob. A filter that matches
+/// nothing is a `SourceNotFound`, so a typo is reported rather than silently
+/// selecting nothing. Shared by `sync <source>` and `upgrade --source` (CLI-244).
+fn select_sources(registry: &Registry, sel: &str) -> Result<Vec<String>> {
+    let names: Vec<String> = registry
+        .sources
+        .iter()
+        .filter(|s| crate::resolve::source_matches_glob(&s.name, sel))
+        .map(|s| s.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Err(MindError::SourceNotFound {
+            name: sel.to_string(),
+        });
+    }
+    Ok(names)
+}
+
 /// `mind sync [source]` — refresh melded source clones and catalogs. With a
 /// `[source]` selector, only matching sources are fetched (CLI-231); with none,
 /// every source is (CLI-50).
@@ -8667,23 +8686,9 @@ pub fn sync_with_selector(
     // source names. A selector that matches nothing (against a non-empty
     // registry) is a SourceNotFound, so a typo is reported rather than silently
     // syncing nothing. With no selector, every source is in scope (CLI-50).
-    let selected: Option<Vec<String>> = match source_selector {
-        Some(sel) => {
-            let names: Vec<String> = registry
-                .sources
-                .iter()
-                .filter(|s| crate::resolve::source_matches_glob(&s.name, sel))
-                .map(|s| s.name.clone())
-                .collect();
-            if names.is_empty() {
-                return Err(MindError::SourceNotFound {
-                    name: sel.to_string(),
-                });
-            }
-            Some(names)
-        }
-        None => None,
-    };
+    let selected: Option<Vec<String>> = source_selector
+        .map(|sel| select_sources(&registry, sel))
+        .transpose()?;
     let in_scope = |name: &str| {
         selected
             .as_ref()
@@ -9080,8 +9085,9 @@ pub fn sync_with_selector(
             yes,
             None,
             true,
-            selected.as_deref(),
-            source_selector,
+            selected.as_deref().map_or(SourceScope::All, |names| {
+                SourceScope::Names(names, source_selector)
+            }),
             None,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
@@ -9115,20 +9121,12 @@ pub fn sync_with_selector(
 
 /// Sync sources relevant to the upgrade scope. Per-source failures are reported
 /// and skipped (CLI-54 resilience); the upgrade pass uses whatever was refreshed.
+/// `item_ref` limits the fetch to sources with a matching installed item, and
+/// `names` to an explicit set (`upgrade --source`, CLI-244; curate.rs's CUR-2
+/// refresh, which scopes the pre-plan fetch to curators and curated sources).
+/// Both filters must agree a source is in scope; `None` for either one imposes
+/// no restriction from it.
 // spec: CLI-169
-pub(crate) fn sync_sources_for_upgrade(
-    paths: &Paths,
-    registry: &mut Registry,
-    item_ref: Option<&str>,
-    out: &crate::render::OutputCtx,
-) -> Result<()> {
-    sync_sources_for_upgrade_scoped(paths, registry, item_ref, None, out)
-}
-
-/// As [`sync_sources_for_upgrade`], with an additional optional `names` filter
-/// (curate.rs's CUR-2 refresh, which scopes the pre-plan fetch to curators and
-/// curated sources rather than the whole registry). Both filters must agree a
-/// source is in scope; `None` for either one imposes no restriction from it.
 pub(crate) fn sync_sources_for_upgrade_scoped(
     paths: &Paths,
     registry: &mut Registry,
@@ -9244,6 +9242,33 @@ pub fn upgrade_no_sync(
     )?)
 }
 
+/// `mind upgrade --source <filter> [item]` — the upgrade pass scoped to the
+/// melded sources the filter matches (CLI-244). The pre-pass sync fetches only
+/// those sources (unless `no_sync`), and the pass upgrades, re-runs hooks for,
+/// and re-expands profiles of only those sources, exactly as `sync <filter>
+/// --upgrade` does (CLI-232). An `item_ref` narrows it further.
+// spec: CLI-244
+pub fn upgrade_source(
+    paths: &Paths,
+    yes: bool,
+    item_ref: Option<&str>,
+    source_selector: &str,
+    no_sync: bool,
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<()> {
+    emit_upgrade_result(upgrade_inner_scoped(
+        paths,
+        yes,
+        item_ref,
+        no_sync,
+        SourceScope::Filter(source_selector),
+        None,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )?)
+}
+
 /// An upgrade pass restricted to a set of SOURCE identities, with the pre-pass
 /// fetch already done by the caller (`no_sync`).
 ///
@@ -9265,8 +9290,7 @@ pub(crate) fn upgrade_sources_no_sync(
         yes,
         None,
         true,
-        Some(sources),
-        None,
+        SourceScope::Names(sources, None),
         None,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
@@ -9360,8 +9384,7 @@ pub fn upgrade_no_sync_keys(
         yes,
         None,
         true,
-        None,
-        None,
+        SourceScope::All,
         Some(keys),
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
@@ -9398,38 +9421,45 @@ fn upgrade_inner(
         yes,
         item_ref,
         no_sync,
-        None,
-        None,
+        SourceScope::All,
         None,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
     )
 }
 
+/// Which sources an upgrade pass may touch (CLI-232, CLI-244).
+#[derive(Clone, Copy)]
+enum SourceScope<'a> {
+    /// Every source: an unscoped `mind upgrade`.
+    All,
+    /// Names the caller already resolved, plus the filter text that produced
+    /// them when there is one (`sync <source> --upgrade`; `curate` has none).
+    Names(&'a [String], Option<&'a str>),
+    /// An `upgrade --source` filter, resolved against the registry the pass
+    /// itself loads (CLI-231 matching).
+    Filter(&'a str),
+}
+
 /// The upgrade pass, additionally restricted to a `source_scope` (CLI-232, H2
-/// fix) and/or a `key_scope` (TUI-72, TUI-73). `source_scope` is threaded from
-/// `sync <source> --upgrade`'s already-computed selector (`sync_inner`'s
-/// `selected`): `None` means every source is in scope (unscoped `mind
-/// upgrade`, unchanged); `Some(names)` restricts both the per-item delta loop
-/// AND the HOOK-11 install-hook re-run to sources in `names`, so `sync
-/// <source> --upgrade` cannot silently upgrade items from (or re-run install
-/// hooks for, HOOK-11) a source the caller never named. `source_filter_desc`
-/// is the raw filter TEXT that produced `source_scope` (the `sync <source>`
-/// selector string), used only to echo it in the CLI-234/CLI-235 disclosure
-/// below (M19); `item_ref` doubles as its own filter text when given (the
-/// `upgrade <item>` case), so callers with an `item_ref` pass `None` here.
-/// `key_scope` is the analogous restriction by exact item KEY (`kind:name`)
-/// rather than by source or by `item_ref` glob, threaded from the TUI's
-/// confirmed-set apply (`upgrade_no_sync_keys`); `None` means unrestricted by
-/// key (every other caller, unchanged).
+/// fix, and CLI-244) and/or a `key_scope` (TUI-72, TUI-73). `source_scope`
+/// restricts the pre-pass fetch, the per-item delta loop, AND the HOOK-11
+/// install-hook re-run to the scoped sources, so `sync <source> --upgrade` or
+/// `upgrade --source` cannot silently upgrade items from (or re-run install
+/// hooks for, HOOK-11) a source the caller never named. Its filter text, when
+/// there is one, is echoed in the CLI-234/CLI-235 disclosure below (M19),
+/// alongside `item_ref`, which doubles as its own filter text. `key_scope` is
+/// the analogous restriction by exact item KEY (`kind:name`) rather than by
+/// source or by `item_ref` glob, threaded from the TUI's confirmed-set apply
+/// (`upgrade_no_sync_keys`); `None` means unrestricted by key (every other
+/// caller, unchanged).
 #[allow(clippy::too_many_arguments)]
 fn upgrade_inner_scoped(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
     no_sync: bool,
-    source_scope: Option<&[String]>,
-    source_filter_desc: Option<&str>,
+    source_scope: SourceScope<'_>,
     key_scope: Option<&[String]>,
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
@@ -9439,18 +9469,36 @@ fn upgrade_inner_scoped(
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
 
+    let (source_scope, source_filter_desc): (Option<HashSet<String>>, Option<&str>) =
+        match source_scope {
+            SourceScope::All => (None, None),
+            SourceScope::Names(names, desc) => (Some(names.iter().cloned().collect()), desc),
+            // spec: CLI-244 -- the same filter `sync <source>` takes (CLI-231).
+            SourceScope::Filter(sel) => {
+                crate::resolve::validate_source_selector(sel)?;
+                let names = select_sources(&registry, sel)?;
+                (Some(names.into_iter().collect()), Some(sel))
+            }
+        };
+
     // spec: CLI-169 - sync each involved source before computing deltas, unless
     // --no-sync is given. Per-source failures are reported and skipped (CLI-54);
     // the upgrade pass runs on the sources that did succeed.
+    // spec: CLI-244 -- a source scope narrows the fetch too, so `upgrade
+    // --source <filter>` syncs only the sources it names.
     if !no_sync {
-        sync_sources_for_upgrade(paths, &mut registry, item_ref, &out)?;
+        sync_sources_for_upgrade_scoped(
+            paths,
+            &mut registry,
+            item_ref,
+            source_scope.as_ref(),
+            &out,
+        )?;
     }
 
     let manifest = Manifest::load(paths)?;
 
     let filter = item_ref.map(parse_item_ref).transpose()?;
-    let source_scope: Option<HashSet<String>> =
-        source_scope.map(|names| names.iter().cloned().collect());
     // spec: TUI-72 TUI-73 - the TUI's confirmed-key scope (exact `kind:name`
     // match), analogous to `source_scope` but by item identity rather than by
     // source or by `filter`'s glob.
@@ -9484,40 +9532,45 @@ fn upgrade_inner_scoped(
             .collect::<HashSet<String>>()
     });
 
-    // spec: CLI-234 -- the multi-source disclosure's scope is the UNION of
-    // every scoping mechanism in play (a filter, a source scope, or a key
-    // scope), computed here BEFORE `hook_scope` below consumes `from_filter`/
-    // `from_keys` by moving them into its (intersecting, not union-ing)
-    // candidate set. `CLI-233`'s original form derived the note's names from
-    // `source_scope` alone (the `sync <filter> --upgrade` case only), so
-    // `upgrade '<suffix>#*'` -- an identical HOOK-11 blast radius, every
-    // matched source's items upgraded and its install hook possibly re-run --
-    // never populated it: `source_scope` is always `None` for a plain
-    // `upgrade <item>` call, so `scope_names` stayed empty and the note never
-    // fired no matter how many sources the item-ref filter actually matched.
+    // spec: CLI-234 -- the multi-source disclosure's scope covers every
+    // scoping mechanism in play (a filter, a source scope, or a key scope).
+    // `CLI-233`'s original form derived the note's names from `source_scope`
+    // alone (the `sync <filter> --upgrade` case only), so `upgrade
+    // '<suffix>#*'` -- an identical HOOK-11 blast radius, every matched
+    // source's items upgraded and its install hook possibly re-run -- never
+    // populated it: `source_scope` is always `None` for a plain `upgrade
+    // <item>` call, so `scope_names` stayed empty and the note never fired no
+    // matter how many sources the item-ref filter actually matched.
+    // spec: CLI-244 -- `upgrade <item> --source <filter>` combines two
+    // mechanisms; the pass touches only the sources every one admits, so the
+    // note names their intersection (the same set the HOOK-11 re-run is
+    // scoped to), not the union, which would name a source the pass never
+    // touches.
+    let hook_scope: Option<HashSet<String>> = {
+        let candidates: Vec<HashSet<String>> = [from_filter, source_scope.clone(), from_keys]
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut candidates = candidates.into_iter();
+        candidates
+            .next()
+            .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
+    };
     let scope_names: Vec<String> = {
-        let mut set: HashSet<String> = HashSet::new();
-        for s in [
-            from_filter.as_ref(),
-            source_scope.as_ref(),
-            from_keys.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            set.extend(s.iter().cloned());
-        }
-        let mut v: Vec<String> = set.into_iter().collect();
+        let mut v: Vec<String> = hook_scope.iter().flatten().cloned().collect();
         v.sort();
         v
     };
-    // spec: CLI-235 -- the raw filter TEXT to echo in the note (M19): an
-    // `item_ref` (the `upgrade <item>` case) doubles as its own filter text;
-    // otherwise fall back to `source_filter_desc` (the `sync <source>`
-    // selector string). Both `None` for the TUI's key-scoped apply, which has
-    // no textual filter to echo.
-    let filter_desc = item_ref.or(source_filter_desc);
-    let multi_source_note = multi_source_upgrade_note(&scope_names, filter_desc);
+    // spec: CLI-235 CLI-244 -- the raw filter TEXT to echo in the note (M19):
+    // an `item_ref` (the `upgrade <item>` case) doubles as its own filter
+    // text, and `source_filter_desc` is the `sync <source>` / `upgrade
+    // --source` string; both are quoted when both shaped the scope. Neither
+    // exists for the TUI's key-scoped apply, which has no text to echo.
+    let filter_desc: Vec<&str> = [item_ref, source_filter_desc]
+        .into_iter()
+        .flatten()
+        .collect();
+    let multi_source_note = multi_source_upgrade_note(&scope_names, &filter_desc);
     // spec: CLI-235 -- hoisted ABOVE `rerun_source_hooks` and unconditional on
     // `yes`/`pending` (M1: this used to print only from inside the `!yes`
     // confirmation block below, which is reached AFTER `rerun_source_hooks`
@@ -9540,17 +9593,6 @@ fn upgrade_inner_scoped(
             println!("  {} {note}", out.warn());
         }
     }
-
-    let hook_scope: Option<HashSet<String>> = {
-        let candidates: Vec<HashSet<String>> = [from_filter, source_scope.clone(), from_keys]
-            .into_iter()
-            .flatten()
-            .collect();
-        let mut candidates = candidates.into_iter();
-        candidates
-            .next()
-            .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
-    };
 
     // HOOK-11, HOOK-121, HOOK-122: run each source's pending source-level hooks
     // for this update -- its update hooks when it declares any, else its
@@ -12736,8 +12778,13 @@ fn json_confirmation_action(base: impl std::fmt::Display, json: bool) -> String 
 /// single-match filter both leave the confirmation exactly as it was before
 /// CLI-233 -- a single match already reads as naming that one source, so
 /// growing the disclosure there would be noise, not signal.
-// spec: CLI-233 CLI-234 CLI-235
-fn multi_source_upgrade_note(names: &[String], filter_desc: Option<&str>) -> Option<String> {
+///
+/// `filters` is the text of every filter that shaped the scope: none for the
+/// TUI's key-scoped apply, one for `sync <filter>` or `upgrade <item>`, two for
+/// `upgrade <item> --source <filter>` (CLI-244), whose scope is their
+/// intersection, so quoting only one would misstate what did the matching.
+// spec: CLI-233 CLI-234 CLI-235 CLI-244
+fn multi_source_upgrade_note(names: &[String], filters: &[&str]) -> Option<String> {
     if names.len() <= 1 {
         return None;
     }
@@ -12746,9 +12793,14 @@ fn multi_source_upgrade_note(names: &[String], filter_desc: Option<&str>) -> Opt
     // spec: M19 -- end with the narrowing remedy (a longer suffix, or the
     // full `host/owner/repo` identity), matching every other confirmation in
     // this module that states a real next step rather than just a warning.
-    let scope = match filter_desc {
-        Some(f) => format!("the filter \"{}\"", strip_ansi(f)),
-        None => "this upgrade's scope".to_string(),
+    let quoted: Vec<String> = filters
+        .iter()
+        .map(|f| format!("\"{}\"", strip_ansi(f)))
+        .collect();
+    let scope = match quoted.as_slice() {
+        [] => "this upgrade's scope".to_string(),
+        [one] => format!("the filter {one}"),
+        many => format!("the filters {} together", many.join(" and ")),
     };
     Some(format!(
         "{scope} matched {} sources; every matched source's items are in scope for this pass, and its install hook may be re-run: {}. Narrow with a longer suffix, or the full host/owner/repo identity, to target fewer.",
@@ -15872,7 +15924,7 @@ mod tests {
         // spec: CLI-233 -- an unscoped `--upgrade` pass (bare `mind upgrade`,
         // or `sync --upgrade` with no `[source]` filter) must not grow the
         // prompt: `scope_names` is empty in that case.
-        assert!(multi_source_upgrade_note(&[], None).is_none());
+        assert!(multi_source_upgrade_note(&[], &[]).is_none());
     }
 
     #[test]
@@ -15881,7 +15933,7 @@ mod tests {
         // like naming that source already; the prompt must not grow.
         let names = vec!["github.com/acme/skills".to_string()];
         assert!(
-            multi_source_upgrade_note(&names, Some("skills")).is_none(),
+            multi_source_upgrade_note(&names, &["skills"]).is_none(),
             "a single-match filter must not grow the confirmation"
         );
     }
@@ -15898,7 +15950,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, Some("skills"))
+        let note = multi_source_upgrade_note(&names, &["skills"])
             .expect("a multi-match filter must produce a naming note");
         assert!(
             note.contains("github.com/acme/skills"),
@@ -15922,10 +15974,26 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, &["skills"]).expect("multi-match note");
         assert!(
             note.contains("skills"),
             "note must echo the filter string: {note}"
+        );
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_quotes_both_filters_when_combined() {
+        // spec: CLI-244 -- `upgrade <item> --source <filter>`'s scope is the
+        // intersection of both, so the note quotes both, not the item alone.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note =
+            multi_source_upgrade_note(&names, &["skills#*", "*/skills"]).expect("multi-match note");
+        assert!(
+            note.contains("\"skills#*\"") && note.contains("\"*/skills\""),
+            "note must quote both filters: {note}"
         );
     }
 
@@ -15938,7 +16006,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, &["skills"]).expect("multi-match note");
         assert!(
             note.contains("host/owner/repo") || note.to_lowercase().contains("narrow"),
             "note must state a narrowing remedy: {note}"
@@ -15955,7 +16023,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, None).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, &[]).expect("multi-match note");
         assert!(
             !note.contains('"'),
             "must not fabricate a quoted filter string: {note}"
@@ -15972,7 +16040,7 @@ mod tests {
             "\x1b[2Jevil".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, None).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, &[]).expect("multi-match note");
         assert!(
             !note.contains('\x1b'),
             "ANSI escape byte must be stripped: {note:?}"
@@ -15992,7 +16060,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, &["skills"]).expect("multi-match note");
         let action = json_confirmation_action(format!("applying pending upgrades ({note})"), true);
         assert!(
             action.contains("github.com/acme/skills"),

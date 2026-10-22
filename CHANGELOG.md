@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `mind upgrade --source <filter>` fetches and upgrades only the matching
+  sources, leaving every other source unfetched. It takes the same filter as
+  `sync [source]` and combines with an `[item]` argument.
+
 ## [0.31.0] - 2026-10-20
 
 ### Added

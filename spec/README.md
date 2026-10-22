@@ -232,6 +232,7 @@ and verified.
 | `unmeld` accepts `remove`/`rm` as additional visible aliases | done | CLI-230 |
 | `sync [source]` accepts an optional source filter, syncing every matching source | done | CLI-231 |
 | `sync <filter> --upgrade`'s upgrade pass and its hook re-run are scoped to the filter's matched sources | done | CLI-232 |
+| `upgrade --source <filter>` syncs and upgrades only the matched sources; composes with `[item]` | done | CLI-244 |
 | `sync <filter> --upgrade` names the filter's matched sources in the confirmation when it matched more than one | done | CLI-233 |
 | Item-name capture rejects control/bidi/zero-width code points: a hard error for a `mind.toml` declaration, skip-with-warning in the convention scan | done | DSC-96 |
 | `[[items]] link` target is confined to the item kind's directory; anything else is refused | done | DSC-97 |
