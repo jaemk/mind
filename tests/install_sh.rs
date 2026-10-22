@@ -13,10 +13,42 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Serializes writing a fake executable against forking a child. A child
+/// forked while another test thread holds a script open for writing inherits
+/// that fd until it execs, and exec'ing the script in that window fails with
+/// ETXTBSY. `sh` then skips the fake on `PATH` and runs the real `curl`,
+/// which reaches the network and resolves the real latest release.
+static EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+fn exec_lock() -> std::sync::MutexGuard<'static, ()> {
+    EXEC_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `Command::output` with the fork taken under [`EXEC_LOCK`]. `spawn` returns
+/// once the child has exec'd (and so closed the inherited fds), so the lock is
+/// released before waiting on the child.
+trait LockedOutput {
+    fn locked_output(&mut self) -> std::io::Result<Output>;
+}
+
+impl LockedOutput for Command {
+    fn locked_output(&mut self) -> std::io::Result<Output> {
+        let child = {
+            let _guard = exec_lock();
+            self.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()?
+        };
+        child.wait_with_output()
+    }
+}
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -42,6 +74,7 @@ fn scratch_dir(tag: &str) -> PathBuf {
 }
 
 fn write_exec(path: &Path, content: &str) {
+    let _guard = exec_lock();
     std::fs::write(path, content).expect("write script");
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path).expect("stat script").permissions();
@@ -63,15 +96,15 @@ fn build_asset_tarball(out_path: &Path, content: &[u8]) {
     perms.set_mode(0o755);
     std::fs::set_permissions(&bin, perms).expect("chmod staged binary");
 
-    let status = Command::new("tar")
+    let out = Command::new("tar")
         .arg("-czf")
         .arg(out_path)
         .arg("-C")
         .arg(&staging)
         .arg("mind")
-        .status()
+        .locked_output()
         .expect("spawn tar");
-    assert!(status.success(), "tar packaging must succeed");
+    assert!(out.status.success(), "tar packaging must succeed");
     let _ = std::fs::remove_dir_all(&staging);
 }
 
@@ -94,7 +127,7 @@ fn sha256_of(path: &Path) -> String {
     }
     let out = cmd
         .arg(path)
-        .output()
+        .locked_output()
         .unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
     assert!(out.status.success(), "{tool} must succeed on {path:?}");
     String::from_utf8_lossy(&out.stdout)
@@ -191,7 +224,7 @@ fn run_install_sh(bin_dir: &Path, install_dir: &Path) -> std::process::Output {
         .env("PATH", new_path)
         .env("MIND_INSTALL_DIR", install_dir)
         .env_remove("MIND_VERSION")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh")
 }
 
@@ -229,7 +262,7 @@ fn run_install_sh_pinned(
         .env("PATH", new_path)
         .env("MIND_INSTALL_DIR", install_dir)
         .env("MIND_VERSION", version)
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh")
 }
 
@@ -724,7 +757,7 @@ fn install_sh_falls_back_over_wget_when_curl_is_absent() {
         .env("PATH", fx.bin_dir.display().to_string())
         .env("MIND_INSTALL_DIR", &fx.install_dir)
         .env_remove("MIND_VERSION")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh under a restricted PATH");
     assert!(
         out.status.success(),
@@ -780,7 +813,7 @@ fn install_sh_fetch_to_refuses_without_curl_or_wget() {
         .env("PATH", fx.bin_dir.display().to_string())
         .env("MIND_INSTALL_DIR", &fx.install_dir)
         .env("MIND_VERSION", "9.9.9")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh under a restricted PATH");
 
     assert!(
@@ -837,7 +870,7 @@ fn install_sh_fetch_refuses_without_curl_or_wget_when_version_is_not_pinned() {
         .env("PATH", fx.bin_dir.display().to_string())
         .env("MIND_INSTALL_DIR", &fx.install_dir)
         .env_remove("MIND_VERSION")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh under a restricted PATH");
 
     assert!(
@@ -898,7 +931,7 @@ fn install_sh_prefers_curl_over_wget_when_both_are_present() {
         .env("PATH", fx.bin_dir.display().to_string())
         .env("MIND_INSTALL_DIR", &fx.install_dir)
         .env_remove("MIND_VERSION")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh under a restricted PATH");
 
     assert!(
@@ -954,7 +987,7 @@ fn install_sh_uses_curl_when_wget_is_genuinely_absent() {
         .env("PATH", fx.bin_dir.display().to_string())
         .env("MIND_INSTALL_DIR", &fx.install_dir)
         .env_remove("MIND_VERSION")
-        .output()
+        .locked_output()
         .expect("spawn sh resources/install.sh under a restricted PATH");
 
     assert!(
