@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-10-22
+
+### Changed
+
+- Update dependencies to their latest compatible versions. For the HTTP client
+  `evolve` uses: `ureq` 3.5.0 (TLS dependency security updates, a fix for
+  protocol-relative redirects in `ureq-proto` 0.6.5, TLS handshake bounded by
+  the connect timeout), `rustls-platform-verifier` 0.7.1, and `aws-lc-rs`
+  1.18.2. Also `clap` 4.6.7, `cached` 4.0.3, `serde_json` 1.0.154,
+  `thiserror` 2.0.21, and `pulldown-cmark` 0.13.5.
+
 ## [0.32.0] - 2026-10-21
 
 ### Added
@@ -1918,7 +1929,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.32.1...HEAD
+[0.32.1]: https://github.com/jaemk/mind/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/jaemk/mind/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/jaemk/mind/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/jaemk/mind/compare/v0.30.0...v0.30.1
