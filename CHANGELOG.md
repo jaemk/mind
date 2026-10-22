@@ -6,11 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-21
+
 ### Added
 
 - `mind upgrade --source <filter>` fetches and upgrades only the matching
   sources, leaving every other source unfetched. It takes the same filter as
   `sync [source]` and combines with an `[item]` argument.
+
+### Security
+
+- `rustls-webpki` updated to 0.103.16 and `webpki-roots` /
+  `webpki-root-certs` to 1.0.10, clearing RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382, and RUSTSEC-2026-0383. All are transitive, backing the
+  HTTP client `evolve` uses.
 
 ## [0.31.0] - 2026-10-20
 
@@ -1909,7 +1918,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/jaemk/mind/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/jaemk/mind/compare/v0.30.1...v0.31.0
 [0.30.1]: https://github.com/jaemk/mind/compare/v0.30.0...v0.30.1
 [0.30.0]: https://github.com/jaemk/mind/compare/v0.29.0...v0.30.0
