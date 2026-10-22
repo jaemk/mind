@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::error::{ItemKind, MindError, Result};
 use crate::git::validate_ref_value;
 use crate::source::Pin;
+use crate::version::{Template, Version};
 
 /// The lifecycle event a hook is bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,9 +137,60 @@ pub struct SourceMeta {
     /// with no `skills/` container. Default false (the DSC-10 container behavior).
     #[serde(rename = "flat-skills", default)]
     pub flat_skills: bool,
+    /// Release tag template (VER-1): `true` for the default template, or a
+    /// string with exactly one `{version}`. Metadata only: it does not make
+    /// the file authoritative.
+    #[serde(rename = "release-tags")]
+    pub release_tags: Option<ReleaseTags>,
+    /// Versions that version-pin resolution never selects (VER-46).
+    pub yanked: Option<Vec<String>>,
+}
+
+/// The raw `[source].release-tags` value, before [`SourceMeta::release_template`]
+/// validates it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ReleaseTags {
+    Flag(bool),
+    Template(String),
 }
 
 impl SourceMeta {
+    /// The declared release tag template, or `None` when `release-tags` is
+    /// absent. A malformed template, or `release-tags = false`, is a
+    /// `MindToml` error (VER-2).
+    // spec: VER-1 VER-2
+    pub fn release_template(&self, toml_path: &Path) -> Result<Option<Template>> {
+        let bad = |msg: String| MindError::MindToml {
+            path: toml_path.to_path_buf(),
+            msg,
+        };
+        match &self.release_tags {
+            None => Ok(None),
+            Some(ReleaseTags::Flag(true)) => Ok(Some(Template::Default)),
+            Some(ReleaseTags::Flag(false)) => Err(bad(
+                "release-tags must be true or a template string such as \"v{version}\"".into(),
+            )),
+            Some(ReleaseTags::Template(s)) => Template::parse(s).map(Some).map_err(bad),
+        }
+    }
+
+    /// The `[source].yanked` versions. An entry that is not a semver version
+    /// is a `MindToml` error (VER-46).
+    // spec: VER-46
+    pub fn yanked_versions(&self, toml_path: &Path) -> Result<Vec<Version>> {
+        self.yanked
+            .iter()
+            .flatten()
+            .map(|s| {
+                Version::parse(s).ok_or_else(|| MindError::MindToml {
+                    path: toml_path.to_path_buf(),
+                    msg: format!("yanked entry {s:?} is not a semver version (MAJOR.MINOR.PATCH)"),
+                })
+            })
+            .collect()
+    }
+
     /// Return the single pin declared by this `[source]` section, or `None`
     /// if none is declared. More than one declared pin is a `MindToml` error
     /// (DSC-41).
@@ -1010,6 +1062,10 @@ impl MindToml {
         if let Some(v) = &parsed.source.min_mind_version {
             validate_version_string(v, "min-mind-version", &file)?;
         }
+        // spec: VER-2 VER-46 -- a malformed release-tags template or yanked
+        // entry fails the load, not the later resolution.
+        parsed.source.release_template(&sanitized_path(&file))?;
+        parsed.source.yanked_versions(&sanitized_path(&file))?;
         // spec: NS-25 — a declared `[source].prefix` that is a reserved
         // item-kind word is rejected at load, before it can reach the
         // effective-prefix resolution.
@@ -3862,6 +3918,82 @@ mod tests {
         // No [profiles]: None.
         let dir = prof_dir("[source]\ndescription = \"x\"\n");
         assert!(MindToml::load(&dir).unwrap().unwrap().profiles.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec: VER-1
+    #[test]
+    fn release_tags_parse_and_are_not_authoritative() {
+        for (body, want) in [
+            (
+                "[source]\nrelease-tags = \"skills-v{version}\"\n",
+                Some(Template::Literal {
+                    prefix: "skills-v".into(),
+                    suffix: String::new(),
+                }),
+            ),
+            ("[source]\nrelease-tags = true\n", Some(Template::Default)),
+            ("[source]\ndescription = \"x\"\n", None),
+        ] {
+            let dir = prof_dir(body);
+            let mt = MindToml::load(&dir).unwrap().unwrap();
+            assert!(!mt.is_authoritative(), "{body:?}");
+            assert_eq!(
+                mt.source.release_template(Path::new("mind.toml")).unwrap(),
+                want,
+                "{body:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    // spec: VER-2
+    #[test]
+    fn invalid_release_tags_or_yanked_fail_load_as_mindtoml() {
+        for (body, needle) in [
+            (
+                "[source]\nrelease-tags = false\n",
+                "must be true or a template",
+            ),
+            ("[source]\nrelease-tags = \"v\"\n", "exactly one {version}"),
+            (
+                "[source]\nrelease-tags = \"{version}-{version}\"\n",
+                "exactly one {version}",
+            ),
+            (
+                "[source]\nrelease-tags = \"{name}-{version}\"\n",
+                "no token other than",
+            ),
+            (
+                "[source]\nrelease-tags = \"-v{version}\"\n",
+                "begin with '-'",
+            ),
+            ("[source]\nyanked = [\"1.2\"]\n", "not a semver version"),
+        ] {
+            let dir = prof_dir(body);
+            match MindToml::load(&dir) {
+                Err(MindError::MindToml { msg, .. }) => {
+                    assert!(msg.contains(needle), "{body:?}: {msg}");
+                }
+                other => panic!("{body:?}: expected MindToml, got {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        // A non-string, non-bool value fails the schema itself.
+        let dir = prof_dir("[source]\nrelease-tags = 3\n");
+        assert!(MindToml::load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = prof_dir("[source]\nyanked = [\"1.2.3\", \"2.0.0-rc.1\"]\n");
+        let mt = MindToml::load(&dir).unwrap().unwrap();
+        let yanked: Vec<String> = mt
+            .source
+            .yanked_versions(Path::new("mind.toml"))
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(yanked, ["1.2.3", "2.0.0-rc.1"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

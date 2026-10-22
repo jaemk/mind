@@ -40,6 +40,11 @@ mind upgrade --allow-breaking --source repo  # take the next major for one sourc
   `--pin version=<range>` resolves against the default template (VER-1). If no
   tag matches, the meld fails with `NoMatchingRelease` and nothing is registered.
 
+Note that `[source]` rejects unknown keys, so a `mind` that predates this feature
+fails to load a `mind.toml` declaring `release-tags`, `yanked`, or `pin-version`.
+A source adopting them should also set `min-mind-version`, so the older binary's
+error names the version gap (DSC-117) instead of a bare schema error.
+
 ## Versions and tags
 
 - `VER-10` A tag is a release when stripping the template's prefix and suffix
@@ -104,7 +109,8 @@ mind upgrade --allow-breaking --source repo  # take the next major for one sourc
 - `VER-45` A moved tag on a release other than the resolved one is not
   detected, since only the resolved release's commit is recorded.
 - `VER-46` `[source].yanked` lists versions (`yanked = ["1.2.3"]`), read from
-  the default-branch tip (VER-3). Resolution never selects a yanked version. A
+  the default-branch tip (VER-3). An entry that is not a semver version is a
+  `MindToml` error. Resolution never selects a yanked version. A
   source already resolved to a yanked version stays there until a `sync` finds a
   newer in-range release. `recall` marks the yanked version (VER-90).
 
