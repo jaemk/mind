@@ -28,7 +28,8 @@ mind upgrade --allow-breaking --source repo  # take the next major for one sourc
   `{version}`. Like `[profiles]`, it is metadata: it does not make the
   `mind.toml` authoritative.
 - `VER-2` A template with zero or several `{version}` placeholders, any other
-  `{...}` token, or a literal part that fails `validate_ref_value` (DSC-66) is a
+  `{...}` token, or a tag name that fails `validate_ref_value` (DSC-66) once a
+  version is filled in (`-v{version}` does, `{version}-final` does not) is a
   `MindToml` error. A non-string, non-`true` value is a `MindToml` error.
 - `VER-3` The template is read from the source's default-branch tip, the same
   place a `[source]` pin directive is read (DSC-41), because it must be known

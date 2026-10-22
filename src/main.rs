@@ -30,6 +30,7 @@ mod selfupdate;
 mod source;
 mod tui;
 mod unmanaged;
+mod version;
 mod workflow_check;
 mod workflow_meta;
 
