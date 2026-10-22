@@ -1466,7 +1466,9 @@ fn adopt_detail(curator: &str, identity: &str) -> String {
 /// substituting content, whether the source is new or already installed.
 fn curator_pin_allowed(pin: &Pin, toml_path: &std::path::Path) -> Result<()> {
     let value = match pin {
-        Pin::DefaultBranch => return Ok(()),
+        // A range names no ref; the tags it resolves to are the source's own
+        // releases (VER-110).
+        Pin::DefaultBranch | Pin::Version(_) => return Ok(()),
         Pin::FollowBranch(v) | Pin::Tag(v) | Pin::Ref(v) => v.as_str(),
     };
     let Some(rest) = value.strip_prefix("refs/") else {

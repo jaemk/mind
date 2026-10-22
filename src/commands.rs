@@ -250,6 +250,16 @@ fn parse_pin_value(value: String) -> Result<PinRequest> {
         crate::git::validate_ref_value(name)?;
         return Ok(PinRequest::Follow(Pin::Tag(name.to_string())));
     }
+    // spec: VER-20 VER-22 -- a range that does not parse is a usage error,
+    // never a tag name.
+    if let Some(range) = value.strip_prefix("version=") {
+        return match crate::version::Range::parse(range) {
+            Some(r) => Ok(PinRequest::Follow(Pin::Version(
+                crate::source::VersionPin::unresolved(&r),
+            ))),
+            None => Err(MindError::BadPinSpec { value }),
+        };
+    }
     if value.contains('=') {
         return Err(MindError::BadPinSpec { value });
     }
@@ -282,7 +292,124 @@ pub(crate) fn pin_description(pin: &Pin) -> String {
         Pin::FollowBranch(b) => format!("branch {b}"),
         Pin::Tag(t) => format!("tag {t}"),
         Pin::Ref(r) => format!("ref {r}"),
+        Pin::Version(v) => match &v.resolved {
+            Some(resolved) => format!("version {} ({resolved})", v.range),
+            None => format!("version {}", v.range),
+        },
     }
+}
+
+/// Resolve a version pin's range against the remote's release tags under
+/// `template` (VER-40), skipping `yanked` versions (VER-46) and warning about
+/// a version whose duplicate tags disagree (VER-11).
+fn resolve_version(
+    source_name: &str,
+    url: &str,
+    pin: &crate::source::VersionPin,
+    template: &crate::version::Template,
+    yanked: &[crate::version::Version],
+) -> Result<crate::version::Resolution> {
+    let range = pin.parsed_range().ok_or_else(|| MindError::BadPinSpec {
+        value: format!("version={}", pin.range),
+    })?;
+    let tags = git::ls_remote_tags(url)?;
+    let res = crate::version::resolve(template, &tags, &range, yanked);
+    for (a, b) in &res.ambiguous {
+        eprintln!(
+            "warning: {source_name}: tags {} and {} name the same version at different commits; skipping that version",
+            strip_ansi(a),
+            strip_ansi(b)
+        );
+    }
+    Ok(res)
+}
+
+/// A version pin filled in from a resolution: the selected release and the
+/// highest one seen (VER-30).
+fn filled_version_pin(
+    pin: &crate::source::VersionPin,
+    selected: &crate::version::Release,
+    res: &crate::version::Resolution,
+) -> crate::source::VersionPin {
+    crate::source::VersionPin {
+        range: pin.range.clone(),
+        resolved: Some(selected.version.to_string()),
+        tag: Some(selected.tag.clone()),
+        highest: res.highest.as_ref().map(|r| r.version.to_string()),
+    }
+}
+
+/// The error for a range no release satisfies (VER-4, VER-42).
+fn no_matching_release(
+    source_name: &str,
+    pin: &crate::source::VersionPin,
+    res: &crate::version::Resolution,
+) -> MindError {
+    MindError::NoMatchingRelease {
+        source_name: source_name.to_string(),
+        range: pin.range.clone(),
+        highest: res.highest.as_ref().map(|r| r.version.to_string()),
+    }
+}
+
+/// Bring an existing pinned clone at `dir` to `source`'s recorded pin (CLI-55)
+/// and return the new HEAD with the pin to record. A version pin is
+/// re-resolved against the default branch's `release-tags` first (VER-43);
+/// the range itself never changes.
+fn sync_clone_to_pin(
+    source: &crate::source::Source,
+    dir: &std::path::Path,
+) -> Result<(String, Pin)> {
+    let pin = source.pin.clone();
+    if !dir.join(".git").is_dir() {
+        if let Some(parent) = dir.parent() {
+            crate::paths::mkdir_p(parent)?;
+        }
+        git::clone_at(&source.url, dir, &pin)?;
+        return Ok((git::head_commit(&source.url, dir)?, pin));
+    }
+    let Pin::Version(vp) = &pin else {
+        git::sync_to_pin(&source.url, dir, &pin)?;
+        return Ok((git::head_commit(&source.url, dir)?, pin));
+    };
+    // spec: VER-3 -- the template and yanked list come from the default
+    // branch tip, not from the release the clone is on.
+    let (template, yanked) = match git::default_branch_mind_toml(&source.url, dir)? {
+        Some(text) => crate::mindfile::release_meta_from_text(&text, &dir.join("mind.toml"))?,
+        None => (None, Vec::new()),
+    };
+    let template = template.unwrap_or(crate::version::Template::Default);
+    let res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
+    let mut next = vp.clone();
+    next.highest = res.highest.as_ref().map(|r| r.version.to_string());
+    match &res.selected {
+        // spec: VER-46 -- nothing in range is selectable now (every candidate
+        // yanked, or the tags gone): stay where the source is.
+        None => {}
+        Some(rel) if vp.tag.as_deref() == Some(rel.tag.as_str()) => {
+            // spec: VER-44 -- the same release; a tag that now peels to a
+            // different commit is not followed.
+            if let Some(recorded) = source.commit.as_deref()
+                && recorded != rel.commit
+            {
+                eprintln!(
+                    "warning: {}: release tag {} moved from {} to {}; staying at {} (re-meld with --pin to accept it)",
+                    source.name,
+                    strip_ansi(&rel.tag),
+                    short(recorded),
+                    short(&rel.commit),
+                    short(recorded)
+                );
+            }
+        }
+        Some(rel) => {
+            next = filled_version_pin(vp, rel, &res);
+            let pin = Pin::Version(next);
+            git::sync_to_pin(&source.url, dir, &pin)?;
+            return Ok((git::head_commit(&source.url, dir)?, pin));
+        }
+    }
+    Ok((git::head_commit(&source.url, dir)?, Pin::Version(next)))
 }
 
 /// Resolve a source's clone directory (`Source::clone_dir`) and confine it to
@@ -917,12 +1044,52 @@ fn meld_recursive(
     //     the ref path (`git checkout <ref>` accepts all three) and frozen.
     let (checkout_pin, freeze) = resolve_checkout_pin(consumer_pin, base_pin);
 
+    // spec: VER-42 -- a version pin resolves now, against the default branch's
+    // release-tags (VER-3, VER-4), and fails the meld when nothing is in range.
+    let checkout_pin = match checkout_pin {
+        Pin::Version(vp) => {
+            let cleanup = |dir: &std::path::Path| {
+                if !is_local {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            };
+            let meta = mindfile.as_ref().map(|m| {
+                Ok::<_, MindError>((
+                    m.source.release_template(&toml_path)?,
+                    m.source.yanked_versions(&toml_path)?,
+                ))
+            });
+            let (template, yanked) = match meta.transpose() {
+                Ok(m) => m.unwrap_or((None, Vec::new())),
+                Err(e) => {
+                    cleanup(&dir);
+                    return Err(e);
+                }
+            };
+            let template = template.unwrap_or(crate::version::Template::Default);
+            let res = match resolve_version(&source.name, &source.url, &vp, &template, &yanked) {
+                Ok(r) => r,
+                Err(e) => {
+                    cleanup(&dir);
+                    return Err(e);
+                }
+            };
+            match &res.selected {
+                Some(rel) => Pin::Version(filled_version_pin(&vp, rel, &res)),
+                None => {
+                    cleanup(&dir);
+                    return Err(no_matching_release(&source.name, &vp, &res));
+                }
+            }
+        }
+        other => other,
+    };
+
     // spec: POL-20 -- pinned check stays post-clone because it needs the effective
     // pin, which may come from the source's mind.toml. Evaluated on the FINAL
     // persisted kind: a `--pin` freeze persists a ref, so it satisfies
     // require-pinned even when the point it freezes is an otherwise-floating branch.
-    let persisted_unpinned =
-        !freeze && matches!(checkout_pin, Pin::DefaultBranch | Pin::FollowBranch(_));
+    let persisted_unpinned = !freeze && checkout_pin.is_floating();
     if let Some(policy) = policy {
         let identity = source.name.clone();
         if policy.pinned() && persisted_unpinned {
@@ -6841,8 +7008,7 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     // spec: CLI-209/POL-20 -- the require-pinned gate applies identically to a
     // re-pin: a floating point (default/follow-branch) is forbidden unless the
     // request freezes it.
-    let persisted_unpinned =
-        !freeze && matches!(checkout_pin, Pin::DefaultBranch | Pin::FollowBranch(_));
+    let persisted_unpinned = !freeze && checkout_pin.is_floating();
     if let Some(policy) = policy.as_ref()
         && policy.pinned()
         && persisted_unpinned
@@ -6865,6 +7031,39 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
         probe.pin = Pin::Ref(String::new());
     }
     let target = clone_dir_checked(paths, &probe)?;
+
+    // spec: VER-80 -- a re-pin to a range resolves it the way a first meld
+    // does, reading release-tags from the default branch (VER-3): the clone's
+    // origin tip, or the working tree of a still-linked local source.
+    let checkout_pin = match checkout_pin {
+        Pin::Version(vp) => {
+            let (template, yanked) = if target.join(".git").is_dir() {
+                match git::default_branch_mind_toml(&url, &target)? {
+                    Some(text) => {
+                        crate::mindfile::release_meta_from_text(&text, &target.join("mind.toml"))?
+                    }
+                    None => (None, Vec::new()),
+                }
+            } else {
+                let root = std::path::Path::new(&url);
+                let toml_path = root.join("mind.toml");
+                match MindToml::load(root)? {
+                    Some(m) => (
+                        m.source.release_template(&toml_path)?,
+                        m.source.yanked_versions(&toml_path)?,
+                    ),
+                    None => (None, Vec::new()),
+                }
+            };
+            let template = template.unwrap_or(crate::version::Template::Default);
+            let res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
+            match &res.selected {
+                Some(rel) => Pin::Version(filled_version_pin(&vp, rel, &res)),
+                None => return Err(no_matching_release(source_name, &vp, &res)),
+            }
+        }
+        other => other,
+    };
 
     // Resolve/check out at the new point WITHOUT mutating the registered
     // `Source` yet (CLI-18): a failure here leaves `pin`/`commit`/the clone
@@ -8725,7 +8924,7 @@ pub fn sync_with_selector(
             print!("{} syncing {} ... ", out.bullet(), source.name);
             let _ = std::io::stdout().flush();
         }
-        let refreshed = (|| -> Result<(String, bool, Option<String>)> {
+        let refreshed = (|| -> Result<(String, bool, Option<String>, Pin)> {
             // spec: STO-69 -- validate before any fetch/clone/delete touches it.
             let dir = clone_dir_checked(paths, source)?;
             // A linked (no-pin) local source is its live working tree (CLI-27):
@@ -8749,29 +8948,22 @@ pub fn sync_with_selector(
                 let desc = MindToml::load(&dir)?
                     .and_then(|mt| mt.source.description)
                     .map(|d| strip_ansi(&d));
-                return Ok((new_commit, changed, desc));
+                return Ok((new_commit, changed, desc, source.pin.clone()));
             }
             // CLI-55: resolve the source against its recorded pin (never change
-            // the pin itself, only move HEAD to the pinned point).
-            let pin = source.pin.clone();
-            if dir.join(".git").is_dir() {
-                git::sync_to_pin(&source.url, &dir, &pin)?;
-            } else {
-                if let Some(parent) = dir.parent() {
-                    crate::paths::mkdir_p(parent)?;
-                }
-                git::clone_at(&source.url, &dir, &pin)?;
-            }
-            let new_commit = git::head_commit(&source.url, &dir)?;
+            // the pin itself, only move HEAD to the pinned point). A version
+            // pin records its new resolution (VER-43).
+            let (new_commit, pin) = sync_clone_to_pin(source, &dir)?;
             let changed = source.commit.as_deref() != Some(new_commit.as_str());
             // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
             let desc = MindToml::load(&dir)?
                 .and_then(|mt| mt.source.description)
                 .map(|d| strip_ansi(&d));
-            Ok((new_commit, changed, desc))
+            Ok((new_commit, changed, desc, pin))
         })();
         match refreshed {
-            Ok((new_commit, changed, desc)) => {
+            Ok((new_commit, changed, desc, pin)) => {
+                source.pin = pin;
                 source.commit = Some(new_commit.clone());
                 source.description = desc;
                 synced += 1;
@@ -9156,7 +9348,7 @@ pub(crate) fn sync_sources_for_upgrade_scoped(
         if !should_sync(&source.name) {
             continue;
         }
-        let refreshed = (|| -> Result<(String, bool)> {
+        let refreshed = (|| -> Result<(String, Pin)> {
             // spec: STO-69 -- validate before any fetch/clone/delete touches it.
             let dir = clone_dir_checked(paths, source)?;
             if source.is_linked() {
@@ -9169,24 +9361,13 @@ pub(crate) fn sync_sources_for_upgrade_scoped(
                     .ok()
                     .or_else(|| source.commit.clone())
                     .unwrap_or_default();
-                let changed = source.commit.as_deref() != Some(new_commit.as_str());
-                return Ok((new_commit, changed));
+                return Ok((new_commit, source.pin.clone()));
             }
-            let pin = source.pin.clone();
-            if dir.join(".git").is_dir() {
-                git::sync_to_pin(&source.url, &dir, &pin)?;
-            } else {
-                if let Some(parent) = dir.parent() {
-                    crate::paths::mkdir_p(parent)?;
-                }
-                git::clone_at(&source.url, &dir, &pin)?;
-            }
-            let new_commit = git::head_commit(&source.url, &dir)?;
-            let changed = source.commit.as_deref() != Some(new_commit.as_str());
-            Ok((new_commit, changed))
+            sync_clone_to_pin(source, &dir)
         })();
         match refreshed {
-            Ok((new_commit, _)) => {
+            Ok((new_commit, pin)) => {
+                source.pin = pin;
                 source.commit = Some(new_commit);
             }
             Err(e) => {

@@ -427,6 +427,36 @@ pub fn select<'a>(
         .find(|r| range.matches(&r.version) && !yanked.contains(&r.version))
 }
 
+/// The outcome of resolving a range against a remote's tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    /// The highest admitted, non-yanked release, if any (VER-40, VER-46).
+    pub selected: Option<Release>,
+    /// The highest stable, non-yanked release, in range or not (VER-30). A
+    /// prerelease is not offered as a breaking move.
+    pub highest: Option<Release>,
+    /// Versions skipped because their duplicate tags disagree (VER-11).
+    pub ambiguous: Vec<(String, String)>,
+}
+
+/// Resolve `range` against `(tag, commit)` pairs under `template`.
+pub fn resolve(
+    template: &Template,
+    tags: &[(String, String)],
+    range: &Range,
+    yanked: &[Version],
+) -> Resolution {
+    let (rels, ambiguous) = releases(template, tags);
+    Resolution {
+        selected: select(&rels, range, yanked).cloned(),
+        highest: rels
+            .iter()
+            .find(|r| !r.version.is_prerelease() && !yanked.contains(&r.version))
+            .cloned(),
+        ambiguous,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

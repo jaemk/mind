@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `meld --pin version=<range>` follows a source's semver release tags within a
+  caret range (`^1.2`, `0.3`) or holds an exact version (`=1.2.3`). `sync` and
+  `upgrade` move the source to the highest release in range; a release outside
+  it needs a re-pin. A re-pointed release tag is not followed. A source names its
+  tags with `[source].release-tags` (default `v{version}` or a bare
+  `{version}`) and can exclude versions with `[source].yanked`. See
+  `docs/src/pinning.md`.
+
 ## [0.32.1] - 2026-10-22
 
 ### Changed

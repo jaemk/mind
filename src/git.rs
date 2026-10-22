@@ -276,8 +276,32 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             run(url, None, &["clone", "--", url, &dest_str])?;
             run(url, Some(dest), &["checkout", sha])?;
         }
+        Pin::Version(v) => {
+            // The caller resolves the range to a release tag first (VER-40);
+            // the checkout is then a tag clone.
+            let tag = resolved_tag(url, v)?;
+            run(
+                url,
+                None,
+                &[
+                    "clone", "--depth", "1", "--branch", tag, "--", url, &dest_str,
+                ],
+            )?;
+        }
     }
     Ok(())
+}
+
+/// The release tag a version pin resolved to. Unresolved is a caller bug, but
+/// it surfaces as an error rather than a panic.
+fn resolved_tag<'a>(url: &str, v: &'a crate::source::VersionPin) -> Result<&'a str> {
+    v.tag
+        .as_deref()
+        .ok_or_else(|| MindError::NoMatchingRelease {
+            source_name: url.to_string(),
+            range: v.range.clone(),
+            highest: v.highest.clone(),
+        })
 }
 
 /// Clone `url` into `dest` (shallow, default branch). Preserved for callers
@@ -353,8 +377,77 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             // from `validate_ref_value` at parse time (DSC-66).
             run(url, Some(dir), &["reset", "--hard", sha])?;
         }
+        Pin::Version(v) => {
+            // The caller has already resolved the range and decided whether a
+            // moved tag may be followed (VER-44); this only moves to the tag.
+            let tag = resolved_tag(url, v)?;
+            run(
+                url,
+                Some(dir),
+                &[
+                    "fetch",
+                    "--depth",
+                    "1",
+                    "--force",
+                    "origin",
+                    "--",
+                    &format!("+refs/tags/{tag}:refs/tags/{tag}"),
+                ],
+            )?;
+            run(url, Some(dir), &["reset", "--hard", tag])?;
+        }
     }
     Ok(())
+}
+
+/// List the remote's tags as `(tag, commit)` pairs (VER-40). The shallow
+/// clones `mind` makes carry no tag list, so this asks the remote directly. An
+/// annotated tag is reported at the commit it peels to (`<tag>^{}`).
+// spec: VER-40
+pub fn ls_remote_tags(url: &str) -> Result<Vec<(String, String)>> {
+    let out = run(url, None, &["ls-remote", "--tags", "--", url])?;
+    let mut tags: Vec<(String, String)> = Vec::new();
+    for line in out.lines() {
+        let Some((sha, name)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix("refs/tags/") else {
+            continue;
+        };
+        match name.strip_suffix("^{}") {
+            // The peeled line follows its tag object's line; it wins.
+            Some(tag) => match tags.iter_mut().find(|(t, _)| t == tag) {
+                Some(entry) => entry.1 = sha.to_string(),
+                None => tags.push((tag.to_string(), sha.to_string())),
+            },
+            None => tags.push((name.to_string(), sha.to_string())),
+        }
+    }
+    Ok(tags)
+}
+
+/// The text of `mind.toml` at the remote default branch's tip, fetched into
+/// the clone at `dir` without moving its checkout (VER-3). `None` when the tip
+/// has no `mind.toml`. Size-capped like every other metadata read (DSC-91).
+// spec: VER-3
+pub fn default_branch_mind_toml(url: &str, dir: &Path) -> Result<Option<String>> {
+    run(url, Some(dir), &["fetch", "--depth", "1", "origin", "HEAD"])?;
+    let Ok(size) = run(url, Some(dir), &["cat-file", "-s", "FETCH_HEAD:mind.toml"]) else {
+        return Ok(None);
+    };
+    let limit = crate::error::metadata_size_limit();
+    if size.parse::<u64>().map_or(true, |n| n > limit) {
+        return Err(MindError::MetadataTooLarge {
+            path: Path::new(url).join("mind.toml"),
+            limit,
+        });
+    }
+    run(
+        url,
+        Some(dir),
+        &["cat-file", "blob", "FETCH_HEAD:mind.toml"],
+    )
+    .map(Some)
 }
 
 /// Resolve the current HEAD commit sha of a clone.
@@ -820,6 +913,25 @@ mod tests {
     /// Ensure the clone and drop helpers work at cleanup time.
     fn cleanup(dir: &Path) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ls_remote_tags_peels_annotated_tags() {
+        // The tag listing VER-40 resolves against.
+        let base = tmpdir("ls-remote-tags");
+        let (remote, sha_a, sha_b, _c) = make_remote(&base);
+        git(&remote, &["tag", "-a", "v2.0.0", "-m", "notes", &sha_b]);
+        let url = format!("file://{}", remote.display());
+        let mut tags = ls_remote_tags(&url).unwrap();
+        tags.sort();
+        assert_eq!(
+            tags,
+            [
+                ("v1.0".to_string(), sha_a.clone()),
+                ("v2.0.0".to_string(), sha_b.clone())
+            ]
+        );
+        cleanup(&base);
     }
 
     #[test]

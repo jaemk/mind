@@ -775,9 +775,24 @@ pub enum MindError {
     ConflictingPin { first: String, second: String },
 
     #[error(
-        "invalid --pin value '{value}': expected HEAD, a ref (tag/sha/branch), 'branch=<name>', or 'tag=<name>'"
+        "invalid --pin value '{value}': expected HEAD, a ref (tag/sha/branch), 'branch=<name>', 'tag=<name>', or 'version=<range>' (^1.2, 1.2, =1.2.3)"
     )]
     BadPinSpec { value: String },
+
+    /// VER-4, VER-42: a version pin whose range no release satisfies. `highest`
+    /// is the highest release found, `None` when no tag is a release at all.
+    #[error(
+        "{source_name}: no release matches {range}{}",
+        match highest {
+            Some(h) => format!(" (highest release is {h})"),
+            None => " (no tag is a release under the source's release-tags)".to_string(),
+        }
+    )]
+    NoMatchingRelease {
+        source_name: String,
+        range: String,
+        highest: Option<String>,
+    },
 
     /// DSC-95: `source_name` and `root` are both source-controlled (a
     /// `mind.toml` `[discover]` root, or the source's own identity), and
@@ -1787,6 +1802,7 @@ impl MindError {
             MindError::GitNotFound => "git-not-found",
             MindError::ConflictingPin { .. } => "conflicting-pin",
             MindError::BadPinSpec { .. } => "bad-pin-spec",
+            MindError::NoMatchingRelease { .. } => "no-matching-release",
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::BadKindFlag { .. } => "bad-kind-flag",

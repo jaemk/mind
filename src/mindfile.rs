@@ -1017,6 +1017,31 @@ fn sanitized_path(path: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(crate::sanitize::strip_ansi(&path.display().to_string()))
 }
 
+/// Only the `[source]` table of a `mind.toml`, for reading release metadata
+/// from a file that is not checked out (VER-3). The rest of the file is
+/// validated when that tree is loaded for real.
+#[derive(Deserialize)]
+struct SourceOnly {
+    #[serde(default)]
+    source: SourceMeta,
+}
+
+/// The release template and yanked list declared by `text`, a `mind.toml`
+/// read from the default branch (VER-3, VER-46).
+pub fn release_meta_from_text(
+    text: &str,
+    toml_path: &Path,
+) -> Result<(Option<Template>, Vec<Version>)> {
+    let parsed: SourceOnly = toml::from_str(text).map_err(|e| MindError::Toml {
+        path: sanitized_path(toml_path),
+        msg: crate::sanitize::strip_ansi(&e.to_string()),
+    })?;
+    Ok((
+        parsed.source.release_template(toml_path)?,
+        parsed.source.yanked_versions(toml_path)?,
+    ))
+}
+
 impl MindToml {
     /// Load `mind.toml` from a repo root, returning `None` if absent.
     ///

@@ -1040,15 +1040,10 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// A short description of a `Pin` for the hook disclosure (mirrors the private
-/// `pin_description` in commands.rs; duplicated here so hooks_cmd is self-contained).
+/// A short description of a `Pin` for the hook disclosure, the same wording
+/// meld and upgrade use.
 fn pin_description(pin: &Pin) -> String {
-    match pin {
-        Pin::DefaultBranch => "default branch".to_string(),
-        Pin::FollowBranch(b) => format!("branch {b}"),
-        Pin::Tag(t) => format!("tag {t}"),
-        Pin::Ref(r) => format!("ref {r}"),
-    }
+    crate::commands::pin_description(pin)
 }
 
 /// The `<source>#<kind>:<name>` form that re-resolves `installed` as a

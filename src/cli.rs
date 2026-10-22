@@ -866,13 +866,16 @@ pub struct MeldArgs {
     /// A bare `<tag|sha|branch>` resolves that ref to its current commit and
     /// freezes it (a snapshot, not a track). `branch=<name>` follows that
     /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
-    /// (re-points on `sync` if it moves). With no `--pin`, the repo's
+    /// (re-points on `sync` if it moves). `version=<range>` follows the
+    /// source's semver release tags within a caret range (`^1.2`, `1.2`) or
+    /// holds an exact one (`=1.2.3`); `sync` moves to the highest release in
+    /// range. With no `--pin`, the repo's
     /// `[source]` pin directive (else the remote default branch) applies.
     /// Unlike the discovery flags below, this ALSO takes effect against an
     /// already-melded source: a re-meld with `--pin` re-pins it, re-checking
     /// out the clone if the resolved commit differs and reporting what changed.
-    // spec: CLI-200, CLI-201, CLI-209
-    #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
+    // spec: CLI-200, CLI-201, CLI-209, VER-20
+    #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME|version=RANGE")]
     pub pin: Option<String>,
 
     /// Deprecated: use `--pin branch=<name>`.

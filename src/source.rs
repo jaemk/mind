@@ -24,6 +24,56 @@ pub enum Pin {
     Tag(String),
     /// Fixed to a specific commit sha: effectively immutable across syncs.
     Ref(String),
+    /// Follow the source's semver release tags within a range (VER-30).
+    Version(VersionPin),
+}
+
+impl Pin {
+    /// Whether the pin floats, for the POL-20 pinned check: a branch, or a
+    /// version range. An exact version (`=X.Y.Z`) is pinned (VER-100).
+    pub fn is_floating(&self) -> bool {
+        match self {
+            Pin::DefaultBranch | Pin::FollowBranch(_) => true,
+            Pin::Tag(_) | Pin::Ref(_) => false,
+            Pin::Version(v) => !matches!(v.parsed_range(), Some(crate::version::Range::Exact(_))),
+        }
+    }
+}
+
+/// A version pin's record (VER-30): the range, the release it resolved to,
+/// and the highest release seen at the last resolution, in range or not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionPin {
+    /// The range as written (`^1.2`, `=1.2.3`), parsed by
+    /// [`crate::version::Range::parse`].
+    pub range: String,
+    /// The selected release's version, unset until resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
+    /// The tag the selected release came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// The highest release seen at the last resolution (VER-61 reads it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highest: Option<String>,
+}
+
+impl VersionPin {
+    /// A pin for `range` that has not been resolved yet.
+    pub fn unresolved(range: &crate::version::Range) -> VersionPin {
+        VersionPin {
+            range: range.to_string(),
+            resolved: None,
+            tag: None,
+            highest: None,
+        }
+    }
+
+    /// The stored range, or `None` when it does not parse. `revalidate` drops
+    /// such a record at registry load, so callers past that point see `Some`.
+    pub fn parsed_range(&self) -> Option<crate::version::Range> {
+        crate::version::Range::parse(&self.range)
+    }
 }
 
 /// A recorded install hook for an ITEM (HOOK-110), kept in
@@ -575,6 +625,14 @@ impl Source {
         let pin_value = match &self.pin {
             Pin::DefaultBranch => None,
             Pin::FollowBranch(v) | Pin::Tag(v) | Pin::Ref(v) => Some(v.as_str()),
+            Pin::Version(v) => {
+                // The range must still parse, and the recorded tag is checked
+                // out by name, so it gets the ref rules.
+                if v.parsed_range().is_none() {
+                    return Err(("pin", format!("invalid version range {:?}", v.range)));
+                }
+                v.tag.as_deref()
+            }
         };
         if let Some(v) = pin_value {
             crate::git::validate_ref_value(v).map_err(|e| ("pin", e.to_string()))?;

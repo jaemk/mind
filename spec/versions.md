@@ -78,8 +78,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
 
 - `VER-30` A version pin is stored as pin kind `version` (extending STO-18).
   It records the range, the resolved version and the tag name it came from, and
-  the highest release seen at the last resolution, whether or not that release
-  is in range. The resolved commit is recorded like any other pin's.
+  the highest stable, non-yanked release seen at the last resolution, whether
+  or not that release is in range. The resolved commit is recorded like any other pin's.
 
 ## Resolution
 
@@ -167,8 +167,10 @@ error names the version gap (DSC-117) instead of a bare schema error.
   (`version==1.2.3`), and any other pin kind without an `unmeld`. Stepping back
   to an older release is a re-pin to an exact version. Returning to a range is
   another re-pin.
-- `VER-81` A linked local source (CLI-27) refuses a version pin
-  (`BadPinSpec`), since it has no releases to resolve. An item-link instance
+- `VER-81` A local source accepts a version pin like any other pin: it is
+  snapshotted into the sources tree (CLI-27) and resolved against the local
+  repo's tags. A local directory that is not a git repository fails with the
+  git error. An item-link instance
   (item-link.md) accepts one: it resolves against the repo's default-branch
   `release-tags` and checks out the item's path at the selected release.
 - `VER-82` `recall` adds a one-line suggestion for a source with a `tag` pin

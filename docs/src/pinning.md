@@ -19,6 +19,7 @@ mind meld owner/repo --pin branch=stable     # follow the stable branch
 | `<tag>`, `<sha>`, or `<branch>` | resolve that ref now and freeze at its commit |
 | `branch=<name>` | follow that branch; `sync` moves to its latest commit |
 | `tag=<name>` | follow that tag; `sync` moves if the tag is re-pointed |
+| `version=<range>` | follow semver release tags in a range; `sync` moves to the highest release in range |
 
 ```
 # Freeze
@@ -38,6 +39,35 @@ tracking the branch. Use `branch=` to keep following.
 
 A source's own `mind.toml` can declare a pin (`follow-branch`, `pin-tag`, or
 `pin-ref` under `[source]`). A `--pin` you pass overrides it.
+
+## Follow release versions
+
+`--pin version=<range>` follows a source's semver release tags. A range is a
+caret requirement with cargo's rules, or an exact version:
+
+```
+mind meld owner/repo --pin version=^1.2      # >=1.2.0, <2.0.0
+mind meld owner/repo --pin version=0.3       # >=0.3.0, <0.4.0
+mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
+```
+
+`sync` (and `upgrade`, which syncs first) moves the source to the highest
+release in range. A release outside the range, such as `2.0.0` under `^1.2`,
+is not applied; re-pin to take it (`--pin version=^2`). A prerelease is
+selected only when the range names one (`^1.3.0-rc.1`).
+
+A release tag that is re-pointed after `mind` resolved it is not followed:
+`sync` warns and keeps the recorded commit. Re-run `meld --pin` to accept it.
+
+The source declares how its tags are named with `release-tags` under
+`[source]`, read from its default branch:
+
+```toml
+[source]
+release-tags = "skills-v{version}"   # default: v{version} or a bare {version}
+yanked = ["1.4.1"]                   # never selected
+min-mind-version = "0.33"            # older mind versions reject these keys
+```
 
 ## Change the pin of a melded source
 
