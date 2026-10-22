@@ -92,20 +92,48 @@ impl Sandbox {
     }
 
     fn mind(&self, args: &[&str]) -> Run {
-        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
-            .args(args)
+        self.mind_env(args, &[], None)
+    }
+
+    /// `mind` with extra environment (e.g. `MIND_TTY`) and optional stdin. With
+    /// `stdin: None` the child gets `/dev/null`.
+    fn mind_env(&self, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Run {
+        use std::io::Write;
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
+        cmd.args(args)
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_MAX_METADATA_SIZE")
             .env_remove("MIND_TTY")
-            .stdin(Stdio::null())
-            .output()
-            .expect("run mind");
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(match stdin {
+                Some(_) => Stdio::piped(),
+                None => Stdio::null(),
+            });
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().expect("run mind");
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .as_mut()
+                .expect("piped stdin")
+                .write_all(text.as_bytes())
+                .expect("write stdin");
+        }
+        let out = child.wait_with_output().expect("wait for mind");
         Run {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             success: out.status.success(),
         }
+    }
+
+    /// The installed `dev` agent's text in the agent home.
+    fn installed_agent(&self) -> String {
+        std::fs::read_to_string(self.claude_home.join("agents/dev.md")).unwrap_or_default()
     }
 
     /// The registry entry of this sandbox's source, or `None` when not melded.
@@ -388,5 +416,103 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
         "an exact version is pinned: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(sb.pin().1, a);
+}
+
+#[test]
+fn upgrade_lists_a_breaking_release_without_applying_it() {
+    // spec: VER-61
+    let (sb, [_a, b, _c]) = released("ver-break-list", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    assert!(
+        sb.installed_agent().contains("one-one"),
+        "{}",
+        sb.installed_agent()
+    );
+    for args in [vec!["upgrade"], vec!["upgrade", "--yes"]] {
+        // spec: VER-63 -- no terminal and no --allow-breaking, and --yes alone,
+        // both list the move and skip it.
+        let r = sb.mind(&args);
+        assert!(r.success, "{args:?}: {}", r.stderr);
+        assert!(
+            r.stdout.contains("1.1.0 -> 2.0.0 (breaking, not applied"),
+            "{args:?}: {}",
+            r.stdout
+        );
+        let (pin, commit) = sb.pin();
+        assert_eq!(pin["value"]["range"], "^1", "{pin}");
+        assert_eq!(commit, b);
+        assert!(sb.installed_agent().contains("one-one"));
+    }
+}
+
+#[test]
+fn allow_breaking_takes_the_new_major_and_upgrades_its_items() {
+    // spec: VER-63
+    let (sb, [_a, _b, c]) = released("ver-break-allow", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(
+        pin["value"]["range"], "^2.0.0",
+        "the range moves to the new major"
+    );
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert!(
+        sb.installed_agent().contains("two-zero"),
+        "items upgrade through the ordinary pass: {}",
+        sb.installed_agent()
+    );
+    // Nothing breaking is left to offer.
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
+}
+
+#[test]
+fn a_terminal_prompts_for_each_breaking_release() {
+    // spec: VER-62
+    let (sb, [_a, b, c]) = released("ver-break-prompt", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    // Declined (the default): listed, not applied.
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(r.stdout.contains("breaking, not applied"), "{}", r.stdout);
+    assert_eq!(sb.pin().1, b);
+
+    // Accepted, then the ordinary upgrade prompt for its items.
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("y\ny\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert!(
+        sb.installed_agent().contains("two-zero"),
+        "{}",
+        sb.installed_agent()
+    );
+}
+
+#[test]
+fn an_exact_hold_is_never_offered_a_breaking_release() {
+    let (sb, [a, _b, _c]) = released("ver-break-exact", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
     assert_eq!(sb.pin().1, a);
 }

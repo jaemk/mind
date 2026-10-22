@@ -721,9 +721,12 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             source,
             no_sync,
+            allow_breaking,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         } => {
+            // spec: VER-63
+            commands::set_allow_breaking(allow_breaking);
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if let Some(source) = source {
                 // spec: CLI-244 - scope the sync and the pass to one source.

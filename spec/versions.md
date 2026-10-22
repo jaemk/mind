@@ -132,17 +132,22 @@ error names the version gap (DSC-117) instead of a bare schema error.
   appears in `upgrade` as an ordinary content change: the CLI-60 prompt, the
   CLI-62 `--yes`, and the CLI-61 report apply unchanged. The report shows the
   version delta (`1.4.2 -> 1.5.0`) next to the commit delta.
-- `VER-61` When the highest-seen release (VER-30) is outside the range,
-  `upgrade` lists it apart from the applied set, one line per source:
-  `<source> 1.5.0 -> 2.0.0 (breaking, not applied)`.
-- `VER-62` On a TTY, each breaking move is offered with its own `[y/N]` prompt
-  (default No) after the compatible changes are settled. Accepting rewrites the
-  stored range to the caret of the new version (`^2.0.0`), resolves it, and
-  upgrades that source's items through the ordinary upgrade path.
+- `VER-61` When the highest-seen release (VER-30) is newer than the resolved
+  one and outside a caret range, `upgrade` lists it, one line per source:
+  `<source> 1.5.0 -> 2.0.0 (breaking, not applied; ...)`, naming the
+  `--allow-breaking --source` command that takes it. An exact hold (`=X.Y.Z`)
+  is never offered a breaking move.
+- `VER-62` Breaking moves are settled before the upgrade pass. On a TTY without
+  `--yes`, each is offered with its own `[y/N]` prompt (default No). Accepting
+  rewrites the stored range to the caret of the new version (`^2.0.0`) and
+  resolves it, so that source's items then upgrade through the ordinary pass
+  (the CLI-60 prompt, `--yes`). If the new range resolves to nothing, the old
+  pin stays and the failure is reported.
 - `VER-63` `upgrade --allow-breaking` accepts every listed breaking move without
   prompting. The `[item]` and `--source` filters (CLI-63) narrow it like any
-  other upgrade. `--yes` alone never accepts a breaking move. Without a TTY and
-  without `--allow-breaking`, breaking moves are reported and skipped.
+  other upgrade. `--yes` alone never accepts a breaking move: with `--yes`, or
+  without a TTY, and without `--allow-breaking`, breaking moves are listed and
+  skipped.
 - `VER-64` The breaking prompt shows the target tag's annotation message when it
   is an annotated tag, sanitized like other source-derived text (`sanitize.rs`).
   A lightweight tag shows no notes.

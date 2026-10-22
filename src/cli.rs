@@ -497,6 +497,15 @@ EXAMPLES:
         #[arg(long)]
         no_sync: bool,
 
+        /// Take every breaking release a version-pinned source has (a release
+        /// outside its range, such as 2.0.0 under `^1.4`) without prompting:
+        /// the range moves to the new major and the source's items upgrade.
+        /// `--yes` alone never takes one; without this flag and without a
+        /// terminal, breaking releases are listed and skipped.
+        // spec: VER-63
+        #[arg(long)]
+        allow_breaking: bool,
+
         /// Re-run a source's install or update hook without the safety prompt
         /// when its commit advanced. This executes arbitrary code from the source; only
         /// use it for a source you trust. Without this flag, a non-TTY upgrade

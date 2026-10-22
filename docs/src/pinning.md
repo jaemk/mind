@@ -52,9 +52,21 @@ mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
 ```
 
 `sync` (and `upgrade`, which syncs first) moves the source to the highest
-release in range. A release outside the range, such as `2.0.0` under `^1.2`,
-is not applied; re-pin to take it (`--pin version=^2`). A prerelease is
-selected only when the range names one (`^1.3.0-rc.1`).
+release in range. A prerelease is selected only when the range names one
+(`^1.3.0-rc.1`).
+
+A release outside the range, such as `2.0.0` under `^1.2`, is a breaking
+release. `upgrade` lists it and does not apply it unless you accept:
+
+```
+mind upgrade                                      # on a terminal: [y/N] per breaking release
+mind upgrade --allow-breaking --source owner/repo # take it without a prompt
+```
+
+Accepting moves the range to the new major (`^2.0.0`) and upgrades the
+source's items. `--yes` alone never takes a breaking release, and without a
+terminal it is listed and skipped. An exact hold (`=1.2.3`) is never offered
+one.
 
 A release tag that is re-pointed after `mind` resolved it is not followed:
 `sync` warns and keeps the recorded commit. Re-run `meld --pin` to accept it.

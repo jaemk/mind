@@ -352,6 +352,133 @@ fn no_matching_release(
     }
 }
 
+/// `upgrade --allow-breaking` (VER-63), set once by `main` before dispatch so
+/// the upgrade entry points keep their signatures.
+static ALLOW_BREAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_breaking(on: bool) {
+    ALLOW_BREAKING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A version-pinned source's breaking release (VER-61): the highest stable
+/// release seen at the last sync, when it is newer than the resolved one and
+/// outside a caret range. An exact hold is never offered one.
+fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
+    let Pin::Version(vp) = pin else {
+        return None;
+    };
+    let range = vp.parsed_range()?;
+    if matches!(range, crate::version::Range::Exact(_)) {
+        return None;
+    }
+    let highest = crate::version::Version::parse(vp.highest.as_deref()?)?;
+    let resolved = vp
+        .resolved
+        .as_deref()
+        .and_then(crate::version::Version::parse);
+    if range.matches(&highest) || resolved.is_some_and(|r| r >= highest) {
+        return None;
+    }
+    Some((vp.resolved.clone().unwrap_or_default(), highest))
+}
+
+/// Settle every in-scope source's breaking release before the upgrade pass
+/// (VER-61..63). Each is listed; an accepted one has its range moved to the
+/// caret of the new release (`^2.0.0`) and is resolved there, so its items then
+/// upgrade through the ordinary pass. `--allow-breaking` accepts them all; on a
+/// terminal without `--yes` each gets its own `[y/N]` prompt; otherwise they are
+/// skipped.
+// spec: VER-61 VER-62 VER-63
+fn settle_breaking_moves(
+    paths: &Paths,
+    registry: &mut Registry,
+    in_scope: &dyn Fn(&str) -> bool,
+    yes: bool,
+    out: &crate::render::OutputCtx,
+) -> Result<()> {
+    let allow = ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
+    let interactive = !yes && crate::hook::is_tty();
+    let mut changed = false;
+    for source in &mut registry.sources {
+        if !in_scope(&source.name) {
+            continue;
+        }
+        let Some((from, to)) = breaking_release(&source.pin) else {
+            continue;
+        };
+        let line = format!("{} {from} -> {to} (breaking)", source.name);
+        let accept = if allow {
+            true
+        } else if interactive {
+            confirm(&format!("take breaking release {line}?"))?
+        } else {
+            false
+        };
+        if !accept {
+            if !out.json {
+                println!(
+                    "{} {} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
+                    out.warn(),
+                    source.name,
+                    crate::error::shell_quote(&source.name)
+                );
+            }
+            continue;
+        }
+        let Pin::Version(vp) = &source.pin else {
+            continue;
+        };
+        let mut moved = source.clone();
+        moved.pin = Pin::Version(crate::source::VersionPin {
+            range: crate::version::Range::caret_of(&to).to_string(),
+            resolved: None,
+            tag: None,
+            highest: vp.highest.clone(),
+        });
+        let applied = clone_dir_checked(paths, &moved)
+            .and_then(|dir| sync_clone_to_pin(&moved, &dir))
+            .and_then(|(commit, pin)| match &pin {
+                // Nothing selectable in the new range: the clone did not move,
+                // so the old pin stays.
+                Pin::Version(v) if v.resolved.is_none() => Err(MindError::NoMatchingRelease {
+                    source_name: source.name.clone(),
+                    range: v.range.clone(),
+                    highest: v.highest.clone(),
+                }),
+                _ => Ok((commit, pin)),
+            });
+        match applied {
+            Ok((commit, pin)) => {
+                if !out.json {
+                    println!(
+                        "{} {line}: range now {}",
+                        out.bullet(),
+                        match &pin {
+                            Pin::Version(v) => v.range.as_str(),
+                            _ => "",
+                        }
+                    );
+                }
+                source.pin = pin;
+                source.commit = Some(commit);
+                changed = true;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {} could not take breaking release for {}: {}",
+                    out.err(),
+                    source.name,
+                    strip_ansi(&e.to_string())
+                );
+            }
+        }
+    }
+    if changed {
+        registry.save(paths)?;
+    }
+    Ok(())
+}
+
 /// Bring an existing pinned clone at `dir` to `source`'s recorded pin (CLI-55)
 /// and return the new HEAD with the pin to record. A version pin is
 /// re-resolved against the default branch's `release-tags` first (VER-43);
@@ -9712,6 +9839,16 @@ fn upgrade_inner_scoped(
             .map(|it| it.source.clone())
             .collect::<HashSet<String>>()
     });
+
+    // spec: VER-62 -- breaking releases are settled before the pass, so an
+    // accepted source's items upgrade through the ordinary path below. The
+    // `[item]`/`--source` scoping narrows it like the rest (VER-63).
+    let breaking_scope = |name: &str| {
+        [&source_scope, &from_filter, &from_keys]
+            .iter()
+            .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
+    };
+    settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
 
     // spec: CLI-234 -- the multi-source disclosure's scope covers every
     // scoping mechanism in play (a filter, a source scope, or a key scope).
