@@ -683,7 +683,7 @@ fn run_item_build(
         item_profiles: installed.profiles.clone(),
         ..crate::commands::source_hook_env(source)
     };
-    let new_installed = crate::install::install(
+    let mut new_installed = crate::install::install(
         paths,
         catalog_item,
         &commit,
@@ -692,6 +692,8 @@ fn run_item_build(
         dangerously_skip_build,
         &hook_env,
     )?;
+    // Same commit, so the same release (VER-60).
+    new_installed.version = installed.version.clone();
     // Persist the updated InstalledItem (hash may change after a build hook).
     let mut manifest = Manifest::load(paths)?;
     manifest.insert(new_installed);

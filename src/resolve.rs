@@ -789,6 +789,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         }
     }
 

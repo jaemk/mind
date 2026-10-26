@@ -437,6 +437,9 @@ pub struct Resolution {
     pub highest: Option<Release>,
     /// Versions skipped because their duplicate tags disagree (VER-11).
     pub ambiguous: Vec<(String, String)>,
+    /// Every admitted, non-yanked release, highest first; `selected` is the
+    /// first until VER-41 skips one the running binary is too old for.
+    pub candidates: Vec<Release>,
 }
 
 /// Resolve `range` against `(tag, commit)` pairs under `template`.
@@ -447,10 +450,16 @@ pub fn resolve(
     yanked: &[Version],
 ) -> Resolution {
     let (rels, ambiguous) = releases(template, tags);
+    let candidates: Vec<Release> = rels
+        .iter()
+        .filter(|r| range.matches(&r.version) && !yanked.contains(&r.version))
+        .cloned()
+        .collect();
     Resolution {
-        selected: select(&rels, range, yanked).cloned(),
+        selected: candidates.first().cloned(),
         highest: highest_stable(&rels, yanked).cloned(),
         ambiguous,
+        candidates,
     }
 }
 

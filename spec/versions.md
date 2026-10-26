@@ -78,8 +78,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 
 - `VER-30` A version pin is stored as pin kind `version` (extending STO-18).
   It records the range, the resolved version and the tag name it came from, and
-  the highest stable, non-yanked release seen at the last resolution, whether
-  or not that release is in range. The resolved commit is recorded like any other pin's.
+  the highest stable, non-yanked release seen at the last resolution (version
+  and tag), whether or not that release is in range. The resolved commit is
+  recorded like any other pin's.
 
 ## Resolution
 
@@ -93,7 +94,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
   meet, resolution tries the next-highest, in descending order, and selects the
   first one the binary meets. Each skipped release is reported (`skipped 1.4.0:
   needs mind 0.35`). If no in-range release fits, the highest is selected and
-  the DSC-40 warning applies.
+  the DSC-40 warning applies. Each release's `min-mind-version` is read
+  leniently from its own `mind.toml`, since that file may use keys the running
+  binary predates.
 - `VER-42` `meld` resolves the pin at meld time (CLI-18). If no release is in
   range, the meld fails with `NoMatchingRelease`, which names the range and the
   highest release found, and nothing is registered.
@@ -135,7 +138,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-60` A compatible move (`sync` landed on a newer in-range release)
   appears in `upgrade` as an ordinary content change: the CLI-60 prompt, the
   CLI-62 `--yes`, and the CLI-61 report apply unchanged. The report shows the
-  version delta (`1.4.2 -> 1.5.0`) next to the commit delta.
+  version delta (`version 1.4.2 -> 1.5.0`) next to the commit delta. Each
+  installed item records the release it was installed from in the manifest;
+  an item installed before that record existed shows `?` as its old version.
 - `VER-61` When the highest-seen release (VER-30) is newer than the resolved
   one and outside a caret range, `upgrade` lists it, one line per source:
   `<source> 1.5.0 -> 2.0.0 (breaking, not applied; ...)`, naming the
@@ -153,13 +158,16 @@ error names the version gap (DSC-117) instead of a bare schema error.
   without a TTY, and without `--allow-breaking`, breaking moves are listed and
   skipped.
 - `VER-64` The breaking prompt shows the target tag's annotation message when it
-  is an annotated tag, sanitized like other source-derived text (`sanitize.rs`).
-  A lightweight tag shows no notes.
+  is an annotated tag, sanitized like other source-derived text (`sanitize.rs`),
+  without a signed tag's signature block and capped at 20 lines. A lightweight
+  tag shows no notes, and neither does a message that cannot be fetched: the
+  notes never block the prompt.
 - `VER-65` A compatible move that looks breaking is warned about: one that drops
   an installed item from the catalog, changes an installed item's kind, or
   removes the referent of a `{{ns:}}` token in an installed item. The warning
-  names each case and the release. It is advisory and does not block the
-  upgrade.
+  names each case and the release, one line each:
+  `<source> 1.0.0 -> 1.1.0 looks breaking: drops agent:gone`. It is advisory
+  and does not block the upgrade.
 
 ## Hooks
 

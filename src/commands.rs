@@ -336,6 +336,7 @@ fn filled_version_pin(
         resolved: Some(selected.version.to_string()),
         tag: Some(selected.tag.clone()),
         highest: res.highest.as_ref().map(|r| r.version.to_string()),
+        highest_tag: res.highest.as_ref().map(|r| r.tag.clone()),
     }
 }
 
@@ -382,6 +383,45 @@ fn default_version_pin(
         .map(|rel| Pin::Version(filled_version_pin(&pin, rel, &res))))
 }
 
+/// Honor `min-mind-version` in a resolution (VER-41): when the selected
+/// release needs a newer `mind`, select the highest in-range release this
+/// binary meets instead, reporting each one skipped. When none fits, the
+/// highest stays selected and the DSC-40 warning applies later. `dir` holds
+/// the source's git objects; `fetch` says whether it is a clone that must
+/// fetch each tag first.
+// spec: VER-41
+fn fit_min_mind_version(
+    source_name: &str,
+    url: &str,
+    dir: &std::path::Path,
+    fetch: bool,
+    res: &mut crate::version::Resolution,
+) -> Result<()> {
+    // A single candidate is selected whether it fits or not.
+    if res.candidates.len() < 2 {
+        return Ok(());
+    }
+    for rel in &res.candidates {
+        let text = git::tag_mind_toml(url, dir, &rel.tag, fetch)?;
+        match text
+            .as_deref()
+            .and_then(crate::mindfile::unmet_min_version_in_text)
+        {
+            Some(required) => eprintln!(
+                "{source_name}: skipped {}: needs mind {}",
+                rel.version,
+                strip_ansi(&required)
+            ),
+            None => {
+                res.selected = Some(rel.clone());
+                return Ok(());
+            }
+        }
+    }
+    res.selected = res.candidates.first().cloned();
+    Ok(())
+}
+
 /// The error for a range no release satisfies (VER-4, VER-42).
 fn no_matching_release(
     source_name: &str,
@@ -401,6 +441,19 @@ static ALLOW_BREAKING: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 pub fn set_allow_breaking(on: bool) {
     ALLOW_BREAKING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The release an installed item's commit came from (VER-60): its source's
+/// resolved version, when the source is version-pinned and still at that
+/// commit.
+fn release_version(registry: &Registry, item: &crate::manifest::InstalledItem) -> Option<String> {
+    let source = registry.find(&item.source)?;
+    match &source.pin {
+        Pin::Version(vp) if source.commit.as_deref() == Some(item.commit.as_str()) => {
+            vp.resolved.clone()
+        }
+        _ => None,
+    }
 }
 
 /// A version-pinned source's breaking release (VER-61): the highest stable
@@ -453,6 +506,7 @@ fn settle_breaking_moves(
         let accept = if allow {
             true
         } else if interactive {
+            print_release_notes(paths, source);
             confirm(&format!("take breaking release {line}?"))?
         } else {
             false
@@ -477,6 +531,7 @@ fn settle_breaking_moves(
             resolved: None,
             tag: None,
             highest: vp.highest.clone(),
+            highest_tag: vp.highest_tag.clone(),
         });
         let applied = clone_dir_checked(paths, &moved)
             .and_then(|dir| sync_clone_to_pin(&moved, &dir))
@@ -522,6 +577,35 @@ fn settle_breaking_moves(
     Ok(())
 }
 
+/// The most lines of a tag message the breaking prompt shows (VER-64).
+const RELEASE_NOTES_MAX_LINES: usize = 20;
+
+/// Print the breaking release's tag message ahead of its prompt (VER-64),
+/// sanitized like other source-derived text. A lightweight tag, or a message
+/// that cannot be fetched, shows nothing: the notes never block the prompt.
+// spec: VER-64
+fn print_release_notes(paths: &Paths, source: &crate::source::Source) {
+    let Pin::Version(vp) = &source.pin else {
+        return;
+    };
+    let Some(tag) = vp.highest_tag.as_deref() else {
+        return;
+    };
+    let notes = clone_dir_checked(paths, source)
+        .and_then(|dir| git::tag_annotation(&source.url, &dir, tag));
+    let Ok(Some(notes)) = notes else {
+        return;
+    };
+    eprintln!("notes for {}:", strip_ansi(tag));
+    let lines: Vec<&str> = notes.lines().collect();
+    for l in lines.iter().take(RELEASE_NOTES_MAX_LINES) {
+        eprintln!("  {}", strip_ansi(l));
+    }
+    if lines.len() > RELEASE_NOTES_MAX_LINES {
+        eprintln!("  ...");
+    }
+}
+
 /// Bring an existing pinned clone at `dir` to `source`'s recorded pin (CLI-55)
 /// and return the new HEAD with the pin to record. A version pin is
 /// re-resolved against the default branch's `release-tags` first (VER-43);
@@ -549,9 +633,11 @@ fn sync_clone_to_pin(
         None => (None, Vec::new()),
     };
     let template = template.unwrap_or(crate::version::Template::Default);
-    let res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
+    let mut res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
+    fit_min_mind_version(&source.name, &source.url, dir, true, &mut res)?;
     let mut next = vp.clone();
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
+    next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
     match &res.selected {
         // spec: VER-46 -- nothing in range is selectable now (every candidate
         // yanked, or the tags gone): stay where the source is.
@@ -1253,7 +1339,13 @@ fn meld_recursive(
                 }
             };
             let template = template.unwrap_or(crate::version::Template::Default);
-            let res = match resolve_version(&source.name, &source.url, &vp, &template, &yanked) {
+            let res = resolve_version(&source.name, &source.url, &vp, &template, &yanked).and_then(
+                |mut res| {
+                    fit_min_mind_version(&source.name, &source.url, &dir, !is_local, &mut res)?;
+                    Ok(res)
+                },
+            );
+            let res = match res {
                 Ok(r) => r,
                 Err(e) => {
                     cleanup(&dir);
@@ -4662,6 +4754,7 @@ fn learn_selected(
                 // spec: LNK-19 -- record what LNK-18 dropped on the installed
                 // item, so the degradation outlives the install-time warning.
                 installed.dropped_requires = dropped_requires;
+                installed.version = release_version(&registry, &installed);
                 installed_keys.push(installed.key().into());
                 if !out.json {
                     // Keep the line starting with "learned <key>" (tests assert the
@@ -4807,6 +4900,7 @@ fn learn_collecting_selected(
             Ok(mut installed) => {
                 // spec: LNK-19
                 installed.dropped_requires = dropped_requires;
+                installed.version = release_version(&registry, &installed);
                 installed_keys.push(installed.key().into());
                 manifest.insert(installed);
             }
@@ -7242,7 +7336,18 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
                 }
             };
             let template = template.unwrap_or(crate::version::Template::Default);
-            let res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
+            let mut res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
+            if target.join(".git").is_dir() {
+                fit_min_mind_version(source_name, &url, &target, true, &mut res)?;
+            } else if is_local {
+                fit_min_mind_version(
+                    source_name,
+                    &url,
+                    std::path::Path::new(&url),
+                    false,
+                    &mut res,
+                )?;
+            }
             match &res.selected {
                 Some(rel) => Pin::Version(filled_version_pin(&vp, rel, &res)),
                 None => return Err(no_matching_release(source_name, &vp, &res)),
@@ -10037,6 +10142,8 @@ fn upgrade_inner_scoped(
         Manifest::load(paths)?
     };
 
+    warn_apparent_breaks(&registry, &manifest, &catalog, hook_scope.as_ref(), &out);
+
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
@@ -10311,6 +10418,7 @@ fn upgrade_inner_scoped(
                 // upgrade too, so it reflects the version now on disk (an
                 // upstream edit may have added or removed such an entry).
                 i.dropped_requires = dropped_requires;
+                i.version = release_version(&registry, &i);
                 // spec: PROF-20 -- the install path builds a fresh entry, so
                 // the old one's install reasons are carried over by hand.
                 crate::profile::carry_reasons(&mut i, &up.old);
@@ -10830,6 +10938,82 @@ fn upgrade_item_disposition(
     UpgradeDisposition::Consider
 }
 
+/// Warn about a compatible release move that looks breaking (VER-65): it
+/// drops an installed item, changes an installed item's kind, or removes the
+/// referent of a `{{ns:}}` token in an installed item. Advisory: the upgrade
+/// carries on. `scope` limits it to the sources the pass touches.
+// spec: VER-65
+fn warn_apparent_breaks(
+    registry: &Registry,
+    manifest: &Manifest,
+    catalog: &[CatalogItem],
+    scope: Option<&HashSet<String>>,
+    out: &crate::render::OutputCtx,
+) {
+    for source in &registry.sources {
+        let Pin::Version(vp) = &source.pin else {
+            continue;
+        };
+        if scope.is_some_and(|s| !s.contains(&source.name)) {
+            continue;
+        }
+        let (Some(to), Some(commit)) = (vp.resolved.as_deref(), source.commit.as_deref()) else {
+            continue;
+        };
+        let installed: Vec<&crate::manifest::InstalledItem> = manifest
+            .items
+            .values()
+            .filter(|i| i.source == source.name)
+            .collect();
+        let Some(moved) = installed.iter().find(|i| i.commit != commit) else {
+            continue;
+        };
+        let from = moved.version.as_deref().unwrap_or("?");
+        let siblings: Vec<&CatalogItem> =
+            catalog.iter().filter(|c| c.source == source.name).collect();
+        let mut cases: Vec<String> = Vec::new();
+        for item in &installed {
+            let same_name: Vec<&&CatalogItem> = siblings
+                .iter()
+                .filter(|c| c.name == item.bare_name)
+                .collect();
+            let Some(cat) = same_name.iter().find(|c| c.kind == item.kind) else {
+                match same_name.first() {
+                    None => cases.push(format!("drops {}", item.display_key())),
+                    Some(c) => cases.push(format!(
+                        "changes {} from {} to {}",
+                        strip_ansi(&item.bare_name),
+                        item.kind.as_str(),
+                        c.kind.as_str()
+                    )),
+                }
+                continue;
+            };
+            for name in crate::namespace::referenced_names(&read_item_text(cat)) {
+                if !siblings.iter().any(|c| c.name == name) {
+                    cases.push(format!(
+                        "removes {} referenced by {}",
+                        strip_ansi(&format!("{{{{ns:{name}}}}}")),
+                        item.display_key()
+                    ));
+                }
+            }
+        }
+        for case in cases {
+            let line = format!(
+                "{} {from} -> {} looks breaking: {case}",
+                strip_ansi(&source.name),
+                strip_ansi(to)
+            );
+            if out.json {
+                eprintln!("{} {line}", out.warn());
+            } else {
+                println!("{} {line}", out.warn());
+            }
+        }
+    }
+}
+
 struct Upgrade {
     cat: CatalogItem,
     old: crate::manifest::InstalledItem,
@@ -10892,6 +11076,19 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
             short(&up.old.commit),
             short(&up.new_commit)
         );
+        // spec: VER-60 -- a version-pinned source shows the release delta too.
+        if let Some(src) = registry.find(&up.cat.source)
+            && let Pin::Version(vp) = &src.pin
+            && src.commit.as_deref() == Some(up.new_commit.as_str())
+            && let Some(to) = &vp.resolved
+        {
+            println!(
+                "    {} {} -> {}",
+                out.dim("version"),
+                up.old.version.as_deref().unwrap_or("?"),
+                to
+            );
+        }
         if let Some(src) = registry.find(&up.cat.source)
             && !up.old.commit.is_empty()
             && !up.new_commit.is_empty()
@@ -14500,6 +14697,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         }
     }
 
@@ -15679,6 +15877,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         });
         manifest.save(paths).expect("save manifest");
     }

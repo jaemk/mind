@@ -56,6 +56,9 @@ pub struct VersionPin {
     /// The highest release seen at the last resolution (VER-61 reads it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highest: Option<String>,
+    /// The tag `highest` came from, for the breaking prompt's notes (VER-64).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highest_tag: Option<String>,
 }
 
 impl VersionPin {
@@ -66,6 +69,7 @@ impl VersionPin {
             resolved: None,
             tag: None,
             highest: None,
+            highest_tag: None,
         }
     }
 

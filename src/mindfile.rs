@@ -1025,6 +1025,14 @@ fn probe_min_version(text: &str) -> Option<String> {
     is_plausible_version(v).then(|| v.to_string())
 }
 
+/// The `[source].min-mind-version` declared by `text`, when the running binary
+/// does not meet it (VER-41). Read leniently, since a release's file may use
+/// keys this binary predates.
+pub fn unmet_min_version_in_text(text: &str) -> Option<String> {
+    probe_min_version(text)
+        .filter(|required| !version_at_least(env!("CARGO_PKG_VERSION"), required))
+}
+
 /// A path with ANSI/control/bidi code points stripped, for a message that will
 /// be printed (DSC-95). A clone directory carries source-controlled components
 /// (an owner, a repo, an item directory name), so a path is not inherently

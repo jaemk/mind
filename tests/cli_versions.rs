@@ -476,6 +476,310 @@ fn sync_moves_to_a_new_compatible_release() {
     assert_eq!(sb.pin().1, d);
 }
 
+/// The `version` recorded on the installed `dev` agent, if any.
+fn installed_version(sb: &Sandbox) -> Option<String> {
+    let raw = std::fs::read_to_string(sb.mind_home.join("manifest.json")).ok()?;
+    let v: Value = serde_json::from_str(&raw).expect("manifest.json is JSON");
+    v["items"]["agent:dev"]["version"]
+        .as_str()
+        .map(str::to_string)
+}
+
+#[test]
+fn upgrade_reports_the_version_delta_of_a_compatible_move() {
+    // spec: VER-60
+    let (sb, [_a, _b, _c]) = released("ver-delta", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(installed_version(&sb).as_deref(), Some("1.1.0"));
+
+    let d = sb.commit("one-two", RELEASE_TAGS);
+    sb.tag("v1.2.0", &d);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(
+        r.stdout.contains("version 1.1.0 -> 1.2.0"),
+        "the version delta sits next to the commit delta: {}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("commit "), "{}", r.stdout);
+    assert!(sb.installed_agent().contains("one-two"));
+    assert_eq!(installed_version(&sb).as_deref(), Some("1.2.0"));
+}
+
+#[test]
+fn an_item_from_a_non_version_pin_records_no_version() {
+    // spec: VER-60
+    let (sb, _) = released("ver-delta-none", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "tag=v1.0.0", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert!(sb.installed_agent().contains("one-zero"));
+    assert_eq!(installed_version(&sb), None);
+}
+
+fn agent(name: &str, body: &str) -> String {
+    format!("---\nname: {name}\ndescription: {name}\n---\n{body}\n")
+}
+
+/// Commit the tree as it stands and tag it.
+fn release(sb: &Sandbox, msg: &str, tag: &str) -> String {
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", msg]);
+    let sha = sb.head();
+    sb.tag(tag, &sha);
+    sha
+}
+
+#[test]
+fn a_compatible_move_that_drops_or_rekinds_an_item_is_warned_about() {
+    // spec: VER-65
+    let sb = Sandbox::new("ver-looks-breaking");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    write_file(&sb.source.join("agents/shift.md"), &agent("shift", "x"));
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
+    std::fs::remove_file(sb.source.join("agents/shift.md")).unwrap();
+    write_file(
+        &sb.source.join("rules/shift.md"),
+        "---\ndescription: s\n---\n",
+    );
+    release(&sb, "one-one", "v1.1.0");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "advisory only: {}", r.stderr);
+    let head = format!("{} 1.0.0 -> 1.1.0 looks breaking:", sb.identity());
+    assert!(
+        r.stdout.contains(&format!("{head} drops agent:gone")),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout
+            .contains(&format!("{head} changes shift from agent to rule")),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        sb.installed_agent().contains("two"),
+        "the upgrade went ahead"
+    );
+}
+
+#[test]
+fn a_compatible_move_that_removes_a_token_referent_is_warned_about() {
+    // spec: VER-65
+    let sb = Sandbox::new("ver-looks-breaking-ref");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(
+        &sb.source.join("agents/dev.md"),
+        &agent("dev", "use {{ns:helper}}"),
+    );
+    write_file(&sb.source.join("agents/helper.md"), &agent("helper", "h"));
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    std::fs::remove_file(sb.source.join("agents/helper.md")).unwrap();
+    release(&sb, "one-one", "v1.1.0");
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        r.stdout.contains(&format!(
+            "{} 1.0.0 -> 1.1.0 looks breaking: removes {{{{ns:helper}}}} referenced by agent:dev",
+            sb.identity()
+        )),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_compatible_move_with_no_break_warns_nothing() {
+    // spec: VER-65
+    let (sb, _) = released("ver-looks-fine", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let d = sb.commit("one-two", RELEASE_TAGS);
+    sb.tag("v1.2.0", &d);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(!r.stdout.contains("looks breaking"), "{}", r.stdout);
+}
+
+const NEEDS_NEWER_MIND: &str =
+    "[source]\nrelease-tags = \"v{version}\"\nmin-mind-version = \"99.0\"\n";
+
+#[test]
+fn resolution_skips_a_release_that_needs_a_newer_mind() {
+    // spec: VER-41
+    let sb = Sandbox::new("ver-min-mind");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("one-one", NEEDS_NEWER_MIND);
+    sb.tag("v1.1.0", &b);
+    let c = sb.commit("one-two", NEEDS_NEWER_MIND);
+    sb.tag("v1.2.0", &c);
+    sb.commit("tip", RELEASE_TAGS);
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    for v in ["1.2.0", "1.1.0"] {
+        assert!(
+            r.stderr.contains(&format!("skipped {v}: needs mind 99.0")),
+            "{v}: {}",
+            r.stderr
+        );
+    }
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.0.0", "{pin}");
+    assert_eq!(commit, a);
+
+    // sync re-resolves on the same terms: a newer release that fits wins.
+    let d = sb.commit("one-three", RELEASE_TAGS);
+    sb.tag("v1.3.0", &d);
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.3.0", "{pin}");
+    assert_eq!(commit, d);
+}
+
+#[test]
+fn with_no_release_that_fits_the_highest_is_selected_with_the_warning() {
+    // spec: VER-41 DSC-40
+    let sb = Sandbox::new("ver-min-mind-none");
+    let a = sb.commit("one-zero", NEEDS_NEWER_MIND);
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("one-one", NEEDS_NEWER_MIND);
+    sb.tag("v1.1.0", &b);
+    sb.commit("tip", RELEASE_TAGS);
+
+    // No terminal and no --yes: the DSC-116 gate refuses the meld.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(sb.entry().is_none());
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+}
+
+#[test]
+fn a_local_version_pin_is_a_snapshot_of_the_release() {
+    // spec: VER-81 CLI-27
+    let (sb, [_a, b, _c]) = released("ver-local-snapshot", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(sb.pin().1, b);
+    // Read from the sources tree, not the working tree (which is at the tip).
+    assert!(sb.installed_agent().contains("one-one"));
+    assert!(
+        std::fs::read_to_string(sb.source.join("agents/dev.md"))
+            .unwrap()
+            .contains("unreleased"),
+        "the working tree is untouched"
+    );
+}
+
+#[test]
+fn a_local_directory_that_is_not_a_repo_fails_with_the_git_error() {
+    // spec: VER-81
+    let sb = Sandbox::new("ver-not-a-repo");
+    let plain = sb.base.join("plain");
+    write_file(&plain.join("agents/dev.md"), &agent("dev", "x"));
+    let r = sb.mind(&["meld", &plain.to_string_lossy(), "--pin", "version=^1"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("git"), "{}", r.stderr);
+}
+
+#[test]
+fn an_item_link_instance_accepts_a_version_pin() {
+    // spec: VER-81 LNK-4
+    let sb = Sandbox::new("ver-item-link");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    let skill = |desc: &str| format!("---\nname: greet\ndescription: {desc}\n---\n# greet\n");
+    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("one-zero"));
+    write_file(&sb.source.join("agents/other.md"), &agent("other", "x"));
+    let a = release(&sb, "one-zero", "v1.0.0");
+    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("tip"));
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "tip"]);
+
+    let link = format!("file://{}/tree/main/skills/greet", sb.spec());
+    let r = sb.mind(&["meld", &link, "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let e = sb
+        .entry_named(&format!("{}#skills/greet", sb.identity()))
+        .expect("the link instance is registered");
+    let (pin, commit) = pin_of(e);
+    assert_eq!(pin["kind"], "version", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.0.0", "{pin}");
+    assert_eq!(commit, a);
+    let installed =
+        std::fs::read_to_string(sb.claude_home.join("skills/greet/SKILL.md")).unwrap_or_default();
+    assert!(installed.contains("one-zero"), "{installed}");
+    assert!(
+        !sb.claude_home.join("agents/other.md").exists(),
+        "only the linked item"
+    );
+}
+
+#[test]
+fn a_version_move_never_grants_hook_consent() {
+    // spec: VER-70 HOOK-22 HOOK-23
+    let sb = Sandbox::new("ver-hooks");
+    let log = sb.base.join("update.log");
+    let toml = format!(
+        "{RELEASE_TAGS}\n[[hooks]]\nrun = \"echo ran >> {}\"\nevent = \"update\"\n",
+        log.display()
+    );
+    let runs = || {
+        std::fs::read_to_string(&log)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    let a = sb.commit("one-zero", &toml);
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("two-zero", &toml);
+    sb.tag("v2.0.0", &b);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    // A compatible move under --yes, with no terminal: the hook is skipped.
+    let c = sb.commit("one-one", &toml);
+    sb.tag("v1.1.0", &c);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert_eq!(sb.pin().1, c);
+    assert_eq!(runs(), 0, "--yes is not hook consent: {}", r.stdout);
+
+    // A breaking move taken with --allow-breaking: still skipped.
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert_eq!(sb.pin().1, b);
+    assert_eq!(runs(), 0, "--allow-breaking is not hook consent");
+
+    // Only the dangerous flag runs it.
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert_eq!(runs(), 1, "{}", r.stdout);
+}
+
 #[test]
 fn sync_does_not_follow_a_moved_release_tag() {
     // spec: VER-44
@@ -660,6 +964,56 @@ fn a_terminal_prompts_for_each_breaking_release() {
         "{}",
         sb.installed_agent()
     );
+}
+
+#[test]
+fn the_breaking_prompt_shows_an_annotated_tags_notes() {
+    // spec: VER-64
+    let (sb, [_a, b, _c]) = released("ver-break-notes", RELEASE_TAGS);
+    let d = sb.commit("three-zero", RELEASE_TAGS);
+    git(
+        &sb.source,
+        &[
+            "tag",
+            "-a",
+            "v3.0.0",
+            "-m",
+            "Drop the dev agent's \x1b[31mold\x1b[0m flags\n\nSee the migration notes.",
+            &d,
+        ],
+    );
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(r.stderr.contains("notes for v3.0.0:"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("Drop the dev agent's old flags"),
+        "sanitized: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("See the migration notes."),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains('\x1b'), "no escape reaches the terminal");
+    assert_eq!(sb.pin().1, b, "declined");
+}
+
+#[test]
+fn a_lightweight_breaking_tag_shows_no_notes() {
+    // spec: VER-64
+    let (sb, _) = released("ver-break-no-notes", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(!r.stderr.contains("notes for"), "{}", r.stderr);
 }
 
 #[test]
