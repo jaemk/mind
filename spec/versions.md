@@ -116,15 +116,19 @@ error names the version gap (DSC-117) instead of a bare schema error.
 
 ## Default pin
 
-- `VER-50` When the default-branch `mind.toml` declares `release-tags`, and
-  neither a consumer `--pin` nor a `[source]` pin directive applies, `meld` pins
+- `VER-50` When the default-branch `mind.toml` of a remote source declares
+  `release-tags`, and no other layer supplies a pin (a consumer `--pin`, a
+  `[source]` pin directive, a curator pin, or an item link's ref), `meld` pins
   `version=^<highest stable release>` instead of following the default branch.
+  The highest stable release skips prereleases and yanked versions (VER-46).
   For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`. If the template
   matches no stable release, `meld` follows the default branch as before and
-  says so.
+  says so. A local source gets no default: it stays linked to its working tree
+  (CLI-27), and an explicit version pin still applies to it (VER-81).
 - `VER-51` `[source]` gains a fourth pin directive, `pin-version = "<range>"`.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
-  `MindToml` error), and a consumer `--pin` overrides it.
+  `MindToml` error), and a consumer `--pin` overrides it. A range that does not
+  parse (VER-20) is a `MindToml` error.
 
 ## Upgrade
 

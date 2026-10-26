@@ -449,12 +449,17 @@ pub fn resolve(
     let (rels, ambiguous) = releases(template, tags);
     Resolution {
         selected: select(&rels, range, yanked).cloned(),
-        highest: rels
-            .iter()
-            .find(|r| !r.version.is_prerelease() && !yanked.contains(&r.version))
-            .cloned(),
+        highest: highest_stable(&rels, yanked).cloned(),
         ambiguous,
     }
+}
+
+/// The highest stable release in `releases` (already highest first) that
+/// `yanked` does not list (VER-30, VER-50).
+pub fn highest_stable<'a>(releases: &'a [Release], yanked: &[Version]) -> Option<&'a Release> {
+    releases
+        .iter()
+        .find(|r| !r.version.is_prerelease() && !yanked.contains(&r.version))
 }
 
 #[cfg(test)]

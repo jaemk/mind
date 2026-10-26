@@ -91,6 +91,22 @@ impl Sandbox {
         )
     }
 
+    /// A remote-looking spec for the same repo. `mind_env` points git's
+    /// `url.<base>.insteadOf` at it, so the clone stays on disk.
+    fn remote_spec(&self) -> String {
+        format!(
+            "{REMOTE_PREFIX}{}",
+            self.source.file_name().unwrap().to_string_lossy()
+        )
+    }
+
+    fn remote_identity(&self) -> String {
+        format!(
+            "git.example.test/acme/{}",
+            self.source.file_name().unwrap().to_string_lossy()
+        )
+    }
+
     fn mind(&self, args: &[&str]) -> Run {
         self.mind_env(args, &[], None)
     }
@@ -105,6 +121,12 @@ impl Sandbox {
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_MAX_METADATA_SIZE")
             .env_remove("MIND_TTY")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env(
+                "GIT_CONFIG_KEY_0",
+                format!("url.file://{}/.insteadOf", self.base.display()),
+            )
+            .env("GIT_CONFIG_VALUE_0", REMOTE_PREFIX)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(match stdin {
@@ -138,23 +160,38 @@ impl Sandbox {
 
     /// The registry entry of this sandbox's source, or `None` when not melded.
     fn entry(&self) -> Option<Value> {
+        self.entry_named(&self.identity())
+    }
+
+    fn entry_named(&self, identity: &str) -> Option<Value> {
         let raw = std::fs::read_to_string(self.mind_home.join("sources.json")).ok()?;
         let v: Value = serde_json::from_str(&raw).expect("sources.json is JSON");
         v["sources"]
             .as_array()?
             .iter()
-            .find(|s| s["name"].as_str() == Some(self.identity().as_str()))
+            .find(|s| s["name"].as_str() == Some(identity))
             .cloned()
     }
 
     /// The recorded pin and commit.
     fn pin(&self) -> (Value, String) {
-        let e = self.entry().expect("source is melded");
-        (
-            e["pin"].clone(),
-            e["commit"].as_str().unwrap_or("").to_string(),
+        pin_of(self.entry().expect("source is melded"))
+    }
+
+    /// The recorded pin and commit of the source melded by `remote_spec`.
+    fn remote_pin(&self) -> (Value, String) {
+        pin_of(
+            self.entry_named(&self.remote_identity())
+                .expect("remote source is melded"),
         )
     }
+}
+
+fn pin_of(e: Value) -> (Value, String) {
+    (
+        e["pin"].clone(),
+        e["commit"].as_str().unwrap_or("").to_string(),
+    )
 }
 
 impl Drop for Sandbox {
@@ -180,6 +217,9 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 const RELEASE_TAGS: &str = "[source]\nrelease-tags = \"v{version}\"\n";
+
+/// The URL prefix `remote_spec` uses; git rewrites it to the sandbox base.
+const REMOTE_PREFIX: &str = "https://git.example.test/acme/";
 
 /// Releases v1.0.0, v1.1.0, v2.0.0 plus a prerelease and a non-semver tag,
 /// then a default-branch tip past them. Returns the sandbox and the shas of
@@ -285,6 +325,124 @@ fn the_template_comes_from_the_default_branch() {
     assert!(r.success, "meld: {}", r.stderr);
     let (pin, _) = sb.pin();
     assert_eq!(pin["value"]["tag"], "skills-v1.0.0", "{pin}");
+}
+
+#[test]
+fn meld_defaults_to_the_caret_of_the_highest_release() {
+    // spec: VER-50
+    let (sb, [_a, _b, c]) = released("ver-default-pin", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["kind"], "version", "{pin}");
+    assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(pin["value"]["tag"], "v2.0.0", "{pin}");
+    assert_eq!(commit, c, "the release commit, not the default-branch tip");
+    assert!(sb.installed_agent().contains("two-zero"));
+}
+
+#[test]
+fn the_default_pin_skips_prereleases_and_yanked_versions() {
+    // spec: VER-50
+    let tip = "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"2.0.0\"]\n";
+    let (sb, [_a, b, _c]) = released("ver-default-yanked", tip);
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^1.1.0", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+}
+
+#[test]
+fn no_stable_release_follows_the_default_branch_and_says_so() {
+    // spec: VER-50
+    let sb = Sandbox::new("ver-default-rc-only");
+    let rc = sb.commit("rc", RELEASE_TAGS);
+    sb.tag("v1.0.0-rc.1", &rc);
+    let tip = sb.commit("tip", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert!(
+        r.stderr
+            .contains("has no stable release; following the default branch"),
+        "{}",
+        r.stderr
+    );
+    let (pin, commit) = sb.remote_pin();
+    assert_ne!(pin["kind"], "version", "{pin}");
+    assert_eq!(commit, tip);
+}
+
+#[test]
+fn a_local_meld_stays_linked_to_its_working_tree() {
+    // spec: VER-50 CLI-27
+    let (sb, _) = released("ver-default-local", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_ne!(pin["kind"], "version", "{pin}");
+    assert_eq!(commit, sb.head(), "the working-tree HEAD");
+    assert!(sb.installed_agent().contains("unreleased"));
+}
+
+#[test]
+fn an_explicit_pin_or_directive_replaces_the_default() {
+    // spec: VER-50 DSC-41
+    let (sb, [a, _b, _c]) = released("ver-default-override", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--pin", "tag=v1.0.0", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["kind"], "tag", "{pin}");
+    assert_eq!(commit, a);
+
+    let tip = "[source]\nrelease-tags = \"v{version}\"\npin-tag = \"v1.0.0\"\n";
+    let (sb, [a, _b, _c]) = released("ver-default-directive", tip);
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["kind"], "tag", "{pin}");
+    assert_eq!(commit, a);
+}
+
+#[test]
+fn a_pin_version_directive_resolves_and_a_consumer_pin_overrides_it() {
+    // spec: VER-51
+    let tip = "[source]\nrelease-tags = \"v{version}\"\npin-version = \"^1\"\n";
+    let (sb, [a, b, _c]) = released("ver-directive", tip);
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["kind"], "version", "{pin}");
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"]);
+    assert!(r.success, "re-pin: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "=1.0.0", "{pin}");
+    assert_eq!(commit, a);
+}
+
+#[test]
+fn a_bad_or_conflicting_pin_version_directive_fails_the_meld() {
+    // spec: VER-51
+    for (name, extra) in [
+        ("ver-directive-bad", "pin-version = \"~1\"\n"),
+        (
+            "ver-directive-conflict",
+            "pin-version = \"^1\"\npin-tag = \"v1.0.0\"\n",
+        ),
+    ] {
+        let tip = format!("{RELEASE_TAGS}{extra}");
+        let (sb, _) = released(name, &tip);
+        let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+        assert!(!r.success, "{name}: {}", r.stdout);
+        assert!(r.stderr.contains("mind.toml"), "{name}: {}", r.stderr);
+        assert!(sb.entry().is_none(), "{name}: nothing is registered");
+    }
 }
 
 #[test]

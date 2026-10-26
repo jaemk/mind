@@ -79,7 +79,7 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
-- **`follow-branch` / `pin-tag` / `pin-ref`**: how `sync` tracks upstream. Declare
+- **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync` tracks upstream. Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
   [Pinning a source version](pinning.md)).
 - **`roots`**: convention discovery scans under each listed directory instead of

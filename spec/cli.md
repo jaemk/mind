@@ -187,7 +187,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   deprecated alias (CLI-202). Supplying more than one (two aliases, or `--pin` plus
   an alias) is `ConflictingPin`. The chosen pin is persisted on the source
   (STO-18). With no pin flag, the source's `[source]` pin directive (DSC-41)
-  applies, else the default is following the remote default branch. `--pin`
+  applies, else a source declaring `release-tags` pins its latest release
+  (VER-50), else the default is following the remote default branch. `--pin`
   requires a value, so there is no bare-flag form that could ambiguously consume
   the following positional argument.
 - `CLI-18` `meld` clones at the pinned point and records the resolved HEAD commit.

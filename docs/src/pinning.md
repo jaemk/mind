@@ -37,8 +37,8 @@ Note that `--pin stable` and `--pin branch=stable` differ. The first takes a
 one-time snapshot of `stable` that `sync` never moves; the second keeps
 tracking the branch. Use `branch=` to keep following.
 
-A source's own `mind.toml` can declare a pin (`follow-branch`, `pin-tag`, or
-`pin-ref` under `[source]`). A `--pin` you pass overrides it.
+A source's own `mind.toml` can declare a pin (`follow-branch`, `pin-tag`,
+`pin-ref`, or `pin-version` under `[source]`). A `--pin` you pass overrides it.
 
 ## Follow release versions
 
@@ -78,8 +78,15 @@ The source declares how its tags are named with `release-tags` under
 [source]
 release-tags = "skills-v{version}"   # default: v{version} or a bare {version}
 yanked = ["1.4.1"]                   # never selected
+pin-version = "^1"                   # optional: the range a plain meld pins
 min-mind-version = "0.33"            # older mind versions reject these keys
 ```
+
+A plain `mind meld owner/repo` of a source that declares `release-tags` pins
+the caret of its highest stable release (`^1.4.2` for `1.4.2`) instead of
+following the default branch. With no stable release yet it follows the
+default branch and says so. A local path meld stays linked to the working
+tree; pass `--pin version=<range>` to pin it.
 
 ## Change the pin of a melded source
 

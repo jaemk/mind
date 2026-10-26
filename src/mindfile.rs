@@ -123,6 +123,9 @@ pub struct SourceMeta {
     /// Pin directive: fix to a specific commit (DSC-41).
     #[serde(rename = "pin-ref")]
     pub pin_ref: Option<String>,
+    /// Pin directive: follow release tags within a version range (VER-51).
+    #[serde(rename = "pin-version")]
+    pub pin_version: Option<String>,
     /// Convention scan roots (DSC-50). When set, convention discovery scans
     /// under each listed repo-root-relative directory instead of the repo root.
     #[serde(default)]
@@ -192,8 +195,9 @@ impl SourceMeta {
     }
 
     /// Return the single pin declared by this `[source]` section, or `None`
-    /// if none is declared. More than one declared pin is a `MindToml` error
-    /// (DSC-41).
+    /// if none is declared. More than one declared pin, or a `pin-version`
+    /// range that does not parse, is a `MindToml` error (DSC-41, VER-51).
+    // spec: VER-51
     pub fn pin_directive(&self, toml_path: &Path) -> Result<Option<Pin>> {
         // Collect which directives are set so we can detect conflicts and give
         // a useful error message naming both conflicting keys.
@@ -210,6 +214,18 @@ impl SourceMeta {
             validate_ref_value(r)?;
             set.push(("pin-ref", Pin::Ref(r.clone())));
         }
+        if let Some(v) = &self.pin_version {
+            let range = crate::version::Range::parse(v).ok_or_else(|| MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "pin-version {v:?} is not a version range (such as \"^1.2\" or \"=1.2.3\")"
+                ),
+            })?;
+            set.push((
+                "pin-version",
+                Pin::Version(crate::source::VersionPin::unresolved(&range)),
+            ));
+        }
         match set.len() {
             0 => Ok(None),
             1 => Ok(Some(set.remove(0).1)),
@@ -218,7 +234,7 @@ impl SourceMeta {
                 Err(MindError::MindToml {
                     path: toml_path.to_path_buf(),
                     msg: format!(
-                        "conflicting pin directives: {}; declare at most one of follow-branch, pin-tag, pin-ref",
+                        "conflicting pin directives: {}; declare at most one of follow-branch, pin-tag, pin-ref, pin-version",
                         names.join(", ")
                     ),
                 })
@@ -1917,6 +1933,54 @@ mod tests {
             .pin_directive(Path::new("mind.toml"))
             .expect("no error");
         assert_eq!(pin, Some(Pin::Ref("abc123".into())));
+    }
+
+    #[test]
+    fn pin_directive_version() {
+        // spec: VER-51
+        let meta = SourceMeta {
+            pin_version: Some("^1.2".into()),
+            ..Default::default()
+        };
+        let pin = meta
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no error");
+        match pin {
+            Some(Pin::Version(v)) => {
+                assert_eq!(v.range, "^1.2");
+                assert!(
+                    v.resolved.is_none(),
+                    "resolved at meld time, not parse time"
+                );
+            }
+            other => panic!("expected a version pin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pin_directive_version_must_parse_and_is_one_of() {
+        // spec: VER-51
+        let bad = SourceMeta {
+            pin_version: Some("~1".into()),
+            ..Default::default()
+        };
+        let err = bad.pin_directive(Path::new("/repo/mind.toml")).unwrap_err();
+        assert!(matches!(err, MindError::MindToml { .. }), "{err:?}");
+        assert!(err.to_string().contains("pin-version"), "{err}");
+
+        let both = SourceMeta {
+            pin_version: Some("^1".into()),
+            follow_branch: Some("main".into()),
+            ..Default::default()
+        };
+        let err = both
+            .pin_directive(Path::new("/repo/mind.toml"))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("follow-branch, pin-version"),
+            "both keys are named: {msg}"
+        );
     }
 
     #[test]

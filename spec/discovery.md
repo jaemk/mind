@@ -587,7 +587,8 @@ run = "make build"
   decided at meld time (DSC-116). `review` still reports it as a hard
   `incompatible-version` finding (CLI-132).
 - `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
-  `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
+  `pin-tag = "<tag>"`, `pin-ref = "<commit>"`, or `pin-version = "<range>"`
+  (VER-51). It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives
   no `--follow-branch` / `--pin-tag` / `--pin-ref` flag at meld (CLI-17); a
   consumer flag overrides it. Declaring more than one is a `MindToml` error. (See

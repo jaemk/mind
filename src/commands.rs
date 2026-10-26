@@ -339,6 +339,49 @@ fn filled_version_pin(
     }
 }
 
+/// The pin a source gets on `meld` when no layer names one (VER-50): when its
+/// default-branch `mind.toml` declares `release-tags`, the caret of its highest
+/// stable, non-yanked release, already resolved to that release. `None` when it
+/// declares no `release-tags`, or declares them but no stable release matches
+/// (the source then follows its default branch, and the meld says so).
+fn default_version_pin(
+    source: &crate::source::Source,
+    mindfile: Option<&MindToml>,
+    toml_path: &std::path::Path,
+) -> Result<Option<Pin>> {
+    let Some(m) = mindfile else {
+        return Ok(None);
+    };
+    let Some(template) = m.source.release_template(toml_path)? else {
+        return Ok(None);
+    };
+    let yanked = m.source.yanked_versions(toml_path)?;
+    let tags = git::ls_remote_tags(&source.url)?;
+    let (releases, _) = crate::version::releases(&template, &tags);
+    let Some(highest) = crate::version::highest_stable(&releases, &yanked) else {
+        eprintln!(
+            "note: {} declares release-tags but has no stable release; following the default branch",
+            source.name
+        );
+        return Ok(None);
+    };
+    let range = crate::version::Range::caret_of(&highest.version);
+    let res = crate::version::resolve(&template, &tags, &range, &yanked);
+    for (a, b) in &res.ambiguous {
+        eprintln!(
+            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+            source.name,
+            strip_ansi(a),
+            strip_ansi(b)
+        );
+    }
+    let pin = crate::source::VersionPin::unresolved(&range);
+    Ok(res
+        .selected
+        .as_ref()
+        .map(|rel| Pin::Version(filled_version_pin(&pin, rel, &res))))
+}
+
 /// The error for a range no release satisfies (VER-4, VER-42).
 fn no_matching_release(
     source_name: &str,
@@ -1157,10 +1200,25 @@ fn meld_recursive(
         .map(|m| m.source.pin_directive(&toml_path))
         .transpose()?
         .flatten();
-    let base_pin = curated_pin
-        .or(url_pin)
-        .or(directive_pin)
-        .unwrap_or(Pin::DefaultBranch);
+    let base_pin = curated_pin.or(url_pin).or(directive_pin);
+
+    // spec: VER-50 -- with no pin from any layer, a remote source whose
+    // default-branch mind.toml declares release-tags pins the caret of its
+    // highest stable release. A local path stays linked to its working tree.
+    let base_pin = match base_pin {
+        Some(p) => p,
+        None if consumer_pin == PinRequest::None && !is_local => {
+            match default_version_pin(&source, mindfile.as_ref(), &toml_path) {
+                Ok(Some(p)) => p,
+                Ok(None) => Pin::DefaultBranch,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            }
+        }
+        None => Pin::DefaultBranch,
+    };
 
     // The consumer flag layers over the base: `--pin branch=`/`tag=` overrides the
     // point (follow), a `--pin` freeze value fixes a point to its current commit
@@ -1173,8 +1231,9 @@ fn meld_recursive(
 
     // spec: VER-42 -- a version pin resolves now, against the default branch's
     // release-tags (VER-3, VER-4), and fails the meld when nothing is in range.
+    // The VER-50 default arrives already resolved.
     let checkout_pin = match checkout_pin {
-        Pin::Version(vp) => {
+        Pin::Version(vp) if vp.resolved.is_none() => {
             let cleanup = |dir: &std::path::Path| {
                 if !is_local {
                     let _ = std::fs::remove_dir_all(dir);
