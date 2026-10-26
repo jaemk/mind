@@ -299,6 +299,16 @@ pub(crate) fn pin_description(pin: &Pin) -> String {
     }
 }
 
+/// Does a recorded pin match the pin a curator or policy declares? A version
+/// pin is declared by its range alone; the resolution recorded beside it is
+/// not drift (VER-101, VER-110).
+pub(crate) fn same_declared_pin(recorded: &Pin, declared: &Pin) -> bool {
+    match (recorded, declared) {
+        (Pin::Version(a), Pin::Version(b)) => a.range == b.range,
+        (a, b) => a == b,
+    }
+}
+
 /// Resolve a version pin's range against the remote's release tags under
 /// `template` (VER-40), skipping `yanked` versions (VER-46) and warning about
 /// a version whose duplicate tags disagree (VER-11).
@@ -1367,10 +1377,11 @@ fn meld_recursive(
     // pin, which may come from the source's mind.toml. Evaluated on the FINAL
     // persisted kind: a `--pin` freeze persists a ref, so it satisfies
     // require-pinned even when the point it freezes is an otherwise-floating branch.
-    let persisted_unpinned = !freeze && checkout_pin.is_floating();
+    // spec: VER-100 -- an exact version is pinned; a range only under
+    // `allow-version-ranges`.
     if let Some(policy) = policy {
         let identity = source.name.clone();
-        if policy.pinned() && persisted_unpinned {
+        if !freeze && policy.forbids_unpinned(&checkout_pin) {
             // POL-20: pinned policy forbids a floating branch (default branch or
             // follow-branch); only a tag / ref / frozen pin is permitted.
             if !is_local {
@@ -7288,10 +7299,9 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     // spec: CLI-209/POL-20 -- the require-pinned gate applies identically to a
     // re-pin: a floating point (default/follow-branch) is forbidden unless the
     // request freezes it.
-    let persisted_unpinned = !freeze && checkout_pin.is_floating();
     if let Some(policy) = policy.as_ref()
-        && policy.pinned()
-        && persisted_unpinned
+        && !freeze
+        && policy.forbids_unpinned(&checkout_pin)
     {
         return Err(MindError::UnpinnedSourceForbidden {
             identity: source_name.to_string(),
@@ -9130,7 +9140,8 @@ pub fn sync_with_selector(
                     && let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name)
                 {
                     let old_pin = src.pin.clone();
-                    if old_pin == am.pin {
+                    // spec: VER-101
+                    if same_declared_pin(&old_pin, &am.pin) {
                         // spec: POL-32 -- already at the declared pin; confirmed registered.
                         break 'registered true;
                     }

@@ -922,7 +922,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Dump {
             output,
             whole_sources,
-        } => dump::run(paths, output, whole_sources),
+            ranges,
+        } => dump::run(paths, output, whole_sources, ranges),
         Command::Completions { shell } => {
             commands::completions(shell);
             Ok(())

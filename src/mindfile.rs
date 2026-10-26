@@ -605,6 +605,10 @@ pub struct NestedSource {
     /// one-of). Also emitted by `mind dump` (DUMP-1, DUMP-4, DSC-65).
     #[serde(rename = "pin-ref", default)]
     pub pin_ref: Option<String>,
+    /// Curator-supplied pin: follow release versions in a range (VER-110,
+    /// DSC-41 one-of).
+    #[serde(rename = "pin-version", default)]
+    pub pin_version: Option<String>,
     /// Curator-supplied convention scan roots (DSC-59 / DSC-50 shape): when
     /// set, convention discovery scans under each listed directory instead of
     /// the repo root.
@@ -723,8 +727,9 @@ impl NestedSource {
 
     /// Return the curator-supplied pin directive, or `None` when not set.
     ///
-    /// Accepts any of `follow-branch`, `pin-tag`, or `pin-ref` (DSC-59,
-    /// DSC-41 one-of rule). Declaring more than one is a `MindToml` error.
+    /// Accepts any of `follow-branch`, `pin-tag`, `pin-ref`, or `pin-version`
+    /// (DSC-59, DSC-41 one-of rule, VER-110). Declaring more than one, or a
+    /// `pin-version` that does not parse, is a `MindToml` error.
     pub fn pin_directive(&self, toml_path: &Path) -> Result<Option<Pin>> {
         // spec: DSC-59 DSC-65 DSC-66
         let mut set: Vec<(&str, Pin)> = Vec::new();
@@ -740,6 +745,19 @@ impl NestedSource {
             validate_ref_value(r)?;
             set.push(("pin-ref", Pin::Ref(r.clone())));
         }
+        if let Some(v) = &self.pin_version {
+            let range = crate::version::Range::parse(v).ok_or_else(|| MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "nested source '{}': pin-version {v:?} is not a version range (such as \"^1.2\" or \"=1.2.3\")",
+                    self.source
+                ),
+            })?;
+            set.push((
+                "pin-version",
+                Pin::Version(crate::source::VersionPin::unresolved(&range)),
+            ));
+        }
         match set.len() {
             0 => Ok(None),
             1 => Ok(Some(set.remove(0).1)),
@@ -748,7 +766,7 @@ impl NestedSource {
                 Err(MindError::MindToml {
                     path: toml_path.to_path_buf(),
                     msg: format!(
-                        "nested source '{}': conflicting pin directives: {}; declare at most one of follow-branch, pin-tag, pin-ref",
+                        "nested source '{}': conflicting pin directives: {}; declare at most one of follow-branch, pin-tag, pin-ref, pin-version",
                         self.source,
                         names.join(", ")
                     ),
@@ -2795,6 +2813,7 @@ mod tests {
             follow_branch: Some("develop".into()),
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -2822,6 +2841,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -2973,6 +2993,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![Hook {
@@ -3007,6 +3028,7 @@ mod tests {
                 follow_branch: Some(branch.into()),
                 pin_tag: None,
                 pin_ref: None,
+                pin_version: None,
                 roots: None,
                 add_roots: None,
                 hooks: vec![],
@@ -3195,6 +3217,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3236,6 +3259,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3264,6 +3288,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3462,6 +3487,7 @@ mod tests {
             follow_branch: Some("--upload-pack=touch /tmp/pwned".into()),
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3490,6 +3516,7 @@ mod tests {
             follow_branch: None,
             pin_tag: Some("-evil".into()),
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3518,6 +3545,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("--depth=1".into()),
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3546,6 +3574,7 @@ mod tests {
             follow_branch: Some("main branch".into()),
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3574,6 +3603,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("main..HEAD".into()),
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3602,6 +3632,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
+            pin_version: None,
             roots: None,
             add_roots: None,
             hooks: vec![],
@@ -3829,6 +3860,7 @@ mod tests {
             follow_branch: None,
             pin_tag: None,
             pin_ref: None,
+            pin_version: None,
             roots: None,
             add_roots: None,
             flat_skills: false,

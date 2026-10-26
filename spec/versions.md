@@ -213,13 +213,15 @@ error names the version gap (DSC-117) instead of a bare schema error.
   with `UnpinnedSourceForbidden`.
 - `VER-101` A `[[sources.auto_meld]]` entry accepts `version = "<range>"` as its
   pin (POL-30). The value is validated as a range (VER-22) at policy parse time,
-  and POL-21 accepts it under the same terms as VER-100.
+  and POL-21 accepts it under the same terms as VER-100. POL-55's drift check
+  compares the range only, so the resolution recorded beside it is not drift.
 - `VER-110` A curator's `[[discover.sources]]` entry accepts `pin-version`
   (DSC-41's one-of rule). `curate` re-pins a curated source whose declared range
   changed, as it does for other pin changes.
 - `VER-120` `dump` keeps freezing every source to its recorded commit (DUMP-1).
   `dump --ranges` emits `pin-version = "<range>"` for a version-pinned source
-  instead, so the output tracks compatible releases.
+  instead, so the output tracks compatible releases. An item-link instance
+  keeps its `pin-ref`, since its URL's ref segment is that commit (LNK-13).
 
 ## Author side
 

@@ -803,6 +803,13 @@ EXAMPLES:
         /// of its items are currently installed.
         #[arg(long = "whole-sources")]
         whole_sources: bool,
+
+        /// Emit a version-pinned source's range as `pin-version` instead of
+        /// freezing it to its recorded commit, so the output tracks
+        /// compatible releases.
+        // spec: VER-120
+        #[arg(long)]
+        ranges: bool,
     },
 
     /// Claim an unmanaged lobe item into a version-controlled source and install

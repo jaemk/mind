@@ -1284,7 +1284,8 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
 
             // spec: CUR-5 -- the entry's pin directive against the recorded pin.
             match entry.pin_directive(&toml_path) {
-                Ok(Some(pin)) if pin != registered.pin => {
+                // spec: VER-110 -- a version directive is compared by range.
+                Ok(Some(pin)) if !commands::same_declared_pin(&registered.pin, &pin) => {
                     // spec: CUR-21 -- a curator may not point the clone at a
                     // ref outside refs/heads and refs/tags. Treated exactly
                     // like the CUR-15 tolerance cases: no `repin` change, a

@@ -1049,7 +1049,7 @@ pub enum MindError {
     LocalMeldForbidden { identity: String },
 
     #[error(
-        "source '{identity}' must be pinned to a tag or ref: the managed policy forbids floating branches"
+        "source '{identity}' must be pinned to a tag, ref, or exact version: the managed policy forbids a floating pin"
     )]
     UnpinnedSourceForbidden { identity: String },
 

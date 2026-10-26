@@ -374,6 +374,74 @@ fn a_changed_pin_directive_is_reported_and_applied() {
     );
 }
 
+/// The recorded pin of the source registered as `identity`.
+fn recorded_pin(env: &Env, identity: &str) -> serde_json::Value {
+    let doc: serde_json::Value = serde_json::from_str(&env.sources_json()).unwrap();
+    doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == identity)
+        .map(|s| s["pin"].clone())
+        .unwrap_or_else(|| panic!("{identity} not registered: {doc}"))
+}
+
+#[test]
+fn a_curator_pin_version_resolves_and_a_changed_range_is_re_pinned() {
+    // spec: VER-110
+    let env = Env::new();
+    let lib = env.repo("lib");
+    for (body, tag) in [
+        ("one-zero", "v1.0.0"),
+        ("one-one", "v1.1.0"),
+        ("two", "v2.0.0"),
+    ] {
+        lib.write_and_commit(
+            "skills/review/SKILL.md",
+            &format!("---\ndescription: Review\n---\n# review\n{body}\n"),
+        );
+        git(&lib.path, &["tag", tag]);
+    }
+    let curator = env.repo("curator");
+    let entry = |range: &str| {
+        format!(
+            "{{ source = \"{}\", install = true, pin-version = \"{range}\" }}",
+            lib.spec()
+        )
+    };
+    curator.curate_list(&[entry("^1")]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let pin = recorded_pin(&env, &env.ident("lib"));
+    assert_eq!(pin["kind"], "version", "{pin}");
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+
+    // An unchanged range is not a pin change, though a resolution is recorded.
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "{}", plan.stderr);
+    assert!(!plan.stdout.contains("repin"), "{}", plan.stdout);
+
+    // A changed range is re-pinned like any other pin change.
+    curator.curate_list(&[entry("^2")]);
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.stdout.contains("repin"), "{}", plan.stdout);
+    let applied = env.mind(&["curate", "--yes"]);
+    assert!(applied.success, "{} {}", applied.stdout, applied.stderr);
+    let pin = recorded_pin(&env, &env.ident("lib"));
+    assert_eq!(pin["value"]["range"], "^2", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+
+    // A range that does not parse is skipped, not applied.
+    curator.curate_list(&[entry("not-a-range")]);
+    let plan = env.mind(&["curate", "--check", "--json"]);
+    assert!(
+        plan.stdout.contains("pin_directive_invalid"),
+        "{}",
+        plan.stdout
+    );
+}
+
 #[test]
 fn an_outdated_curated_source_is_reported_and_upgraded() {
     // spec: CUR-6

@@ -331,7 +331,7 @@ own items plus the `install = true` (or `install-items`) entries.
 A `[[discover.sources]]` entry may supply configuration for a nested source that
 has no `mind.toml` of its own:
 
-- **`follow-branch`** / **`pin-tag`** / **`pin-ref`**: curator-supplied pin
+- **`follow-branch`** / **`pin-tag`** / **`pin-ref`** / **`pin-version`**: curator-supplied pin
   directive for the nested source. Declare at most one; two is an error. `sync`
   uses whichever is set, the same as if the source had declared it in its own
   `[source]` table. A consumer's explicit `meld --pin` still overrides

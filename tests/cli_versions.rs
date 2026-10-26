@@ -865,9 +865,9 @@ fn re_pinning_switches_between_range_exact_and_other_pins() {
 
 #[test]
 fn a_version_range_is_unpinned_under_require_pinned_policy() {
-    // A range floats, so POL-20's pinned policy refuses it; an exact version
-    // is pinned.
-    let (sb, [a, _b, _c]) = released("ver-policy", RELEASE_TAGS);
+    // spec: VER-100 -- a range floats, so POL-20's pinned policy refuses it;
+    // an exact version is pinned.
+    let (sb, [a, b, _c]) = released("ver-policy", RELEASE_TAGS);
     let policy = sb.base.join("policy.toml");
     write_file(&policy, "[sources]\npinned = true\n");
     let run = |pin: &str| {
@@ -882,6 +882,8 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
     };
     let out = run("version=^1");
     assert!(!out.status.success(), "a range must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("must be pinned"), "{stderr}");
     assert!(sb.entry().is_none());
     let out = run("version==1.0.0");
     assert!(
@@ -890,6 +892,126 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(sb.pin().1, a);
+
+    // With allow-version-ranges, a range counts as pinned.
+    write_file(
+        &policy,
+        "[sources]\npinned = true\nallow-version-ranges = true\n",
+    );
+    let out = run("version=^1");
+    assert!(
+        out.status.success(),
+        "a range is pinned under allow-version-ranges: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(commit, b);
+    // A branch still is not.
+    let out = run("branch=main");
+    assert!(!out.status.success(), "a branch stays unpinned");
+}
+
+#[test]
+fn a_policy_auto_meld_entry_takes_a_version_range() {
+    // spec: VER-101
+    let (sb, [_a, b, _c]) = released("ver-auto-meld", RELEASE_TAGS);
+    let policy = sb.base.join("policy.toml");
+    write_file(
+        &policy,
+        &format!(
+            "[sources]\npinned = true\nallow-version-ranges = true\n\n\
+             [[sources.auto_meld]]\nrepo = \"{}\"\nversion = \"^1\"\n",
+            sb.spec()
+        ),
+    );
+    let sync = || {
+        Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(["sync"])
+            .env("MIND_HOME", &sb.mind_home)
+            .env("CLAUDE_HOME", &sb.claude_home)
+            .env("MIND_POLICY_FILE", &policy)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run mind")
+    };
+    let out = sync();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+
+    // The recorded resolution is not drift from the declared range.
+    let out = sync();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("re-pinned"), "{stdout}");
+    assert_eq!(sb.pin().0["value"]["resolved"], "1.1.0");
+}
+
+#[test]
+fn dump_ranges_emits_the_range_and_plain_dump_still_freezes() {
+    // spec: VER-120
+    let (sb, [_a, b, _c]) = released("ver-dump", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    let plain = sb.mind(&["dump"]);
+    assert!(plain.success, "{}", plain.stderr);
+    assert!(
+        plain.stdout.contains(&format!("pin-ref = \"{b}\"")),
+        "{}",
+        plain.stdout
+    );
+    assert!(!plain.stdout.contains("pin-version"), "{}", plain.stdout);
+
+    let ranged = sb.mind(&["dump", "--ranges"]);
+    assert!(ranged.success, "{}", ranged.stderr);
+    assert!(
+        ranged.stdout.contains("pin-version = \"^1\""),
+        "{}",
+        ranged.stdout
+    );
+    assert!(!ranged.stdout.contains("pin-ref"), "{}", ranged.stdout);
+
+    // The output re-melds: the nested source resolves its range afresh.
+    let dumped = sb.base.join("dumped");
+    write_file(&dumped.join("mind.toml"), &ranged.stdout);
+    for args in [
+        vec!["-c", "init.defaultBranch=main", "init", "-q"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["add", "-A"],
+        vec!["commit", "-qm", "dump"],
+    ] {
+        git(&dumped, &args);
+    }
+    let fresh = sb.base.join("mind-fresh");
+    let fresh_home = fresh.to_string_lossy().into_owned();
+    let fresh_lobe = sb.base.join("claude-fresh").to_string_lossy().into_owned();
+    let r = sb.mind_env(
+        &["meld", &dumped.to_string_lossy(), "--yes"],
+        &[("MIND_HOME", &fresh_home), ("CLAUDE_HOME", &fresh_lobe)],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let raw = std::fs::read_to_string(fresh.join("sources.json")).unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    let nested = doc["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == sb.identity())
+        .unwrap_or_else(|| panic!("nested source not registered: {doc}"));
+    assert_eq!(nested["pin"]["value"]["range"], "^1", "{nested}");
+    assert_eq!(nested["commit"], b.as_str(), "{nested}");
 }
 
 #[test]

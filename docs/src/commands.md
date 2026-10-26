@@ -368,11 +368,12 @@ there. See [Adopt items you placed by hand](unmanaged.md).
 ## dump
 
 ```
-mind dump [--output PATH] [--whole-sources]
+mind dump [--output PATH] [--whole-sources] [--ranges]
 ```
 
 Write a `mind.toml` that reproduces your sources, pins, and installed items.
-`--whole-sources` marks every source `install = true`. See
+`--whole-sources` marks every source `install = true`. `--ranges` writes a
+version-pinned source's range (`pin-version`) instead of its commit. See
 [Back up and reproduce your setup](dump.md).
 
 ## review

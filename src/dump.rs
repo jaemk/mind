@@ -87,6 +87,11 @@ struct DumpEntry {
     #[serde(rename = "pin-ref", skip_serializing_if = "Option::is_none")]
     pin_ref: Option<String>,
 
+    /// Under `--ranges`, a version-pinned source's range in place of
+    /// `pin-ref` (VER-120).
+    #[serde(rename = "pin-version", skip_serializing_if = "Option::is_none")]
+    pin_version: Option<String>,
+
     /// A profile-tracked source's enabled profiles minus `default` (PROF-28).
     /// Never alongside `install = true`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,7 +122,14 @@ struct DumpEntry {
 /// - `output` - write to this file instead of stdout when `Some`
 /// - `whole_sources` - when true, emit `install = true` for every source
 ///   regardless of what is actually installed (DUMP-3)
-pub fn run(paths: &Paths, output: Option<PathBuf>, whole_sources: bool) -> Result<()> {
+/// - `ranges` - when true, emit a version-pinned source's range as
+///   `pin-version` instead of its commit (VER-120)
+pub fn run(
+    paths: &Paths,
+    output: Option<PathBuf>,
+    whole_sources: bool,
+    ranges: bool,
+) -> Result<()> {
     // spec: DUMP-1 DUMP-2 DUMP-3 DUMP-4 DUMP-5 DUMP-6 DUMP-7 DUMP-8 DUMP-9 LNK-13
 
     // DUMP-9: dump always writes TOML; --json has no effect on the output format.
@@ -131,7 +143,7 @@ pub fn run(paths: &Paths, output: Option<PathBuf>, whole_sources: bool) -> Resul
 
     // spec: DUMP-8 — with no melded sources, emit a valid super-source whose
     // [discover].sources is empty, and exit 0.
-    let entries = build_entries(paths, &registry, &manifest, whole_sources)?;
+    let entries = build_entries(paths, &registry, &manifest, whole_sources, ranges)?;
 
     let doc = DumpDoc {
         source: DumpSource {
@@ -173,6 +185,7 @@ fn build_entries(
     registry: &Registry,
     manifest: &Manifest,
     whole_sources: bool,
+    ranges: bool,
 ) -> Result<Vec<DumpEntry>> {
     let mut entries = Vec::with_capacity(registry.sources.len());
 
@@ -202,7 +215,14 @@ fn build_entries(
             }
             continue;
         }
-        let entry = build_entry(paths, source, manifest, whole_sources)?;
+        let mut entry = build_entry(paths, source, manifest, whole_sources)?;
+        // spec: VER-120 -- `--ranges` trades the frozen commit of a
+        // version-pinned source for its range. An item link (above) keeps its
+        // commit, which is also its URL's ref segment.
+        if ranges && let crate::source::Pin::Version(vp) = &source.pin {
+            entry.pin_ref = None;
+            entry.pin_version = Some(vp.range.clone());
+        }
         entries.push(entry);
     }
 
@@ -260,6 +280,7 @@ fn build_link_entry(
         add_roots: None,
         flat_skills: None,
         pin_ref: source.commit.clone(),
+        pin_version: None,
         profiles: None,
         default_profile: None,
         install,
@@ -377,6 +398,7 @@ fn build_entry(
         add_roots,
         flat_skills,
         pin_ref,
+        pin_version: None,
         profiles,
         default_profile,
         install,
@@ -593,6 +615,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(true),
@@ -631,6 +654,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(false),
@@ -674,6 +698,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: None,
@@ -723,6 +748,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(false),
@@ -764,6 +790,7 @@ mod tests {
                         add_roots: Some(vec!["extra".into()]),
                         flat_skills: Some(true),
                         pin_ref: Some("deadbeefdeadbeef1234".into()),
+                        pin_version: None,
                         profiles: None,
                         default_profile: None,
                         install: Some(true),
@@ -777,6 +804,7 @@ mod tests {
                         add_roots: None,
                         flat_skills: None,
                         pin_ref: None,
+                        pin_version: None,
                         profiles: None,
                         default_profile: None,
                         install: None,
@@ -891,6 +919,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: Some("deadbeefdeadbeef".into()),
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(true),
@@ -904,6 +933,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(false),
@@ -997,6 +1027,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(true),
@@ -1040,6 +1071,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(true),
@@ -1120,6 +1152,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: source.commit.clone(),
+            pin_version: None,
             profiles: Some(profiles),
             default_profile,
             install: None,
@@ -1226,6 +1259,7 @@ mod tests {
             add_roots: None,
             flat_skills: None,
             pin_ref: None,
+            pin_version: None,
             profiles: None,
             default_profile: None,
             install: Some(true),

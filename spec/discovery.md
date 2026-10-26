@@ -469,7 +469,8 @@ run = "make build"
 - `DSC-59` A `[discover].sources` entry may carry configuration for the
   nested source that the source itself would normally declare in its own
   `mind.toml`: a pin directive (exactly one of `follow-branch = "<branch>"`,
-  `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`, per DSC-41), `roots = [...]`
+  `pin-tag = "<tag>"`, `pin-ref = "<commit>"`, or `pin-version = "<range>"`,
+  per DSC-41 and VER-110), `roots = [...]`
   (convention scan roots, DSC-50), `add-roots = [...]` (additive convention
   scan roots, DSC-84; gated like `roots`, see DSC-88), `flat-skills = true`
   (flat skill layout, DSC-74; see DSC-77), and one or more hooks as a

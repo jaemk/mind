@@ -32,7 +32,7 @@ what you already have installed; see [Back up and reproduce your setup](dump.md)
 | `install-items` | offer only these `kind:name` items (literal names, no globs) |
 | `profiles` | enable these [install profiles](authoring-profiles.md) of that source |
 | `default-profile` | `false` leaves that source's `default` profile out |
-| `follow-branch`, `pin-tag`, `pin-ref` | pin that source (at most one) |
+| `follow-branch`, `pin-tag`, `pin-ref`, `pin-version` | pin that source (at most one); `pin-version` takes a release range such as `"^1.2"` |
 | `kind` | for an item link to a `.md` file: `agent`, `rule`, or `command` |
 
 `install = true` cannot be combined with `install-items` or `profiles`.
