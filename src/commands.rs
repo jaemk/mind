@@ -8598,6 +8598,7 @@ pub fn forget(
     paths: &Paths,
     item_ref: Option<&str>,
     unmanaged: bool,
+    dropped: bool,
     yes: bool,
     force: bool,
     dangerously_skip: bool,
@@ -8606,18 +8607,92 @@ pub fn forget(
         return forget_unmanaged_bulk(paths, item_ref, yes);
     }
 
-    // `unmanaged` is false: clap guarantees `item_ref` is Some (required_unless_present).
-    let item_ref = item_ref.expect("item_ref required when --unmanaged is not set");
-
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
-    let parsed = parse_item_ref(item_ref)?;
 
-    // A glob uninstalls every installed match (mirroring `learn`'s selection);
-    // an exact ref honors the kind prefix and source qualifier and errors on an
-    // ambiguous bare name (e.g. one shared by a skill and an agent).
-    let keys: Vec<String> = if is_glob(&parsed.name) {
-        let matches = select_installed(&manifest.items, &parsed);
+    let keys: Vec<String> = if dropped {
+        // spec: CLI-245
+        let keys = dropped_item_keys(paths, &manifest, item_ref)?;
+        if keys.is_empty() {
+            if out.json {
+                return print_json(&MutationResult::new(
+                    "forget",
+                    item_ref.unwrap_or("--dropped"),
+                    "removed",
+                ));
+            }
+            println!("no dropped items; nothing to forget");
+            return Ok(());
+        }
+        keys
+    } else {
+        // clap guarantees `item_ref` is Some without --unmanaged or --dropped.
+        let item_ref = item_ref.expect("item_ref required without --unmanaged or --dropped");
+        let parsed = parse_item_ref(item_ref)?;
+        forget_ref_keys(paths, &manifest, &parsed, yes)?
+    };
+    if keys.is_empty() {
+        // An exact ref that named an unmanaged item, already removed.
+        return Ok(());
+    }
+    let item_ref = item_ref.unwrap_or("--dropped");
+    forget_keys(
+        paths,
+        &mut manifest,
+        keys,
+        item_ref,
+        yes,
+        force,
+        dangerously_skip,
+    )
+}
+
+/// The installed items `forget --dropped` removes (CLI-245): those whose
+/// source is no longer melded, or whose melded source's catalog has no item
+/// with the same stable identity. An item of a melded source with no clone on
+/// disk is kept. `item_ref` narrows the set like a `forget` glob.
+fn dropped_item_keys(
+    paths: &Paths,
+    manifest: &Manifest,
+    item_ref: Option<&str>,
+) -> Result<Vec<String>> {
+    let registry = Registry::load(paths)?;
+    // A scan error must not make every item look dropped.
+    let catalog = catalog::scan(paths, &registry)?;
+    let candidates: Vec<&crate::manifest::InstalledItem> = match item_ref {
+        Some(r) => select_installed(&manifest.items, &parse_item_ref(r)?),
+        None => manifest.items.values().collect(),
+    };
+    let mut keys: Vec<String> = candidates
+        .into_iter()
+        .filter(|m| match registry.find(&m.source) {
+            None => true,
+            Some(s) => {
+                clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
+                    && !catalog.iter().any(|it| {
+                        it.source == m.source && it.kind == m.kind && it.name == m.bare_name
+                    })
+            }
+        })
+        .map(|m| m.key().into())
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
+/// The manifest keys an explicit `forget <ref>` names. A glob uninstalls every
+/// installed match (mirroring `learn`'s selection); an exact ref honors the
+/// kind prefix and source qualifier and errors on an ambiguous bare name (e.g.
+/// one shared by a skill and an agent). An exact ref naming only an unmanaged
+/// lobe item removes that item here and returns no keys.
+fn forget_ref_keys(
+    paths: &Paths,
+    manifest: &Manifest,
+    parsed: &crate::resolve::ItemRef,
+    yes: bool,
+) -> Result<Vec<String>> {
+    Ok(if is_glob(&parsed.name) {
+        let matches = select_installed(&manifest.items, parsed);
         if matches.is_empty() {
             return Err(MindError::NotInstalled {
                 name: parsed.name.clone(),
@@ -8625,19 +8700,34 @@ pub fn forget(
         }
         matches.iter().map(|it| it.key().into()).collect()
     } else {
-        match crate::resolve::resolve_installed(&manifest.items, &parsed) {
+        match crate::resolve::resolve_installed(&manifest.items, parsed) {
             Ok(it) => vec![it.key().into()],
             // UNM-4: an exact ref that names no managed item may name an
             // unmanaged lobe item; a glob never sweeps unmanaged entries.
             Err(MindError::NotInstalled { .. }) => {
-                let unmanaged_items = crate::unmanaged::scan(paths, &manifest)?;
-                let item = crate::unmanaged::resolve(&unmanaged_items, &parsed)?;
-                return forget_unmanaged_single(item, yes);
+                let unmanaged_items = crate::unmanaged::scan(paths, manifest)?;
+                let item = crate::unmanaged::resolve(&unmanaged_items, parsed)?;
+                forget_unmanaged_single(item, yes)?;
+                Vec::new()
             }
             Err(e) => return Err(e),
         }
-    };
+    })
+}
 
+/// Remove the installed items `keys` (CLI-40..42): confirm a multi-item
+/// removal, warn about dependents of a single one (DEP-60), run each item's
+/// uninstall hooks, and save the manifest.
+fn forget_keys(
+    paths: &Paths,
+    manifest: &mut Manifest,
+    keys: Vec<String>,
+    item_ref: &str,
+    yes: bool,
+    force: bool,
+    dangerously_skip: bool,
+) -> Result<()> {
+    let out = crate::render::ctx();
     // CLI-42: removing more than one item (typically a glob that matched more
     // broadly than intended) lists the matches and confirms first. `--yes` skips;
     // a non-TTY run without `--yes` refuses rather than removing silently.
@@ -10950,6 +11040,7 @@ fn warn_apparent_breaks(
     scope: Option<&HashSet<String>>,
     out: &crate::render::OutputCtx,
 ) {
+    let mut any_drop = false;
     for source in &registry.sources {
         let Pin::Version(vp) = &source.pin else {
             continue;
@@ -11000,6 +11091,7 @@ fn warn_apparent_breaks(
             }
         }
         for case in cases {
+            any_drop |= case.starts_with("drops ");
             let line = format!(
                 "{} {from} -> {} looks breaking: {case}",
                 strip_ansi(&source.name),
@@ -11011,6 +11103,11 @@ fn warn_apparent_breaks(
                 println!("{} {line}", out.warn());
             }
         }
+    }
+    // spec: CLI-245 -- a dropped item is never upgraded, so the warning
+    // repeats until it is forgotten; point at the one command that does that.
+    if any_drop {
+        eprintln!("hint: run `mind forget --dropped` to remove items a source no longer offers");
     }
 }
 

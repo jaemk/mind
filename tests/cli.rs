@@ -28057,3 +28057,106 @@ fn re_pin_to_older_sha_then_upgrade_installs_older_content() {
          not stay pinned at v2's: {manifest_v1:#}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// forget --dropped (CLI-245)
+// ---------------------------------------------------------------------------
+
+/// The manifest's installed keys, sorted.
+fn installed_keys(sb: &Sandbox) -> Vec<String> {
+    let m: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let mut keys: Vec<String> = m["items"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn forget_dropped_removes_only_items_removed_upstream() {
+    // spec: CLI-245
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    sb.remove_and_commit("agents/dev.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let r = sb.mind(&["forget", "--dropped"]);
+    assert!(
+        r.success,
+        "forget --dropped failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(r.stdout.contains("forgot agent:dev"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "the dropped item's link must be removed"
+    );
+    assert!(sb.claude_home.join("skills/review").exists());
+}
+
+#[test]
+fn forget_dropped_takes_items_of_an_unmelded_source_and_confirms_several() {
+    // spec: CLI-245
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+
+    // Two items: CLI-42's confirmation applies, and a non-TTY run refuses.
+    let r = sb.mind(&["forget", "--dropped"]);
+    assert!(!r.success, "a multi-item forget must confirm: {}", r.stdout);
+    assert!(
+        r.stdout.contains("forget would remove 2 item(s)"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(installed_keys(&sb).len(), 2, "nothing removed on refusal");
+
+    let r = sb.mind(&["forget", "--dropped", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(installed_keys(&sb).is_empty(), "{}", r.stdout);
+}
+
+#[test]
+fn forget_dropped_is_narrowed_by_a_ref() {
+    // spec: CLI-245
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+
+    let r = sb.mind(&["forget", "--dropped", "agent:*"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}
+
+#[test]
+fn forget_dropped_with_nothing_dropped_removes_nothing() {
+    // spec: CLI-245
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let r = sb.mind(&["forget", "--dropped"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("no dropped items"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}
+
+#[test]
+fn forget_dropped_keeps_items_of_a_source_whose_clone_is_missing() {
+    // spec: CLI-245 -- a linked source whose working tree vanished scans to
+    // nothing, which says nothing about what it dropped.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let moved = sb.base.join("moved");
+    std::fs::rename(&sb.source, &moved).unwrap();
+    let r = sb.mind(&["forget", "--dropped"]);
+    std::fs::rename(&moved, &sb.source).unwrap();
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("no dropped items"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}

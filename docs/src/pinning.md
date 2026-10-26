@@ -60,7 +60,8 @@ is skipped in favor of the next-highest one in range.
 (`version 1.1.0 -> 1.2.0`). It also warns when a release inside the range looks
 breaking: it drops an installed item, changes an installed item's kind, or
 removes the target of a `{{ns:}}` reference. The warning does not stop the
-upgrade.
+upgrade. A dropped item stays installed, so the warning repeats until you
+remove it with `mind forget --dropped`.
 
 A release outside the range, such as `2.0.0` under `^1.2`, is a breaking
 release. `upgrade` lists it and does not apply it unless you accept:

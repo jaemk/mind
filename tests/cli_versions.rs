@@ -571,6 +571,17 @@ fn a_compatible_move_that_drops_or_rekinds_an_item_is_warned_about() {
         sb.installed_agent().contains("two"),
         "the upgrade went ahead"
     );
+    // spec: CLI-245 -- a drop points at the command that clears it.
+    assert!(r.stderr.contains("mind forget --dropped"), "{}", r.stderr);
+    let f = sb.mind(&["forget", "--dropped", "--yes"]);
+    assert!(f.success, "{}", f.stderr);
+    assert!(f.stdout.contains("forgot agent:gone"), "{}", f.stdout);
+    let again = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        !again.stdout.contains("drops agent:gone"),
+        "{}",
+        again.stdout
+    );
 }
 
 #[test]

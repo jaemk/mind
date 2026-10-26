@@ -27,6 +27,17 @@ longer want them.
 If the item declares an uninstall hook, `forget` runs it after a prompt. A
 non-interactive run skips it unless you pass `--dangerously-skip-hook-check`.
 
+## Clear items a source dropped
+
+```
+mind forget --dropped              # every item marked "removed upstream"
+mind forget --dropped 'agent:*'    # only the dropped agents
+```
+
+An item a source stops offering stays installed, and `recall` marks it
+"removed upstream". `--dropped` removes those, plus the items of a source you
+dropped with `unmeld --keep-items`.
+
 ## Turn off an install profile
 
 ```

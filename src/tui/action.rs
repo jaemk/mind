@@ -114,7 +114,7 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
         // `yes = true`: the TUI confirms destructive actions in its own UI
         // (TUI-24) and acts on a single resolved item, so never read a CLI prompt.
         ActionKind::Forget { item_key } => {
-            commands::forget(paths, Some(&item_key), false, true, true, false)?
+            commands::forget(paths, Some(&item_key), false, false, true, true, false)?
         }
         // spec: TUI-21 TUI-30 TUI-77 -- the same end-to-end verb `mind meld`
         // runs, with the flags typed into the meld input (`--pin`,

@@ -186,6 +186,7 @@ Uninstall items: the store copy and every link. Alias `uninstall`, `unlearn`.
 |------|--------|
 | `--profile <NAME>` | disable a profile of the source named by `ITEM`, forgetting items installed only for it |
 | `--unmanaged` | act on unmanaged lobe items only; with no `ITEM`, all of them |
+| `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them |
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
 | `--dangerously-skip-hook-check` | run uninstall hooks without asking |
 
@@ -197,6 +198,7 @@ mind forget review
 mind forget 'skill:*' --yes
 mind forget owner/repo --profile full
 mind forget --unmanaged
+mind forget --dropped
 ```
 
 ## recall

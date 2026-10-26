@@ -369,8 +369,16 @@ EXAMPLES:
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
         /// omit to remove every unmanaged item across all lobes.
         /// With `--profile`: the melded source whose profile to disable.
-        #[arg(required_unless_present = "unmanaged")]
+        /// With `--dropped`: narrows the dropped items to this ref or glob.
+        #[arg(required_unless_present_any = ["unmanaged", "dropped"])]
         item: Option<String>,
+
+        /// Remove every installed item its source no longer offers (marked
+        /// "removed upstream" by `recall`), or whose source is no longer
+        /// melded. With `<item>`, only the dropped items it matches.
+        // spec: CLI-245
+        #[arg(long, conflicts_with_all = ["unmanaged", "profile"])]
+        dropped: bool,
 
         /// Disable this install profile of the source named by `<item>`: drop
         /// it from the source's enabled profiles and forget each item that was

@@ -595,6 +595,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   removing any. `--yes` (`-y`) skips the prompt; a non-TTY run without `--yes`
   refuses (`ConfirmationRequired`) rather than removing silently. Removing a
   single exact match is not prompted.
+- `CLI-245` `forget --dropped` removes every installed item its source no
+  longer offers: no catalog item shares its stable identity (source, kind, bare
+  name), as `recall` marks "removed upstream", or its source is no longer
+  melded (`unmeld --keep-items`, CLI-22). An item whose source is melded but
+  whose clone is missing is kept, since nothing says it was dropped. An optional
+  `<item>` ref or glob narrows the set. CLI-42's confirmation applies when more
+  than one item would go. With nothing dropped it says so and removes nothing.
 
 ## sync
 
