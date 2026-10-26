@@ -216,7 +216,7 @@ const ALLOWLIST: &[&str] = &[
     // documented ahead of implementation. Each ID moves to a citing test as it
     // is built. VER-45 states a limitation (a moved non-resolved tag is not
     // detected), which no test can observe.
-    "VER-45", "VER-46", "VER-82", "VER-90", "VER-91", "VER-130", "VER-131",
+    "VER-45", "VER-46", "VER-90", "VER-91",
 ];
 
 #[test]

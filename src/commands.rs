@@ -299,6 +299,30 @@ pub(crate) fn pin_description(pin: &Pin) -> String {
     }
 }
 
+/// `recall`'s suggestion for a source following a release tag (VER-82): when
+/// `source` has a `tag` pin and the tag is a release under the
+/// `release-tags` its checkout declares, the `meld --pin version=` command
+/// that follows compatible releases instead. Read from the clone on disk, since
+/// `recall` does not fetch.
+fn version_pin_hint(paths: &Paths, source: &crate::source::Source) -> Option<String> {
+    let Pin::Tag(tag) = &source.pin else {
+        return None;
+    };
+    let dir = clone_dir_checked(paths, source).ok()?;
+    let mindfile = MindToml::load(&dir).ok()??;
+    let template = mindfile
+        .source
+        .release_template(&dir.join("mind.toml"))
+        .ok()??;
+    let version = template.match_tag(tag)?;
+    Some(format!(
+        "hint: {} follows release tag {}; to take compatible releases, run `mind meld {} --pin version=^{version}`",
+        strip_ansi(&source.name),
+        strip_ansi(tag),
+        crate::error::shell_quote(&source.name)
+    ))
+}
+
 /// Does a recorded pin match the pin a curator or policy declares? A version
 /// pin is declared by its range alone; the resolution recorded beside it is
 /// not drift (VER-101, VER-110).
@@ -3530,21 +3554,43 @@ pub fn init_source(
         );
     }
 
+    // spec: VER-131 -- a generated mind.toml declares the default release-tag
+    // template when the repo's own tags already include releases under it.
+    // The tags are read from the local repo, so this stays offline (INIT-6).
+    let release_tags = |text: String| -> String {
+        let template = crate::version::Template::parse(crate::scaffold::RELEASE_TAGS)
+            .expect("the default template parses");
+        let found = git::ls_remote_tags(&root.to_string_lossy())
+            .map(|tags| crate::version::releases(&template, &tags).0.len())
+            .unwrap_or(0);
+        if found == 0 {
+            return text;
+        }
+        println!(
+            "  {found} release tag(s) match {}; declaring release-tags",
+            crate::scaffold::RELEASE_TAGS
+        );
+        crate::scaffold::with_release_tags(&text)
+    };
+
     // mind.toml handling: INIT-3 (create if absent) + INIT-12 (patch when flags
     // require it). When flat_skills_flag or namespace is set, always write (patch
     // existing or create with scaffold); otherwise keep the create-if-absent logic.
     if flat_skills_flag || namespace.is_some() {
-        let patched = crate::scaffold::patch_source_meta(
+        let mut patched = crate::scaffold::patch_source_meta(
             pre_toml.as_deref(),
             flat_skills_flag,
             namespace.as_deref(),
         );
+        if pre_toml.is_none() {
+            patched = release_tags(patched);
+        }
         std::fs::write(&toml_path, &patched).map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     } else if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        std::fs::write(&toml_path, crate::scaffold::scaffold())
+        std::fs::write(&toml_path, release_tags(crate::scaffold::scaffold()))
             .map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     }
@@ -11073,34 +11119,12 @@ fn warn_apparent_breaks(
         let from = moved.version.as_deref().unwrap_or("?");
         let siblings: Vec<&CatalogItem> =
             catalog.iter().filter(|c| c.source == source.name).collect();
-        let mut cases: Vec<String> = Vec::new();
-        for item in &installed {
-            let same_name: Vec<&&CatalogItem> = siblings
+        let cases = apparent_break_cases(
+            installed
                 .iter()
-                .filter(|c| c.name == item.bare_name)
-                .collect();
-            let Some(cat) = same_name.iter().find(|c| c.kind == item.kind) else {
-                match same_name.first() {
-                    None => cases.push(format!("drops {}", item.display_key())),
-                    Some(c) => cases.push(format!(
-                        "changes {} from {} to {}",
-                        strip_ansi(&item.bare_name),
-                        item.kind.as_str(),
-                        c.kind.as_str()
-                    )),
-                }
-                continue;
-            };
-            for name in crate::namespace::referenced_names(&read_item_text(cat)) {
-                if !siblings.iter().any(|c| c.name == name) {
-                    cases.push(format!(
-                        "removes {} referenced by {}",
-                        strip_ansi(&format!("{{{{ns:{name}}}}}")),
-                        item.display_key()
-                    ));
-                }
-            }
-        }
+                .map(|i| (i.kind, i.bare_name.as_str(), i.display_key())),
+            &siblings,
+        );
         for case in cases {
             any_drop |= case.starts_with("drops ");
             let line = format!(
@@ -11120,6 +11144,42 @@ fn warn_apparent_breaks(
     if any_drop {
         eprintln!("hint: run `mind forget --dropped` to remove items a source no longer offers");
     }
+}
+
+/// The VER-65 cases a move from `old` items to the catalog `siblings` shows:
+/// an item gone from the catalog, an item whose name now has another kind, and
+/// a `{{ns:}}` token in an item's new text whose referent is gone. `old` is
+/// `(kind, bare name, display key)`. Shared by `upgrade` (VER-65) and `review`
+/// (VER-130).
+pub(crate) fn apparent_break_cases<'a>(
+    old: impl IntoIterator<Item = (ItemKind, &'a str, String)>,
+    siblings: &[&CatalogItem],
+) -> Vec<String> {
+    let mut cases: Vec<String> = Vec::new();
+    for (kind, bare, key) in old {
+        let same_name: Vec<&&CatalogItem> = siblings.iter().filter(|c| c.name == bare).collect();
+        let Some(cat) = same_name.iter().find(|c| c.kind == kind) else {
+            match same_name.first() {
+                None => cases.push(format!("drops {key}")),
+                Some(c) => cases.push(format!(
+                    "changes {} from {} to {}",
+                    strip_ansi(bare),
+                    kind.as_str(),
+                    c.kind.as_str()
+                )),
+            }
+            continue;
+        };
+        for name in crate::namespace::referenced_names(&read_item_text(cat)) {
+            if !siblings.iter().any(|c| c.name == name) {
+                cases.push(format!(
+                    "removes {} referenced by {key}",
+                    strip_ansi(&format!("{{{{ns:{name}}}}}")),
+                ));
+            }
+        }
+    }
+    cases
 }
 
 struct Upgrade {
@@ -11361,6 +11421,12 @@ pub fn recall(
             })
             .collect::<Vec<_>>();
         out.print_rows(&rows);
+        // spec: VER-82
+        for s in &registry.sources {
+            if let Some(hint) = version_pin_hint(paths, s) {
+                println!("{}", out.dim(&hint));
+            }
+        }
         // spec: PROF-29
         print_profile_block(paths, &registry.sources.iter().collect::<Vec<_>>());
         return Ok(());
@@ -11708,6 +11774,10 @@ pub fn recall(
             ]);
         }
         out.print_rows(&rows);
+        // spec: VER-82
+        if let Some(hint) = version_pin_hint(paths, s) {
+            println!("  {}", out.dim(&hint));
+        }
     }
 
     // UNM-2: list unmanaged lobe items after the sources. Human view only;

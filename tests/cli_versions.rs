@@ -955,6 +955,123 @@ fn a_policy_auto_meld_entry_takes_a_version_range() {
 }
 
 #[test]
+fn review_checks_release_tags_and_breaks_since_the_highest_release() {
+    // spec: VER-130
+    let (sb, _) = released("ver-review", RELEASE_TAGS);
+    let r = sb.mind(&["review", &sb.spec()]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    // `v1.2` fits `v{version}` but is not semver.
+    assert!(
+        r.stdout
+            .contains("advisory [non-semver-release-tag]: tag v1.2 fits"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("apparent-break"), "{}", r.stdout);
+
+    // The tree since v2.0.0 turns the dev agent into a rule.
+    std::fs::remove_file(sb.source.join("agents/dev.md")).unwrap();
+    write_file(
+        &sb.source.join("rules/dev.md"),
+        "---\ndescription: d\n---\n",
+    );
+    let r = sb.mind(&["review", &sb.spec()]);
+    assert!(r.success, "advisory only: {}", r.stderr);
+    assert!(
+        r.stdout.contains(
+            "advisory [apparent-break]: since release 2.0.0 (v2.0.0), this tree changes dev from agent to rule"
+        ),
+        "{}",
+        r.stdout
+    );
+
+    // A template that matches no tag.
+    let bare = Sandbox::new("ver-review-none");
+    bare.commit("one", RELEASE_TAGS);
+    let r = bare.mind(&["review", &bare.spec()]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("advisory [no-release-tags]"),
+        "{}",
+        r.stdout
+    );
+
+    // A template that does not parse is a hard finding.
+    bare.commit("two", "[source]\nrelease-tags = \"v{major}\"\n");
+    let r = bare.mind(&["review", &bare.spec()]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(
+        r.stderr.contains("error [toml-parse-error]") && r.stderr.contains("release-tags"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn init_source_declares_release_tags_when_the_repo_has_releases() {
+    // spec: VER-131
+    let sb = Sandbox::new("ver-init");
+    let a = sb.commit("one", "");
+    sb.tag("not-a-release", &a);
+    let r = sb.mind(&["init-source", &sb.spec()]);
+    assert!(r.success, "{}", r.stderr);
+    let toml = std::fs::read_to_string(sb.source.join("mind.toml")).unwrap();
+    assert!(!toml.contains("release-tags"), "{toml}");
+
+    std::fs::remove_file(sb.source.join("mind.toml")).unwrap();
+    sb.tag("v1.0.0", &a);
+    let r = sb.mind(&["init-source", &sb.spec()]);
+    assert!(r.success, "{}", r.stderr);
+    let toml = std::fs::read_to_string(sb.source.join("mind.toml")).unwrap();
+    assert!(toml.contains("release-tags = \"v{version}\""), "{toml}");
+    assert!(r.stdout.contains("1 release tag(s)"), "{}", r.stdout);
+
+    // An existing mind.toml is left as it is.
+    write_file(&sb.source.join("mind.toml"), "[source]\n");
+    assert!(sb.mind(&["init-source", &sb.spec()]).success);
+    let toml = std::fs::read_to_string(sb.source.join("mind.toml")).unwrap();
+    assert_eq!(toml, "[source]\n");
+}
+
+#[test]
+fn recall_suggests_a_version_pin_for_a_release_tag_pin() {
+    // spec: VER-82
+    let (sb, _) = released("ver-tag-hint", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "tag=v1.0.0", "--yes"])
+            .success
+    );
+    let hint = "--pin version=^1.0.0";
+    for args in [vec!["recall", "--sources"], vec!["recall"]] {
+        let r = sb.mind(&args);
+        assert!(r.success, "{args:?}: {}", r.stderr);
+        let line = r
+            .stdout
+            .lines()
+            .find(|l| l.contains(hint))
+            .unwrap_or_else(|| panic!("{args:?}: no hint in {}", r.stdout));
+        assert!(line.contains(&sb.identity()), "{line}");
+        assert!(line.contains("mind meld"), "{line}");
+    }
+
+    // A tag that is not a release under the template gets no suggestion.
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "tag=v1.2", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains("--pin version="), "{}", r.stdout);
+
+    // Nor does a source already on a version pin.
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains("--pin version="), "{}", r.stdout);
+}
+
+#[test]
 fn dump_ranges_emits_the_range_and_plain_dump_still_freezes() {
     // spec: VER-120
     let (sb, [_a, b, _c]) = released("ver-dump", RELEASE_TAGS);

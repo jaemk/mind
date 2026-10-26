@@ -98,6 +98,10 @@ following the default branch. With no stable release yet it follows the
 default branch and says so. A local path meld stays linked to the working
 tree; pass `--pin version=<range>` to pin it.
 
+A source pinned with `--pin tag=<tag>` to one of its releases gets a hint in
+`recall` with the `meld --pin version=^<version>` command that follows
+compatible releases instead.
+
 ## Change the pin of a melded source
 
 Run `meld --pin` again on a source you already have:

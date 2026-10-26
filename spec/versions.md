@@ -192,7 +192,10 @@ error names the version gap (DSC-117) instead of a bare schema error.
   `release-tags` and checks out the item's path at the selected release.
 - `VER-82` `recall` adds a one-line suggestion for a source with a `tag` pin
   whose tag is a release under its declared `release-tags`:
-  `mind meld <source> --pin version=^<version>`.
+  `mind meld <source> --pin version=^<version>`. `recall` does not fetch, so
+  the template is read from the clone's checkout (the tagged release) rather
+  than the default-branch tip (VER-3). It shows in `recall --sources` and under
+  the source in the status view.
 
 ## Reporting
 
@@ -229,7 +232,12 @@ error names the version gap (DSC-117) instead of a bare schema error.
   that at least one tag is a release, and which tags match the prefix and suffix
   but are not semver (VER-10). It also runs the VER-65 checks between the
   highest release and the reviewed tree, so an author sees an apparent break
-  before tagging a compatible version.
+  before tagging a compatible version. A template that does not parse fails the
+  `mind.toml` load, the existing `toml-parse-error` hard finding; the rest are
+  advisories: `no-release-tags`, `non-semver-release-tag`, `apparent-break`,
+  and `release-tags-unchecked` when the tags cannot be listed or the highest
+  release cannot be checked out. Tags come from the local repo for a local
+  target and from the remote for a remote or melded one.
 - `VER-131` `init-source` adds `release-tags = "v{version}"` to the generated
   `mind.toml` when the repo already has tags that are releases under that
   template.

@@ -48,6 +48,13 @@ Findings are hard (non-zero exit) or advisory (exit 0):
 - a deprecated `[source].install` field
 - each declared source or item hook, so a consumer sees the source runs code
 - workflow defects the harness would reject (see [Workflows](workflows.md))
+- for a source declaring `release-tags` (see
+  [Pin a source to a version](pinning.md#follow-release-versions)): a template
+  that matches no tag (`no-release-tags`), a tag that fits the template but is
+  not semver (`non-semver-release-tag`), and a change since the highest release
+  that would break consumers on its caret range (`apparent-break`): an item
+  dropped, an item's kind changed, or a `{{ns:}}` referent removed. Tag a new
+  major version for an apparent break.
 
 `--fix` works on a local working tree only. It replaces recognized hardcoded
 paths with tokens, unwraps misplaced `{{ns:}}` tokens, and wraps bare sibling
@@ -81,7 +88,9 @@ Each run:
 1. Discovers the items exactly as a meld would, so what it reports is what a
    consumer gets.
 2. Writes a `mind.toml` if there is none, with a `[source]` table and a
-   description placeholder. An existing `mind.toml` is never overwritten.
+   description placeholder. When the repo already has tags such as `v1.2.0`,
+   it also declares `release-tags = "v{version}"`. An existing `mind.toml` is
+   never overwritten.
 3. Reports each item's references to its siblings: those already written as
    `{{ns:name}}` tokens, and bare mentions in prose. Bare mentions are reported
    as `unguarded-reference` advisories only when a namespace is in effect,
