@@ -592,6 +592,52 @@ fn a_move_that_would_run_a_hook_is_held() {
         .unwrap();
     assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), old);
 
+    // An installed tool with a build hook whose content changed.
+    let sb = Sandbox::new("auto-held-build");
+    let built = sb.base.join("built.log");
+    let items = format!(
+        concat!(
+            "[[items]]\nkind = \"agent\"\nname = \"dev\"\npath = \"agents/dev.md\"\n",
+            "[[items]]\nkind = \"tool\"\nname = \"btool\"\npath = \"tools/btool\"\n",
+            "build = \"echo built >> '{}'\"\n",
+        ),
+        built.display()
+    );
+    let tool_md = sb.source.join("tools/btool/TOOL.md");
+    write_file(&tool_md, "---\ndescription: tool\n---\none-zero\n");
+    sb.commit(&agent("one-zero"), &toml(&items), Some("v1.0.0"));
+    let r = sb.mind(&[
+        "meld",
+        &sb.spec(),
+        "--pin",
+        "version=^1",
+        "--yes",
+        "--auto-update",
+    ]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(
+        sb.mind_home.join("store/tool/btool").exists(),
+        "the tool is installed: {}",
+        r.stdout
+    );
+    let _ = std::fs::remove_file(&built);
+    write_file(&tool_md, "---\ndescription: tool\n---\none-one\n");
+    sb.commit(&agent("one-zero"), &toml(&items), Some("v1.1.0"));
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(&format!(
+            "auto-update: held {} 1.1.0: tool:btool has a hook that needs consent",
+            sb.identity()
+        )),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(sb.entry()["pin"]["value"]["resolved"], "1.0.0");
+    assert!(!built.exists(), "the build hook never ran");
+    let store = std::fs::read_to_string(sb.mind_home.join("store/tool/btool/TOOL.md")).unwrap();
+    assert!(store.contains("one-zero"), "{store}");
+
     // A source-level update hook on the new release.
     let sb = melded("auto-held-source", "", "--auto-update");
     sb.commit(
