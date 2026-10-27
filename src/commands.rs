@@ -1693,7 +1693,8 @@ fn meld_recursive(
     // terminal to ask on, only an explicit `--yes` carries on.
     if let Some(required) = crate::mindfile::unmet_min_version(mindfile.as_ref()) {
         let required = required.to_string();
-        let interactive = !yes && crate::hook::is_tty();
+        // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
+        let interactive = !yes && !json_mode() && crate::hook::is_tty();
         if accept_newer_mind || interactive {
             eprintln!("{}", catalog::newer_mind_warning(&source.name, &required));
             catalog::first_version_warning(&source.name);

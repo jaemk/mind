@@ -55,6 +55,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `UnpinnedSourceForbidden` message now reads "must be pinned to a tag,
   ref, or exact version".
 
+### Fixed
+
+- `meld --json` of a source that needs a newer `mind` no longer asks
+  `continue melding ... anyway?` on a terminal. It fails as it does with no
+  terminal; pass `--yes` to meld it anyway.
+
 ## [0.32.1] - 2026-10-22
 
 ### Changed

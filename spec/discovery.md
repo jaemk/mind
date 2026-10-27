@@ -1063,7 +1063,8 @@ field lets the curator opt in to named handling.
   names both versions, `mind evolve`, and `--yes`. `meld --yes` skips the
   question and melds with the warning, and the answer carries to the sources
   that meld walks (`[discover].sources`, a marketplace's entries). With no
-  terminal to ask on and no `--yes`, the meld fails as if declined, and so do
+  terminal to ask on, or under `--json` (LIFE-45), and no `--yes`, the meld
+  fails as if declined, and so do
   the melds that `curate`, `sync`, and a policy auto-meld run on their own.
   The check reads the `mind.toml` at the resolved pin.
 

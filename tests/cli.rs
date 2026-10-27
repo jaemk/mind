@@ -8572,6 +8572,26 @@ fn meld_asks_before_melding_a_source_requiring_a_newer_mind() {
 }
 
 #[test]
+fn meld_json_on_a_terminal_refuses_a_source_requiring_a_newer_mind_without_asking() {
+    // spec: DSC-116 LIFE-45
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"9.0\"\n");
+    let r = sb.run(
+        &["meld", &sb.source_spec(), "--json"],
+        Some("y\n"),
+        &[("MIND_TTY", "1")],
+    );
+    assert!(!r.success, "declined, as with no terminal");
+    assert!(!r.stdout.contains("anyway?"), "{}", r.stdout);
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "the reply on stdin is never read"
+    );
+}
+
+#[test]
 fn meld_names_the_version_gap_when_a_newer_mind_toml_does_not_parse() {
     // spec: DSC-117
     let sb = Sandbox::new();
