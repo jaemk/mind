@@ -87,7 +87,7 @@ missing items, or shows each item's state. Alias `add`.
 | `--profile <NAME>` | enable an install profile in addition to `default` (repeatable or comma list) |
 | `--no-default-profile` | leave the `default` profile out |
 | `--all-profiles` | enable every declared profile |
-| `--pin <HEAD\|REF\|branch=NAME\|tag=NAME\|version=RANGE>` | set the version tracked; also re-pins a melded source; see [Pin a source to a version](pinning.md) |
+| `--pin <HEAD\|REF\|branch=NAME\|tag=NAME\|version=RANGE>` | set the version tracked (`'version=*'` tracks every tagged release); also re-pins a melded source; see [Pin a source to a version](pinning.md) |
 | `-N`, `--namespace <PREFIX>` | install items as `<PREFIX>:<name>`; a different namespace registers a separate instance; see [Fix name collisions](collisions.md) |
 | `-r`, `--recursive` | offer the items of every source a curator lists |
 | `-f`, `--force` | overwrite link targets `mind` did not create; on a re-meld, also re-offer every install hook |

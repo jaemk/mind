@@ -4,7 +4,7 @@ name = "mind-cli"
 # from `main` is distinguishable from the released one (`mind --version`, bug
 # reports, `evolve --check`). The release bump drops the suffix, and
 # .github/workflows/release.yml releases a merged version without one.
-version = "0.35.2-dev"
+version = "0.36.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -40,6 +40,9 @@ libc = "0.2"
 strip-ansi-escapes = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
+# Version pins (VER-20): comparator ranges (`<2.0`, `>=1.2, <2`, `~1.2`) match
+# with cargo's own `VersionReq` rules. Already in the tree via `self_update`.
+semver = "1"
 # Stores only, no features. `proc_macro` would pull a proc-macro crate plus
 # darling and a second TOML parser into the build, and nothing here uses the
 # `#[cached]` attribute: `tui::data` drives `LruCache` directly. `time_stores`

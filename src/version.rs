@@ -67,6 +67,23 @@ impl Version {
     fn triple(&self) -> (u64, u64, u64) {
         (self.major, self.minor, self.patch)
     }
+
+    /// The `semver` crate's form, for matching a [`Range::Req`]. Build
+    /// metadata is dropped, since it never affects a match.
+    fn to_semver(&self) -> Option<semver::Version> {
+        let pre = if self.pre.is_empty() {
+            semver::Prerelease::EMPTY
+        } else {
+            semver::Prerelease::new(&self.pre.join(".")).ok()?
+        };
+        Some(semver::Version {
+            major: self.major,
+            minor: self.minor,
+            patch: self.patch,
+            pre,
+            build: semver::BuildMetadata::EMPTY,
+        })
+    }
 }
 
 impl PartialEq for Version {
@@ -232,7 +249,8 @@ impl fmt::Display for Template {
     }
 }
 
-/// A version range (VER-20): a caret requirement or an exact version.
+/// A version range (VER-20): a caret requirement, an exact version, or any
+/// other cargo requirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Range {
     /// `^X`, `^X.Y`, `^X.Y.Z` (or the bare form). Missing components are `None`.
@@ -244,6 +262,9 @@ pub enum Range {
     },
     /// `=X.Y.Z`.
     Exact(Version),
+    /// Any other cargo requirement: comparators (`<2.0`, `>=1.2, <2`), tilde
+    /// (`~1.2`), wildcards (`1.*`), or a partial `=X.Y`.
+    Req(semver::VersionReq),
 }
 
 impl Range {
@@ -251,9 +272,22 @@ impl Range {
     /// `BadPinSpec` (VER-22).
     // spec: VER-20 VER-22
     pub fn parse(s: &str) -> Option<Range> {
-        if let Some(v) = s.strip_prefix('=') {
-            return Version::parse(v).map(Range::Exact);
+        if let Some(v) = s.strip_prefix('=').and_then(Version::parse) {
+            return Some(Range::Exact(v));
         }
+        Range::parse_caret(s).or_else(|| Range::parse_req(s))
+    }
+
+    /// A cargo requirement other than the caret and exact forms (VER-20).
+    /// Build metadata means nothing in a requirement, so it is refused.
+    fn parse_req(s: &str) -> Option<Range> {
+        if s.trim().is_empty() || s.contains('+') {
+            return None;
+        }
+        semver::VersionReq::parse(s).ok().map(Range::Req)
+    }
+
+    fn parse_caret(s: &str) -> Option<Range> {
         let body = s.strip_prefix('^').unwrap_or(s);
         // Build metadata means nothing in a requirement.
         if body.contains('+') {
@@ -292,6 +326,8 @@ impl Range {
     pub fn matches(&self, v: &Version) -> bool {
         match self {
             Range::Exact(want) => v == want,
+            // The semver crate applies the same prerelease rule as VER-21.
+            Range::Req(req) => v.to_semver().is_some_and(|sv| req.matches(&sv)),
             Range::Caret {
                 major,
                 minor,
@@ -343,6 +379,7 @@ impl fmt::Display for Range {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Range::Exact(v) => write!(f, "={v}"),
+            Range::Req(req) => write!(f, "{req}"),
             Range::Caret {
                 major,
                 minor,
@@ -600,19 +637,29 @@ mod tests {
             ("1.2", "^1.2"),
             ("=1.2.3", "=1.2.3"),
             ("^1.3.0-rc.1", "^1.3.0-rc.1"),
+            ("<2.0", "<2.0"),
+            (">=1.2, <2", ">=1.2, <2"),
+            (">=1.2,<2", ">=1.2, <2"),
+            ("~1.2", "~1.2"),
+            ("1.*", "1.*"),
+            ("*", "*"),
+            ("=1.2", "=1.2"),
+            (">=1", ">=1"),
         ] {
             assert_eq!(r(input).to_string(), shown);
         }
         for bad in [
             "",
+            " ",
             "^",
             "v1",
-            "~1.2",
-            ">=1",
+            "<",
+            "<v2",
             "^1.2.3.4",
-            "=1.2",
             "^1.2-rc.1",
             "^1.2.3+b",
+            "<2.0.0+b",
+            ">=1.2, ",
             "main",
         ] {
             assert!(Range::parse(bad).is_none(), "{bad:?} must not parse");
@@ -642,6 +689,42 @@ mod tests {
                 assert!(!rg.matches(&v(x)), "{range} should refuse {x}");
             }
         }
+    }
+
+    #[test]
+    fn comparator_ranges_follow_cargo() {
+        // spec: VER-20
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("<2.0", &["0.1.0", "1.0.0", "1.99.9"], &["2.0.0", "2.1.0"]),
+            (">=1.2, <2", &["1.2.0", "1.9.0"], &["1.1.9", "2.0.0"]),
+            (">1.2.3", &["1.2.4", "3.0.0"], &["1.2.3"]),
+            ("<=1.4", &["1.4.0", "1.4.9"], &["1.5.0"]),
+            ("~1.2", &["1.2.0", "1.2.9"], &["1.3.0", "1.1.9"]),
+            ("~1.2.3", &["1.2.3", "1.2.9"], &["1.3.0", "1.2.2"]),
+            ("1.*", &["1.0.0", "1.9.9"], &["2.0.0", "0.9.0"]),
+            ("=1.2", &["1.2.0", "1.2.9"], &["1.3.0"]),
+            ("*", &["0.0.1", "1.0.0", "99.0.0"], &["2.0.0-rc.1"]),
+        ];
+        for (range, yes, no) in cases {
+            let rg = r(range);
+            for x in *yes {
+                assert!(rg.matches(&v(x)), "{range} should admit {x}");
+            }
+            for x in *no {
+                assert!(!rg.matches(&v(x)), "{range} should refuse {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn comparator_ranges_need_a_prerelease_opt_in() {
+        // spec: VER-21
+        assert!(!r("<2.0").matches(&v("2.0.0-rc.1")));
+        assert!(!r("<2.0").matches(&v("1.5.0-rc.1")));
+        let rc = r(">=1.3.0-rc.1, <2");
+        assert!(rc.matches(&v("1.3.0-rc.2")));
+        assert!(rc.matches(&v("1.4.0")));
+        assert!(!rc.matches(&v("1.4.0-rc.1")));
     }
 
     #[test]

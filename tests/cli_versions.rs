@@ -270,10 +270,87 @@ fn meld_with_no_release_in_range_registers_nothing() {
 }
 
 #[test]
+fn comparator_and_tilde_ranges_resolve_like_cargo() {
+    // spec: VER-20 VER-40 -- a comparator, comparator-list, or tilde range
+    // selects the highest release it admits and is recorded in cargo's form.
+    for (range, recorded, resolved) in [
+        ("<2.0", "<2.0", "1.1.0"),
+        (">=1.0,<1.1", ">=1.0, <1.1", "1.0.0"),
+        ("~1.0", "~1.0", "1.0.0"),
+        ("1.*", "1.*", "1.1.0"),
+        (">=1", ">=1", "2.0.0"),
+        ("*", "*", "2.0.0"),
+    ] {
+        let (sb, _) = released("ver-comparator", RELEASE_TAGS);
+        let pin_arg = format!("version={range}");
+        let r = sb.mind(&["meld", &sb.spec(), "--pin", &pin_arg]);
+        assert!(r.success, "{range}: {}", r.stderr);
+        let (pin, _) = sb.pin();
+        assert_eq!(pin["value"]["range"], recorded, "{range}: {pin}");
+        assert_eq!(pin["value"]["resolved"], resolved, "{range}: {pin}");
+    }
+}
+
+#[test]
+fn a_star_range_takes_every_release_without_a_breaking_move() {
+    // spec: VER-20 VER-61 -- `*` admits every stable release, so a new major
+    // is an ordinary move and nothing is ever listed as breaking.
+    let sb = Sandbox::new("ver-star");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=*", "--yes"])
+            .success
+    );
+    assert_eq!(sb.pin().0["value"]["resolved"], "1.0.0");
+    let c = sb.commit("two-zero", RELEASE_TAGS);
+    sb.tag("v2.0.0", &c);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "*", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert!(
+        sb.installed_agent().contains("two-zero"),
+        "{}",
+        sb.installed_agent()
+    );
+}
+
+#[test]
+fn a_release_above_a_comparator_range_is_a_breaking_move() {
+    // spec: VER-61 VER-63 -- a release past the range's upper bound is offered
+    // like one past a caret range; taking it moves to its caret.
+    let (sb, [_a, b, c]) = released("ver-comparator-break", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=<2.0", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(
+        r.stdout.contains("1.1.0 -> 2.0.0 (breaking, not applied"),
+        "{}",
+        r.stdout
+    );
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "<2.0", "{pin}");
+    assert_eq!(commit, b);
+
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
+    assert_eq!(commit, c);
+}
+
+#[test]
 fn a_range_that_does_not_parse_is_a_usage_error() {
     // spec: VER-22
     let (sb, _) = released("ver-bad-range", RELEASE_TAGS);
-    for bad in ["version=~1", "version=v1", "version=1.2.3.4", "version="] {
+    for bad in ["version=<v2", "version=v1", "version=1.2.3.4", "version="] {
         let r = sb.mind(&["meld", &sb.spec(), "--pin", bad]);
         assert!(!r.success, "{bad}: {}", r.stdout);
         assert!(
@@ -490,7 +567,7 @@ fn a_pin_version_directive_resolves_and_a_consumer_pin_overrides_it() {
 fn a_bad_or_conflicting_pin_version_directive_fails_the_meld() {
     // spec: VER-51
     for (name, extra) in [
-        ("ver-directive-bad", "pin-version = \"~1\"\n"),
+        ("ver-directive-bad", "pin-version = \"v1\"\n"),
         (
             "ver-directive-conflict",
             "pin-version = \"^1\"\npin-tag = \"v1.0.0\"\n",
@@ -2112,7 +2189,7 @@ fn a_recommended_range_nudges_toward_the_breaking_release_without_taking_it() {
 
     // A range that does not parse records nothing and fails nothing, and a
     // dropped recommendation is dropped.
-    for tip in [recommending("~1"), RELEASE_TAGS.to_string()] {
+    for tip in [recommending("v1"), RELEASE_TAGS.to_string()] {
         sb.commit("recommend-none", &tip);
         let r = sb.mind(&["sync"]);
         assert!(r.success, "{tip}: {}", r.stderr);

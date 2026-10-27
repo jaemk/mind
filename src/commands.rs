@@ -721,7 +721,7 @@ fn release_version(registry: &Registry, item: &crate::manifest::InstalledItem) -
 
 /// A version-pinned source's breaking release (VER-61): the highest stable
 /// release seen at the last sync, when it is newer than the resolved one and
-/// outside a caret range. An exact hold is never offered one.
+/// outside the range. An exact hold is never offered one.
 fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
     let Pin::Version(vp) = pin else {
         return None;
