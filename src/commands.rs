@@ -399,7 +399,7 @@ fn default_version_pin(
     let Some(highest) = crate::version::highest_stable(&releases, &yanked) else {
         eprintln!(
             "note: {} declares release-tags but has no stable release; following the default branch",
-            source.name
+            strip_ansi(&source.name)
         );
         return Ok(None);
     };
@@ -425,7 +425,7 @@ fn default_version_pin(
     for (a, b) in &res.ambiguous {
         eprintln!(
             "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
-            source.name,
+            strip_ansi(&source.name),
             strip_ansi(a),
             strip_ansi(b)
         );
@@ -476,12 +476,14 @@ fn release_needs_newer_mind(
     fetch: bool,
     rel: &crate::version::Release,
 ) -> Option<String> {
+    let shown = strip_ansi(source_name);
     let text = match git::tag_mind_toml(url, dir, &rel.tag, fetch) {
         Ok(text) => text,
         Err(e) => {
             eprintln!(
-                "warning: {source_name}: could not read min-mind-version of {}: {e}",
-                rel.version
+                "warning: {shown}: could not read min-mind-version of {}: {}",
+                rel.version,
+                strip_ansi(&e.to_string())
             );
             return None;
         }
@@ -490,7 +492,7 @@ fn release_needs_newer_mind(
         .as_deref()
         .and_then(crate::mindfile::unmet_min_version_in_text)?;
     eprintln!(
-        "{source_name}: skipped {}: needs mind {}",
+        "{shown}: skipped {}: needs mind {}",
         rel.version,
         strip_ansi(&required)
     );
@@ -16689,9 +16691,17 @@ mod tests {
     fn a_release_whose_mind_toml_cannot_be_fetched_counts_as_fitting() {
         // spec: VER-41 -- a failed tag fetch warns and keeps the release
         // selectable rather than failing the resolution.
+        // A repo with no `origin` remote: the fetch fails locally, never
+        // reaching a network or an enclosing checkout's remote.
         let (_paths, base) = ns_paths();
-        let not_a_repo = base.join("not-a-repo");
+        let not_a_repo = base.join("no-origin");
         std::fs::create_dir_all(&not_a_repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&not_a_repo)
+            .status()
+            .expect("run git");
+        assert!(init.success());
         let rel = crate::version::Release {
             tag: "v1.0.0".into(),
             version: crate::version::Version::parse("1.0.0").unwrap(),

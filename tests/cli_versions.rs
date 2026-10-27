@@ -692,6 +692,24 @@ fn resolution_skips_a_release_that_needs_a_newer_mind() {
 }
 
 #[test]
+fn the_skip_report_strips_control_bytes_from_the_source_name() {
+    // spec: VER-41 DSC-95
+    let sb = Sandbox::new("ver-skip-\u{202e}der");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("one-one", NEEDS_NEWER_MIND);
+    sb.tag("v1.1.0", &b);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let line = r
+        .stderr
+        .lines()
+        .find(|l| l.contains("skipped 1.1.0"))
+        .unwrap_or_else(|| panic!("no skip report in {:?}", r.stderr));
+    assert!(!line.contains('\u{202e}'), "{line:?}");
+}
+
+#[test]
 fn with_no_release_that_fits_the_highest_is_selected_with_the_warning() {
     // spec: VER-41 DSC-40
     let sb = Sandbox::new("ver-min-mind-none");
