@@ -165,9 +165,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
   pin stays and the failure is reported.
 - `VER-63` `upgrade --allow-breaking` accepts every listed breaking move without
   prompting. The `[item]` and `--source` filters (CLI-63) narrow it like any
-  other upgrade. `--yes` alone never accepts a breaking move: with `--yes`, or
-  without a TTY, and without `--allow-breaking`, breaking moves are listed and
-  skipped.
+  other upgrade. `--yes` alone never accepts a breaking move: with `--yes`,
+  under `--json`, or without a TTY, and without `--allow-breaking`, breaking
+  moves are listed and skipped.
 - `VER-64` The breaking prompt shows the target tag's annotation message when it
   is an annotated tag, sanitized like other source-derived text (`sanitize.rs`),
   without a signed tag's signature block and capped at 20 lines. A lightweight

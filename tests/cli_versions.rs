@@ -1574,7 +1574,24 @@ fn a_lightweight_breaking_tag_shows_no_notes() {
 }
 
 #[test]
+fn json_on_a_terminal_lists_a_breaking_release_without_prompting() {
+    // spec: VER-63 LIFE-45
+    let (sb, [_a, b, _c]) = released("ver-break-json-tty", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind_env(&["upgrade", "--json"], &[("MIND_TTY", "1")], Some("y\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let v: Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout is one JSON document ({e}): {}", r.stdout));
+    assert_eq!(v["breaking"][0]["applied"], false, "{v}");
+    assert_eq!(sb.pin().1, b, "the reply on stdin is never read");
+}
+
+#[test]
 fn an_exact_hold_is_never_offered_a_breaking_release() {
+    // spec: VER-61
     let (sb, [a, _b, _c]) = released("ver-break-exact", RELEASE_TAGS);
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"])

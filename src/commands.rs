@@ -658,8 +658,8 @@ fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
 /// (VER-61..63). Each is listed; an accepted one has its range moved to the
 /// caret of the new release (`^2.0.0`) and is resolved there, so its items then
 /// upgrade through the ordinary pass. `--allow-breaking` accepts them all; on a
-/// terminal without `--yes` each gets its own `[y/N]` prompt; otherwise they are
-/// skipped.
+/// terminal without `--yes` or `--json` each gets its own `[y/N]` prompt;
+/// otherwise they are skipped.
 // spec: VER-61 VER-62 VER-63
 fn settle_breaking_moves(
     paths: &Paths,
@@ -669,7 +669,8 @@ fn settle_breaking_moves(
     out: &crate::render::OutputCtx,
 ) -> Result<Vec<BreakingMoveJson>> {
     let allow = ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
-    let interactive = !yes && crate::hook::is_tty();
+    // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
+    let interactive = !yes && !out.json && crate::hook::is_tty();
     let mut changed = false;
     let mut moves = Vec::new();
     for source in &mut registry.sources {
