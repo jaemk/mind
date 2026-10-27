@@ -230,11 +230,13 @@ impl SourceMeta {
     }
 
     /// The range the author recommends (VER-140): `pin-version`, when it
-    /// parses. Read leniently, so a typo there never fails a `sync`.
+    /// parses as a range. Read leniently, so a typo there never fails a
+    /// `sync`; an exact version (VER-53) recommends nothing.
     pub fn recommended_range(&self) -> Option<crate::version::Range> {
         self.pin_version
             .as_deref()
             .and_then(crate::version::Range::parse)
+            .filter(|r| !matches!(r, crate::version::Range::Exact(_)))
     }
 
     /// Return the single pin declared by this `[source]` section, or `None`
@@ -260,10 +262,18 @@ impl SourceMeta {
         if let Some(v) = &self.pin_version {
             let range = crate::version::Range::parse(v).ok_or_else(|| MindError::MindToml {
                 path: toml_path.to_path_buf(),
-                msg: format!(
-                    "pin-version {v:?} is not a version range (such as \"^1.2\" or \"=1.2.3\")"
-                ),
+                msg: format!("pin-version {v:?} is not a version range (such as \"^1.2\")"),
             })?;
+            // spec: VER-53 -- a source recommends a range, never one release;
+            // holding a version is the consumer's call (`--pin version==X`).
+            if matches!(range, crate::version::Range::Exact(_)) {
+                return Err(MindError::MindToml {
+                    path: toml_path.to_path_buf(),
+                    msg: format!(
+                        "pin-version {v:?} is an exact version; declare a range such as \"^1.2\" (a consumer holds one release with `meld --pin version==X.Y.Z`)"
+                    ),
+                });
+            }
             set.push((
                 "pin-version",
                 Pin::Version(crate::source::VersionPin::unresolved(&range)),
@@ -2045,6 +2055,29 @@ mod tests {
             }
             other => panic!("expected a version pin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pin_directive_version_refuses_an_exact_version() {
+        // spec: VER-53
+        let exact = SourceMeta {
+            pin_version: Some("=1.2.3".into()),
+            ..Default::default()
+        };
+        let err = exact
+            .pin_directive(Path::new("/repo/mind.toml"))
+            .unwrap_err();
+        assert!(matches!(err, MindError::MindToml { .. }), "{err:?}");
+        assert!(err.to_string().contains("is an exact version"), "{err}");
+        assert!(
+            exact.recommended_range().is_none(),
+            "an exact pin-version recommends nothing"
+        );
+        let caret = SourceMeta {
+            pin_version: Some("^1.2".into()),
+            ..Default::default()
+        };
+        assert_eq!(caret.recommended_range().unwrap().to_string(), "^1.2");
     }
 
     #[test]

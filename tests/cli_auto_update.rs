@@ -525,6 +525,28 @@ fn breaking_moves_follow_the_recommended_range() {
 }
 
 #[test]
+fn an_exact_recommendation_moves_nothing() {
+    // spec: VER-53 AUP-12
+    let declare = "auto-update = \"breaking\"\n";
+    let sb = melded("auto-major-exact", declare, "--auto-update");
+    sb.commit(&agent("two-zero"), &toml(declare), Some("v2.0.0"));
+    sb.commit(
+        &agent("tip"),
+        &toml(&format!("{declare}pin-version = \"=2.0.0\"\n")),
+        None,
+    );
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert_eq!(sb.entry()["pin"]["value"]["range"], "^1");
+    assert!(
+        sb.entry()["pin"]["value"].get("recommended").is_none(),
+        "{}",
+        sb.entry()
+    );
+    assert!(sb.installed_agent().contains("one-zero"));
+}
+
+#[test]
 fn a_compatible_grant_never_takes_a_recommended_major() {
     // spec: AUP-10 AUP-12
     let declare = "auto-update = \"breaking\"\n";

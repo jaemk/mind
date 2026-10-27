@@ -139,6 +139,13 @@ error names the version gap (DSC-117) instead of a bare schema error.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
   `MindToml` error), and a consumer `--pin` overrides it. A range that does not
   parse (VER-20) is a `MindToml` error.
+- `VER-53` `[source].pin-version` is a range, never an exact version: `=X.Y.Z`
+  is a `MindToml` error at `meld`, with or without a consumer `--pin` (as for
+  an unparsable range, VER-51), and a hard `review` finding. As a
+  recommendation (VER-140) it records nothing, so a melded source whose
+  default branch declares one keeps syncing. Holding one release is the
+  consumer's choice (`meld --pin version==X.Y.Z`, VER-20), and a curator's
+  `[[discover.sources]]` entry may still declare one (VER-110).
 - `VER-52` When VER-50 applies, `meld` notes on stderr that the source follows
   releases, naming the range and the selected release, and that `upgrade`
   takes compatible releases and asks before a new major:

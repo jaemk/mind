@@ -22,6 +22,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommends it with `pin-version`. A move that would run a hook is held for
   `mind upgrade`, and the next `recall` or `upgrade` summarizes each run.
 
+### Changed
+
+- `[source].pin-version` must be a range. An exact version (`"=1.2.3"`) is a
+  `mind.toml` error at `meld` and a `review` finding, and is never recorded as a
+  recommendation. Consumers still hold a release with `--pin version==1.2.3`,
+  and a curator's `[[discover.sources]]` entry may still pin one.
+
 ## [0.33.0] - 2026-10-26
 
 ### Added

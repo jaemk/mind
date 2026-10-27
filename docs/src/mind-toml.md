@@ -80,7 +80,9 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync`
-  tracks upstream. `pin-version` takes a release range such as `"^1"`. Declare
+  tracks upstream. `pin-version` takes a release range such as `"^1"`, never an
+  exact version (`"=1.2.3"` is an error; a consumer holds one with
+  `--pin version==1.2.3`). Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
   [Pin a source to a version](pinning.md)).
 - **`release-tags`**: how the source's release tags are named, a template with

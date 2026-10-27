@@ -438,6 +438,21 @@ fn an_explicit_pin_or_directive_replaces_the_default() {
 }
 
 #[test]
+fn an_exact_pin_version_directive_is_refused() {
+    // spec: VER-53
+    let tip = "[source]\nrelease-tags = \"v{version}\"\npin-version = \"=1.0.0\"\n";
+    let (sb, _) = released("ver-directive-exact", tip);
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("is an exact version"), "{}", r.stderr);
+    // Like an unparsable range (VER-51), the file is invalid whatever the
+    // consumer pins.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("is an exact version"), "{}", r.stderr);
+}
+
+#[test]
 fn a_pin_version_directive_resolves_and_a_consumer_pin_overrides_it() {
     // spec: VER-51
     let tip = "[source]\nrelease-tags = \"v{version}\"\npin-version = \"^1\"\n";
