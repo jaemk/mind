@@ -435,6 +435,49 @@ fn a_run_honors_yanked_releases() {
 }
 
 #[test]
+fn a_run_honors_min_mind_version_and_moved_tags() {
+    // spec: AUP-16
+    // A newer release the binary is too old for is skipped.
+    let sb = melded("auto-min-version", "", "--auto-update");
+    sb.commit(
+        &agent("one-one"),
+        &toml("min-mind-version = \"99.0\"\n"),
+        Some("v1.1.0"),
+    );
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert_eq!(sb.entry()["pin"]["value"]["resolved"], "1.0.0");
+    assert!(sb.installed_agent().contains("one-zero"));
+
+    // The resolved release's tag moved upstream: the run does not follow it.
+    let sb = melded("auto-moved-tag", "", "--auto-update");
+    let old = sb.entry()["commit"].as_str().unwrap().to_string();
+    let moved = sb.commit(&agent("one-zero-moved"), &toml(""), None);
+    git(&sb.source, &["tag", "-f", "v1.0.0", &moved]);
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert_eq!(sb.entry()["commit"], old.as_str());
+    assert!(sb.installed_agent().contains("one-zero"));
+    assert!(!sb.installed_agent().contains("moved"));
+}
+
+#[test]
+fn a_run_skips_a_source_the_locked_allowlist_no_longer_admits() {
+    // spec: AUP-15
+    let sb = melded("auto-allowlist", "", "--auto-update");
+    sb.commit(&agent("one-one"), &toml(""), Some("v1.1.0"));
+    let locked = sb.policy("[sources]\nallow = [\"github.com/acme/*\"]\nlock = true\n");
+    let r = sb.mind_env(
+        &["auto-update", "run"],
+        &[("MIND_POLICY_FILE", locked.as_str())],
+        None,
+    );
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert_eq!(sb.entry()["pin"]["value"]["resolved"], "1.0.0");
+    assert!(sb.installed_agent().contains("one-zero"));
+}
+
+#[test]
 fn breaking_moves_follow_the_recommended_range() {
     // spec: AUP-12 AUP-13
     let declare = "auto-update = \"breaking\"\n";

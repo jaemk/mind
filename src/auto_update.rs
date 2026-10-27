@@ -226,10 +226,15 @@ pub fn trigger_command(every: &str) -> String {
 /// What marks a hook entry as the one `config auto-update on` added.
 const TRIGGER_PREFIX: &str = "mind auto-update run";
 
+/// Whether `hook` is exactly a command `trigger_command` builds, so `off`
+/// never removes a hand-written hook that merely starts the same way.
 fn is_trigger(hook: &serde_json::Value) -> bool {
     hook.get("command")
         .and_then(|c| c.as_str())
-        .is_some_and(|c| c.starts_with(TRIGGER_PREFIX))
+        .and_then(|c| c.strip_prefix(TRIGGER_PREFIX))
+        .and_then(|c| c.strip_prefix(" --if-stale "))
+        .and_then(|c| c.strip_suffix(" --background"))
+        .is_some_and(|every| parse_duration(every).is_ok())
 }
 
 fn read_settings(file: &Path) -> Result<serde_json::Value> {
@@ -470,6 +475,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn off_keeps_a_hand_written_hook_that_starts_the_same_way() {
+        // spec: AUP-20
+        let dir = temp("settings-own");
+        let file = dir.join("settings.json");
+        let own = "mind auto-update run && echo done";
+        let original = serde_json::json!({
+            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": own}]}]}
+        });
+        std::fs::write(&file, original.to_string()).unwrap();
+        assert!(install_trigger(&file, "1d").unwrap());
+        assert!(remove_trigger(&file).unwrap());
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(v, original, "only the trigger went");
+        assert!(!remove_trigger(&file).unwrap(), "nothing left to remove");
     }
 
     #[test]
