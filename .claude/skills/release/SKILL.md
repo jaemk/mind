@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a new `mind` release. Bump the version, update the changelog, verify CI, and open a release PR; merging it is the release, and the release workflow tags, builds, and publishes it. Then confirm the workflow succeeded.
+description: Cut a new `mind` release. Bump the version and update the changelog, either in a new release PR or as a commit on an existing PR, and verify CI; merging that PR is the release, and the release workflow tags, builds, and publishes it. Then confirm the workflow succeeded.
 ---
 
 # release
@@ -19,9 +19,19 @@ verb/flag or other backward-compatible feature is a minor bump; a bug-fix-only
 batch is a patch; a breaking change to the CLI, config, on-disk layout, or
 `mind.toml` schema is a major bump.
 
+The bump goes in one of two places:
+
+- **A release PR** (default): a dedicated branch off `main` carrying only the
+  bump and the changelog. Releases whatever has already landed on `main`.
+- **An existing PR**: a bump commit added on top of an open feature PR, so
+  merging that PR lands the change and releases it in one step. Use this when
+  asked to "release with PR N" or "add the version bump to this PR".
+
 ## Steps
 
-### 1. Start from an up-to-date main on a release branch
+### 1. Get onto the branch
+
+For a release PR, start from an up-to-date `main` on a new release branch:
 
 ```bash
 git switch main
@@ -30,14 +40,27 @@ git status --porcelain                  # must print nothing
 git switch -c YYMMDD.release-X.Y.Z      # today's date, the real version
 ```
 
+For an existing PR, check out its branch and bring it up to date with `main`,
+so the version and changelog are bumped from what `main` carries now:
+
+```bash
+gh pr view <N> --json headRefName,mergeable
+git switch <head branch>
+git pull
+git status --porcelain                  # must print nothing
+git fetch origin main
+git merge origin/main                   # resolve conflicts, then commit
+```
+
 ### 2. Pick the version and survey the changes
 
 ```bash
-git describe --tags --abbrev=0          # the previous release tag
-git log v<prev>..HEAD --format=%s       # substitute the tag printed above
+git describe --tags --abbrev=0 origin/main  # the previous release tag
+git log v<prev>..HEAD --format=%s           # substitute the tag printed above
 ```
 
-Decide the new `X.Y.Z` from that list (see the SemVer note above).
+On an existing PR this list includes the PR's own commits, which belong in the
+release. Decide the new `X.Y.Z` from that list (see the SemVer note above).
 
 ### 3. Bump the version
 
@@ -66,24 +89,42 @@ not the commit workflow. Update the link references at the bottom: point
 the newest version, and each ref chains to the next-older one). Keep the voice
 plain and factual (see `~/.local/share/agents/voice/voice-profile.md`).
 
-### 5. Verify, commit, and open the release PR
+### 5. Verify, commit, and push
 
 ```bash
 make ci                                 # green on the bumped tree
 git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -m "release X.Y.Z"           # the real version
+```
+
+The commit subject is `release X.Y.Z` (the repo's convention). Then either
+open the release PR:
+
+```bash
 git push -u origin YYMMDD.release-X.Y.Z
 gh pr create --base main --title "release X.Y.Z" --body-file <notes>
 ```
 
-The commit subject and PR title are `release X.Y.Z` (the repo's convention).
-The body is the changelog section's bullets.
+with the changelog section's bullets as the body, or push the bump onto the
+existing PR and note the release in its description:
+
+```bash
+git push
+gh pr edit <N> --body-file <notes>      # the existing body plus a line: "Releases X.Y.Z on merge."
+```
 
 ### 6. Stop at the PR
 
 Preparing the PR is the whole job. Do not push to `main`, create a tag, or run
 `cargo publish`. Merging the PR is the release; report the PR link and that
 merging it releases `X.Y.Z`.
+
+A bumped PR releases on any merge method, since `decide` reads the merged
+`Cargo.toml`. Keep it current with `main` until it merges: if another PR lands
+first, merge `main` in again and move that PR's changelog entries into the
+`X.Y.Z` section. If a different release merges first with the same version,
+re-bump this PR to the next version, or `decide` sees an existing release and
+skips it.
 
 ### 7. After the merge: confirm the release workflow succeeded
 

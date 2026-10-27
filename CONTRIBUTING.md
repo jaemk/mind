@@ -18,7 +18,7 @@ installed (`cargo install cargo-audit --locked`), so a passing gate does not on
 its own mean a scan ran. It is the only step that reaches the network, and the
 only one whose result can change without the tree changing, so
 `make ci-local SKIP_AUDIT=1` opts out when you are offline or an unrelated
-upstream advisory is blocking you. CI scans every push and every tag regardless
+upstream advisory is blocking you. CI scans every push and every release regardless
 and does not read that variable.
 
 `make build-release` builds the binary the release workflow ships, with a
