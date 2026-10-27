@@ -596,6 +596,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             kind,
             dry_run,
             force,
+            overwrite,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
             local,
@@ -611,8 +612,11 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             let _local_guard = commands::apply_local_scope(paths, local)?;
             let flow = commands::InstallFlow {
                 yes,
+                // spec: CLI-246 -- `--overwrite` accepts every conflict.
                 clobber: if force {
                     commands::Clobber::Force
+                } else if overwrite {
+                    commands::Clobber::Overwrite
                 } else {
                     commands::Clobber::Prompt
                 },

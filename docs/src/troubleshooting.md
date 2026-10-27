@@ -20,7 +20,8 @@ equivalent in those harnesses, so they stay in `~/.claude`. See
 ### `learn` refuses with `LinkOccupied`
 
 `mind` never overwrites a file or link it did not create. Move the existing
-entry aside and `learn` again, pass `learn --force` to replace it, or
+entry aside and `learn` again, pass `--overwrite` to `learn` or `meld` to
+replace every such entry, or
 [absorb](unmanaged.md) it if it is something you want to keep under version
 control.
 

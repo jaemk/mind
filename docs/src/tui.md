@@ -103,6 +103,15 @@ errors are shown inline.
 An install preview arms the same dependency closure as the direct install
 action. See [Find and install items](installing.md#items-that-depend-on-other-items).
 
+### The confirm
+
+While a confirm is open it takes every key: `y` confirms, `n` or `Esc` cancels,
+and anything else is ignored. An install's confirm also takes `f`, which runs it
+with `--force`, replacing every link target in the way that `mind` did not
+create. If an install you confirmed with `y` stops on such a target, a second
+confirm names the path and offers the same retry with `--force`. For a meld,
+add `--overwrite` to the `m` input instead.
+
 ## Details dialog
 
 Pressing `Enter` on a source or item opens a centered details dialog describing
@@ -126,7 +135,9 @@ through the normal confirm-and-execute path.
   The confirm lists the items enabling installs, or the items disabling forgets
   and any it keeps because another installed item depends on them. These run
   `mind learn <source> --profile <name>` and `mind forget <source> --profile
-  <name>`.
+  <name>`. When profiles are enabled, **Install enabled profiles** comes first:
+  it installs the enabled profiles' members that are not installed, running
+  `mind learn <source> --profile <name>` for each.
 
 In the dialog, `j` / `k` move the highlight, `Enter` or `y` runs the highlighted
 action, and `Esc`, `q`, or `n` dismisses without acting. On a group header, kind

@@ -281,6 +281,8 @@ and verified.
 | `--json` integers fit i64: the unlimited metadata cap is emitted as `i64::MAX` bytes | done | [cli.md](cli.md) (CLI-242) |
 | A kind-qualified ref with no source selector also matches the effective name `<kind>:<name>`; both matching is ambiguous | done | [namespacing.md](namespacing.md) (NS-74) |
 | An unmanaged lobe workflow claims its harness name in the collision check | done | [workflows.md](workflows.md) (WF-61) |
+| TUI: "Install enabled profiles" in the source dialog; a link conflict offers a `--force` retry; the confirm modal owns the keyboard and takes `f` to confirm an install with `--force` | done | [tui.md](tui.md) (TUI-79..82) |
+| `meld --overwrite` / `learn --overwrite` accept every link-target overwrite without a prompt per conflict; the overwrite prompt takes `a` for all | done | [cli.md](cli.md) (CLI-246, CLI-247) |
 | `--json` carries a workflow's `when_to_use` separately from `description` | done | [workflows.md](workflows.md) (WF-62) |
 | `[discover].workflows` globs match only regular non-symlink `.js` files | done | [discovery.md](discovery.md) (DSC-114) |
 | Item-link skill and tool `TOOL.md` anchors are classified no-follow | done | [discovery.md](discovery.md) (DSC-115) |

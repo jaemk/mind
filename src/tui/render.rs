@@ -723,13 +723,19 @@ fn draw_input_modal(frame: &mut Frame, area: Rect, title: &str, hint: &str, inpu
 /// TTY. Otherwise the modal stays as a single prompt line plus the hint.
 // spec: DEP-40
 fn confirm_modal_text(action: &crate::tui::app::PendingAction) -> String {
+    // spec: TUI-82 -- an install offers its --force confirm in the hint.
+    let hint = if action.kind.can_force() {
+        "  [y] confirm   [f] confirm with --force   [n/Esc] cancel"
+    } else {
+        "  [y] confirm   [n/Esc] cancel"
+    };
     match action.dep_tree.as_deref() {
         Some(tree) => format!(
-            "{}\n\n{}\n  [y] confirm   [n/Esc] cancel",
+            "{}\n\n{}\n{hint}",
             action.description,
             tree.trim_end_matches('\n')
         ),
-        None => format!("{}\n\n  [y] confirm   [n/Esc] cancel", action.description),
+        None => format!("{}\n\n{hint}", action.description),
     }
 }
 
@@ -1268,5 +1274,21 @@ mod tests {
             body, "Sync all sources?\n\n  [y] confirm   [n/Esc] cancel",
             "a treeless confirm must be exactly the prompt plus the key hint"
         );
+    }
+
+    #[test]
+    fn confirm_modal_offers_force_only_for_an_install() {
+        // spec: TUI-82 - an install's confirm names the `f` key; a forced
+        // retry or a non-install does not.
+        let learn = ActionKind::Learn {
+            item_key: "skill:b".to_string(),
+            source: "s".to_string(),
+        };
+        let body = confirm_modal_text(&PendingAction::new(learn.clone(), "Install?".to_string()));
+        assert!(body.contains("[f] confirm with --force"), "{body}");
+        for kind in [ActionKind::Forced(Box::new(learn)), ActionKind::Sync] {
+            let body = confirm_modal_text(&PendingAction::new(kind, "x".to_string()));
+            assert!(!body.contains("[f]"), "{body}");
+        }
     }
 }

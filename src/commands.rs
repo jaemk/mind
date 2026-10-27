@@ -4592,6 +4592,58 @@ pub enum Clobber {
     Prompt,
     /// Overwrite the conflicting target without asking (`--force`).
     Force,
+    /// Overwrite every conflicting target without asking, and nothing else
+    /// `--force` implies (a re-meld's HOOK-60 re-offer): `--overwrite`
+    /// (CLI-246).
+    Overwrite,
+}
+
+impl Clobber {
+    /// Whether an occupied link target is replaced without a prompt: by the
+    /// flag (`--force`/`--overwrite`), or because the user answered `a` to an
+    /// earlier overwrite prompt in this run (CLI-247).
+    fn overwrites(self) -> bool {
+        match self {
+            Clobber::Force | Clobber::Overwrite => true,
+            Clobber::Prompt => OVERWRITE_ALL.load(std::sync::atomic::Ordering::Relaxed),
+            Clobber::Error => false,
+        }
+    }
+}
+
+/// Set when the user answers `a` (all) to an overwrite prompt (CLI-247): the
+/// rest of the run overwrites every conflict without asking again.
+static OVERWRITE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The answer to an overwrite prompt: `y` this one, `a` this and every later
+/// one in the run, anything else (or EOF) no.
+#[derive(Debug, PartialEq, Eq)]
+enum OverwriteAnswer {
+    Yes,
+    All,
+    No,
+}
+
+fn parse_overwrite_answer(input: &str) -> OverwriteAnswer {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => OverwriteAnswer::Yes,
+        "a" | "all" => OverwriteAnswer::All,
+        _ => OverwriteAnswer::No,
+    }
+}
+
+/// Prompt `[y/N/a]` to overwrite an occupied link target (CLI-35, CLI-247).
+/// An `a` sets `OVERWRITE_ALL` so later conflicts in the run do not ask.
+fn confirm_overwrite(prompt: &str) -> Result<bool> {
+    let line = prompt_line(&format!("\n{prompt} [y/N/a] "))?;
+    Ok(match parse_overwrite_answer(&line) {
+        OverwriteAnswer::Yes => true,
+        OverwriteAnswer::All => {
+            OVERWRITE_ALL.store(true, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        OverwriteAnswer::No => false,
+    })
 }
 
 /// The install-time options that travel together through the learn/meld chain:
@@ -4979,7 +5031,7 @@ fn learn_selected(
             break;
         }
         let siblings = siblings_of(&items, &target.source);
-        let force = clobber == Clobber::Force;
+        let force = clobber.overwrites();
         // A `learn` never takes the re-install path: DEP-23 drops every already-
         // installed key from the closure above, so nothing reaching here is
         // installed under this effective name (HOOK-125: a repeat `learn` is a
@@ -4997,11 +5049,13 @@ fn learn_selected(
             dangerously_skip_build,
             is_update,
         );
-        // CLI-34: a conflicting (non-mind) target refuses by default. With
+        // CLI-35: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
-        // yes, retry forced. `install` aborts before touching anything on a
-        // clobber, so the retry is safe.
+        // yes, retry forced, and on an `a` also stop asking (CLI-247).
+        // `install` aborts before touching anything on a clobber, so the
+        // retry is safe.
         if let Err(MindError::LinkOccupied { path }) = &result
+            && !force
             && clobber == Clobber::Prompt
             && crate::hook::is_tty()
             && !out.json
@@ -5011,7 +5065,7 @@ fn learn_selected(
             // composing the prompt (not the whole prompt after), so the
             // trailing "exists and is not..." text cannot be swallowed by an
             // unterminated escape in the path.
-            result = if confirm(&format!(
+            result = if confirm_overwrite(&format!(
                 "{} exists and is not managed by mind; overwrite it?",
                 display_path(std::path::Path::new(&path))
             ))? {
@@ -5162,7 +5216,7 @@ fn learn_collecting_selected(
             break;
         }
         let siblings = siblings_of(&items, &target.source);
-        let force = clobber == Clobber::Force;
+        let force = clobber.overwrites();
         // The same defensive guard as the `learn` path above: DEP-23 has
         // already dropped every installed key, so this is false here.
         let is_update = manifest.items.contains_key(target.key().as_str());
@@ -6452,6 +6506,32 @@ pub(crate) struct ProfileChangePreview {
     pub kept: Vec<String>,
 }
 
+/// The effective keys `learn <source> --profile <each of profiles>` would
+/// install (PROF-17): for the TUI's Enable and Install-enabled confirms
+/// (TUI-78, TUI-79). Read-only.
+pub(crate) fn profiles_install_preview(
+    paths: &Paths,
+    source_name: &str,
+    profiles: &[String],
+) -> Result<ProfileChangePreview> {
+    let selection = crate::profile::Selection {
+        include_default: false,
+        named: profiles.to_vec(),
+        all: false,
+    };
+    let req = ProfileInstall {
+        source_name,
+        selection: &selection,
+        learn_patterns: &[],
+        only_missing_from_snapshot: false,
+    };
+    let plan = plan_profile_install(paths, &req)?;
+    Ok(ProfileChangePreview {
+        install: plan.pending.iter().map(|k| strip_ansi(k)).collect(),
+        ..ProfileChangePreview::default()
+    })
+}
+
 /// Preview enabling (`enable`) or disabling `profile` on `source_name`
 /// (TUI-78, PROF-17, PROF-25). Disabling a profile that is not enabled
 /// previews nothing.
@@ -6468,22 +6548,7 @@ pub(crate) fn profile_change_preview(
         });
     };
     if enable {
-        let selection = crate::profile::Selection {
-            include_default: false,
-            named: vec![profile.to_string()],
-            all: false,
-        };
-        let req = ProfileInstall {
-            source_name,
-            selection: &selection,
-            learn_patterns: &[],
-            only_missing_from_snapshot: false,
-        };
-        let plan = plan_profile_install(paths, &req)?;
-        return Ok(ProfileChangePreview {
-            install: plan.pending.iter().map(|k| strip_ansi(k)).collect(),
-            ..ProfileChangePreview::default()
-        });
+        return profiles_install_preview(paths, source_name, &[profile.to_string()]);
     }
     if !source.profiles.iter().flatten().any(|p| p == profile) {
         return Ok(ProfileChangePreview::default());
@@ -13952,6 +14017,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         all_profiles,
         recursive,
         force,
+        overwrite,
         local,
     } = args;
     // spec: HARN-20/HARN-21 -- `--local` restricts the install fan-out to
@@ -13995,10 +14061,14 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     if is_item_link_spec(&repo) {
         crate::profile::reject_on_item_link(&profile_flags)?;
     }
-    // CLI-34: `--force` overwrites a conflicting target; otherwise a
-    // conflict prompts on a TTY (Clobber::Prompt).
+    // CLI-35: `--force` overwrites a conflicting target; otherwise a
+    // conflict prompts on a TTY (Clobber::Prompt). spec: CLI-246 --
+    // `--overwrite` accepts every conflict but, unlike `--force`, leaves the
+    // HOOK-60 re-offer to the pending hooks.
     let clobber = if force {
         Clobber::Force
+    } else if overwrite {
+        Clobber::Overwrite
     } else {
         Clobber::Prompt
     };
@@ -15119,6 +15189,23 @@ mod tests {
         assert!(parse_confirm("whatever", true));
         assert!(!parse_confirm("n", true));
         assert!(!parse_confirm("NO", true));
+    }
+
+    #[test]
+    fn overwrite_prompt_answers_yes_all_or_no() {
+        // spec: CLI-247 - `a` accepts this conflict and every later one; the
+        // default (a bare Enter, EOF, anything else) refuses.
+        assert_eq!(parse_overwrite_answer("y"), OverwriteAnswer::Yes);
+        assert_eq!(parse_overwrite_answer(" YES \n"), OverwriteAnswer::Yes);
+        assert_eq!(parse_overwrite_answer("a"), OverwriteAnswer::All);
+        assert_eq!(parse_overwrite_answer("All\n"), OverwriteAnswer::All);
+        assert_eq!(parse_overwrite_answer(""), OverwriteAnswer::No);
+        assert_eq!(parse_overwrite_answer("n"), OverwriteAnswer::No);
+        assert_eq!(parse_overwrite_answer("maybe"), OverwriteAnswer::No);
+        // The flags overwrite without a prompt; `Error` never does.
+        assert!(Clobber::Force.overwrites());
+        assert!(Clobber::Overwrite.overwrites());
+        assert!(!Clobber::Error.overwrites());
     }
 
     /// Write `policy_toml` to a temp file and point `$MIND_POLICY_FILE` at it,

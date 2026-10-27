@@ -321,9 +321,17 @@ EXAMPLES:
 
         /// Overwrite a link target that already exists and is not managed by
         /// mind (a user's file/dir/foreign link). Without it, a conflict prompts
-        /// on a TTY and otherwise refuses.
+        /// on a TTY (answer `a` to overwrite the rest without asking) and
+        /// otherwise refuses.
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Accept every overwrite of a link target mind did not create, without
+        /// a prompt per conflict. The same as `--force` for `learn`; kept so
+        /// `learn` and `meld` share the flag.
+        // spec: CLI-246
+        #[arg(long)]
+        overwrite: bool,
 
         /// Run an item's install hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
@@ -1062,13 +1070,21 @@ pub struct MeldArgs {
     pub recursive: bool,
 
     /// When installing, overwrite link targets that already exist and are not
-    /// managed by mind. Without it, a conflict prompts on a TTY. On a re-meld
+    /// managed by mind. Without it, a conflict prompts on a TTY (answer `a` to
+    /// overwrite the rest without asking). On a re-meld
     /// of an already-melded source, `--force` ALSO re-offers every one of the
     /// source's install hooks, even those already run at the current commit
     /// (not just the pending ones an ordinary re-meld re-offers).
     // spec: HOOK-60
     #[arg(short = 'f', long)]
     pub force: bool,
+
+    /// Accept every overwrite of a link target mind did not create, without a
+    /// prompt per conflict. Unlike `--force`, a re-meld does not re-offer
+    /// install hooks that already ran.
+    // spec: CLI-246
+    #[arg(long)]
+    pub overwrite: bool,
 
     /// Install the source's item(s) into ONLY the current project's lobe --
     /// a registered lobe whose directory lives under the current working
