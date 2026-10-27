@@ -518,13 +518,32 @@ fn auto_update_json(
     }
 }
 
-/// The managed policy's auto-update cap (AUP-30), for display. A policy that
+/// The managed policy, for showing auto-update levels (AUP-30). A policy that
 /// fails to load is reported by the verbs that enforce it, not here.
-fn auto_update_cap_for_display() -> Option<crate::auto_update::Level> {
-    Policy::load()
-        .ok()
-        .flatten()
-        .and_then(|p| p.auto_update_cap())
+fn policy_for_display() -> Option<Policy> {
+    Policy::load().ok().flatten()
+}
+
+/// The managed policy's cap on `source`'s auto-update level (AUP-30): its
+/// `[sources].auto-update`, and `compatible` for a source an `auto_meld`
+/// entry pins, since `sync` puts that range back (POL-55) and a breaking move
+/// would only be undone, and its items downgraded, at the next sync.
+// spec: AUP-30
+fn auto_update_cap(
+    policy: Option<&Policy>,
+    source: &crate::source::Source,
+) -> Option<crate::auto_update::Level> {
+    use crate::auto_update::Level;
+    let policy = policy?;
+    let pinned_by_policy = policy
+        .auto_meld()
+        .iter()
+        .any(|am| parse_spec_quiet(&am.repo).is_ok_and(|spec| spec.name == source.name));
+    match (policy.auto_update_cap(), pinned_by_policy) {
+        (cap, false) => cap,
+        (Some(cap), true) => Some(cap.min(Level::Compatible)),
+        (None, true) => Some(Level::Compatible),
+    }
 }
 
 /// The release a version-pinned source is on, for `recall`'s source header
@@ -11680,7 +11699,7 @@ pub fn recall(
 
     if sources {
         let registry = Registry::load(paths)?;
-        let cap = auto_update_cap_for_display();
+        let policy = policy_for_display();
         if json {
             // spec: PROF-29 -- each source carries its declared profiles and
             // the enabled ones; a source without profiles is unchanged.
@@ -11704,8 +11723,11 @@ pub fn recall(
                         // registry serializes.
                         obj.insert(
                             "auto_update".into(),
-                            serde_json::to_value(auto_update_json(s, cap))
-                                .map_err(|e| MindError::json("recall sources", e))?,
+                            serde_json::to_value(auto_update_json(
+                                s,
+                                auto_update_cap(policy.as_ref(), s),
+                            ))
+                            .map_err(|e| MindError::json("recall sources", e))?,
                         );
                     }
                     Ok(v)
@@ -11745,7 +11767,7 @@ pub fn recall(
                 // spec: VER-90
                 let release = version_token(&s.pin);
                 // spec: AUP-11
-                let auto = auto_update_token(s, cap);
+                let auto = auto_update_token(s, auto_update_cap(policy.as_ref(), s));
                 vec![
                     out.bullet(),
                     s.name.clone(),
@@ -12018,7 +12040,7 @@ pub fn recall(
         // Fall through: unmanaged lobe items are still worth showing (UNM-2).
     }
 
-    let auto_update_cap = auto_update_cap_for_display();
+    let display_policy = policy_for_display();
     for s in &registry.sources {
         if !source_shown(s) {
             continue;
@@ -12048,7 +12070,7 @@ pub fn recall(
         // spec: VER-90
         let release = version_token(&s.pin);
         // spec: AUP-11
-        let auto = auto_update_token(s, auto_update_cap);
+        let auto = auto_update_token(s, auto_update_cap(display_policy.as_ref(), s));
         println!(
             "{} {}  {}{}",
             out.bullet(),
@@ -14539,7 +14561,6 @@ pub fn auto_update_run(
     git::set_noninteractive(true);
 
     let policy = Policy::load()?;
-    let cap = policy.as_ref().and_then(|p| p.auto_update_cap());
     let manifest = Manifest::load(paths)?;
     let mut registry = Registry::load(paths)?;
     let mut report = Report {
@@ -14549,7 +14570,7 @@ pub fn auto_update_run(
     let mut breaking: Vec<BreakingMoveJson> = Vec::new();
     let mut moved_names: Vec<String> = Vec::new();
     for source in &mut registry.sources {
-        let level = auto_update_level(source, cap);
+        let level = auto_update_level(source, auto_update_cap(policy.as_ref(), source));
         if level == Level::Off {
             continue;
         }

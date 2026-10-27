@@ -133,7 +133,10 @@ mind auto-update run                    # what the trigger runs; also usable fro
 
 - `AUP-30` A managed policy's `[sources].auto-update` caps the effective level
   for every source: `"off"`, `"compatible"`, or `"breaking"`. The cap applies
-  to the run and to the level `recall` shows (AUP-11). `"off"` also makes
+  to the run and to the level `recall` shows (AUP-11). A source an
+  `[[sources.auto_meld]]` entry pins is capped at `compatible` with or without
+  the key: its range is the policy's, which `sync` restores (POL-55), so a
+  breaking move would be undone at the next sync. `"off"` also makes
   `config auto-update on` an error. Any other value is an `InvalidPolicy`
   error naming `[sources].auto-update`.
 

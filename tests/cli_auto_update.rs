@@ -826,6 +826,25 @@ fn a_managed_policy_caps_the_level() {
         r.stderr
     );
 
+    // A source the policy provisions keeps the policy's range, so a breaking
+    // grant runs at compatible.
+    let pinned = sb.policy(&format!(
+        "[[sources.auto_meld]]\nrepo = '{}'\nversion = \"^1\"\n",
+        sb.spec()
+    ));
+    let env = [("MIND_POLICY_FILE", pinned.as_str())];
+    let r = sb.mind_env(&["recall", "--sources", "--json"], &env, None);
+    let v: Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    assert_eq!(
+        v["items"][0]["auto_update"]["effective"], "compatible",
+        "{v}"
+    );
+    assert!(sb.mind_env(&["auto-update", "run"], &env, None).success);
+    assert_eq!(sb.entry()["pin"]["value"]["range"], "^1");
+    // Without the policy, the same grant takes the recommended major.
+    assert!(sb.mind(&["auto-update", "run"]).success);
+    assert_eq!(sb.entry()["pin"]["value"]["range"], "^2");
+
     let bad = sb.policy("[sources]\nauto-update = \"sometimes\"\n");
     let r = sb.mind_env(
         &["auto-update", "run"],

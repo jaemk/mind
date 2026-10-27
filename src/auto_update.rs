@@ -277,7 +277,7 @@ fn write_settings(file: &Path, v: &serde_json::Value) -> Result<()> {
         .ok_or_else(|| MindError::io(&target, std::io::Error::other("no parent directory")))?;
     crate::paths::mkdir_p(dir)?;
     let mode = std::fs::metadata(&target)
-        .map(|m| m.permissions().mode() & 0o7777)
+        .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o644);
     let mut text = serde_json::to_string_pretty(v)
         .map_err(|e| MindError::io(&target, std::io::Error::other(e)))?;
