@@ -2102,7 +2102,7 @@ mod tests {
     fn pin_directive_version_must_parse_and_is_one_of() {
         // spec: VER-51
         let bad = SourceMeta {
-            pin_version: Some("~1".into()),
+            pin_version: Some("v1".into()),
             ..Default::default()
         };
         let err = bad.pin_directive(Path::new("/repo/mind.toml")).unwrap_err();

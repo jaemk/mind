@@ -4,7 +4,7 @@ A version pin follows a source's semver release tags within a compatible range.
 The source maintainer declares how release tags are named; the consumer pins a
 range. `sync` moves the source to the highest release inside the range, and a
 breaking release (outside the range) is reported but applied only on explicit
-consent. The range model is cargo's caret requirements.
+consent. The range model is cargo's version requirements.
 
 ```toml
 [source]
@@ -14,6 +14,7 @@ release-tags = "v{version}"
 ```sh
 mind meld owner/repo                         # pins ^<highest release> when release-tags is declared
 mind meld owner/repo --pin version=^1.2      # >=1.2.0, <2.0.0
+mind meld owner/repo --pin 'version=<2.0'    # any release below 2.0.0
 mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
 mind upgrade                                 # compatible moves; breaking ones listed, not applied
 mind upgrade --allow-breaking --source repo  # take the next major for one source
@@ -68,7 +69,12 @@ error names the version gap (DSC-117) instead of a bare schema error.
     leftmost nonzero component may not change, so `^1.2` is `>=1.2.0, <2.0.0`,
     `^0.3` is `>=0.3.0, <0.4.0`, and `^0.0.3` is exactly `0.0.3`);
   - a bare `X`, `X.Y`, or `X.Y.Z`, which means the same as the caret form;
-  - `=X.Y.Z`, an exact version (so the flag reads `--pin version==1.2.3`).
+  - `=X.Y.Z`, an exact version (so the flag reads `--pin version==1.2.3`);
+  - any other cargo version requirement: a comparator (`<2.0`, `>=1.2`, `>1.2.3`,
+    `<=1.4`), a comma-separated list of them that must all hold (`>=1.2, <2`),
+    a tilde (`~1.2`, `>=1.2.0, <1.3.0`), a wildcard (`1.*`), or a partial exact
+    (`=1.2`), with cargo's semantics. It is recorded in cargo's normalized form
+    (`>=1.2,<2` as `>=1.2, <2`). Build metadata (`+b`) is refused.
 - `VER-21` A prerelease is never selected unless the range's own version carries
   one, and then only prereleases of that same `MAJOR.MINOR.PATCH` (cargo's rule).
   `^1.3.0-rc.1` admits `1.3.0-rc.2` and `1.3.0`, never `1.4.0-rc.1`.
@@ -161,7 +167,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   installed item records the release it was installed from in the manifest;
   an item installed before that record existed shows `?` as its old version.
 - `VER-61` When the highest-seen release (VER-30) is newer than the resolved
-  one and outside a caret range, `upgrade` lists it, one line per source:
+  one and outside the range (above a caret's major or a comparator's upper
+  bound alike), `upgrade` lists it, one line per source:
   `<source> 1.5.0 -> 2.0.0 (breaking, not applied; ...)`, naming the
   `--allow-breaking --source` command that takes it. An exact hold (`=X.Y.Z`)
   is never offered a breaking move.

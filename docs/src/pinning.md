@@ -42,14 +42,21 @@ A source's own `mind.toml` can declare a pin (`follow-branch`, `pin-tag`,
 
 ## Follow release versions
 
-`--pin version=<range>` follows a source's semver release tags. A range is a
-caret requirement with cargo's rules, or an exact version:
+`--pin version=<range>` follows a source's semver release tags. A range is any
+cargo version requirement: a caret, a comparator or comma-separated list of
+them, a tilde, a wildcard, or an exact version:
 
 ```
-mind meld owner/repo --pin version=^1.2      # >=1.2.0, <2.0.0
-mind meld owner/repo --pin version=0.3       # >=0.3.0, <0.4.0
-mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
+mind meld owner/repo --pin version=^1.2          # >=1.2.0, <2.0.0
+mind meld owner/repo --pin version=0.3           # >=0.3.0, <0.4.0
+mind meld owner/repo --pin 'version=<2.0'        # any release below 2.0.0
+mind meld owner/repo --pin 'version=>=1.2, <1.5' # 1.2.0 up to, not including, 1.5.0
+mind meld owner/repo --pin version=~1.2          # >=1.2.0, <1.3.0
+mind meld owner/repo --pin version==1.2.3        # hold at exactly 1.2.3
 ```
+
+Quote a range that contains `<`, `>`, `*`, or a space so the shell passes it
+through.
 
 `sync` (and `upgrade`, which syncs first) moves the source to the highest
 release in range. A prerelease is selected only when the range names one
@@ -63,8 +70,8 @@ removes the target of a `{{ns:}}` reference. The warning does not stop the
 upgrade. A dropped item stays installed, so the warning repeats until you
 remove it with `mind forget --dropped`.
 
-A release outside the range, such as `2.0.0` under `^1.2`, is a breaking
-release. `upgrade` lists it and does not apply it unless you accept:
+A release outside the range, such as `2.0.0` under `^1.2` or `<2.0`, is a
+breaking release. `upgrade` lists it and does not apply it unless you accept:
 
 ```
 mind upgrade                                      # on a terminal: [y/N] per breaking release

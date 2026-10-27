@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Version pins accept any cargo version requirement, not only caret and exact
+  forms: comparators and comparator lists (`--pin 'version=<2.0'`,
+  `'version=>=1.2, <1.5'`), tilde (`~1.2`), wildcards (`1.*`), and a partial
+  exact (`=1.2`). The same ranges work in `[source].pin-version` and a policy
+  `auto_meld` entry. A release above the range is offered as a breaking move
+  like one past a caret.
+
 ## [0.35.1] - 2026-10-27
 
 ### Changed

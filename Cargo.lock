@@ -1559,6 +1559,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "self_update",
+ "semver",
  "serde",
  "serde_json",
  "strip-ansi-escapes",
