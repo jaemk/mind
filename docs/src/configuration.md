@@ -90,6 +90,8 @@ every other kind an over-cap file fails the scan of its source.
   sources/<host>/<owner>/<repo> clone of each melded repo
   store/<kind>/<name>/          installed copy of each item (name is effective)
   personal/                     built-in absorb destination, created on demand
+  auto-update.json              last auto-update run and reports not yet shown
+  auto-update.log               every auto-update run's moves, holds, and failures
   .tmp/staging/                 scratch for new copies during transactional installs
   .tmp/backup/                  previous copy held during a swap, for rollback
   .lock                         global advisory lock
@@ -103,8 +105,9 @@ Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
 
 A global advisory lock (`~/.mind/.lock`) is held by every mutating command
 (`meld`, `unmeld`, `learn`, `forget`, `sync`, `upgrade`, `introspect --fix`,
-`config lobes add|remove`). A second concurrent `mind` invocation blocks until
-the first finishes. The lock is released when the holding process exits, even on
+`config lobes add|remove`, `config auto-update`). A second concurrent `mind`
+invocation blocks until the first finishes, except `auto-update run`, which
+exits without doing anything when the lock is held. The lock is released when the holding process exits, even on
 crash, so an aborted run never wedges the next one. Read-only commands (`recall`,
 `probe`, `introspect`, `config show`) take a shared lock and proceed concurrently
 with each other, but never observe a writer mid-update.

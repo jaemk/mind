@@ -12,6 +12,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommended range. When it includes a breaking release, `upgrade` and
   `recall` say so next to that release (`acme/skills recommends ^2`), and
   `--json` reports it as `recommended`. Taking the release still needs consent.
+- Auto-update. `mind auto-update run` syncs and upgrades version-pinned
+  sources without prompting, and `mind config auto-update on` runs it from a
+  Claude Code `SessionStart` hook at most once a day. A source updates at the
+  level the consumer allowed (`meld --auto-update`), capped by the managed
+  policy's `[sources].auto-update`; a maintainer's `[source].auto-update` sets
+  what a bare `--auto-update` allows and what a first meld asks for. `breaking`
+  moves to a new major once the maintainer
+  recommends it with `pin-version`. A move that would run a hook is held for
+  `mind upgrade`, and the next `recall` or `upgrade` summarizes each run.
+
+### Changed
+
+- An exact `[source].pin-version` (`"=1.2.3"`) reads as its caret (`^1.2.3`),
+  both as the range a plain meld pins and as the recommendation, and `review`
+  notes it. Consumers still hold a release with `--pin version==1.2.3`, and a
+  curator's `[[discover.sources]]` entry may still pin one.
 
 ## [0.33.0] - 2026-10-26
 

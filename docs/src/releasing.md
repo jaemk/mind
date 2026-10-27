@@ -133,7 +133,10 @@ release-tags = "v{version}"
 pin-version = "^1"
 ```
 
-Leave it out otherwise. A consumer's `--pin` overrides it.
+Leave it out otherwise. A consumer's `--pin` overrides it. It is always a
+range: an exact version (`"=1.2.3"`) reads as `"^1.2.3"`, and `mind review`
+says so, since holding one release is the consumer's choice
+(`mind meld <source> --pin version==1.2.3`).
 
 ## Recommend a new major
 
@@ -149,3 +152,24 @@ each consumer sees after their next `sync`:
 The same hint shows in the `upgrade` prompt and in `recall`. Taking the new
 major still needs the consumer's yes or `--allow-breaking`. A recommendation
 that does not include the breaking release shows nothing.
+
+## Ask for automatic updates
+
+```toml
+[source]
+release-tags = "v{version}"
+auto-update = "breaking"   # or true / "compatible"
+```
+
+This asks consumers who run `mind config auto-update on` to let your source
+update without them running `upgrade`. A consumer is asked once, when they meld
+on a terminal, and can allow it later with `mind meld <source> --auto-update`.
+
+- `compatible` (or `true`) takes each new release inside the consumer's range.
+- `breaking` also moves them to a new major, but only after you recommend it:
+  tag `2.0.0`, then set `pin-version = "^2"` on the default branch when they
+  should move.
+
+The consumer's choice wins: changing the level never changes what a consumer
+already allowed, and raising it only shows them a note. A release whose update would run one of your hooks
+is never applied automatically, because a hook needs the consumer's consent.

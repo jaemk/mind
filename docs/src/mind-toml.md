@@ -80,7 +80,9 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync`
-  tracks upstream. `pin-version` takes a release range such as `"^1"`. Declare
+  tracks upstream. `pin-version` takes a release range such as `"^1"`; an exact
+  version (`"=1.2.3"`) reads as its caret (`"^1.2.3"`), since a consumer holds
+  one release with `--pin version==1.2.3`. Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
   [Pin a source to a version](pinning.md)).
 - **`release-tags`**: how the source's release tags are named, a template with
@@ -91,8 +93,13 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   [Name your release tags](releasing.md#name-your-release-tags).
 - **`yanked`**: release versions (`["1.4.1"]`) a version pin never selects.
   A source already on one stays there until a newer release in its range.
-- `release-tags`, `yanked`, and `pin-version` are read from the default
-  branch. An older `mind` rejects them, so set `min-mind-version` alongside.
+- **`auto-update`**: `true` / `"compatible"` or `"breaking"`, the level you
+  ask consumers to let `mind auto-update run` take. It is a request: it sets
+  what `meld --auto-update` grants and what a first meld asks, and the
+  consumer's choice always wins. See
+  [Ask for automatic updates](releasing.md#ask-for-automatic-updates).
+- `release-tags`, `yanked`, `pin-version`, and `auto-update` are read from the
+  default branch. An older `mind` rejects them, so set `min-mind-version` alongside.
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).

@@ -67,6 +67,10 @@ pub struct VersionPin {
     /// last resolution (VER-140). A hint only: it never changes `range`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended: Option<String>,
+    /// The default branch's `[source].auto-update` at the last resolution
+    /// (AUP-5): what the maintainer declares, not what the consumer granted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<crate::auto_update::Level>,
 }
 
 impl VersionPin {
@@ -80,6 +84,7 @@ impl VersionPin {
             highest_tag: None,
             yanked: false,
             recommended: None,
+            auto_update: None,
         }
     }
 
@@ -388,6 +393,10 @@ pub struct Source {
     /// and reports a key that left the expansion (PROF-22).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_snapshot: Option<Vec<String>>,
+    /// The consumer's auto-update grant (AUP-8). `None` is never granted;
+    /// `Some(Off)` is revoked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<crate::auto_update::Level>,
 }
 
 impl Source {
@@ -1223,6 +1232,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         install_hook_commit: None,
         profiles: None,
         profile_snapshot: None,
+        auto_update: None,
     })
 }
 

@@ -119,3 +119,34 @@ A non-interactive run skips install and build hooks unless you pass
 `--dangerously-skip-install-hook-check` and
 `--dangerously-skip-build-hook-check`. Both run code from the source, so use
 them only for sources you trust. See [Scripts and CI](scripting.md).
+
+## Auto-update
+
+Auto-update syncs and upgrades version-pinned sources on its own, for the
+sources you allow:
+
+```
+mind config auto-update on                # run at most once a day, when a session starts
+mind meld owner/repo --auto-update        # allow what the source declares
+mind meld owner/repo --auto-update=off    # stop
+```
+
+`config auto-update on` adds a `SessionStart` hook to each Claude lobe's
+`settings.json` that runs `mind auto-update run --if-stale 1d --background`.
+`--every 12h` changes the interval and `off` removes the hook. For another
+harness, schedule `mind auto-update run --if-stale 1d` from cron.
+
+A source runs at the level you allowed with `--auto-update` (nothing until you
+do), capped by your managed policy's `[sources].auto-update`, if any. A
+maintainer's `[source].auto-update` is a request: it sets what a bare
+`--auto-update` allows, and melding a source that declares one on a terminal
+asks whether to allow it. Changing it never changes your level.
+
+`compatible` takes releases inside the range. `breaking` also moves to a new
+major once the maintainer recommends it with `pin-version`. `recall` shows each
+source's level.
+
+A run never prompts. A source whose move would run a hook is left where it is
+until you run `mind upgrade`. The next `recall` or `upgrade` prints a one-line
+summary of what auto-update did, and `~/.mind/auto-update.log` keeps the
+history.

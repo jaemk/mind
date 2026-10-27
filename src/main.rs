@@ -1,3 +1,4 @@
+mod auto_update;
 mod catalog;
 mod cli;
 mod commands;
@@ -38,7 +39,7 @@ use std::io::IsTerminal;
 
 use clap::{CommandFactory, Parser};
 
-use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
+use cli::{AutoUpdateCmd, Cli, Command, ConfigCmd, HooksCmd, LobesCmd, OnOff};
 use config::MAX_METADATA_SIZE_ENV;
 use error::{MindError, Result};
 use paths::Paths;
@@ -303,6 +304,14 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
         // spec: STO-48
         Command::Evolve { .. } => LockMode::None,
 
+        // `auto-update run` takes the exclusive lock itself, without waiting
+        // (AUP-18): an outer blocking lock would queue an unattended run behind
+        // the user, and `--background` takes no lock at all in the parent.
+        // spec: AUP-18
+        Command::AutoUpdate {
+            action: AutoUpdateCmd::Run { .. },
+        } => LockMode::None,
+
         // Mutating commands.
         Command::Meld(_)
         // curate registers, installs, re-pins, upgrades, and (with --prune)
@@ -327,7 +336,8 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
             action:
                 ConfigCmd::Lobes {
                     action: LobesCmd::Add { .. } | LobesCmd::Remove { .. } | LobesCmd::Detect,
-                },
+                }
+                | ConfigCmd::AutoUpdate { .. },
         } => LockMode::Exclusive,
 
         // probe in TUI mode: the TUI manages its own per-op locks (TUI-25).
@@ -728,6 +738,10 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         } => {
+            // spec: AUP-21
+            if !json {
+                auto_update::show_unshown(paths);
+            }
             // spec: VER-63
             commands::set_allow_breaking(allow_breaking);
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
@@ -767,15 +781,21 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             kind,
             source,
             tree,
-        } => commands::recall(
-            paths,
-            sources,
-            item.as_deref(),
-            kind.map(|k| k.to_kind()),
-            source.as_deref(),
-            json,
-            tree,
-        ),
+        } => {
+            // spec: AUP-21
+            if !json {
+                auto_update::show_unshown(paths);
+            }
+            commands::recall(
+                paths,
+                sources,
+                item.as_deref(),
+                kind.map(|k| k.to_kind()),
+                source.as_deref(),
+                json,
+                tree,
+            )
+        }
         Command::Probe {
             query,
             kind,
@@ -850,7 +870,17 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     commands::lobe_remove(paths, &path, snapshot)
                 }
             },
+            ConfigCmd::AutoUpdate { state, every } => {
+                commands::config_auto_update(paths, state == OnOff::On, &every)
+            }
         },
+        Command::AutoUpdate {
+            action:
+                AutoUpdateCmd::Run {
+                    if_stale,
+                    background,
+                },
+        } => commands::auto_update_run(paths, if_stale.as_deref(), background, json),
         Command::LinkProject {
             dir,
             preset,
@@ -1152,6 +1182,11 @@ mod tests {
             &["config", "lobes", "remove"],
             &["mind", "config", "lobes", "remove", "/some/home"],
         ),
+        (
+            &["config", "auto-update"],
+            &["mind", "config", "auto-update", "on"],
+        ),
+        (&["auto-update", "run"], &["mind", "auto-update", "run"]),
         (&["curate"], &["mind", "curate", "--check"]),
         (&["hooks", "run"], &["mind", "hooks", "run", "agents"]),
         (&["hooks", "list"], &["mind", "hooks", "list", "agents"]),

@@ -215,10 +215,6 @@ const ALLOWLIST: &[&str] = &[
     // Release versions (spec/versions.md): VER-45 states a limitation (a moved
     // non-resolved tag is not detected), which no test can observe.
     "VER-45",
-    // Auto-update (spec/auto-update.md) is planned: documented ahead of the
-    // implementation, which cites each ID and removes it from here.
-    "AUP-1", "AUP-2", "AUP-5", "AUP-6", "AUP-8", "AUP-9", "AUP-10", "AUP-11", "AUP-12", "AUP-13",
-    "AUP-15", "AUP-16", "AUP-17", "AUP-18", "AUP-19", "AUP-20", "AUP-21", "AUP-30",
 ];
 
 #[test]

@@ -536,6 +536,16 @@ pub fn head_commit(url: &str, dir: &Path) -> Result<String> {
     run(url, Some(dir), &["rev-parse", "HEAD"])
 }
 
+/// Put a clone back on `sha`, a commit it was on before a move. The object is
+/// already local, so nothing is fetched, and a tag moved upstream since cannot
+/// redirect it.
+pub fn reset_to_commit(url: &str, dir: &Path, sha: &str) -> Result<()> {
+    // `reset --hard` takes no `--` before a commit; the value comes from the
+    // registry, so reject anything shaped like an option (DSC-66).
+    validate_ref_value(sha)?;
+    run(url, Some(dir), &["reset", "--hard", sha]).map(|_| ())
+}
+
 /// Initialize a new git repository at `dir`, creating the directory if absent.
 pub fn git_init(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).map_err(|e| crate::error::MindError::io(dir, e))?;

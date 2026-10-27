@@ -438,6 +438,35 @@ fn an_explicit_pin_or_directive_replaces_the_default() {
 }
 
 #[test]
+fn an_exact_pin_version_directive_reads_as_its_caret() {
+    // spec: VER-53
+    let tip = "[source]\nrelease-tags = \"v{version}\"\npin-version = \"=1.0.0\"\n";
+    let (sb, [_a, b, _c]) = released("ver-directive-exact", tip);
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1.0.0", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+
+    // review says so, as advice.
+    let r = sb.mind(&["review", &sb.spec()]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(
+            "advisory [exact-pin-version]: [source].pin-version \"=1.0.0\" reads as \"^1.0.0\""
+        ),
+        "{}",
+        r.stdout
+    );
+
+    // A consumer still holds one release.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+    assert_eq!(sb.pin().0["value"]["range"], "=1.0.0");
+}
+
+#[test]
 fn a_pin_version_directive_resolves_and_a_consumer_pin_overrides_it() {
     // spec: VER-51
     let tip = "[source]\nrelease-tags = \"v{version}\"\npin-version = \"^1\"\n";
