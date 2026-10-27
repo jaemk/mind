@@ -128,9 +128,10 @@ error names the version gap (DSC-117) instead of a bare schema error.
   and a release whose `min-mind-version` the binary does not meet, as VER-41
   skips one; when no stable release fits, the highest is used and the DSC-40
   warning applies. For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`.
-  If the template matches no stable release, `meld` follows the default branch as before and
-  says so. A local source gets no default: it stays linked to its working tree
-  (CLI-27), and an explicit version pin still applies to it (VER-81).
+  If the template matches no stable release, `meld` follows the default branch
+  as before and says so. A local source gets no default: it stays linked to its
+  working tree (CLI-27), and an explicit version pin still applies to it
+  (VER-81).
 - `VER-51` `[source]` gains a fourth pin directive, `pin-version = "<range>"`.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
   `MindToml` error), and a consumer `--pin` overrides it. A range that does not

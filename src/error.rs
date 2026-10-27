@@ -781,8 +781,12 @@ pub enum MindError {
 
     /// VER-4, VER-42: a version pin whose range no release satisfies. `highest`
     /// is the highest release found, `None` when no tag is a release at all.
+    /// DSC-95: `source_name` is the source's own identity and `main.rs` prints
+    /// this message verbatim, so it is sanitized.
     #[error(
-        "{source_name}: no release matches {range}{}",
+        "{}: no release matches {}{}",
+        crate::sanitize::strip_ansi(source_name),
+        crate::sanitize::strip_ansi(range),
         match highest {
             Some(h) => format!(" (highest release is {h})"),
             None => " (no tag is a release under the source's release-tags)".to_string(),

@@ -864,6 +864,47 @@ fn sync_does_not_follow_a_moved_release_tag() {
     assert_eq!(sb.pin().1, moved);
 }
 
+/// Assert that the stderr line containing `needle` carries no U+202E.
+fn stripped_line(stderr: &str, needle: &str) {
+    let line = stderr
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no {needle:?} in {stderr:?}"));
+    assert!(!line.contains('\u{202e}'), "{line:?}");
+}
+
+#[test]
+fn release_warnings_and_errors_strip_control_bytes_from_the_source_name() {
+    // spec: VER-11 VER-42 VER-44 DSC-95
+    // No release-tags: the default template reads both `v1.0.0` and `1.0.0`,
+    // here at different commits, so 1.0.0 is ambiguous and skipped.
+    let sb = Sandbox::new("ver-warn-\u{202e}der");
+    let a = sb.commit("one-zero", "");
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("one-zero-again", "");
+    sb.tag("1.0.0", &b);
+    let c = sb.commit("one-one", "");
+    sb.tag("v1.1.0", &c);
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^3"]);
+    assert!(!r.success, "meld must fail: {}", r.stdout);
+    stripped_line(&r.stderr, "no release matches ^3");
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    stripped_line(
+        &r.stderr,
+        "tags 1.0.0 and v1.0.0 name the same version at different commits",
+    );
+    assert_eq!(sb.pin().1, c);
+
+    let moved = sb.commit("moved", "");
+    sb.tag("v1.1.0", &moved);
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync: {}", r.stderr);
+    stripped_line(&r.stderr, "release tag v1.1.0 moved");
+}
+
 #[test]
 fn a_yanked_release_is_never_selected() {
     // The yanked list is read from the default-branch tip.

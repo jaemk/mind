@@ -350,7 +350,8 @@ fn resolve_version(
     let res = crate::version::resolve(template, &tags, &range, yanked);
     for (a, b) in &res.ambiguous {
         eprintln!(
-            "warning: {source_name}: tags {} and {} name the same version at different commits; skipping that version",
+            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+            strip_ansi(source_name),
             strip_ansi(a),
             strip_ansi(b)
         );
@@ -727,7 +728,7 @@ fn sync_clone_to_pin(
             {
                 eprintln!(
                     "warning: {}: release tag {} moved from {} to {}; staying at {} (re-meld with --pin to accept it)",
-                    source.name,
+                    strip_ansi(&source.name),
                     strip_ansi(&rel.tag),
                     short(recorded),
                     short(&rel.commit),
