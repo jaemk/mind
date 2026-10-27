@@ -14450,6 +14450,15 @@ fn auto_update_breaking_move(
     }
 }
 
+/// Put `source`'s clone back on the commit the registry records (AUP-17), so a
+/// held or failed move leaves the source and its items agreeing.
+fn auto_update_restore_clone(source: &crate::source::Source, dir: &std::path::Path) -> Result<()> {
+    match source.commit.as_deref() {
+        Some(sha) => git::reset_to_commit(&source.url, dir, sha),
+        None => git::sync_to_pin(&source.url, dir, &source.pin),
+    }
+}
+
 /// A version pin's resolved version, for a run report line.
 fn resolved_version(pin: &Pin) -> String {
     match pin {
@@ -14461,8 +14470,11 @@ fn resolved_version(pin: &Pin) -> String {
 /// `mind auto-update run`'s `--json` result (AUP-13, AUP-21).
 #[derive(Serialize)]
 struct AutoUpdateJson {
-    verb: &'static str,
-    status: &'static str,
+    // spec: CLI-153 CLI-168 -- the mutating-verb envelope.
+    schema: u8,
+    action: &'static str,
+    target: &'static str,
+    outcome: &'static str,
     moved: Vec<String>,
     held: Vec<String>,
     failed: Vec<String>,
@@ -14494,8 +14506,10 @@ pub fn auto_update_run(
     let up_to_date = |json: bool| {
         if json {
             print_json(&AutoUpdateJson {
-                verb: "auto-update",
-                status: "skipped",
+                schema: 1,
+                action: "auto-update run",
+                target: "*",
+                outcome: "skipped",
                 moved: Vec::new(),
                 held: Vec::new(),
                 failed: Vec::new(),
@@ -14548,41 +14562,50 @@ pub fn auto_update_run(
         }
         let shown = strip_ansi(&source.name);
         enum Step {
-            Unchanged,
+            Unchanged(Box<Pin>),
             Moved(String, Box<Pin>, bool),
             Held(String),
         }
+        let current: &crate::source::Source = source;
         let step = (|| -> Result<Step> {
-            let dir = clone_dir_checked(paths, source)?;
-            let (mut commit, mut pin) = sync_clone_to_pin(source, &dir)?;
-            let mut took_breaking = false;
-            if level == Level::Breaking {
-                let mut probe = source.clone();
-                probe.pin = pin.clone();
-                if let Some((c, p)) = auto_update_breaking_move(&probe, &dir)? {
-                    commit = c;
-                    pin = p;
-                    took_breaking = true;
+            let dir = clone_dir_checked(paths, current)?;
+            let moving = || -> Result<Step> {
+                let (mut commit, mut pin) = sync_clone_to_pin(current, &dir)?;
+                let mut took_breaking = false;
+                if level == Level::Breaking {
+                    let mut probe = current.clone();
+                    probe.pin = pin.clone();
+                    if let Some((c, p)) = auto_update_breaking_move(&probe, &dir)? {
+                        commit = c;
+                        pin = p;
+                        took_breaking = true;
+                    }
                 }
+                if current.commit.as_deref() == Some(commit.as_str()) {
+                    // Nothing moved; keep the refreshed release metadata.
+                    return Ok(Step::Unchanged(Box::new(pin)));
+                }
+                let mut next = current.clone();
+                next.pin = pin.clone();
+                next.commit = Some(commit.clone());
+                if let Some(why) = auto_update_hold_reason(paths, &next, &dir, &manifest)? {
+                    // spec: AUP-17 -- put the clone back where the source is
+                    // recorded, so the source and its items do not disagree.
+                    auto_update_restore_clone(current, &dir)?;
+                    return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
+                }
+                Ok(Step::Moved(commit, Box::new(pin), took_breaking))
+            };
+            let step = moving();
+            if step.is_err() {
+                // A failure after the clone moved (a breaking resolution, the
+                // hold scan) must not leave it ahead of the registry.
+                let _ = auto_update_restore_clone(current, &dir);
             }
-            if source.commit.as_deref() == Some(commit.as_str()) {
-                // Nothing moved; keep the refreshed release metadata.
-                source.pin = pin;
-                return Ok(Step::Unchanged);
-            }
-            let mut next = source.clone();
-            next.pin = pin.clone();
-            next.commit = Some(commit.clone());
-            if let Some(why) = auto_update_hold_reason(paths, &next, &dir, &manifest)? {
-                // spec: AUP-17 -- put the clone back where the source is
-                // recorded, so the source and its items do not disagree.
-                git::sync_to_pin(&source.url, &dir, &source.pin)?;
-                return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
-            }
-            Ok(Step::Moved(commit, Box::new(pin), took_breaking))
+            step
         })();
         match step {
-            Ok(Step::Unchanged) => {}
+            Ok(Step::Unchanged(pin)) => source.pin = *pin,
             Ok(Step::Moved(commit, pin, took_breaking)) => {
                 let from = resolved_version(&source.pin);
                 let to = resolved_version(&pin);
@@ -14638,8 +14661,10 @@ pub fn auto_update_run(
 
     if json {
         return print_json(&AutoUpdateJson {
-            verb: "auto-update",
-            status: if report.failed.is_empty() {
+            schema: 1,
+            action: "auto-update run",
+            target: "*",
+            outcome: if report.failed.is_empty() {
                 "ok"
             } else {
                 "partial"

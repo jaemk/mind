@@ -11,8 +11,8 @@ a consumer must grant explicitly.
 ```toml
 [source]
 release-tags = "v{version}"
-auto-update = "breaking"     # "compatible" (default when declared) | "breaking"
-pin-version = "^2"           # with "breaking": the newest major auto-update may move to
+auto-update = "breaking"     # what to ask for: true / "compatible" | "breaking"
+pin-version = "^2"           # the newest major a `breaking` grant may move to
 ```
 
 ```sh
@@ -33,8 +33,8 @@ mind auto-update run                    # what the trigger runs; also usable fro
 
 ## Declaration
 
-- `AUP-5` `[source].auto-update` declares the highest level the maintainer
-  wants: `"compatible"` or `"breaking"`. `true` means `"compatible"`. Any other
+- `AUP-5` `[source].auto-update` declares the level the maintainer asks for:
+  `"compatible"` or `"breaking"`. `true` means `"compatible"`. Any other
   value is a `MindToml` error. It is read from the default-branch tip, like
   `release-tags` (VER-3), so a change applies without a new release.
 - `AUP-6` The declaration is a request, not a limit. It sets what a bare
@@ -74,7 +74,10 @@ mind auto-update run                    # what the trigger runs; also usable fro
   major: tag `2.0.0`, then set `pin-version = "^2"` when consumers should move.
 - `AUP-13` A breaking move taken by a run is reported like one taken by
   `upgrade --allow-breaking` (VER-91): `run --json` lists it in a `breaking`
-  array of `{source, from, to, applied, recommended}`.
+  array of `{source, from, to, applied, recommended}`. The document is the
+  mutating-verb result (CLI-153) with `action: "auto-update run"`, `target:
+  "*"`, an `outcome` of `ok`, `partial` (a source failed), or `skipped` (not
+  stale), and `moved`, `held`, and `failed` lists of the lines AUP-21 logs.
 
 ## The run
 

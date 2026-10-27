@@ -59,6 +59,12 @@ Shapes:
   `{"schema": 1, "action": "hooks-run", "target": "...", "event": "...",
   "existed": N, "ran": N, "skipped": N}`.
 - `curate`: one document whose `outcome` is `clean`, `pending`, or `applied`.
+- `auto-update run`: `{"schema": 1, "action": "auto-update run", "target": "*",
+  "outcome": "ok|partial|skipped", "moved": [...], "held": [...], "failed":
+  [...], "breaking": [...]}`.
+
+`config auto-update on|off` returns the changing-verb object with `count` set
+to the number of `settings.json` files changed.
 
 `learn --json` refuses with `confirmation-required` when the dependency closure
 adds items you did not name, unless `--yes` is given, since there is no prompt

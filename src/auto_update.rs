@@ -255,14 +255,45 @@ fn read_settings(file: &Path) -> Result<serde_json::Value> {
     }
 }
 
+/// Write `v` to `file` atomically. A symlinked `settings.json` (a dotfiles
+/// checkout) is written through, so the link survives, and the file keeps its
+/// mode, since it may hold tokens under `env`.
 fn write_settings(file: &Path, v: &serde_json::Value) -> Result<()> {
-    if let Some(dir) = file.parent() {
-        crate::paths::mkdir_p(dir)?;
-    }
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let target = match std::fs::symlink_metadata(file) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(file).map_err(|e| MindError::io(file, e))?
+        }
+        _ => file.to_path_buf(),
+    };
+    let dir = target
+        .parent()
+        .ok_or_else(|| MindError::io(&target, std::io::Error::other("no parent directory")))?;
+    crate::paths::mkdir_p(dir)?;
+    let mode = std::fs::metadata(&target)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644);
     let mut text = serde_json::to_string_pretty(v)
-        .map_err(|e| MindError::io(file, std::io::Error::other(e)))?;
+        .map_err(|e| MindError::io(&target, std::io::Error::other(e)))?;
     text.push('\n');
-    Paths::atomic_write(file, text.as_bytes())
+    let tmp = dir.join(format!(".settings.json.mind.{}", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .and_then(|mut f| {
+            // `mode` is masked by the umask at creation; set it exactly.
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, &target));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        MindError::io(&target, e)
+    })
 }
 
 /// Install the `SessionStart` trigger in `file` (a lobe's `settings.json`),
@@ -439,6 +470,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_trigger_writes_through_a_symlink_and_keeps_the_mode() {
+        // spec: AUP-20
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp("settings-link");
+        let real = dir.join("dotfiles").join("settings.json");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "{\"env\": {\"TOKEN\": \"x\"}}\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = dir.join("settings.json");
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+
+        assert!(install_trigger(&file, "1d").unwrap());
+        let link = std::fs::symlink_metadata(&file).unwrap();
+        assert!(link.file_type().is_symlink(), "the link survives");
+        assert!(has_trigger(&real), "the target carries the trigger");
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the mode is kept");
+
+        assert!(remove_trigger(&file).unwrap());
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!has_trigger(&real));
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

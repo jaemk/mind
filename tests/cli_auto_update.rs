@@ -456,6 +456,15 @@ fn breaking_moves_follow_the_recommended_range() {
     let r = sb.mind(&["auto-update", "run", "--json"]);
     assert!(r.success, "{}", r.stderr);
     let v: Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    // spec: CLI-153
+    assert_eq!(v["schema"], 1, "{v}");
+    assert_eq!(v["action"], "auto-update run", "{v}");
+    assert_eq!(v["outcome"], "ok", "{v}");
+    assert_eq!(
+        v["moved"][0],
+        format!("{} 1.0.0 -> 2.0.0", sb.identity()),
+        "{v}"
+    );
     assert_eq!(
         v["breaking"],
         serde_json::json!([{
@@ -518,6 +527,27 @@ fn a_move_that_would_run_a_hook_is_held() {
     // The clone went back too, so recall sees nothing out of date.
     let r = sb.mind(&["recall"]);
     assert!(!r.stdout.contains("outdated"), "{}", r.stdout);
+
+    // The clone goes back to the recorded commit even when the tag it was
+    // resolved from has since moved upstream.
+    let sb = melded("auto-held-moved-tag", "", "--auto-update");
+    let old = sb.entry()["commit"].as_str().unwrap().to_string();
+    let moved = sb.commit(&agent("one-zero-moved"), &toml(""), None);
+    git(&sb.source, &["tag", "-f", "v1.0.0", &moved]);
+    sb.commit(
+        "---\nname: dev\ndescription: dev\nupdate: echo updated\n---\none-one\n",
+        &toml(""),
+        Some("v1.1.0"),
+    );
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("held"), "{}", r.stdout);
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(sb.mind_home.join("sources").join(sb.identity()))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), old);
 
     // A source-level update hook on the new release.
     let sb = melded("auto-held-source", "", "--auto-update");
