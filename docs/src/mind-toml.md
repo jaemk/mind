@@ -84,10 +84,11 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   at most one; two is an error. A consumer `meld --pin` overrides it (see
   [Pin a source to a version](pinning.md)).
 - **`release-tags`**: how the source's release tags are named, a template with
-  one `{version}` (`"skills-v{version}"`), or `true` for the default
-  `v{version}` or bare `{version}`. A plain meld of a source that declares it
-  pins the caret of its highest stable release. See
-  [Follow release versions](pinning.md#follow-release-versions).
+  one `{version}` and literal text around it (`"skills-v{version}"`,
+  `"release/{version}"`), or `true` for the default `v{version}` or bare
+  `{version}`. The version part must be full semver. A plain meld of a source
+  that declares it pins the caret of its highest stable release. See
+  [Name your release tags](releasing.md#name-your-release-tags).
 - **`yanked`**: release versions (`["1.4.1"]`) a version pin never selects.
   A source already on one stays there until a newer release in its range.
 - `release-tags`, `yanked`, and `pin-version` are read from the default

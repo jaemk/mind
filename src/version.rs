@@ -538,8 +538,7 @@ mod tests {
 
     #[test]
     fn template_parses_and_rejects() {
-        // Template parsing for VER-1/VER-2; reading it from mind.toml is not
-        // wired yet, so the IDs stay allowlisted.
+        // spec: VER-1 VER-2
         assert_eq!(
             Template::parse("v{version}").unwrap(),
             Template::Literal {
@@ -580,6 +579,16 @@ mod tests {
         assert!(t.is_near_miss("skills-v1.2.3.4"));
         assert!(!t.is_near_miss("skills-v1.2.3"));
         assert!(!t.is_near_miss("other"));
+
+        // A suffix is stripped as a literal before the version is read, so
+        // `1.2.3-stable` is the stable 1.2.3, and a prerelease sits before it.
+        let s = Template::parse("{version}-stable").unwrap();
+        assert_eq!(s.match_tag("1.2.3-stable"), Some(v("1.2.3")));
+        assert!(!s.match_tag("1.2.3-stable").unwrap().is_prerelease());
+        assert_eq!(s.match_tag("1.3.0-rc.1-stable"), Some(v("1.3.0-rc.1")));
+        assert_eq!(s.match_tag("1.2.3"), None);
+        let slash = Template::parse("release/{version}").unwrap();
+        assert_eq!(slash.match_tag("release/1.2.3"), Some(v("1.2.3")));
 
         let d = Template::Default;
         assert_eq!(d.match_tag("v1.2.3"), Some(v("1.2.3")));

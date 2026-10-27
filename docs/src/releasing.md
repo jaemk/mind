@@ -22,8 +22,44 @@ git push origin v1.0.0
 ```
 
 `mind init-source` adds `release-tags = "v{version}"` for you when the repo
-already has tags like `v1.2.0`. In a repo that tags more than one thing, give
-the template a prefix (`"skills-v{version}"`) so only those tags count.
+already has tags like `v1.2.0`.
+
+## Name your release tags
+
+`release-tags` is a template: exactly one `{version}`, with any literal text
+before or after it.
+
+| `release-tags` | release tags it matches |
+|----------------|-------------------------|
+| `true` | `v1.2.3` or a bare `1.2.3` |
+| `"v{version}"` | `v1.2.3` |
+| `"skills-v{version}"` | `skills-v1.2.3` |
+| `"release/{version}"` | `release/1.2.3` |
+| `"{version}-stable"` | `1.2.3-stable` |
+
+`mind` strips the prefix and suffix as literal text, then reads what is left as
+a version:
+
+- The version must be full semver, `MAJOR.MINOR.PATCH`, optionally with a
+  prerelease (`-rc.1`) and build metadata (`+build.5`). A tag that fits the
+  template but is not semver, such as `v1.2`, is ignored, and `mind review`
+  reports it as `non-semver-release-tag`.
+- A prerelease goes before any suffix: under `"{version}-stable"`,
+  `1.3.0-rc.1-stable` is the prerelease `1.3.0-rc.1` and `1.2.3-stable` is the
+  stable `1.2.3`.
+- Tags that do not fit the template are not releases, so other tags in the
+  repo are left alone. In a repo that tags more than one thing, give each line
+  of releases its own prefix and point `release-tags` at the one this source
+  ships.
+- Two tags for the same version (`v1.2.3` and `1.2.3` under `true`) are fine
+  when they point at the same commit. At different commits the version is
+  skipped with a warning.
+
+The template must contain exactly one `{version}` and no other `{...}` token,
+and a filled-in tag must be a valid git ref name: no whitespace, no `..`, and
+no leading `-`. A template that breaks these rules fails the `mind.toml` load,
+which `mind review` reports. One source has one template; there is no list of
+alternatives, and date or build-number schemes are not versions.
 
 ## What consumers get
 
