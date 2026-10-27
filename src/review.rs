@@ -144,7 +144,15 @@ fn release_tag_checks(
         }
     }
     let (releases, _) = crate::version::releases(&template, &tags);
-    let Some(highest) = releases.first() else {
+    // Compare with the release consumers are on: the highest stable,
+    // non-yanked one (VER-50), not a newer prerelease or a yanked version.
+    let yanked = mindfile
+        .source
+        .yanked_versions(&source_dir.join("mind.toml"))
+        .unwrap_or_default();
+    let Some(highest) =
+        crate::version::highest_stable(&releases, &yanked).or_else(|| releases.first())
+    else {
         result.advisory.push(Finding::advisory(
             "no-release-tags",
             format!(

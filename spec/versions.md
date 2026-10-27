@@ -253,8 +253,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-130` `review` checks a source's `release-tags`: that it parses (VER-2),
   that at least one tag is a release, and which tags match the prefix and suffix
   but are not semver (VER-10). It also runs the VER-65 checks between the
-  highest release and the reviewed tree, so an author sees an apparent break
-  before tagging a compatible version. A template that does not parse fails the
+  highest stable, non-yanked release (the one VER-50 pins consumers to; the
+  highest release of any kind when none is stable) and the reviewed tree, so an
+  author sees an apparent break before tagging a compatible version. A template that does not parse fails the
   `mind.toml` load, the existing `toml-parse-error` hard finding; the rest are
   advisories: `no-release-tags`, `non-semver-release-tag`, `apparent-break`,
   and `release-tags-unchecked` when the tags cannot be listed or the highest

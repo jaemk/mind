@@ -1253,6 +1253,30 @@ fn review_checks_release_tags_and_breaks_since_the_highest_release() {
         r.stdout
     );
 
+    // The comparison is with the highest stable release consumers are on,
+    // not a newer prerelease or a yanked version.
+    let pre = Sandbox::new("ver-review-prerelease");
+    write_file(&pre.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&pre.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(&pre.source.join("agents/gone.md"), &agent("gone", "x"));
+    release(&pre, "one-zero", "v1.0.0");
+    std::fs::remove_file(pre.source.join("agents/gone.md")).unwrap();
+    let rc = release(&pre, "two-rc", "v2.0.0-rc.1");
+    pre.tag("v1.1.0", &rc);
+    write_file(
+        &pre.source.join("mind.toml"),
+        "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n",
+    );
+    let r = pre.mind(&["review", &pre.spec()]);
+    assert!(r.success, "advisory only: {}", r.stderr);
+    assert!(
+        r.stdout.contains(
+            "advisory [apparent-break]: since release 1.0.0 (v1.0.0), this tree drops agent:gone"
+        ),
+        "{}",
+        r.stdout
+    );
+
     // A template that matches no tag.
     let bare = Sandbox::new("ver-review-none");
     bare.commit("one", RELEASE_TAGS);

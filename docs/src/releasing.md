@@ -103,7 +103,8 @@ breaking:
 - removing the target of a `{{ns:}}` reference an item uses
 
 Run `mind review` before you tag. It compares your tree with your highest
-release and reports each of these as an `apparent-break` advisory. A compatible
+stable, non-yanked release (the one a new consumer gets) and reports each of
+these as an `apparent-break` advisory. A compatible
 release that does one anyway still installs, with a warning; the dropped item
 stays installed until the consumer runs `mind forget --dropped`.
 
