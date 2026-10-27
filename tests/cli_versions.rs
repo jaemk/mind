@@ -356,6 +356,31 @@ fn the_default_pin_skips_prereleases_and_yanked_versions() {
 }
 
 #[test]
+fn the_default_pin_skips_a_release_that_needs_a_newer_mind() {
+    // spec: VER-50 VER-41 -- the caret of the highest release this binary
+    // meets, not of one it would only warn about.
+    let sb = Sandbox::new("ver-default-min-mind");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    let b = sb.commit("two-zero", NEEDS_NEWER_MIND);
+    sb.tag("v2.0.0", &b);
+    sb.commit("tip", RELEASE_TAGS);
+
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert!(
+        r.stderr.contains("skipped 2.0.0: needs mind 99.0"),
+        "{}",
+        r.stderr
+    );
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^1.0.0", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.0.0", "{pin}");
+    assert_eq!(pin["value"]["highest"], "2.0.0", "{pin}");
+    assert_eq!(commit, a);
+}
+
+#[test]
 fn no_stable_release_follows_the_default_branch_and_says_so() {
     // spec: VER-50
     let sb = Sandbox::new("ver-default-rc-only");
@@ -1008,6 +1033,38 @@ fn review_checks_release_tags_and_breaks_since_the_highest_release() {
 }
 
 #[test]
+fn review_reports_a_dropped_item_and_tags_it_cannot_list() {
+    // spec: VER-130
+    let sb = Sandbox::new("ver-review-drop");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "d"));
+    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "g"));
+    release(&sb, "one-zero", "v1.0.0");
+    std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
+    let r = sb.mind(&["review", &sb.spec()]);
+    assert!(r.success, "advisory only: {}", r.stderr);
+    assert!(
+        r.stdout.contains(
+            "advisory [apparent-break]: since release 1.0.0 (v1.0.0), this tree drops agent:gone"
+        ),
+        "{}",
+        r.stdout
+    );
+
+    // A directory that is not a git repo has no tags to list.
+    let plain = sb.base.join("plain");
+    write_file(&plain.join("mind.toml"), RELEASE_TAGS);
+    write_file(&plain.join("agents/dev.md"), &agent("dev", "d"));
+    let r = sb.mind(&["review", &plain.to_string_lossy()]);
+    assert!(r.success, "advisory only: {}", r.stderr);
+    assert!(
+        r.stdout.contains("advisory [release-tags-unchecked]"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
 fn init_source_declares_release_tags_when_the_repo_has_releases() {
     // spec: VER-131
     let sb = Sandbox::new("ver-init");
@@ -1069,6 +1126,23 @@ fn recall_suggests_a_version_pin_for_a_release_tag_pin() {
     );
     let r = sb.mind(&["recall", "--sources"]);
     assert!(!r.stdout.contains("--pin version="), "{}", r.stdout);
+}
+
+#[test]
+fn the_version_pin_hint_strips_control_bytes_from_the_source_name() {
+    // spec: VER-82 DSC-95 -- the suggested command quotes a sanitized name.
+    // A repo spec refuses control characters, but not a bidi override.
+    let (sb, _) = released("ver-hint-\u{202e}der", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "tag=v1.0.0", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.success, "{}", r.stderr);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("--pin version=^1.0.0"))
+        .unwrap_or_else(|| panic!("no hint in {:?}", r.stdout));
+    assert!(!line.contains('\u{202e}'), "{line:?}");
 }
 
 #[test]

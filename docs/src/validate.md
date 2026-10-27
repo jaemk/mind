@@ -54,7 +54,11 @@ Findings are hard (non-zero exit) or advisory (exit 0):
   not semver (`non-semver-release-tag`), and a change since the highest release
   that would break consumers on its caret range (`apparent-break`): an item
   dropped, an item's kind changed, or a `{{ns:}}` referent removed. Tag a new
-  major version for an apparent break.
+  major version for an apparent break. The tags come from the local repo for a
+  local path, and from the remote for a melded or remote source, so that check
+  makes a network call; the highest release is checked out to a temporary
+  clone under `~/.mind`. When the tags cannot be listed or the release cannot
+  be checked out, `release-tags-unchecked` says so.
 
 `--fix` works on a local working tree only. It replaces recognized hardcoded
 paths with tokens, unwraps misplaced `{{ns:}}` tokens, and wraps bare sibling

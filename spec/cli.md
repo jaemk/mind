@@ -601,7 +601,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   melded (`unmeld --keep-items`, CLI-22). An item whose source is melded but
   whose clone is missing is kept, since nothing says it was dropped. An optional
   `<item>` ref or glob narrows the set. CLI-42's confirmation applies when more
-  than one item would go. With nothing dropped it says so and removes nothing.
+  than one item would go. With nothing dropped it says so and removes nothing;
+  under `--json` the outcome is `no-op`.
 
 ## sync
 

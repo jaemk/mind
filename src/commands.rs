@@ -319,7 +319,7 @@ fn version_pin_hint(paths: &Paths, source: &crate::source::Source) -> Option<Str
         "hint: {} follows release tag {}; to take compatible releases, run `mind meld {} --pin version=^{version}`",
         strip_ansi(&source.name),
         strip_ansi(tag),
-        crate::error::shell_quote(&source.name)
+        crate::error::shell_quote(&strip_ansi(&source.name))
     ))
 }
 
@@ -376,13 +376,16 @@ fn filled_version_pin(
 
 /// The pin a source gets on `meld` when no layer names one (VER-50): when its
 /// default-branch `mind.toml` declares `release-tags`, the caret of its highest
-/// stable, non-yanked release, already resolved to that release. `None` when it
-/// declares no `release-tags`, or declares them but no stable release matches
-/// (the source then follows its default branch, and the meld says so).
+/// stable, non-yanked release that this binary meets (VER-41), already resolved
+/// to that release. When none fits, the highest one. `None` when it declares no
+/// `release-tags`, or declares them but no stable release matches (the source
+/// then follows its default branch, and the meld says so). `dir` is the clone
+/// the release tags are fetched into.
 fn default_version_pin(
     source: &crate::source::Source,
     mindfile: Option<&MindToml>,
     toml_path: &std::path::Path,
+    dir: &std::path::Path,
 ) -> Result<Option<Pin>> {
     let Some(m) = mindfile else {
         return Ok(None);
@@ -400,8 +403,25 @@ fn default_version_pin(
         );
         return Ok(None);
     };
-    let range = crate::version::Range::caret_of(&highest.version);
-    let res = crate::version::resolve(&template, &tags, &range, &yanked);
+    // spec: VER-41 -- the default is the caret of a release this binary can
+    // run, so a newest release that needs a newer mind does not strand the
+    // meld on it while an older one fits.
+    let stable: Vec<&crate::version::Release> = releases
+        .iter()
+        .filter(|r| !r.version.is_prerelease() && !yanked.contains(&r.version))
+        .collect();
+    let mut chosen = highest;
+    if stable.len() > 1
+        && let Some(fits) = stable.iter().find(|rel| {
+            release_needs_newer_mind(&source.name, &source.url, dir, true, rel).is_none()
+        })
+    {
+        chosen = *fits;
+    }
+    let range = crate::version::Range::caret_of(&chosen.version);
+    let mut res = crate::version::resolve(&template, &tags, &range, &yanked);
+    // Every release above `chosen` was skipped above.
+    res.selected = Some(chosen.clone());
     for (a, b) in &res.ambiguous {
         eprintln!(
             "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
@@ -436,24 +456,45 @@ fn fit_min_mind_version(
         return Ok(());
     }
     for rel in &res.candidates {
-        let text = git::tag_mind_toml(url, dir, &rel.tag, fetch)?;
-        match text
-            .as_deref()
-            .and_then(crate::mindfile::unmet_min_version_in_text)
-        {
-            Some(required) => eprintln!(
-                "{source_name}: skipped {}: needs mind {}",
-                rel.version,
-                strip_ansi(&required)
-            ),
-            None => {
-                res.selected = Some(rel.clone());
-                return Ok(());
-            }
+        if release_needs_newer_mind(source_name, url, dir, fetch, rel).is_none() {
+            res.selected = Some(rel.clone());
+            return Ok(());
         }
     }
     res.selected = res.candidates.first().cloned();
     Ok(())
+}
+
+/// The `min-mind-version` release `rel` declares when this binary does not
+/// meet it (VER-41), reporting the skip. A release whose `mind.toml` cannot be
+/// read (the tag fetch fails) is warned about and treated as fitting, so a
+/// flaky fetch keeps the selection rather than failing the meld or sync.
+fn release_needs_newer_mind(
+    source_name: &str,
+    url: &str,
+    dir: &std::path::Path,
+    fetch: bool,
+    rel: &crate::version::Release,
+) -> Option<String> {
+    let text = match git::tag_mind_toml(url, dir, &rel.tag, fetch) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!(
+                "warning: {source_name}: could not read min-mind-version of {}: {e}",
+                rel.version
+            );
+            return None;
+        }
+    };
+    let required = text
+        .as_deref()
+        .and_then(crate::mindfile::unmet_min_version_in_text)?;
+    eprintln!(
+        "{source_name}: skipped {}: needs mind {}",
+        rel.version,
+        strip_ansi(&required)
+    );
+    Some(required)
 }
 
 /// The error for a range no release satisfies (VER-4, VER-42).
@@ -1328,7 +1369,7 @@ fn meld_recursive(
     let base_pin = match base_pin {
         Some(p) => p,
         None if consumer_pin == PinRequest::None && !is_local => {
-            match default_version_pin(&source, mindfile.as_ref(), &toml_path) {
+            match default_version_pin(&source, mindfile.as_ref(), &toml_path, &dir) {
                 Ok(Some(p)) => p,
                 Ok(None) => Pin::DefaultBranch,
                 Err(e) => {
@@ -8674,7 +8715,7 @@ pub fn forget(
                 return print_json(&MutationResult::new(
                     "forget",
                     item_ref.unwrap_or("--dropped"),
-                    "removed",
+                    "no-op",
                 ));
             }
             println!("no dropped items; nothing to forget");
@@ -16641,6 +16682,26 @@ mod tests {
             }
             other => panic!("expected UnsafeClonePath, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_release_whose_mind_toml_cannot_be_fetched_counts_as_fitting() {
+        // spec: VER-41 -- a failed tag fetch warns and keeps the release
+        // selectable rather than failing the resolution.
+        let (_paths, base) = ns_paths();
+        let not_a_repo = base.join("not-a-repo");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let rel = crate::version::Release {
+            tag: "v1.0.0".into(),
+            version: crate::version::Version::parse("1.0.0").unwrap(),
+            commit: "0".repeat(40),
+        };
+        let url = not_a_repo.to_string_lossy().into_owned();
+        assert_eq!(
+            release_needs_newer_mind("s", &url, &not_a_repo, true, &rel),
+            None
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

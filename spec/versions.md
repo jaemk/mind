@@ -96,7 +96,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   needs mind 0.35`). If no in-range release fits, the highest is selected and
   the DSC-40 warning applies. Each release's `min-mind-version` is read
   leniently from its own `mind.toml`, since that file may use keys the running
-  binary predates.
+  binary predates. A release whose `mind.toml` cannot be fetched is warned
+  about and treated as fitting, so a failed fetch never fails the resolution.
 - `VER-42` `meld` resolves the pin at meld time (CLI-18). If no release is in
   range, the meld fails with `NoMatchingRelease`, which names the range and the
   highest release found, and nothing is registered.
@@ -123,8 +124,10 @@ error names the version gap (DSC-117) instead of a bare schema error.
   `release-tags`, and no other layer supplies a pin (a consumer `--pin`, a
   `[source]` pin directive, a curator pin, or an item link's ref), `meld` pins
   `version=^<highest stable release>` instead of following the default branch.
-  The highest stable release skips prereleases and yanked versions (VER-46).
-  For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`. If the template
+  The highest stable release skips prereleases and yanked versions (VER-46),
+  and a release whose `min-mind-version` the binary does not meet, as VER-41
+  skips one; when no stable release fits, the highest is used and the DSC-40
+  warning applies. For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`. If the template
   matches no stable release, `meld` follows the default branch as before and
   says so. A local source gets no default: it stays linked to its working tree
   (CLI-27), and an explicit version pin still applies to it (VER-81).

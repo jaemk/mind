@@ -28144,6 +28144,12 @@ fn forget_dropped_with_nothing_dropped_removes_nothing() {
     assert!(r.success, "{}", r.stderr);
     assert!(r.stdout.contains("no dropped items"), "{}", r.stdout);
     assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+
+    // --json reports the no-op as one, like the other no-op mutations.
+    let r = sb.mind(&["forget", "--dropped", "--json"]);
+    assert!(r.success, "{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("JSON");
+    assert_eq!(v["outcome"], "no-op", "{v}");
 }
 
 #[test]

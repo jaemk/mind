@@ -94,7 +94,8 @@ min-mind-version = "0.33"            # older mind versions reject these keys
 
 A plain `mind meld owner/repo` of a source that declares `release-tags` pins
 the caret of its highest stable release (`^1.4.2` for `1.4.2`) instead of
-following the default branch. With no stable release yet it follows the
+following the default branch. A release whose `min-mind-version` this `mind`
+does not meet is passed over for the next-highest one. With no stable release yet it follows the
 default branch and says so. A local path meld stays linked to the working
 tree; pass `--pin version=<range>` to pin it.
 
@@ -144,8 +145,9 @@ mind learn https://github.com/owner/repo/tree/main/skills/foo --pin
 
 ## Organization-wide pinning
 
-A [managed policy](policy.md) can require every source to be pinned to a tag
-or commit, refusing floating branches.
+A [managed policy](policy.md) can require every source to be pinned to a tag,
+a commit, or an exact release version, refusing floating branches. A version
+range counts as pinned only when the policy sets `allow-version-ranges`.
 
 ## Older flag spellings
 
