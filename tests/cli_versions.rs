@@ -1590,6 +1590,7 @@ fn json_reports_each_version_pinned_source_and_the_breaking_moves() {
         "highest_available": "2.0.0",
         "breaking_available": true,
         "yanked": false,
+        "recommended": null,
     });
 
     let r = sb.mind(&["recall", "--sources", "--json"]);
@@ -1611,6 +1612,7 @@ fn json_reports_each_version_pinned_source_and_the_breaking_moves() {
             "from": "1.1.0",
             "to": "2.0.0",
             "applied": false,
+            "recommended": false,
         }]),
         "{v}"
     );
@@ -2003,4 +2005,105 @@ fn an_exact_hold_is_never_offered_a_breaking_release() {
     assert!(r.success, "upgrade: {}", r.stderr);
     assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
     assert_eq!(sb.pin().1, a);
+}
+
+/// The default-branch `mind.toml` with `pin-version = <range>` on top of the
+/// release template.
+fn recommending(range: &str) -> String {
+    format!("{RELEASE_TAGS}pin-version = \"{range}\"\n")
+}
+
+#[test]
+fn a_recommended_range_nudges_toward_the_breaking_release_without_taking_it() {
+    // spec: VER-140 VER-141 VER-142
+    let (sb, [_a, b, _c]) = released("ver-recommend", &recommending("^2"));
+    // A first meld records the recommendation; the consumer's range stands.
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let (pin, _) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["recommended"], "^2", "{pin}");
+
+    let id = sb.identity();
+    let quoted = format!("'{id}'");
+    for args in [vec!["upgrade"], vec!["upgrade", "--yes"]] {
+        let r = sb.mind(&args);
+        assert!(r.success, "{args:?}: {}", r.stderr);
+        assert!(
+            r.stdout.contains(&format!(
+                "1.1.0 -> 2.0.0 (breaking, not applied; {id} recommends ^2; take it with `mind upgrade --allow-breaking --source {quoted}`)"
+            )),
+            "{args:?}: {}",
+            r.stdout
+        );
+        // spec: VER-141 -- a recommendation is not consent.
+        let (pin, commit) = sb.pin();
+        assert_eq!(pin["value"]["range"], "^1", "{pin}");
+        assert_eq!(commit, b);
+    }
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(
+        r.stdout.contains(&format!(
+            "breaking release 2.0.0 available ({id} recommends ^2); take it with"
+        )),
+        "{}",
+        r.stdout
+    );
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(
+        format!("{}{}", r.stdout, r.stderr).contains(&format!(
+            "take breaking release {id} 1.1.0 -> 2.0.0 (breaking, {id} recommends ^2)?"
+        )),
+        "{}{}",
+        r.stdout,
+        r.stderr
+    );
+
+    // spec: VER-142
+    let r = sb.mind(&["recall", "--sources", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("recall JSON");
+    assert_eq!(v["items"][0]["version"]["recommended"], "^2", "{v}");
+    let r = sb.mind(&["upgrade", "--yes", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("upgrade JSON");
+    assert_eq!(v["breaking"][0]["recommended"], true, "{v}");
+
+    // A recommendation that does not admit the breaking release gives no hint.
+    sb.commit("recommend-one", &recommending("^1"));
+    assert!(sb.mind(&["sync"]).success);
+    assert_eq!(sb.pin().0["value"]["recommended"], "^1");
+    let r = sb.mind(&["upgrade"]);
+    assert!(r.stdout.contains("(breaking, not applied;"), "{}", r.stdout);
+    assert!(!r.stdout.contains("recommends"), "{}", r.stdout);
+    let r = sb.mind(&["upgrade", "--yes", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("upgrade JSON");
+    assert_eq!(v["breaking"][0]["recommended"], false, "{v}");
+
+    // A range that does not parse records nothing and fails nothing, and a
+    // dropped recommendation is dropped.
+    for tip in [recommending("~1"), RELEASE_TAGS.to_string()] {
+        sb.commit("recommend-none", &tip);
+        let r = sb.mind(&["sync"]);
+        assert!(r.success, "{tip}: {}", r.stderr);
+        let (pin, _) = sb.pin();
+        assert!(pin["value"].get("recommended").is_none(), "{tip}: {pin}");
+    }
+
+    // A re-pin records it as well.
+    sb.commit("recommend-two", &recommending("^2"));
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1.0", "--yes"]);
+    assert!(r.success, "re-pin: {}", r.stderr);
+    let (pin, _) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1.0", "{pin}");
+    assert_eq!(pin["value"]["recommended"], "^2", "{pin}");
+
+    // An exact hold has no breaking release, so no hint either.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version==1.0.0", "--yes"]);
+    assert!(r.success, "re-pin: {}", r.stderr);
+    let r = sb.mind(&["upgrade"]);
+    assert!(!r.stdout.contains("recommends"), "{}", r.stdout);
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains("recommends"), "{}", r.stdout);
 }
