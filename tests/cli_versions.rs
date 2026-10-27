@@ -645,6 +645,31 @@ fn a_compatible_move_that_removes_a_token_referent_is_warned_about() {
 }
 
 #[test]
+fn an_accepted_breaking_release_is_not_warned_as_looking_breaking() {
+    // spec: VER-65 -- only a compatible move is checked; a new major is
+    // expected to break.
+    let sb = Sandbox::new("ver-looks-breaking-major");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
+    release(&sb, "two-zero", "v2.0.0");
+
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(sb.installed_agent().contains("two"), "{}", r.stdout);
+    assert!(!r.stdout.contains("looks breaking"), "{}", r.stdout);
+    // spec: CLI-245 -- the dropped item still points at its remover.
+    assert!(r.stderr.contains("mind forget --dropped"), "{}", r.stderr);
+}
+
+#[test]
 fn a_compatible_move_with_no_break_warns_nothing() {
     // spec: VER-65
     let (sb, _) = released("ver-looks-fine", RELEASE_TAGS);
@@ -795,6 +820,50 @@ fn an_item_link_instance_accepts_a_version_pin() {
         !sb.claude_home.join("agents/other.md").exists(),
         "only the linked item"
     );
+
+    // spec: VER-120 -- `dump --ranges` keeps the link's commit, which is also
+    // its URL's ref segment.
+    let ranged = sb.mind(&["dump", "--ranges"]);
+    assert!(ranged.success, "{}", ranged.stderr);
+    assert!(
+        ranged.stdout.contains(&format!("pin-ref = \"{a}\"")),
+        "{}",
+        ranged.stdout
+    );
+    assert!(!ranged.stdout.contains("pin-version"), "{}", ranged.stdout);
+
+    // spec: VER-43 -- a newer compatible release moves the instance, and its
+    // one item upgrades.
+    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("one-one"));
+    let b = release(&sb, "one-one", "v1.1.0");
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = pin_of(
+        sb.entry_named(&format!("{}#skills/greet", sb.identity()))
+            .expect("still registered"),
+    );
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+    let installed =
+        std::fs::read_to_string(sb.claude_home.join("skills/greet/SKILL.md")).unwrap_or_default();
+    assert!(installed.contains("one-one"), "{installed}");
+    assert!(!sb.claude_home.join("agents/other.md").exists());
+}
+
+#[test]
+fn sync_stays_put_when_no_release_in_range_is_left() {
+    // spec: VER-43
+    let (sb, [_a, b, _c]) = released("ver-tags-gone", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1"])
+            .success
+    );
+    git(&sb.source, &["tag", "-d", "v1.0.0", "v1.1.0"]);
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
 }
 
 #[test]
@@ -955,6 +1024,47 @@ fn a_source_on_a_since_yanked_release_stays_until_a_newer_one() {
     let (pin, commit) = sb.pin();
     assert_eq!(pin["value"]["resolved"], "1.2.0", "{pin}");
     assert_eq!(commit, d);
+}
+
+#[test]
+fn re_pinning_a_linked_local_or_remote_source_to_a_range() {
+    // spec: VER-80 VER-81 VER-42
+    let (sb, [_a, b, _c]) = released("ver-repin-linked", RELEASE_TAGS);
+    // A plain local meld links the working tree (CLI-27).
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    assert!(sb.installed_agent().contains("unreleased"));
+
+    // The template is read from the working tree; the snapshot is the release.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1"]);
+    assert!(r.success, "re-pin: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+    assert!(
+        std::fs::read_to_string(sb.source.join("agents/dev.md"))
+            .unwrap()
+            .contains("unreleased"),
+        "the working tree is untouched"
+    );
+
+    // A range nothing matches fails and leaves the pin as it was.
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^5"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("no release matches ^5"), "{}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(commit, b);
+
+    // A remote clone on its default pin re-pins to an older major.
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(sb.remote_pin().0["value"]["range"], "^2.0.0");
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--pin", "version=^1"]);
+    assert!(r.success, "re-pin: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
 }
 
 #[test]
@@ -1715,6 +1825,107 @@ fn a_plain_remote_meld_follows_compatible_releases_and_takes_a_new_major_on_cons
     let r = sb.mind(&["recall", "--sources"]);
     assert!(r.stdout.contains("release 2.0.0 (^2.0.0)"), "{}", r.stdout);
     assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
+}
+
+#[test]
+fn an_accepted_breaking_release_that_resolves_to_nothing_keeps_the_old_pin() {
+    // spec: VER-62
+    let (sb, [_a, b, _c]) = released("ver-break-fails", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    // 2.0.0 is yanked after the last sync recorded it as the highest release,
+    // so `^2.0.0` has nothing selectable.
+    sb.commit(
+        "yank",
+        "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"2.0.0\"]\n",
+    );
+    let r = sb.mind(&[
+        "upgrade",
+        "--no-sync",
+        "--allow-breaking",
+        "--yes",
+        "--json",
+    ]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(
+        r.stderr.contains("could not take breaking release"),
+        "{}",
+        r.stderr
+    );
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("upgrade JSON");
+    assert_eq!(v["breaking"][0]["applied"], false, "{v}");
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+    assert!(sb.installed_agent().contains("one-one"));
+}
+
+/// A second source repo beside `sb.source`, named `name`, with an agent
+/// `other` released as v1.0.0 and v2.0.0. Returns its path.
+fn second_source(sb: &Sandbox, name: &str) -> PathBuf {
+    let dir = sb.base.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    for args in [
+        vec!["-c", "init.defaultBranch=main", "init", "-q"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+    ] {
+        git(&dir, &args);
+    }
+    write_file(&dir.join("mind.toml"), RELEASE_TAGS);
+    for (desc, tag) in [("other-one", "v1.0.0"), ("other-two", "v2.0.0")] {
+        write_file(&dir.join("agents/other.md"), &agent("other", desc));
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-qm", desc]);
+        git(&dir, &["tag", tag]);
+    }
+    dir
+}
+
+#[test]
+fn source_and_item_filters_narrow_the_breaking_moves() {
+    // spec: VER-63 CLI-63
+    let (sb, [_a, b, c]) = released("ver-break-scope", RELEASE_TAGS);
+    let other = second_source(&sb, "ver-break-scope-other");
+    let other_identity = format!(
+        "local/{}/ver-break-scope-other",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    for spec in [sb.spec(), other.to_string_lossy().into_owned()] {
+        assert!(
+            sb.mind(&["meld", &spec, "--pin", "version=^1", "--yes"])
+                .success
+        );
+    }
+    let other_range = || {
+        pin_of(sb.entry_named(&other_identity).expect("other is melded")).0["value"]["range"]
+            .clone()
+    };
+
+    // `--source` takes only the named source's new major.
+    let r = sb.mind(&[
+        "upgrade",
+        "--allow-breaking",
+        "--yes",
+        "--source",
+        &sb.identity(),
+    ]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert_eq!(other_range(), "^1", "the other source is out of scope");
+    let _ = b;
+
+    // An `[item]` filter takes the new major of the source it names.
+    let r = sb.mind(&["upgrade", "agent:other", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert_eq!(other_range(), "^2.0.0");
+    let installed = std::fs::read_to_string(sb.claude_home.join("agents/other.md")).unwrap();
+    assert!(installed.contains("other-two"), "{installed}");
 }
 
 #[test]

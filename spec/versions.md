@@ -104,7 +104,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-43` `sync` re-resolves every version-pinned source (CLI-55). It moves the
   source to the highest in-range release and updates the recorded commit and
   resolved version. It also updates the highest-seen release (VER-30). `sync`
-  never changes the range itself.
+  never changes the range itself. When no in-range release is selectable (its
+  tags were deleted, or every one is yanked), the source stays where it is.
 - `VER-44` A release tag never moves silently. If the resolved release's tag now
   peels to a different commit than the one recorded, `sync` does not follow it.
   It keeps the recorded commit and warns that the tag moved, naming both
@@ -178,7 +179,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   removes the referent of a `{{ns:}}` token in an installed item. The warning
   names each case and the release, one line each:
   `<source> 1.0.0 -> 1.1.0 looks breaking: drops agent:gone`. It is advisory
-  and does not block the upgrade.
+  and does not block the upgrade. A breaking move the user took (VER-62,
+  VER-63) is not checked, since a new major is expected to break.
 
 ## Hooks
 

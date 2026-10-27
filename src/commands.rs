@@ -11317,6 +11317,13 @@ fn warn_apparent_breaks(
             continue;
         };
         let from = moved.version.as_deref().unwrap_or("?");
+        // A move from outside the range is a breaking release the user took
+        // (VER-62, VER-63): expected to break, so only a compatible one is
+        // called out. Its drops still earn the `forget --dropped` hint.
+        let compatible = match (vp.parsed_range(), crate::version::Version::parse(from)) {
+            (Some(range), Some(v)) => range.matches(&v),
+            _ => true,
+        };
         let siblings: Vec<&CatalogItem> =
             catalog.iter().filter(|c| c.source == source.name).collect();
         let cases = apparent_break_cases(
@@ -11327,6 +11334,9 @@ fn warn_apparent_breaks(
         );
         for case in cases {
             any_drop |= case.starts_with("drops ");
+            if !compatible {
+                continue;
+            }
             let line = format!(
                 "{} {from} -> {} looks breaking: {case}",
                 strip_ansi(&source.name),
