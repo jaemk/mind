@@ -529,13 +529,6 @@ fn default_version_pin(
             strip_ansi(b)
         );
     }
-    // spec: VER-52 -- say that the meld follows releases rather than the
-    // default branch, and how later releases arrive.
-    eprintln!(
-        "note: {} follows releases {range} (now {}); `mind upgrade` takes compatible releases and asks before a new major",
-        strip_ansi(&source.name),
-        chosen.version
-    );
     let pin = crate::source::VersionPin::unresolved(&range);
     Ok(res
         .selected
@@ -1498,11 +1491,15 @@ fn meld_recursive(
     // spec: VER-50 -- with no pin from any layer, a remote source whose
     // default-branch mind.toml declares release-tags pins the caret of its
     // highest stable release. A local path stays linked to its working tree.
+    let mut default_release = false;
     let base_pin = match base_pin {
         Some(p) => p,
         None if consumer_pin == PinRequest::None && !is_local => {
             match default_version_pin(&source, mindfile.as_ref(), &toml_path, &dir) {
-                Ok(Some(p)) => p,
+                Ok(Some(p)) => {
+                    default_release = true;
+                    p
+                }
                 Ok(None) => Pin::DefaultBranch,
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&dir);
@@ -1586,6 +1583,17 @@ fn meld_recursive(
             }
             return Err(MindError::UnpinnedSourceForbidden { identity });
         }
+    }
+
+    // spec: VER-52 -- once the policy admits it, say that the meld follows
+    // releases rather than the default branch, and how later releases arrive.
+    if default_release && let Pin::Version(vp) = &checkout_pin {
+        eprintln!(
+            "note: {} follows releases {} (now {}); `mind upgrade` takes compatible releases and asks before a new major",
+            strip_ansi(&source.name),
+            vp.range,
+            vp.resolved.as_deref().unwrap_or("?")
+        );
     }
 
     // Step 3: if the checkout point is not DefaultBranch, the source is a clone at
@@ -9869,6 +9877,8 @@ pub fn sync_with_selector(
         });
     }
     let mut upgraded: Vec<String> = Vec::new();
+    let mut version_rows = version_rows;
+    let mut breaking_moves: Vec<BreakingMoveJson> = Vec::new();
     if then_upgrade {
         // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
         // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
@@ -9899,6 +9909,11 @@ pub fn sync_with_selector(
         )?;
         if let Some(result) = pass {
             upgraded = result.installed;
+            // spec: VER-91 -- the pass may have settled a breaking release, so
+            // its release state is the current one, and its breaking moves are
+            // this run's.
+            version_rows = result.sources;
+            breaking_moves = result.breaking;
         }
     }
     // spec: CLI-217 -- emitted AFTER the `--upgrade` pass, not before it. The
@@ -9920,6 +9935,7 @@ pub fn sync_with_selector(
         result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
         result.sources = version_rows;
+        result.breaking = breaking_moves;
         print_json(&result)?;
     }
     Ok(())

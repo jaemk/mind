@@ -140,7 +140,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-52` When VER-50 applies, `meld` notes on stderr that the source follows
   releases, naming the range and the selected release, and that `upgrade`
   takes compatible releases and asks before a new major:
-  `note: <source> follows releases ^1.4.2 (now 1.4.2); ...`.
+  `note: <source> follows releases ^1.4.2 (now 1.4.2); ...`. The note follows
+  the managed-policy check (VER-100), so a meld the policy refuses does not
+  print it.
 
 ## Upgrade
 
@@ -223,7 +225,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   result carries a `sources` array of `{source, version}` for the
   version-pinned sources it covered. The `upgrade` result lists its breaking
   moves in their own `breaking` array, apart from the applied changes:
-  `{source, from, to, applied}`, `applied` false for one listed and left.
+  `{source, from, to, applied}`, `applied` false for one listed and left. A
+  `sync --upgrade` result carries its upgrade pass's `sources` and `breaking`.
 
 ## Policy, curators, and dump
 

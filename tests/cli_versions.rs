@@ -1037,6 +1037,40 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
 }
 
 #[test]
+fn a_default_release_pin_the_policy_refuses_is_not_announced() {
+    // spec: VER-52 VER-100 -- the note follows the policy check, so a refused
+    // meld never claims to follow releases.
+    let (sb, _) = released("ver-policy-note", RELEASE_TAGS);
+    let policy = sb.base.join("policy.toml");
+    write_file(&policy, "[sources]\npinned = true\n");
+    let policy_env = policy.to_string_lossy().into_owned();
+    let r = sb.mind_env(
+        &["meld", &sb.remote_spec(), "--yes"],
+        &[("MIND_POLICY_FILE", policy_env.as_str())],
+        None,
+    );
+    assert!(!r.success, "the default range is refused: {}", r.stdout);
+    assert!(r.stderr.contains("must be pinned"), "{}", r.stderr);
+    assert!(!r.stderr.contains("follows releases"), "{}", r.stderr);
+}
+
+#[test]
+fn sync_upgrade_json_reports_the_passes_breaking_moves() {
+    // spec: VER-91
+    let (sb, _) = released("ver-sync-upgrade-json", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["sync", "--upgrade", "--yes", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("sync JSON");
+    assert_eq!(v["action"], "sync", "{v}");
+    assert_eq!(v["sources"][0]["version"]["resolved"], "1.1.0", "{v}");
+    assert_eq!(v["breaking"][0]["to"], "2.0.0", "{v}");
+    assert_eq!(v["breaking"][0]["applied"], false, "{v}");
+}
+
+#[test]
 fn a_policy_auto_meld_entry_takes_a_version_range() {
     // spec: VER-101
     let (sb, [_a, b, _c]) = released("ver-auto-meld", RELEASE_TAGS);
