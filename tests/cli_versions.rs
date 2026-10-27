@@ -907,6 +907,7 @@ fn release_warnings_and_errors_strip_control_bytes_from_the_source_name() {
 
 #[test]
 fn a_yanked_release_is_never_selected() {
+    // spec: VER-46
     // The yanked list is read from the default-branch tip.
     let tip = "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n";
     let (sb, [a, _b, _c]) = released("ver-yanked", tip);
@@ -915,6 +916,39 @@ fn a_yanked_release_is_never_selected() {
     let (pin, commit) = sb.pin();
     assert_eq!(pin["value"]["resolved"], "1.0.0", "{pin}");
     assert_eq!(commit, a);
+}
+
+#[test]
+fn a_source_on_a_since_yanked_release_stays_until_a_newer_one() {
+    // spec: VER-46
+    let (sb, [_a, b, _c]) = released("ver-yanked-later", RELEASE_TAGS);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(sb.pin().1, b);
+
+    // 1.1.0 is yanked after the source resolved to it: sync does not step
+    // down to 1.0.0.
+    sb.commit(
+        "yank",
+        "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n",
+    );
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+
+    // A newer in-range release moves it.
+    let d = sb.commit(
+        "one-two",
+        "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n",
+    );
+    sb.tag("v1.2.0", &d);
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["resolved"], "1.2.0", "{pin}");
+    assert_eq!(commit, d);
 }
 
 #[test]

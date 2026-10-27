@@ -79,9 +79,19 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
-- **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync` tracks upstream. Declare
+- **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync`
+  tracks upstream. `pin-version` takes a release range such as `"^1"`. Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
-  [Pinning a source version](pinning.md)).
+  [Pin a source to a version](pinning.md)).
+- **`release-tags`**: how the source's release tags are named, a template with
+  one `{version}` (`"skills-v{version}"`), or `true` for the default
+  `v{version}` or bare `{version}`. A plain meld of a source that declares it
+  pins the caret of its highest stable release. See
+  [Follow release versions](pinning.md#follow-release-versions).
+- **`yanked`**: release versions (`["1.4.1"]`) a version pin never selects.
+  A source already on one stays there until a newer release in its range.
+- `release-tags`, `yanked`, and `pin-version` are read from the default
+  branch. An older `mind` rejects them, so set `min-mind-version` alongside.
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).

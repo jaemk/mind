@@ -87,7 +87,7 @@ The source declares how its tags are named with `release-tags` under
 ```toml
 [source]
 release-tags = "skills-v{version}"   # default: v{version} or a bare {version}
-yanked = ["1.4.1"]                   # never selected
+yanked = ["1.4.1"]                   # never selected; a source on it stays put
 pin-version = "^1"                   # optional: the range a plain meld pins
 min-mind-version = "0.33"            # older mind versions reject these keys
 ```

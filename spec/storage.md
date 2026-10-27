@@ -252,8 +252,8 @@ The on-disk layout and the two persisted JSON files.
   consumer, since `curated_by` and `curate` both ship in the same release) is
   fully invisible to `curate` until `curate --adopt <identity>` (CUR-16) claims
   it on a curator's behalf.
-- `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
-  and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
+- `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`
+  | `version`, VER-30) and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default
   branch.
 - `STO-67` `ssh://` userinfo handling in the URL form of `parse_spec` (CLI-19):

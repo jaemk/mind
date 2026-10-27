@@ -4076,7 +4076,7 @@ mod tests {
         }
     }
 
-    // spec: VER-2
+    // spec: VER-2 VER-46
     #[test]
     fn invalid_release_tags_or_yanked_fail_load_as_mindtoml() {
         for (body, needle) in [

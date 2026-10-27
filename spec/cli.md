@@ -209,8 +209,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   proceeds.
 - `CLI-201` `--pin branch=<name>` and `--pin tag=<name>` record a floating pin:
   `branch=<name>` tracks that branch (`follow-branch`); `tag=<name>` tracks that
-  tag (`tag`), which re-points on sync if the upstream tag moves (CLI-55). A value
-  carrying an unrecognized `key=` form (anything but `branch=` or `tag=`) is a
+  tag (`tag`), which re-points on sync if the upstream tag moves (CLI-55).
+  `--pin version=<range>` records a version pin (VER-20). A value carrying an
+  unrecognized `key=` form (anything but `branch=`, `tag=`, or `version=`) is a
   `BadPinSpec` usage error, so a mistyped key is not silently taken as a ref name.
 - `CLI-202` The former `--follow-branch <branch>`, `--pin-tag <tag>`, and
   `--pin-ref <commit>` flags remain as hidden deprecated aliases mapping onto the
@@ -723,7 +724,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `follow-branch` source resets to that branch's current tip and updates the
   recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the
   pinned tag / commit, so its recorded commit moves only if the upstream tag was
-  moved (a moved tag is reset to). `sync` never changes the pin itself (cf.
+  moved (a moved tag is reset to). A version pin re-resolves its range
+  (VER-43). `sync` never changes the pin itself (cf.
   CLI-52 for aliases). `upgrade` and `introspect` operate on the synced (pinned)
   content, so a `pin-tag` source does not report drift as upstream's default
   branch advances past the tag.

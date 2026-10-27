@@ -591,7 +591,7 @@ run = "make build"
   `pin-tag = "<tag>"`, `pin-ref = "<commit>"`, or `pin-version = "<range>"`
   (VER-51). It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives
-  no `--follow-branch` / `--pin-tag` / `--pin-ref` flag at meld (CLI-17); a
+  no `--pin` (or deprecated alias) flag at meld (CLI-17); a
   consumer flag overrides it. Declaring more than one is a `MindToml` error. (See
   CLI-18 for clone behavior and CLI-55 for how `sync` treats each pin kind.)
 

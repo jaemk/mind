@@ -720,6 +720,14 @@ fn sync_clone_to_pin(
         // spec: VER-46 -- nothing in range is selectable now (every candidate
         // yanked, or the tags gone): stay where the source is.
         None => {}
+        // spec: VER-46 -- a source on a since-yanked release stays there
+        // until a newer in-range release appears; it never steps down.
+        Some(rel)
+            if vp
+                .resolved
+                .as_deref()
+                .and_then(crate::version::Version::parse)
+                .is_some_and(|cur| yanked.contains(&cur) && rel.version <= cur) => {}
         Some(rel) if vp.tag.as_deref() == Some(rel.tag.as_str()) => {
             // spec: VER-44 -- the same release; a tag that now peels to a
             // different commit is not followed.

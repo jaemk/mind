@@ -12,7 +12,7 @@ release-tags = "v{version}"
 ```
 
 ```sh
-mind meld owner/repo                         # pins ^<latest major> when release-tags is declared
+mind meld owner/repo                         # pins ^<highest release> when release-tags is declared
 mind meld owner/repo --pin version=^1.2      # >=1.2.0, <2.0.0
 mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
 mind upgrade                                 # compatible moves; breaking ones listed, not applied
@@ -116,7 +116,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   the default-branch tip (VER-3). An entry that is not a semver version is a
   `MindToml` error. Resolution never selects a yanked version. A
   source already resolved to a yanked version stays there until a `sync` finds a
-  newer in-range release. `recall` marks the yanked version (VER-90).
+  newer in-range release; it never steps down to an older one. `recall` marks
+  the yanked version (VER-90).
 
 ## Default pin
 
