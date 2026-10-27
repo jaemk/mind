@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "mind-cli"
-version = "0.36.0"
+version = "0.36.1-dev"
 dependencies = [
  "cached",
  "clap",
