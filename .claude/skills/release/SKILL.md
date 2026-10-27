@@ -1,15 +1,18 @@
 ---
 name: release
-description: Cut a new `mind` release. Bump the version, update the changelog, verify CI, tag with `make release`, and confirm the GitHub release workflow builds and uploads the binaries.
+description: Cut a new `mind` release. Bump the version, update the changelog, verify CI, and open a release PR; merging it is the release, and the release workflow tags, builds, and publishes it. Then confirm the workflow succeeded.
 ---
 
 # release
 
-Cut a tagged release of `mind`. The version in `Cargo.toml` is the single source
-of truth: `make release` tags `v<version>` and pushes it, and that tag push
-triggers `.github/workflows/release.yml`, which builds the per-platform binaries,
-publishes the GitHub Release with the tarballs, and regenerates the Homebrew
-formula.
+Cut a release of `mind`. The version in `Cargo.toml` is the single source of
+truth, and merging a version bump to `main` is the release: every push to
+`main` runs `.github/workflows/release.yml`, whose `decide` job releases only
+when `Cargo.toml` carries a stable version (no `-dev` suffix) that has no
+GitHub release yet. The workflow then builds the per-platform binaries, creates
+the `v<version>` tag and the GitHub Release, publishes to crates.io,
+regenerates the Homebrew formula, and puts `main` back on the next `-dev`
+version. Nothing is pushed to `main` or tagged by hand.
 
 Releases are SemVer. Pick the bump from what landed since the last tag: a new
 verb/flag or other backward-compatible feature is a minor bump; a bug-fix-only
@@ -18,147 +21,115 @@ batch is a patch; a breaking change to the CLI, config, on-disk layout, or
 
 ## Steps
 
-### 1. Confirm a clean, green starting point
-
-Work from `main` with everything merged and pushed.
+### 1. Start from an up-to-date main on a release branch
 
 ```bash
-git switch main && git pull
-test -z "$(git status --porcelain)" || echo "tree is dirty; commit or stash first"
-make ci    # fmt-check + clippy (-D warnings) + test; must pass
+git switch main
+git pull
+git status --porcelain                  # must print nothing
+git switch -c YYMMDD.release-X.Y.Z      # today's date, the real version
 ```
 
 ### 2. Pick the version and survey the changes
 
 ```bash
 git describe --tags --abbrev=0          # the previous release tag
-git log "$(git describe --tags --abbrev=0)..HEAD" --format='%s'
+git log v<prev>..HEAD --format=%s       # substitute the tag printed above
 ```
 
 Decide the new `X.Y.Z` from that list (see the SemVer note above).
 
 ### 3. Bump the version
 
-Between releases `main` carries a pre-release version (`X.Y.Z-dev`) so a build
-from `main` is distinguishable from the released binary. Drop the suffix here:
-edit `Cargo.toml` `[package].version` to the new `X.Y.Z`, then sync the lockfile
-so `Cargo.lock`'s `mind` entry matches (the release build uses `--locked`, so a
-stale lock fails CI):
+`main` carries a pre-release version (`X.Y.Z-dev`) between releases. Drop the
+suffix: edit `Cargo.toml` `[package].version` to the new `X.Y.Z`, then sync the
+lockfile so `Cargo.lock`'s `mind` entry matches (the release build uses
+`--locked`, so a stale lock fails the release):
 
 ```bash
-cargo build        # rewrites Cargo.lock's mind version
+cargo build                             # rewrites Cargo.lock's mind version
 ```
 
 `tests/changelog.rs` only requires a matching `## [X.Y.Z]` section once the
-`-dev` suffix is gone, so this bump is what arms that check. Step 9 puts the
-next `-dev` version back.
+`-dev` suffix is gone, so this bump is what arms that check.
 
 ### 4. Update the changelog
 
-Add a `## [X.Y.Z] - YYYY-MM-DD` section at the top of `CHANGELOG.md` (Keep a
-Changelog format), grouping the changes under `Added` / `Changed` / `Fixed` /
-`Removed`. Describe user-facing behavior, not the commit workflow. Update the
-link references at the bottom: point `[Unreleased]` at
-`.../compare/vX.Y.Z...HEAD` and add `[X.Y.Z]: .../compare/v<prev>...vX.Y.Z`.
-`tests/changelog.rs` enforces this (every version section needs a matching ref,
-`[Unreleased]` must compare from the newest version, and each ref chains to the
-next-older one), so `make ci` fails if a ref is missing or stale. Keep the voice
+Add a `## [X.Y.Z] - YYYY-MM-DD` section directly under the `## [Unreleased]`
+heading in `CHANGELOG.md` (Keep a Changelog format), moving the unreleased
+entries into it and leaving `[Unreleased]` empty. Group the changes under
+`Added` / `Changed` / `Fixed` / `Removed`, describing user-facing behavior,
+not the commit workflow. Update the link references at the bottom: point
+`[Unreleased]` at `.../compare/vX.Y.Z...HEAD` and add
+`[X.Y.Z]: .../compare/v<prev>...vX.Y.Z`. `tests/changelog.rs` enforces this
+(every version section needs a matching ref, `[Unreleased]` must compare from
+the newest version, and each ref chains to the next-older one). Keep the voice
 plain and factual (see `~/.local/share/agents/voice/voice-profile.md`).
 
-### 5. Commit the release prep
+### 5. Verify, commit, and open the release PR
 
 ```bash
 make ci                                 # green on the bumped tree
 git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "release 0.0.0"           # use the real version
-git push origin main
+git commit -m "release X.Y.Z"           # the real version
+git push -u origin YYMMDD.release-X.Y.Z
+gh pr create --base main --title "release X.Y.Z" --body-file <notes>
 ```
 
-The commit subject is `release X.Y.Z` (matches the repo's convention).
+The commit subject and PR title are `release X.Y.Z` (the repo's convention).
+The body is the changelog section's bullets.
 
-### 6. Tag and trigger the release workflow
+### 6. Stop at the PR
 
-`make release` requires a clean tree and an unused tag. It tags `v<Cargo.toml
-version>` and pushes the tag:
+Preparing the PR is the whole job. Do not push to `main`, create a tag, or run
+`cargo publish`. Merging the PR is the release; report the PR link and that
+merging it releases `X.Y.Z`.
+
+### 7. After the merge: confirm the release workflow succeeded
+
+When asked to confirm a release, check it rather than assuming:
 
 ```bash
-make release                            # tags v<version> from Cargo.toml and pushes it
-# override only if needed: make release VERSION=1.2.3   (or TAG=v1.2.3)
+gh run list --workflow=release.yml --limit 3
+gh run watch <run id>                   # the id the list printed
 ```
 
-### 7. Watch the GitHub workflow succeed
+A run can be waiting on the `release` environment's approval gate before
+`publish`, which looks like nothing happening. The jobs:
 
-The tag push starts `release.yml`. It must finish green before the release is
-real. Watch it:
+1. `decide`: reads the version and skips a `-dev` or already-released one.
+2. `ci`, `ci-macos`, `audit` (parallel): `make ci` on Linux and macOS and a
+   RustSec scan of the merged commit, gating everything downstream.
+3. `build` (matrix): builds `--release --locked` for `aarch64-apple-darwin`,
+   `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and the musl legs
+   `aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl` (static, used
+   by `install.sh`), attesting build provenance for each tarball.
+4. `release`: generates `SHA256SUMS` and runs `gh release create --target`
+   with every tarball, which creates the `v<version>` tag.
+5. `publish`: publishes to crates.io via trusted publishing (skipped when the
+   version is already there), then commits the regenerated `Formula/mind.rb`
+   and the next patch's `-dev` version to `main` as `github-actions[bot]`.
 
-```bash
-gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId -q '.[0].databaseId')"
-# or: gh run list --workflow=release.yml --limit=3
-```
-
-The workflow has five jobs:
-
-1. `ci` and `ci-macos` (parallel): re-run `make ci` on Linux and macOS at the
-   tagged commit, gating everything downstream.
-2. `build` (matrix, needs `ci` + `ci-macos`): builds `--release --locked` for
-   `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`,
-   `x86_64-unknown-linux-gnu`, and the musl legs `aarch64-unknown-linux-musl` and
-   `x86_64-unknown-linux-musl` (statically linked, glibc-version-independent;
-   used by `install.sh`). Uploads each `mind-<version>-<target>.tar.gz` as an
-   artifact and attests build provenance for it. A `--locked` failure here means
-   `Cargo.lock` is stale; fix it and re-tag.
-3. `release` (needs `build`): downloads the artifacts, generates `SHA256SUMS`,
-   and runs `gh release create` with every tarball plus `SHA256SUMS`; a missing
-   target's glob would fail the command, so the job fails closed on a partial
-   matrix.
-4. `publish` (needs `release`): publishes to crates.io via trusted publishing
-   (OIDC, `rust-lang/crates-io-auth-action`, no stored token), then regenerates
-   `Formula/mind.rb` from the tarball checksums via `resources/update-formula.sh`
-   and commits it back to `main` as `github-actions[bot]`.
-
-### 8. Verify the published release
+Then verify what was published:
 
 ```bash
-gh release view "v<version>"            # five .tar.gz assets attached
+gh release view v<version>              # five .tar.gz assets plus SHA256SUMS
 cargo info mind-cli                     # crates.io has the new version
-git pull                                # pick up the bot's formula commit
-grep -n 'version\|sha256' Formula/mind.rb   # points at the new version
+git pull                                # pick up the bot's formula + dev commit
 ```
-
-Optionally smoke-test the install path (`resources/install.sh`, or
-`brew upgrade mind` from the tap).
-
-### 9. Put `main` back on a `-dev` version
-
-Bump `Cargo.toml` to the next patch version with a `-dev` suffix (after
-`0.22.0`, use `0.22.1-dev`), sync the lockfile, and add a fresh
-`## [Unreleased]` heading to `CHANGELOG.md`:
-
-```bash
-cargo build                             # rewrites Cargo.lock
-git add Cargo.toml Cargo.lock CHANGELOG.md
-git commit -m "back to dev"
-git push
-```
-
-Without this, a binary built from `main` reports the released version, so
-`mind --version` in a bug report and `evolve --check` cannot tell a release from
-unreleased work. The exact next number does not matter; step 3 sets the real one.
 
 ## Notes
 
-- The version lives only in `Cargo.toml`; `Makefile` and the workflow derive the
-  tag from it. Do not hand-write the tag except via the `make release` override.
-- If the workflow fails after the tag was pushed, delete the tag
-  (`git push origin :refs/tags/v<version>` and `git tag -d v<version>`), fix the
-  cause on `main`, and re-run from step 5. A partially-created GitHub Release may
-  need to be deleted in the UI or with `gh release delete`.
-- The release is outward-facing and hard to reverse (it publishes binaries and
-  pushes a formula commit). Confirm steps 1-5 are correct before running
-  `make release`.
+- The tag is created by the workflow's `GITHUB_TOKEN`, so the "Protected
+  release" tag ruleset (`refs/tags/v*`) must list GitHub Actions as a bypass
+  actor. Without it, the `release` job's tag creation is refused.
+- A run that fails partway is re-run with `gh workflow run release.yml --ref
+  main` (`workflow_dispatch`). Every publishing step is idempotent: an existing
+  GitHub Release gets its assets re-uploaded, a version already on crates.io is
+  not published again, and an up-to-date formula is not re-committed. Fix the
+  cause on `main` first if the failure was in the tree; since `main` is then
+  past the release commit, the re-run releases that newer commit.
 - Known flake: `ci-macos` can fail the timing-based lock test
   `tui::action::tests::execute_lock_is_exclusive_not_shared` under a loaded
-  runner (it did on the first v0.13.0 tag, run 28724441026; the re-tag passed).
-  If that single test is the only failure on `ci-macos`, treat it as a flake:
-  delete the tag (see above), re-tag, and re-run. Investigate only if it fails
-  deterministically across re-runs.
+  runner. If that single test is the only failure, re-run the failed jobs.
+  Investigate only if it fails deterministically across re-runs.

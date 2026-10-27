@@ -1,10 +1,9 @@
 # Common developer tasks. Run `make help` for the list.
 
-.PHONY: help build build-release fmt fmt-check clippy test audit check ci ci-local release clean docs docs-build
+.PHONY: help build build-release fmt fmt-check clippy test audit check ci ci-local clean docs docs-build
 
-# Package version from Cargo.toml, used to derive the release tag.
-VERSION := $(shell grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
-TAG := v$(VERSION)
+# There is no release target: merging a version bump to main is the release
+# (.github/workflows/release.yml tags and publishes it).
 
 help:
 	@echo "targets:"
@@ -18,8 +17,6 @@ help:
 	@echo "  check      local gate: fmt (fix) + clippy + test + audit"
 	@echo "  ci         CI gate: fmt-check + clippy + test + audit"
 	@echo "  ci-local   like ci but formats in place (fmt) instead of fmt-check"
-	@echo "  release    tag v$(VERSION) and push it (triggers the release workflow)"
-	@echo "             override: make release TAG=v1.2.3  (or VERSION=1.2.3)"
 	@echo "  docs       build the docs site and serve it locally with live reload"
 	@echo "  docs-build build the docs site to docs/book"
 	@echo "  clean      cargo clean"
@@ -52,7 +49,7 @@ test:
 # Skipped with a NOTE, not failed, when cargo-audit is absent: this runs inside
 # `ci`, and the CI runner images do not ship the tool. The scan itself is gated
 # in CI by a dedicated rustsec/audit-check job, in ci.yml for pushes and pull
-# requests and in release.yml for a tag. This target exists so the same scan is
+# requests and in release.yml for a release. This target exists so the same scan is
 # exercised LOCALLY, before a push, rather than being first seen in CI, and a
 # hard failure here would break CI to re-check what CI already does.
 #
@@ -65,7 +62,7 @@ test:
 # that passed yesterday, including for a transitive dependency with no fixed
 # release to move to. `make ci-local SKIP_AUDIT=1` opts out when you are offline
 # or unblocking unrelated work. It is not a way to ship past an advisory: CI
-# scans every push and every tag and does not read this variable.
+# scans every push and every release and does not read this variable.
 #
 # `cargo audit` exits non-zero on a vulnerability but not on an informational
 # advisory (`unmaintained`, `unsound`, `notice`), which matches the CI job's
@@ -73,11 +70,11 @@ test:
 # dependency with no fixed release to move to.
 audit:
 	@if [ -n "$(SKIP_AUDIT)" ]; then \
-		echo "note: NO advisory scan ran (SKIP_AUDIT set; CI scans every push and every tag)" >&2; \
+		echo "note: NO advisory scan ran (SKIP_AUDIT set; CI scans every push and every release)" >&2; \
 		exit 0; \
 	fi; \
 	command -v cargo-audit >/dev/null 2>&1 \
-		|| { echo "note: NO advisory scan ran (cargo-audit not installed; CI scans every push and every tag). Install: cargo install cargo-audit --locked" >&2; exit 0; }; \
+		|| { echo "note: NO advisory scan ran (cargo-audit not installed; CI scans every push and every release). Install: cargo install cargo-audit --locked" >&2; exit 0; }; \
 	cargo audit
 
 # Local developer gate: format in place, then lint, test, and scan advisories.
@@ -91,17 +88,6 @@ ci: fmt-check clippy test audit
 # instead of just checking, so a single command both fixes formatting and runs
 # the full lint + test gate. Same set as `check`.
 ci-local: fmt clippy test audit
-
-# Tag the current commit and push it, which triggers .github/workflows/release.yml.
-# Defaults to v<Cargo.toml version>; override with `make release TAG=v1.2.3` or
-# `make release VERSION=1.2.3`. Requires a clean tree and an unused tag.
-release:
-	@test -z "$$(git status --porcelain)" || { echo "error: working tree is dirty; commit first"; exit 1; }
-	@if git rev-parse -q --verify "refs/tags/$(TAG)" >/dev/null; then \
-		echo "error: tag $(TAG) already exists"; exit 1; \
-	fi
-	git tag -a $(TAG) -m "release $(TAG)"
-	git push origin $(TAG)
 
 # Serve the mdBook docs (docs/) locally with live reload, opening a browser.
 # Same tool the Pages workflow uses; install with `cargo install mdbook` (or grab
