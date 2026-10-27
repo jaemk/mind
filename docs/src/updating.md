@@ -136,17 +136,15 @@ mind meld owner/repo --auto-update=off    # stop
 `--every 12h` changes the interval and `off` removes the hook. For another
 harness, schedule `mind auto-update run --if-stale 1d` from cron.
 
-A source runs at the lowest of three levels:
-
-- what its maintainer declares in `[source].auto-update` (`compatible` when it
-  declares nothing),
-- what you allowed with `--auto-update` (nothing until you do), and
-- your managed policy's `[sources].auto-update`, if any.
+A source runs at the level you allowed with `--auto-update` (nothing until you
+do), capped by your managed policy's `[sources].auto-update`, if any. A
+maintainer's `[source].auto-update` is a request: it sets what a bare
+`--auto-update` allows, and melding a source that declares one on a terminal
+asks whether to allow it. Changing it never changes your level.
 
 `compatible` takes releases inside the range. `breaking` also moves to a new
-major once the maintainer recommends it with `pin-version`, and you can only
-allow it when the source declares it. Melding a source that declares a level on
-a terminal asks whether to allow it. `recall` shows each source's level.
+major once the maintainer recommends it with `pin-version`. `recall` shows each
+source's level.
 
 A run never prompts. A source whose move would run a hook is left where it is
 until you run `mind upgrade`. The next `recall` or `upgrade` prints a one-line

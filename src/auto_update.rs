@@ -13,7 +13,7 @@ use crate::error::{MindError, Result};
 use crate::paths::Paths;
 
 /// How far a source may move without being asked (AUP-1). Ordered, so the
-/// effective level is a `min` (AUP-10).
+/// policy cap is a `min` (AUP-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -47,14 +47,13 @@ impl std::fmt::Display for Level {
     }
 }
 
-/// The level a run applies (AUP-10): the lowest of what the maintainer
-/// declares (`compatible` when nothing is, AUP-6), what the consumer granted
-/// (`off` when nothing was), and the managed policy's cap.
+/// The level a run applies (AUP-10): what the consumer granted (`off` when
+/// nothing was), capped by the managed policy. The maintainer's declaration
+/// is only a request (AUP-6), so it plays no part.
 // spec: AUP-6 AUP-10 AUP-30
-pub fn effective(declared: Option<Level>, granted: Option<Level>, cap: Option<Level>) -> Level {
-    declared
-        .unwrap_or(Level::Compatible)
-        .min(granted.unwrap_or(Level::Off))
+pub fn effective(granted: Option<Level>, cap: Option<Level>) -> Level {
+    granted
+        .unwrap_or(Level::Off)
         .min(cap.unwrap_or(Level::Breaking))
 }
 
@@ -367,32 +366,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_effective_level_is_the_lowest_of_the_three() {
-        // spec: AUP-6 AUP-10 AUP-30
+    fn the_effective_level_is_the_grant_capped_by_policy() {
+        // spec: AUP-10 AUP-30
         use Level::*;
-        assert_eq!(effective(None, None, None), Off, "nothing granted");
-        assert_eq!(effective(None, Some(Compatible), None), Compatible);
-        assert_eq!(
-            effective(None, Some(Breaking), None),
-            Compatible,
-            "no declaration caps at compatible"
-        );
-        assert_eq!(effective(Some(Breaking), Some(Breaking), None), Breaking);
-        assert_eq!(
-            effective(Some(Compatible), Some(Breaking), None),
-            Compatible,
-            "a lowered declaration lowers it"
-        );
-        assert_eq!(
-            effective(Some(Breaking), Some(Compatible), None),
-            Compatible,
-            "a raised declaration does not raise the grant"
-        );
-        assert_eq!(
-            effective(Some(Breaking), Some(Breaking), Some(Compatible)),
-            Compatible
-        );
-        assert_eq!(effective(Some(Breaking), Some(Breaking), Some(Off)), Off);
+        assert_eq!(effective(None, None), Off, "nothing granted");
+        assert_eq!(effective(Some(Compatible), None), Compatible);
+        assert_eq!(effective(Some(Breaking), None), Breaking);
+        assert_eq!(effective(Some(Off), None), Off, "revoked");
+        assert_eq!(effective(Some(Breaking), Some(Compatible)), Compatible);
+        assert_eq!(effective(Some(Compatible), Some(Breaking)), Compatible);
+        assert_eq!(effective(Some(Breaking), Some(Off)), Off);
     }
 
     #[test]

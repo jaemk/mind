@@ -167,6 +167,6 @@ on a terminal, and can allow it later with `mind meld <source> --auto-update`.
   tag `2.0.0`, then set `pin-version = "^2"` on the default branch when they
   should move.
 
-Lowering the level applies at the next run; raising it only shows the consumer
-a note until they allow it. A release whose update would run one of your hooks
+The consumer's choice wins: changing the level never changes what a consumer
+already allowed, and raising it only shows them a note. A release whose update would run one of your hooks
 is never applied automatically, because a hook needs the consumer's consent.

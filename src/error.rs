@@ -783,13 +783,6 @@ pub enum MindError {
     #[error("invalid --auto-update value '{value}': expected off, compatible, or breaking")]
     BadAutoUpdate { value: String },
 
-    /// AUP-6: a consumer granting `breaking` to a source that does not declare it.
-    #[error(
-        "{} does not declare auto-update = \"breaking\", so it cannot be granted; grant compatible instead",
-        crate::sanitize::strip_ansi(source_name)
-    )]
-    AutoUpdateNotDeclared { source_name: String },
-
     /// AUP-30: the managed policy turns auto-update off.
     #[error("auto-update is turned off by the managed policy ([sources].auto-update = \"off\")")]
     AutoUpdateForbidden,
@@ -1832,7 +1825,6 @@ impl MindError {
             MindError::ConflictingPin { .. } => "conflicting-pin",
             MindError::BadPinSpec { .. } => "bad-pin-spec",
             MindError::BadAutoUpdate { .. } => "bad-auto-update",
-            MindError::AutoUpdateNotDeclared { .. } => "auto-update-not-declared",
             MindError::AutoUpdateForbidden => "auto-update-forbidden",
             MindError::BadDuration { .. } => "bad-duration",
             MindError::SettingsJson { .. } => "settings-json",

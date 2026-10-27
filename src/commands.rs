@@ -469,8 +469,8 @@ fn version_marks(source: &crate::source::Source) -> Vec<String> {
             vp.range
         ));
     }
-    // spec: AUP-10 -- a raised declaration never raises a grant; say so once
-    // the consumer has granted something lower.
+    // spec: AUP-10 -- the declaration never changes a grant; say so once the
+    // maintainer asks for more than the consumer granted.
     if let (Some(declared), Some(granted)) = (vp.auto_update, source.auto_update)
         && granted != crate::auto_update::Level::Off
         && declared > granted
@@ -919,8 +919,8 @@ fn sync_clone_to_pin(
     // spec: VER-140 -- recorded fresh each sync, so a recommendation the
     // default branch dropped is dropped here too.
     next.recommended = meta.recommended;
-    // spec: AUP-5 AUP-10 -- the declaration too, so a maintainer lowering it
-    // lowers the effective level at the next run.
+    // spec: AUP-5 -- the declaration too, for the bare `--auto-update`, the
+    // first-meld prompt, and recall's note.
     next.auto_update = meta.auto_update;
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
     next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
@@ -14339,12 +14339,6 @@ fn apply_auto_update_grant(
             level
         }
     };
-    // spec: AUP-6
-    if level == Level::Breaking && declared != Some(Level::Breaking) {
-        return Err(MindError::AutoUpdateNotDeclared {
-            source_name: source.name.clone(),
-        });
-    }
     if level != Level::Off && !ranged {
         if !json {
             println!(
@@ -14378,7 +14372,7 @@ fn auto_update_level(
     ) {
         return Level::Off;
     }
-    crate::auto_update::effective(vp.auto_update, source.auto_update, cap)
+    crate::auto_update::effective(source.auto_update, cap)
 }
 
 /// Why moving `source` (already at its new commit in `dir`) would need hook

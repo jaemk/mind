@@ -15,9 +15,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Auto-update. `mind auto-update run` syncs and upgrades version-pinned
   sources without prompting, and `mind config auto-update on` runs it from a
   Claude Code `SessionStart` hook at most once a day. A source updates at the
-  lowest of what its maintainer declares (`[source].auto-update`), what the
-  consumer allowed (`meld --auto-update`), and the managed policy's
-  `[sources].auto-update`. `breaking` moves to a new major once the maintainer
+  level the consumer allowed (`meld --auto-update`), capped by the managed
+  policy's `[sources].auto-update`; a maintainer's `[source].auto-update` sets
+  what a bare `--auto-update` allows and what a first meld asks for. `breaking`
+  moves to a new major once the maintainer
   recommends it with `pin-version`. A move that would run a hook is held for
   `mind upgrade`, and the next `recall` or `upgrade` summarizes each run.
 

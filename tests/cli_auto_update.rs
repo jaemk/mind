@@ -249,18 +249,28 @@ fn meld_records_a_grant_and_an_off_revokes_it() {
 }
 
 #[test]
-fn breaking_cannot_be_granted_unless_the_source_declares_it() {
-    // spec: AUP-6
-    let sb = melded("auto-undeclared", "", "");
-    let r = sb.mind(&["meld", &sb.spec(), "--auto-update=breaking"]);
-    assert!(!r.success, "{}", r.stdout);
-    assert!(
-        r.stderr
-            .contains("does not declare auto-update = \"breaking\""),
-        "{}",
-        r.stderr
+fn the_consumer_grant_wins_over_the_declaration() {
+    // spec: AUP-6 AUP-10
+    // Breaking granted to a source that declares only compatible.
+    let declare = "auto-update = \"compatible\"\n";
+    let sb = melded("auto-override", declare, "--auto-update=breaking");
+    assert_eq!(sb.entry()["auto_update"], "breaking");
+    let r = sb.mind(&["recall", "--sources", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).unwrap();
+    assert_eq!(
+        v["items"][0]["auto_update"],
+        serde_json::json!({"declared": "compatible", "granted": "breaking", "effective": "breaking"}),
+        "{v}"
     );
-    assert!(sb.entry().get("auto_update").is_none());
+
+    // The maintainer drops the declaration and recommends a new major: the
+    // grant still takes it.
+    sb.commit(&agent("two-zero"), &toml(""), Some("v2.0.0"));
+    sb.commit(&agent("tip"), &toml("pin-version = \"^2\"\n"), None);
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert_eq!(sb.entry()["pin"]["value"]["range"], "^2");
+    assert!(sb.installed_agent().contains("two-zero"));
 }
 
 #[test]

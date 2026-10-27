@@ -854,8 +854,8 @@ EXAMPLES:
         force: bool,
     },
 
-    /// Update version-pinned sources without being asked, at the level each
-    /// source's maintainer declares and you granted (`meld --auto-update`).
+    /// Update version-pinned sources without being asked, at the level you
+    /// granted each one (`meld --auto-update`).
     ///
     /// `mind config auto-update on` installs a trigger that runs `auto-update
     /// run` when an agent session starts; `run` can also be scheduled from
@@ -1125,8 +1125,8 @@ pub struct MeldArgs {
     /// Let `mind auto-update run` update this source without asking.
     /// `--auto-update` alone grants the level the source declares
     /// (`[source].auto-update`, else `compatible`); `=compatible` takes
-    /// releases inside the range, `=breaking` (only when the source declares
-    /// it) also takes the new major it recommends, and `=off` revokes the
+    /// releases inside the range, `=breaking` also takes the new major the
+    /// source recommends (`pin-version`), and `=off` revokes the
     /// grant. Applies to a version range pin only. Unlike the discovery
     /// flags, this also takes effect against an already-melded source.
     // spec: AUP-8

@@ -2,10 +2,11 @@
 
 Auto-update runs `mind`'s release resolution on its own, so a version-pinned
 source picks up new releases without the consumer running `sync` and `upgrade`.
-The maintainer declares what their source may take automatically; the consumer
-grants it per source; a managed policy can cap it. Compatible releases are the
-ordinary case. A maintainer may also mark the source so that breaking releases
-are taken automatically, which a consumer must grant explicitly.
+The maintainer declares what they would like their source to take
+automatically; the consumer decides per source, and their choice wins; a
+managed policy can cap it. Compatible releases are the ordinary case. A
+maintainer may also ask for breaking releases to be taken automatically, which
+a consumer must grant explicitly.
 
 ```toml
 [source]
@@ -36,9 +37,11 @@ mind auto-update run                    # what the trigger runs; also usable fro
   wants: `"compatible"` or `"breaking"`. `true` means `"compatible"`. Any other
   value is a `MindToml` error. It is read from the default-branch tip, like
   `release-tags` (VER-3), so a change applies without a new release.
-- `AUP-6` A source that declares nothing can still be auto-updated at
-  `compatible` when the consumer grants it (AUP-8). `breaking` requires the
-  declaration: a consumer cannot grant a level the maintainer did not declare.
+- `AUP-6` The declaration is a request, not a limit. It sets what a bare
+  `--auto-update` grants (AUP-8) and what a first meld asks for (AUP-9). A
+  consumer may grant any level whatever the source declares, `breaking`
+  included; a breaking move still waits for the maintainer's recommended range
+  (AUP-12).
 
 ## Consent
 
@@ -52,10 +55,10 @@ mind auto-update run                    # what the trigger runs; also usable fro
   `breaking`, `<source> asks to update automatically, including breaking
   releases [y/N]`. Declining `breaking` offers `compatible` next. Without a
   TTY, with `--yes`, or under `--json`, nothing is granted.
-- `AUP-10` The effective level is the lowest of the declaration (AUP-5, or
-  `compatible` under AUP-6), the grant, and the policy cap (AUP-30). A
-  maintainer lowering the declaration lowers the effective level at the next
-  run. A maintainer raising it does not raise the grant: `recall` notes
+- `AUP-10` The effective level is the consumer's grant (`off` when there is
+  none), capped by the policy (AUP-30). A change to the declaration never
+  changes it. When the declaration is above a grant that is not `off`, `recall`
+  notes
   `<source> asks to update automatically, including breaking releases; allow
   it with mind meld <source> --auto-update=breaking`.
 - `AUP-11` `recall` and `recall --sources` show the effective level in the
