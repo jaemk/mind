@@ -290,6 +290,7 @@ and verified.
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 | Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
 | Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking` | done | [versions.md](versions.md) (VER-1..131) |
+| Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the maintainer declares (`[source].auto-update`) and the consumer grants, compatible releases or, when both say so, breaking ones within the source's recommended range | planned | [auto-update.md](auto-update.md) (AUP-1..30) |
 
 ## Documents
 
@@ -358,6 +359,9 @@ and verified.
 - [versions.md](versions.md) - release versions: a source's semver release tags,
   version-range pins resolved by `sync`, and the consent rules for taking a
   breaking release at `upgrade`.
+- [auto-update.md](auto-update.md) - auto-update: a trigger that runs release
+  resolution unattended, at the level a source's maintainer declares and its
+  consumer grants (planned).
 
 ## Conventions
 
