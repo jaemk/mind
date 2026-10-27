@@ -161,9 +161,15 @@ git pull                                # pick up the bot's formula + dev commit
 
 ## Notes
 
-- The tag is created by the workflow's `GITHUB_TOKEN`, so the "Protected
-  release" tag ruleset (`refs/tags/v*`) must list GitHub Actions as a bypass
-  actor. Without it, the `release` job's tag creation is refused.
+- The tag is created by the workflow's `GITHUB_TOKEN`. A personal-account repo
+  cannot list GitHub Actions as a ruleset bypass actor, so the "Protected
+  release" tag ruleset (`refs/tags/v*`) blocks deletion, update, and
+  non-fast-forward but not creation. Re-adding a `creation` rule makes the
+  `release` job fail with "Cannot create ref due to creations being
+  restricted".
+- `publish` runs in the `release` environment, which needs `main` among its
+  allowed deployment refs (the `v*` tag entry is from the tag-triggered
+  releases) and waits for a required reviewer's approval.
 - A run that fails partway is re-run with `gh workflow run release.yml --ref
   main` (`workflow_dispatch`). Every publishing step is idempotent: an existing
   GitHub Release gets its assets re-uploaded, a version already on crates.io is
