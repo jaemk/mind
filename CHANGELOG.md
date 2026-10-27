@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `recall --profiles` and bare `learn <source> --profile` print one block per
+  profile with the members wrapped to the terminal width (`COLUMNS` overrides)
+  and the counts aligned, instead of one long row per profile.
+
 ## [0.35.0] - 2026-10-27
 
 ### Added

@@ -106,6 +106,7 @@ impl Sandbox {
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_MAX_METADATA_SIZE")
             .env_remove("MIND_TTY")
+            .env_remove("COLUMNS")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(match stdin {
@@ -1421,14 +1422,42 @@ fn unmeld_and_hooks_run_see_the_recorded_state() {
 
 // ----- Discovering profiles after meld -----
 
-/// The command printed after `enable <profile>: ` in a profile listing.
-fn enable_command(stdout: &str, profile: &str) -> String {
-    let marker = format!("enable {profile}: ");
-    let line = stdout
+/// A profile's block in a listing: its heading line (`  * <name> ...`) and
+/// the indented lines under it.
+fn profile_block<'a>(stdout: &'a str, profile: &str) -> Vec<&'a str> {
+    let mut lines = stdout
         .lines()
-        .find(|l| l.trim_start().starts_with(&marker))
-        .unwrap_or_else(|| panic!("no `{marker}` line in: {stdout}"));
-    line.trim_start()[marker.len()..].to_string()
+        .skip_while(|l| l.starts_with("      ") || l.split_whitespace().nth(1) != Some(profile));
+    let heading = lines
+        .next()
+        .unwrap_or_else(|| panic!("no block for {profile} in: {stdout}"));
+    std::iter::once(heading)
+        .chain(lines.take_while(|l| l.starts_with("      ")))
+        .collect()
+}
+
+/// The text after `<label>:` in a profile block, its wrapped lines joined
+/// with single spaces.
+fn block_field(stdout: &str, profile: &str, label: &str) -> Option<String> {
+    let marker = format!("{label}:");
+    let block = profile_block(stdout, profile);
+    let start = block
+        .iter()
+        .position(|l| l.trim_start().starts_with(&marker))?;
+    let mut words = vec![block[start].trim_start()[marker.len()..].trim()];
+    words.extend(
+        block[start + 1..]
+            .iter()
+            .take_while(|l| l.starts_with("               "))
+            .map(|l| l.trim()),
+    );
+    Some(words.join(" "))
+}
+
+/// The command printed on a profile's `enable:` line in a listing.
+fn enable_command(stdout: &str, profile: &str) -> String {
+    block_field(stdout, profile, "enable")
+        .unwrap_or_else(|| panic!("no enable line for {profile} in: {stdout}"))
 }
 
 #[test]
@@ -1445,20 +1474,19 @@ fn recall_profiles_lists_members_enabled_state_and_counts() {
         out.contains(&format!("profiles of {}:", sb.identity())),
         "{out}"
     );
-    let row = |name: &str| {
-        out.lines()
-            .find(|l| l.split_whitespace().nth(1) == Some(name))
-            .unwrap_or_else(|| panic!("no row for {name} in: {out}"))
-            .to_string()
-    };
+    let row = |name: &str| profile_block(out, name)[0].to_string();
     assert!(row("default").contains("(enabled)"), "{out}");
     assert!(row("default").contains("2/2 installed"), "{out}");
-    assert!(row("basic").contains("skill:review, rule:style"), "{out}");
+    assert_eq!(
+        block_field(out, "basic", "members").as_deref(),
+        Some("skill:review, rule:style"),
+        "{out}"
+    );
     assert!(!row("basic").contains("(enabled)"), "{out}");
     // full = basic + agent:planner + skill:deploy; the closure item
     // skill:helper is not a member.
     assert!(row("full").contains("2/4 installed"), "{out}");
-    assert!(!out.lines().any(|l| l.contains("enable default:")), "{out}");
+    assert_eq!(block_field(out, "default", "enable"), None, "{out}");
     let cmd = enable_command(out, "full");
     let r = run_printed(&sb, &cmd, &["--yes"]);
     assert!(r.success, "{cmd}: {} {}", r.stdout, r.stderr);
@@ -1470,6 +1498,64 @@ fn recall_profiles_lists_members_enabled_state_and_counts() {
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(r.stdout.contains("full (enabled)"), "{}", r.stdout);
     assert!(r.stdout.contains("4/4 installed"), "{}", r.stdout);
+}
+
+#[test]
+fn profile_listing_wraps_members_and_aligns_counts() {
+    // spec: PROF-36 -- one block per profile: the counts line up across
+    // headings, members wrap to COLUMNS under a hanging indent, and the
+    // enable command stays on one line.
+    let members = [
+        "skill:review",
+        "skill:test",
+        "skill:helper",
+        "skill:deploy",
+        "agent:planner",
+        "rule:style",
+        "skill:*",
+        "agent:*",
+    ];
+    let quoted: Vec<String> = members.iter().map(|m| format!("\"{m}\"")).collect();
+    let toml = format!(
+        "[profiles]\nwide = [{}]\nlong-profile-name = [\"rule:style\"]\n",
+        quoted.join(", ")
+    );
+    let sb = Sandbox::with_toml("src", &toml);
+    assert!(sb.mind(&["meld", &sb.spec(), "--register-only"]).success);
+    let r = sb.mind_env(&["recall", "--profiles"], &[("COLUMNS", "40")], None);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let out = &r.stdout;
+
+    let wide = profile_block(out, "wide");
+    assert!(
+        wide.iter()
+            .filter(|l| l.contains("members:") || l.starts_with("               "))
+            .count()
+            > 1,
+        "members should wrap at 40 columns: {out}"
+    );
+    for line in out.lines() {
+        if line.starts_with("profiles of") || line.trim_start().starts_with("enable:") {
+            continue;
+        }
+        assert!(
+            line.chars().count() <= 40,
+            "line over 40 columns: {line:?}\n{out}"
+        );
+    }
+    assert_eq!(
+        block_field(out, "wide", "members"),
+        Some(members.join(", ")),
+        "{out}"
+    );
+    let at = |name: &str| profile_block(out, name)[0].find(" installed");
+    assert!(at("wide").is_some(), "{out}");
+    assert_eq!(at("wide"), at("long-profile-name"), "{out}");
+    let cmd = enable_command(out, "wide");
+    assert_eq!(
+        shell_split(&cmd),
+        svec(&["mind", "learn", &sb.identity(), "--profile", "wide"])
+    );
 }
 
 #[test]
@@ -1515,12 +1601,14 @@ fn recall_profiles_marks_a_profile_whose_expansion_fails() {
     let r = sb.mind(&["recall", "--profiles"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(r.stdout.contains("0/1 installed"), "{}", r.stdout);
-    let broken = r
-        .stdout
-        .lines()
-        .find(|l| l.split_whitespace().nth(1) == Some("broken"))
-        .unwrap_or_else(|| panic!("{}", r.stdout));
-    assert!(broken.contains("error:"), "{broken}");
+    let error = block_field(&r.stdout, "broken", "error");
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|e| e.contains("skill:missing")),
+        "{}",
+        r.stdout
+    );
 
     let doc = json_doc(&sb.mind(&["recall", "--profiles", "--json"]));
     let profiles = doc["items"][0]["profiles"].as_array().unwrap();
@@ -1579,7 +1667,11 @@ fn learn_with_a_bare_profile_flag_lists_the_choices() {
         "{}",
         r.stdout
     );
-    assert!(r.stdout.contains("enable full: mind learn"), "{}", r.stdout);
+    assert!(
+        enable_command(&r.stdout, "full").starts_with("mind learn"),
+        "{}",
+        r.stdout
+    );
     assert_eq!(sb.installed(), before);
     assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
 

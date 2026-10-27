@@ -7215,38 +7215,89 @@ pub fn list_profiles(paths: &Paths, source_ref: Option<&str>, json: bool) -> Res
         return Ok(());
     }
     let out = crate::render::ctx();
+    let width = crate::render::term_width();
     for (i, listing) in listings.iter().enumerate() {
         if i > 0 {
             println!();
         }
         println!("profiles of {}:", strip_ansi(&listing.source));
-        let rows = listing
+        let quoted = crate::error::shell_quote(&strip_ansi(&listing.source));
+        let names: Vec<String> = listing
             .profiles
             .iter()
             .map(|p| {
-                let name = if p.enabled {
-                    format!("{} (enabled)", p.name)
+                let name = strip_ansi(&p.name);
+                if p.enabled {
+                    format!("{name} (enabled)")
                 } else {
-                    p.name.clone()
-                };
-                let status = match (&p.error, p.installed, p.total) {
-                    (Some(e), _, _) => format!("error: {e}"),
-                    (None, Some(n), Some(m)) => format!("{n}/{m} installed"),
-                    _ => String::new(),
-                };
-                vec![out.bullet(), name, p.members.join(", "), out.dim(&status)]
+                    name
+                }
             })
-            .collect::<Vec<_>>();
-        out.print_rows(&rows);
-        let quoted = crate::error::shell_quote(&strip_ansi(&listing.source));
-        for p in listing.profiles.iter().filter(|p| !p.enabled) {
-            println!(
-                "  enable {}: mind learn {quoted} --profile {}",
-                p.name, p.name
-            );
+            .collect();
+        let name_width = names
+            .iter()
+            .map(|n| crate::render::visible_width(n))
+            .max()
+            .unwrap_or(0);
+        for (p, name) in listing.profiles.iter().zip(&names) {
+            print_profile_listing_block(&out, p, name, name_width, &quoted, width);
         }
     }
     Ok(())
+}
+
+/// One profile of the PROF-36 listing: a heading line (name, enabled marker,
+/// installed count), then its members and any expansion error wrapped to
+/// `width` under a hanging indent, then the `learn` command that enables it,
+/// kept on one line so it copies whole.
+fn print_profile_listing_block(
+    out: &crate::render::OutputCtx,
+    p: &ProfileListing,
+    name: &str,
+    name_width: usize,
+    quoted_source: &str,
+    width: usize,
+) {
+    const INDENT: &str = "      ";
+    const HANG: &str = "               ";
+    let count = match (p.installed, p.total) {
+        (Some(n), Some(m)) => format!("{n}/{m} installed"),
+        _ => String::new(),
+    };
+    let pad = name_width.saturating_sub(crate::render::visible_width(name));
+    let heading = format!(
+        "  {} {name}{}  {}",
+        out.bullet(),
+        " ".repeat(pad),
+        out.dim(&count)
+    );
+    println!("{}", heading.trim_end());
+
+    let mut members: Vec<String> = p.members.clone();
+    if members.is_empty() {
+        members.push("(none)".into());
+    }
+    let last = members.len() - 1;
+    for m in &mut members[..last] {
+        m.push(',');
+    }
+    let first = format!("{INDENT}members: ");
+    for line in crate::render::wrap_tokens(&members, &first, HANG, width) {
+        println!("{line}");
+    }
+    if let Some(e) = &p.error {
+        let words: Vec<&str> = e.split_whitespace().collect();
+        let first = format!("{INDENT}error:   ");
+        for line in crate::render::wrap_tokens(&words, &first, HANG, width) {
+            println!("{}", out.red(&line));
+        }
+    }
+    if !p.enabled {
+        println!(
+            "{INDENT}enable:  mind learn {quoted_source} --profile {}",
+            strip_ansi(&p.name)
+        );
+    }
 }
 
 /// Insert PROF-29's `profiles` (profile name -> declared members, members
