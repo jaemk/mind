@@ -1574,6 +1574,150 @@ fn a_lightweight_breaking_tag_shows_no_notes() {
 }
 
 #[test]
+fn the_breaking_prompt_caps_long_notes_at_twenty_lines() {
+    // spec: VER-64
+    let (sb, _) = released("ver-break-notes-cap", RELEASE_TAGS);
+    let d = sb.commit("three-zero", RELEASE_TAGS);
+    let body: Vec<String> = (2..=30).map(|n| format!("body {n}")).collect();
+    let message = format!("Release three\n\n{}", body.join("\n"));
+    git(&sb.source, &["tag", "-a", "v3.0.0", "-m", &message, &d]);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    // The subject, the blank line after it, then the body: 20 lines in all.
+    assert!(r.stderr.contains("Release three"), "{}", r.stderr);
+    assert!(r.stderr.contains("body 19\n"), "{}", r.stderr);
+    assert!(!r.stderr.contains("body 20"), "capped: {}", r.stderr);
+    assert!(r.stderr.contains("\n  ...\n"), "{}", r.stderr);
+}
+
+#[test]
+fn the_breaking_prompt_leaves_out_a_signed_tags_signature() {
+    // spec: VER-64
+    let (sb, _) = released("ver-break-notes-signed", RELEASE_TAGS);
+    let key = sb.base.join("signing-key");
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f"])
+        .arg(&key)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("ssh-keygen is needed to sign a test tag");
+    assert!(status.success(), "ssh-keygen failed");
+    let d = sb.commit("three-zero", RELEASE_TAGS);
+    let signing_key = format!("user.signingkey={}", key.display());
+    git(
+        &sb.source,
+        &[
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &signing_key,
+            "tag",
+            "-s",
+            "v3.0.0",
+            "-m",
+            "Signed release\n\nSee the migration notes.",
+            &d,
+        ],
+    );
+    let tag_object = Command::new("git")
+        .args(["cat-file", "tag", "v3.0.0"])
+        .current_dir(&sb.source)
+        .output()
+        .expect("read the tag object");
+    assert!(
+        String::from_utf8_lossy(&tag_object.stdout).contains("BEGIN SSH SIGNATURE"),
+        "the tag is signed"
+    );
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind_env(&["upgrade"], &[("MIND_TTY", "1")], Some("\n"));
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(r.stderr.contains("notes for v3.0.0:"), "{}", r.stderr);
+    assert!(r.stderr.contains("Signed release"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("See the migration notes."),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("SIGNATURE"), "{}", r.stderr);
+}
+
+#[test]
+fn a_plain_remote_meld_follows_compatible_releases_and_takes_a_new_major_on_consent() {
+    // spec: VER-50 VER-52 VER-43 VER-60 VER-61 VER-63 VER-90
+    let sb = Sandbox::new("ver-lifecycle");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    sb.commit("unreleased", RELEASE_TAGS);
+
+    // A plain meld pins the caret of the only release.
+    let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert!(
+        r.stderr.contains("follows releases ^1.0.0 (now 1.0.0)"),
+        "{}",
+        r.stderr
+    );
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^1.0.0", "{pin}");
+    assert_eq!(commit, a);
+    assert!(sb.installed_agent().contains("one-zero"));
+
+    // A compatible release: upgrade syncs to it and installs it.
+    let b = sb.commit("one-one", RELEASE_TAGS);
+    sb.tag("v1.1.0", &b);
+    sb.commit("unreleased", RELEASE_TAGS);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(r.stdout.contains("version 1.0.0 -> 1.1.0"), "{}", r.stdout);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^1.0.0", "the range never moves");
+    assert_eq!(pin["value"]["resolved"], "1.1.0", "{pin}");
+    assert_eq!(commit, b);
+    assert!(sb.installed_agent().contains("one-one"));
+
+    // A new major: listed and left by upgrade, marked by recall.
+    let c = sb.commit("two-zero", RELEASE_TAGS);
+    sb.tag("v2.0.0", &c);
+    sb.commit("unreleased", RELEASE_TAGS);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(
+        r.stdout.contains("1.1.0 -> 2.0.0 (breaking, not applied"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(sb.remote_pin().1, b);
+    assert!(sb.installed_agent().contains("one-one"));
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.stdout.contains("release 1.1.0 (^1.0.0)"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("breaking release 2.0.0 available"),
+        "{}",
+        r.stdout
+    );
+
+    // Taken on consent: the range moves to the new major and its items upgrade.
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    let (pin, commit) = sb.remote_pin();
+    assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert!(sb.installed_agent().contains("two-zero"));
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.stdout.contains("release 2.0.0 (^2.0.0)"), "{}", r.stdout);
+    assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
+}
+
+#[test]
 fn json_on_a_terminal_lists_a_breaking_release_without_prompting() {
     // spec: VER-63 LIFE-45
     let (sb, [_a, b, _c]) = released("ver-break-json-tty", RELEASE_TAGS);
