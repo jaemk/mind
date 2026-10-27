@@ -1183,7 +1183,7 @@ fn sync_upgrade_json_reports_the_passes_breaking_moves() {
 #[test]
 fn a_policy_auto_meld_entry_takes_a_version_range() {
     // spec: VER-101
-    let (sb, [_a, b, _c]) = released("ver-auto-meld", RELEASE_TAGS);
+    let (sb, [_a, b, c]) = released("ver-auto-meld", RELEASE_TAGS);
     let policy = sb.base.join("policy.toml");
     write_file(
         &policy,
@@ -1220,6 +1220,29 @@ fn a_policy_auto_meld_entry_takes_a_version_range() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("re-pinned"), "{stdout}");
     assert_eq!(sb.pin().0["value"]["resolved"], "1.1.0");
+
+    // spec: POL-55 -- a changed range is drift: re-pinned, then resolved by
+    // the same sync.
+    write_file(
+        &policy,
+        &format!(
+            "[sources]\npinned = true\nallow-version-ranges = true\n\n\
+             [[sources.auto_meld]]\nrepo = \"{}\"\nversion = \"^2\"\n",
+            sb.spec()
+        ),
+    );
+    let out = sync();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("re-pinned"), "{stdout}");
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^2", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(commit, c);
 }
 
 #[test]

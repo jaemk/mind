@@ -50,8 +50,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-10` A tag is a release when stripping the template's prefix and suffix
   leaves a semver version `MAJOR.MINOR.PATCH` with an optional `-prerelease`
   and `+build`. A tag that matches the prefix and suffix but whose remainder is
-  not semver (`v1.2`, `v1.2.3.4`) is skipped, not an error. `review` reports it
-  (VER-130).
+  not semver (`v1.2`, `v1.2.3.4`) is skipped, not an error. `review` reports
+  it when the remainder starts with a digit (VER-130); one that does not
+  (`latest`) is some other tag.
 - `VER-11` Releases order by semver precedence, the same rule `evolve` uses for
   its release tags (storage.md). Build metadata does not order: two tags whose
   versions differ only by `+build`, or the `v1.2.3` / `1.2.3` pair under the

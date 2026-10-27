@@ -5,9 +5,6 @@
 //! release live in `git.rs`; reading the template from a `mind.toml` lives in
 //! `mindfile.rs`.
 
-// Not called from the CLI until version pins are wired into meld/sync/upgrade.
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -206,11 +203,14 @@ impl Template {
         self.remainder(tag).and_then(Version::parse)
     }
 
-    /// Whether `tag` fits the template's prefix and suffix but its remainder
-    /// is not semver: skipped on resolution, reported by `review` (VER-10).
+    /// Whether `tag` fits the template's prefix and suffix and its remainder
+    /// starts like a version but is not semver (`v1.2`): skipped on
+    /// resolution, reported by `review` (VER-10). A remainder that does not
+    /// start with a digit (`latest`) is some other tag.
     pub fn is_near_miss(&self, tag: &str) -> bool {
-        self.remainder(tag)
-            .is_some_and(|r| !r.is_empty() && Version::parse(r).is_none())
+        self.remainder(tag).is_some_and(|r| {
+            r.starts_with(|c: char| c.is_ascii_digit()) && Version::parse(r).is_none()
+        })
     }
 
     fn remainder<'a>(&self, tag: &'a str) -> Option<&'a str> {
@@ -414,19 +414,6 @@ pub fn releases(
     (out, ambiguous)
 }
 
-/// The highest release in `releases` (already highest first) that `range`
-/// admits and `yanked` does not list (VER-46).
-// spec: VER-46
-pub fn select<'a>(
-    releases: &'a [Release],
-    range: &Range,
-    yanked: &[Version],
-) -> Option<&'a Release> {
-    releases
-        .iter()
-        .find(|r| range.matches(&r.version) && !yanked.contains(&r.version))
-}
-
 /// The outcome of resolving a range against a remote's tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
@@ -579,6 +566,13 @@ mod tests {
         assert!(t.is_near_miss("skills-v1.2.3.4"));
         assert!(!t.is_near_miss("skills-v1.2.3"));
         assert!(!t.is_near_miss("other"));
+        // A remainder that does not start with a digit is some other tag, not
+        // a mistyped version: under the default template every tag fits the
+        // empty prefix, and `latest` is not worth reporting.
+        assert!(!t.is_near_miss("skills-vnext"));
+        assert!(Template::Default.is_near_miss("v1.2"));
+        assert!(!Template::Default.is_near_miss("latest"));
+        assert!(!Template::Default.is_near_miss("stable"));
 
         // A suffix is stripped as a literal before the version is read, so
         // `1.2.3-stable` is the stable 1.2.3, and a prerelease sits before it.
@@ -685,18 +679,23 @@ mod tests {
     }
 
     #[test]
-    fn select_skips_yanked_and_out_of_range() {
-        // The yanked filter VER-46 uses; reading the list is not wired yet.
+    fn resolve_skips_yanked_and_out_of_range() {
+        // spec: VER-40 VER-46
         let tags: Vec<(String, String)> = ["v1.0.0", "v1.1.0", "v1.2.0", "v2.0.0"]
             .iter()
             .map(|t| (t.to_string(), format!("c-{t}")))
             .collect();
-        let (rels, _) = releases(&Template::Default, &tags);
-        let pick = select(&rels, &r("^1"), &[]).unwrap();
-        assert_eq!(pick.tag, "v1.2.0");
-        let pick = select(&rels, &r("^1"), &[v("1.2.0")]).unwrap();
-        assert_eq!(pick.tag, "v1.1.0");
-        assert!(select(&rels, &r("^3"), &[]).is_none());
+        let pick = |range: &str, yanked: &[Version]| {
+            resolve(&Template::Default, &tags, &r(range), yanked)
+                .selected
+                .map(|rel| rel.tag)
+        };
+        assert_eq!(pick("^1", &[]).as_deref(), Some("v1.2.0"));
+        assert_eq!(pick("^1", &[v("1.2.0")]).as_deref(), Some("v1.1.0"));
+        assert_eq!(pick("^3", &[]), None);
+        // The highest seen is stable and not yanked, in range or not (VER-30).
+        let res = resolve(&Template::Default, &tags, &r("^1"), &[v("2.0.0")]);
+        assert_eq!(res.highest.map(|rel| rel.tag).as_deref(), Some("v1.2.0"));
     }
 
     #[test]
