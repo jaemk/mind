@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-27
+
 ### Added
 
 - `meld --overwrite` and `learn --overwrite` replace every link target mind did
@@ -2024,7 +2026,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.33.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.34.0...HEAD
+[0.34.0]: https://github.com/jaemk/mind/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/jaemk/mind/compare/v0.32.1...v0.33.0
 [0.32.1]: https://github.com/jaemk/mind/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/jaemk/mind/compare/v0.31.0...v0.32.0
