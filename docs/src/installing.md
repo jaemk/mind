@@ -10,8 +10,8 @@ mind learn skill:review      # install it
 mind recall                  # confirm it is installed
 ```
 
-A source that publishes semver releases installs from its highest release, not
-its default branch, and `meld` says so. `upgrade` then takes its compatible
+A source that publishes semver releases installs from its highest stable
+release, not its default branch, and `meld` says so. `upgrade` then takes its compatible
 releases and asks before a new major. See
 [Keep everything up to date](updating.md#sources-that-publish-releases).
 

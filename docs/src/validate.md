@@ -50,9 +50,11 @@ Findings are hard (non-zero exit) or advisory (exit 0):
 - workflow defects the harness would reject (see [Workflows](workflows.md))
 - for a source declaring `release-tags` (see
   [Pin a source to a version](pinning.md#follow-release-versions)): a template
-  that matches no tag (`no-release-tags`), a tag that fits the template but is
-  not semver (`non-semver-release-tag`), and a change since the highest release
-  that would break consumers on its caret range (`apparent-break`): an item
+  that matches no tag (`no-release-tags`), a tag that fits the template and
+  starts like a version but is not semver, such as `v1.2`
+  (`non-semver-release-tag`), and a change since the highest stable,
+  non-yanked release that would break consumers on its caret range
+  (`apparent-break`): an item
   dropped, an item's kind changed, or a `{{ns:}}` referent removed. Tag a new
   major version for an apparent break. The tags come from the local repo for a
   local path, and from the remote for a melded or remote source, so that check

@@ -46,7 +46,7 @@ any hooks, even with `--yes`.
 
 ## Sources that publish releases
 
-A source that publishes semver releases is melded at its highest release and
+A source that publishes semver releases is melded at its highest stable release and
 follows a range (`^1.4.2`), not its default branch. `recall` shows the release
 and range in each source's header. `upgrade` moves such a source only to
 releases inside its range, and shows `version 1.4.2 -> 1.6.0` beside the

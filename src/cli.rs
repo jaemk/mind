@@ -508,8 +508,9 @@ EXAMPLES:
         /// Take every breaking release a version-pinned source has (a release
         /// outside its range, such as 2.0.0 under `^1.4`) without prompting:
         /// the range moves to the new major and the source's items upgrade.
-        /// `--yes` alone never takes one; without this flag and without a
-        /// terminal, breaking releases are listed and skipped.
+        /// `--yes` alone never takes one; without this flag, and without a
+        /// terminal or under `--json`, breaking releases are listed and
+        /// skipped.
         // spec: VER-63
         #[arg(long)]
         allow_breaking: bool,
