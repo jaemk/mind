@@ -1,5 +1,5 @@
 //! Integration tests for install profiles at `meld` and `learn`
-//! (spec/profiles.md, PROF-1..20 and PROF-26).
+//! (spec/profiles.md, PROF-1..20, PROF-26, and PROF-31..35).
 //!
 //! Each test drives the real `mind` binary against a hermetic fixture: a local
 //! git repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed
@@ -1417,4 +1417,260 @@ fn unmeld_and_hooks_run_see_the_recorded_state() {
         log.contains(&"helper uninstall default,full|full".to_string()),
         "{log:?}"
     );
+}
+
+// ----- Discovering profiles after meld -----
+
+/// The command printed after `enable <profile>: ` in a profile listing.
+fn enable_command(stdout: &str, profile: &str) -> String {
+    let marker = format!("enable {profile}: ");
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with(&marker))
+        .unwrap_or_else(|| panic!("no `{marker}` line in: {stdout}"));
+    line.trim_start()[marker.len()..].to_string()
+}
+
+#[test]
+fn recall_profiles_lists_members_enabled_state_and_counts() {
+    // spec: PROF-31 -- each declared profile with its members, the enabled
+    // marker, and `<n>/<m> installed`, then a runnable `learn` command per
+    // profile that is not enabled.
+    let sb = Sandbox::new("src");
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let r = sb.mind(&["recall", "--profiles"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let out = &r.stdout;
+    assert!(
+        out.contains(&format!("profiles of {}:", sb.identity())),
+        "{out}"
+    );
+    let row = |name: &str| {
+        out.lines()
+            .find(|l| l.split_whitespace().nth(1) == Some(name))
+            .unwrap_or_else(|| panic!("no row for {name} in: {out}"))
+            .to_string()
+    };
+    assert!(row("default").contains("(enabled)"), "{out}");
+    assert!(row("default").contains("2/2 installed"), "{out}");
+    assert!(row("basic").contains("skill:review, rule:style"), "{out}");
+    assert!(!row("basic").contains("(enabled)"), "{out}");
+    // full = basic + agent:planner + skill:deploy; the closure item
+    // skill:helper is not a member.
+    assert!(row("full").contains("2/4 installed"), "{out}");
+    assert!(!out.lines().any(|l| l.contains("enable default:")), "{out}");
+    let cmd = enable_command(out, "full");
+    let r = run_printed(&sb, &cmd, &["--yes"]);
+    assert!(r.success, "{cmd}: {} {}", r.stdout, r.stderr);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
+    assert!(sb.manifest_item("agent:planner").is_some());
+
+    // A selector narrows the listing to one source.
+    let r = sb.mind(&["recall", "--profiles", "src"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("full (enabled)"), "{}", r.stdout);
+    assert!(r.stdout.contains("4/4 installed"), "{}", r.stdout);
+}
+
+#[test]
+fn recall_profiles_without_profiled_sources_says_so() {
+    // spec: PROF-31 -- nothing declares profiles: say so; a selected source
+    // that declares none is named; an unknown selector fails.
+    let sb = Sandbox::with_toml("plain", "");
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let r = sb.mind(&["recall", "--profiles"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("no melded source declares profiles"),
+        "{}",
+        r.stdout
+    );
+    let r = sb.mind(&["recall", "--profiles", "plain"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains(&format!("{} declares no profiles", sb.identity())),
+        "{}",
+        r.stdout
+    );
+    let r = sb.mind(&["recall", "--profiles", "nope"]);
+    assert!(!r.success, "{}", r.stdout);
+    let r = sb.mind(&["recall", "--profiles", "--sources"]);
+    assert!(
+        !r.success,
+        "--profiles conflicts with --sources: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn recall_profiles_marks_a_profile_whose_expansion_fails() {
+    // spec: PROF-31 PROF-32 -- an exact member naming no item is reported on
+    // its row rather than failing the listing.
+    let sb = Sandbox::with_toml(
+        "src",
+        "[profiles]\nbasic = [\"skill:review\"]\nbroken = [\"skill:missing\"]\n",
+    );
+    assert!(sb.mind(&["meld", &sb.spec(), "--register-only"]).success);
+    let r = sb.mind(&["recall", "--profiles"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("0/1 installed"), "{}", r.stdout);
+    let broken = r
+        .stdout
+        .lines()
+        .find(|l| l.split_whitespace().nth(1) == Some("broken"))
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    assert!(broken.contains("error:"), "{broken}");
+
+    let doc = json_doc(&sb.mind(&["recall", "--profiles", "--json"]));
+    let profiles = doc["items"][0]["profiles"].as_array().unwrap();
+    let broken = profiles.iter().find(|p| p["name"] == "broken").unwrap();
+    assert!(broken["error"].is_string(), "{broken}");
+    assert!(broken.get("total").is_none(), "{broken}");
+}
+
+#[test]
+fn recall_profiles_json_carries_items_and_counts() {
+    // spec: PROF-32
+    let sb = Sandbox::new("src");
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let doc = json_doc(&sb.mind(&["recall", "--profiles", "--json"]));
+    let src = &doc["items"][0];
+    assert_eq!(src["source"], sb.identity());
+    let profiles = src["profiles"].as_array().unwrap();
+    let names: Vec<&str> = profiles
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["basic", "default", "full"]);
+    let full = &profiles[2];
+    assert_eq!(full["enabled"], false);
+    assert_eq!(
+        full["members"],
+        serde_json::json!(["basic", "agent:*", "skill:deploy"])
+    );
+    assert_eq!(
+        full["items"],
+        serde_json::json!([
+            "agent:planner",
+            "rule:style",
+            "skill:deploy",
+            "skill:review"
+        ])
+    );
+    assert_eq!(full["installed"], 2);
+    assert_eq!(full["total"], 4);
+    assert_eq!(profiles[1]["enabled"], true);
+}
+
+#[test]
+fn learn_with_a_bare_profile_flag_lists_the_choices() {
+    // spec: PROF-33 -- `--profile` with no value lists that source's profiles
+    // and installs nothing; under --json it is PROF-32's document; an empty
+    // value beside a named profile is ignored.
+    let sb = Sandbox::new("src");
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let before = sb.installed();
+    let r = sb.mind(&["learn", "src", "--profile"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains(&format!("profiles of {}:", sb.identity())),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("enable full: mind learn"), "{}", r.stdout);
+    assert_eq!(sb.installed(), before);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
+
+    let doc = json_doc(&sb.mind(&["learn", "src", "--profile", "--json"]));
+    assert_eq!(doc["items"][0]["source"], sb.identity());
+    assert_eq!(sb.installed(), before);
+
+    let r = sb.mind(&["learn", "src", "--profile", "--profile", "full", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
+}
+
+#[test]
+fn profile_header_names_the_recall_and_learn_commands() {
+    // spec: PROF-34 -- the not-enabled line names commands that work after
+    // the meld, including when nothing installed (PROF-10).
+    let sb = Sandbox::new("src");
+    let r = sb.mind(&["meld", &sb.spec(), "--no-default-profile"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("not enabled:"))
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    assert!(line.contains("not enabled: basic, default, full"), "{line}");
+    let recall = backticked(line);
+    assert_eq!(
+        shell_split(&recall),
+        svec(&["mind", "recall", "--profiles", &sb.identity()])
+    );
+    let r = run_printed(&sb, &recall, &[]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("full"), "{}", r.stdout);
+    let after_recall = &line[line.find(&recall).unwrap() + recall.len() + 1..];
+    assert_eq!(
+        shell_split(&backticked(after_recall)),
+        svec(&["mind", "learn", &sb.identity(), "--profile", "<name>"])
+    );
+}
+
+#[test]
+fn profile_install_prints_progress_before_resolving() {
+    // spec: PROF-35 -- a progress line names the enabled profiles before the
+    // resolve, ahead of the first install line; none under --json. The
+    // members install in one learn pass, so no member reports "already
+    // installed" for a dependency an earlier member pulled in.
+    let sb = Sandbox::new("src");
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(&format!(
+            "resolving profile(s) default of {} ...",
+            sb.identity()
+        )),
+        "{}",
+        r.stdout
+    );
+
+    let r = sb.mind(&["learn", "src", "--profile", "full", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let progress = r
+        .stdout
+        .find(&format!(
+            "resolving profile(s) full of {} ...",
+            sb.identity()
+        ))
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    let first_learned = r
+        .stdout
+        .find("learned ")
+        .unwrap_or_else(|| panic!("{}", r.stdout));
+    assert!(progress < first_learned, "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("already installed; nothing to do"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(
+        sb.installed(),
+        svec(&[
+            "agent:planner",
+            "rule:style",
+            "skill:deploy",
+            "skill:helper",
+            "skill:review"
+        ])
+    );
+
+    sb.mind(&["forget", "src", "--profile", "full", "--yes"]);
+    let r = sb.mind(&["learn", "src", "--profile", "full", "--yes", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("resolving"), "{}", r.stdout);
+    json_doc(&r);
 }

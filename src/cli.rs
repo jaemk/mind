@@ -280,9 +280,15 @@ EXAMPLES:
         /// source's enabled profiles (repeatable; a comma-separated list is
         /// accepted). Only the named profiles are installed; `default` is not
         /// added. The dependency-closure prompt and `--dry-run` apply as for
-        /// any `learn`.
-        // spec: PROF-17
-        #[arg(long = "profile", value_name = "NAME")]
+        /// any `learn`. With no NAME, lists the source's profiles instead of
+        /// installing anything.
+        // spec: PROF-17 PROF-33
+        #[arg(
+            long = "profile",
+            value_name = "NAME",
+            num_args = 0..=1,
+            default_missing_value = ""
+        )]
         profiles: Vec<String>,
 
         /// Accepted for symmetry with `meld`; `learn` never enables the
@@ -598,6 +604,19 @@ EXAMPLES:
         // spec: DEP-61
         #[arg(long)]
         tree: bool,
+
+        /// List the install profiles of every melded source that declares
+        /// them, or of SOURCE: each profile's members, whether it is enabled,
+        /// how many of its items are installed, and the `mind learn <source>
+        /// --profile <name>` command that enables it.
+        // spec: PROF-31
+        #[arg(
+            long,
+            value_name = "SOURCE",
+            num_args = 0..=1,
+            conflicts_with_all = ["sources", "item", "kind", "source", "tree"]
+        )]
+        profiles: Option<Option<String>>,
     },
 
     /// Search melded catalogs for available items, or launch the interactive TUI.

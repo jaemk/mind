@@ -154,7 +154,7 @@ Alias `install`.
 | flag | effect |
 |------|--------|
 | `--all` | every item of the named source |
-| `--profile <NAME>` | install and enable that profile of a melded source (repeatable or comma list) |
+| `--profile <NAME>` | install and enable that profile of a melded source (repeatable or comma list); with no `NAME`, list the source's profiles |
 | `--all-profiles` | install and enable every declared profile |
 | `-n`, `--dry-run` | show what would install, change nothing |
 | `-f`, `--force` | overwrite a link target `mind` did not create |
@@ -219,6 +219,7 @@ followed by unmanaged items. With `ITEM`, show that item's details. Alias
 | flag | effect |
 |------|--------|
 | `--sources` | list sources instead, with their hooks and profiles |
+| `--profiles [SOURCE]` | list each source's profiles (or one source's): members, enabled, installed count, and the `learn` command to enable it |
 | `--kind <KIND>` | only items of this kind |
 | `--source <FILTER>` | only items from matching sources |
 | `--tree` | installed items as a dependency forest (scoped to `ITEM` if given) |

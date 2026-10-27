@@ -19,6 +19,8 @@ mind meld owner/repo                        # installs basic (via default)
 mind meld owner/repo --profile full         # default + full
 mind meld owner/repo --no-default-profile --profile full
 mind learn owner/repo --profile full        # enable full on an already-melded source
+mind learn owner/repo --profile             # list the source's profiles
+mind recall --profiles owner/repo           # same, with each profile's install state
 mind forget owner/repo --profile full       # disable it again
 ```
 
@@ -240,6 +242,43 @@ the user named.
   PROF-5) as hard findings, and a glob or `*` member matching nothing
   (`empty-profile-member`) or a profile whose expansion is empty
   (`empty-profile`) as advisories.
+
+## Discovering profiles after meld
+
+- `PROF-31` `recall --profiles [<source>]` lists the declared profiles of each
+  melded source that declares any, or of the one source named by a CLI-36
+  selector. Each profile is one row: its name, marked `(enabled)` when it is in
+  the recorded set, its members as declared, and `<n>/<m> installed`, where
+  `<m>` is the size of its expansion against the current catalog and `<n>` how
+  many of those items are installed from this source. A profile whose expansion
+  fails (PROF-5) shows the error in place of the count. Each source then gets one
+  `mind learn <source> --profile <name>` line (the source shell-quoted, CLI-225)
+  per profile that is not enabled. With no selector and no source declaring
+  profiles, it says so; a selected source that declares none is reported the
+  same way. An unknown or ambiguous selector fails as for `learn <source>
+  --profile` (PROF-17). `--profiles` conflicts with `--sources`, `--tree`, an
+  item argument, `--kind`, and `--source`.
+- `PROF-32` Under `--json`, `recall --profiles` emits the CLI-167 envelope
+  around an array with one object per listed source: `source`, and `profiles`,
+  an array of objects carrying `name`, `enabled`, `members` (sanitized), and
+  either `items` (the expansion's effective keys), `installed`, and `total`, or
+  `error` when the expansion fails.
+- `PROF-33` `learn <source> --profile` with no value, and no named profile and
+  no `--all-profiles`, prints the PROF-31 listing for that source and installs
+  nothing; under `--json` it emits PROF-32's document. An empty `--profile`
+  value given alongside named profiles is ignored.
+- `PROF-34` The profile header that `meld`, a re-meld, and `learn <source>
+  --profile` print before installing (PROF-12) names the declared profiles that
+  are not enabled together with `mind recall --profiles <source>` and `mind
+  learn <source> --profile <name>`, so the line is still actionable after the
+  meld finishes, including when nothing was installed (PROF-10).
+- `PROF-35` A profile install says what it is doing before it resolves: outside
+  `--json`, `meld`, a re-meld, `learn <source> --profile`, and `curate` print
+  `resolving profile(s) <names> of <source> ...` first, naming the enabled set
+  the install resolves. Resolution scans the catalog once
+  for all members, and the members install in one `learn` pass over their
+  combined closure, so the time grows with the number of members rather than
+  with its square.
 
 ## Out of scope
 

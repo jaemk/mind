@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `recall --profiles [source]` lists each source's install profiles with their
+  members, which are enabled, how many of their items are installed, and the
+  `mind learn <source> --profile <name>` command that enables each one.
+  `learn <source> --profile` with no name prints the same listing.
+- A profile install prints `resolving profile(s) <names> of <source> ...`
+  before it resolves.
+
+### Changed
+
+- The profile header at `meld` and `learn` names `mind recall --profiles` and
+  `mind learn <source> --profile <name>` for the profiles that are not enabled.
+
+### Fixed
+
+- `learn <source> --profile` and a profile meld no longer rescan the catalog
+  once per profile member. Enabling a profile of a large source took time
+  quadratic in its size (about 40s for 480 items) and now takes about a second.
+
 ## [0.34.0] - 2026-10-27
 
 ### Added
