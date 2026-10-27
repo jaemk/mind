@@ -73,7 +73,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
   - any other cargo version requirement: a comparator (`<2.0`, `>=1.2`, `>1.2.3`,
     `<=1.4`), a comma-separated list of them that must all hold (`>=1.2, <2`),
     a tilde (`~1.2`, `>=1.2.0, <1.3.0`), a wildcard (`1.*`), or a partial exact
-    (`=1.2`), with cargo's semantics. It is recorded in cargo's normalized form
+    (`=1.2`), with cargo's semantics. `*` admits every stable release, so a
+    source pinned to it takes each new major as a compatible move and is never
+    offered a breaking one (VER-61). It is recorded in cargo's normalized form
     (`>=1.2,<2` as `>=1.2, <2`). Build metadata (`+b`) is refused.
 - `VER-21` A prerelease is never selected unless the range's own version carries
   one, and then only prereleases of that same `MAJOR.MINOR.PATCH` (cargo's rule).

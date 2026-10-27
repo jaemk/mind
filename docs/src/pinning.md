@@ -52,6 +52,7 @@ mind meld owner/repo --pin version=0.3           # >=0.3.0, <0.4.0
 mind meld owner/repo --pin 'version=<2.0'        # any release below 2.0.0
 mind meld owner/repo --pin 'version=>=1.2, <1.5' # 1.2.0 up to, not including, 1.5.0
 mind meld owner/repo --pin version=~1.2          # >=1.2.0, <1.3.0
+mind meld owner/repo --pin 'version=*'           # every stable release, new majors included
 mind meld owner/repo --pin version==1.2.3        # hold at exactly 1.2.3
 ```
 

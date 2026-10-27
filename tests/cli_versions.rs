@@ -279,6 +279,7 @@ fn comparator_and_tilde_ranges_resolve_like_cargo() {
         ("~1.0", "~1.0", "1.0.0"),
         ("1.*", "1.*", "1.1.0"),
         (">=1", ">=1", "2.0.0"),
+        ("*", "*", "2.0.0"),
     ] {
         let (sb, _) = released("ver-comparator", RELEASE_TAGS);
         let pin_arg = format!("version={range}");
@@ -288,6 +289,34 @@ fn comparator_and_tilde_ranges_resolve_like_cargo() {
         assert_eq!(pin["value"]["range"], recorded, "{range}: {pin}");
         assert_eq!(pin["value"]["resolved"], resolved, "{range}: {pin}");
     }
+}
+
+#[test]
+fn a_star_range_takes_every_release_without_a_breaking_move() {
+    // spec: VER-20 VER-61 -- `*` admits every stable release, so a new major
+    // is an ordinary move and nothing is ever listed as breaking.
+    let sb = Sandbox::new("ver-star");
+    let a = sb.commit("one-zero", RELEASE_TAGS);
+    sb.tag("v1.0.0", &a);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=*", "--yes"])
+            .success
+    );
+    assert_eq!(sb.pin().0["value"]["resolved"], "1.0.0");
+    let c = sb.commit("two-zero", RELEASE_TAGS);
+    sb.tag("v2.0.0", &c);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    assert!(!r.stdout.contains("breaking"), "{}", r.stdout);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "*", "{pin}");
+    assert_eq!(pin["value"]["resolved"], "2.0.0", "{pin}");
+    assert_eq!(commit, c);
+    assert!(
+        sb.installed_agent().contains("two-zero"),
+        "{}",
+        sb.installed_agent()
+    );
 }
 
 #[test]
