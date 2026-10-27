@@ -44,6 +44,7 @@
 - [Dependencies between items](dependencies.md)
 - [Claude plugins and marketplaces](marketplace.md)
 - [Curate other repos](curating.md)
+- [Publish versioned releases](releasing.md)
 - [Validate before publishing](validate.md)
 
 # Reference

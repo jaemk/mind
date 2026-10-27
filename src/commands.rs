@@ -299,6 +299,40 @@ pub(crate) fn pin_description(pin: &Pin) -> String {
     }
 }
 
+/// `recall`'s suggestion for a source following a release tag (VER-82): when
+/// `source` has a `tag` pin and the tag is a release under the
+/// `release-tags` its checkout declares, the `meld --pin version=` command
+/// that follows compatible releases instead. Read from the clone on disk, since
+/// `recall` does not fetch.
+fn version_pin_hint(paths: &Paths, source: &crate::source::Source) -> Option<String> {
+    let Pin::Tag(tag) = &source.pin else {
+        return None;
+    };
+    let dir = clone_dir_checked(paths, source).ok()?;
+    let mindfile = MindToml::load(&dir).ok()??;
+    let template = mindfile
+        .source
+        .release_template(&dir.join("mind.toml"))
+        .ok()??;
+    let version = template.match_tag(tag)?;
+    Some(format!(
+        "hint: {} follows release tag {}; to take compatible releases, run `mind meld {} --pin version=^{version}`",
+        strip_ansi(&source.name),
+        strip_ansi(tag),
+        crate::error::shell_quote(&strip_ansi(&source.name))
+    ))
+}
+
+/// Does a recorded pin match the pin a curator or policy declares? A version
+/// pin is declared by its range alone; the resolution recorded beside it is
+/// not drift (VER-101, VER-110).
+pub(crate) fn same_declared_pin(recorded: &Pin, declared: &Pin) -> bool {
+    match (recorded, declared) {
+        (Pin::Version(a), Pin::Version(b)) => a.range == b.range,
+        (a, b) => a == b,
+    }
+}
+
 /// Resolve a version pin's range against the remote's release tags under
 /// `template` (VER-40), skipping `yanked` versions (VER-46) and warning about
 /// a version whose duplicate tags disagree (VER-11).
@@ -316,7 +350,8 @@ fn resolve_version(
     let res = crate::version::resolve(template, &tags, &range, yanked);
     for (a, b) in &res.ambiguous {
         eprintln!(
-            "warning: {source_name}: tags {} and {} name the same version at different commits; skipping that version",
+            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+            strip_ansi(source_name),
             strip_ansi(a),
             strip_ansi(b)
         );
@@ -336,7 +371,231 @@ fn filled_version_pin(
         resolved: Some(selected.version.to_string()),
         tag: Some(selected.tag.clone()),
         highest: res.highest.as_ref().map(|r| r.version.to_string()),
+        highest_tag: res.highest.as_ref().map(|r| r.tag.clone()),
+        // Resolution never selects a yanked version (VER-46).
+        yanked: false,
     }
+}
+
+/// A version-pinned source's release state in `--json` output (VER-91).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct VersionJson {
+    range: String,
+    resolved: Option<String>,
+    tag: Option<String>,
+    highest_available: Option<String>,
+    breaking_available: bool,
+    yanked: bool,
+}
+
+/// `pin`'s [`VersionJson`], `None` for any other pin kind. The tag is
+/// source-controlled, so it is sanitized (DSC-95).
+fn version_json(pin: &Pin) -> Option<VersionJson> {
+    let Pin::Version(vp) = pin else {
+        return None;
+    };
+    Some(VersionJson {
+        range: vp.range.clone(),
+        resolved: vp.resolved.clone(),
+        tag: vp.tag.as_deref().map(strip_ansi),
+        highest_available: vp.highest.clone(),
+        breaking_available: breaking_release(pin).is_some(),
+        yanked: vp.yanked,
+    })
+}
+
+/// One source's [`VersionJson`] in a `sync` or `upgrade` result (VER-91).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct SourceVersionJson {
+    source: String,
+    version: VersionJson,
+}
+
+/// The [`SourceVersionJson`] of every version-pinned source `in_scope` admits.
+fn source_versions(registry: &Registry, in_scope: &dyn Fn(&str) -> bool) -> Vec<SourceVersionJson> {
+    registry
+        .sources
+        .iter()
+        .filter(|s| in_scope(&s.name))
+        .filter_map(|s| {
+            version_json(&s.pin).map(|version| SourceVersionJson {
+                source: strip_ansi(&s.name),
+                version,
+            })
+        })
+        .collect()
+}
+
+/// A breaking release `upgrade` settled (VER-61..63, VER-91): taken, or
+/// listed and left.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct BreakingMoveJson {
+    source: String,
+    from: String,
+    to: String,
+    applied: bool,
+}
+
+/// `recall`'s release lines for a version-pinned source (VER-90): a breaking
+/// release outside its range, and a resolved release since yanked.
+fn version_marks(source: &crate::source::Source) -> Vec<String> {
+    let Pin::Version(vp) = &source.pin else {
+        return Vec::new();
+    };
+    let shown = strip_ansi(&source.name);
+    let mut lines = Vec::new();
+    if let Some((_, to)) = breaking_release(&source.pin) {
+        lines.push(format!(
+            "note: {shown}: breaking release {to} available; take it with `mind upgrade --allow-breaking --source {}`",
+            crate::error::shell_quote(&shown)
+        ));
+    }
+    if vp.yanked
+        && let Some(resolved) = &vp.resolved
+    {
+        lines.push(format!(
+            "warning: {shown}: release {resolved} is yanked; sync moves on when a newer release in {} is tagged",
+            vp.range
+        ));
+    }
+    lines
+}
+
+/// The release a version-pinned source is on, for `recall`'s source header
+/// (VER-90): ` release 1.4.2 (^1.4.2)`. Empty for any other pin kind.
+fn version_token(pin: &Pin) -> String {
+    match pin {
+        Pin::Version(vp) => match &vp.resolved {
+            Some(resolved) => format!(" release {resolved} ({})", vp.range),
+            None => format!(" release ({})", vp.range),
+        },
+        _ => String::new(),
+    }
+}
+
+/// The pin a source gets on `meld` when no layer names one (VER-50): when its
+/// default-branch `mind.toml` declares `release-tags`, the caret of its highest
+/// stable, non-yanked release that this binary meets (VER-41), already resolved
+/// to that release. When none fits, the highest one. `None` when it declares no
+/// `release-tags`, or declares them but no stable release matches (the source
+/// then follows its default branch, and the meld says so). `dir` is the clone
+/// the release tags are fetched into.
+fn default_version_pin(
+    source: &crate::source::Source,
+    mindfile: Option<&MindToml>,
+    toml_path: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<Option<Pin>> {
+    let Some(m) = mindfile else {
+        return Ok(None);
+    };
+    let Some(template) = m.source.release_template(toml_path)? else {
+        return Ok(None);
+    };
+    let yanked = m.source.yanked_versions(toml_path)?;
+    let tags = git::ls_remote_tags(&source.url)?;
+    let (releases, _) = crate::version::releases(&template, &tags);
+    let Some(highest) = crate::version::highest_stable(&releases, &yanked) else {
+        eprintln!(
+            "note: {} declares release-tags but has no stable release; following the default branch",
+            strip_ansi(&source.name)
+        );
+        return Ok(None);
+    };
+    // spec: VER-41 -- the default is the caret of a release this binary can
+    // run, so a newest release that needs a newer mind does not strand the
+    // meld on it while an older one fits.
+    let stable: Vec<&crate::version::Release> = releases
+        .iter()
+        .filter(|r| !r.version.is_prerelease() && !yanked.contains(&r.version))
+        .collect();
+    let mut chosen = highest;
+    if stable.len() > 1
+        && let Some(fits) = stable.iter().find(|rel| {
+            release_needs_newer_mind(&source.name, &source.url, dir, true, rel).is_none()
+        })
+    {
+        chosen = *fits;
+    }
+    let range = crate::version::Range::caret_of(&chosen.version);
+    let mut res = crate::version::resolve(&template, &tags, &range, &yanked);
+    // Every release above `chosen` was skipped above.
+    res.selected = Some(chosen.clone());
+    for (a, b) in &res.ambiguous {
+        eprintln!(
+            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+            strip_ansi(&source.name),
+            strip_ansi(a),
+            strip_ansi(b)
+        );
+    }
+    let pin = crate::source::VersionPin::unresolved(&range);
+    Ok(res
+        .selected
+        .as_ref()
+        .map(|rel| Pin::Version(filled_version_pin(&pin, rel, &res))))
+}
+
+/// Honor `min-mind-version` in a resolution (VER-41): when the selected
+/// release needs a newer `mind`, select the highest in-range release this
+/// binary meets instead, reporting each one skipped. When none fits, the
+/// highest stays selected and the DSC-40 warning applies later. `dir` holds
+/// the source's git objects; `fetch` says whether it is a clone that must
+/// fetch each tag first.
+// spec: VER-41
+fn fit_min_mind_version(
+    source_name: &str,
+    url: &str,
+    dir: &std::path::Path,
+    fetch: bool,
+    res: &mut crate::version::Resolution,
+) -> Result<()> {
+    // A single candidate is selected whether it fits or not.
+    if res.candidates.len() < 2 {
+        return Ok(());
+    }
+    for rel in &res.candidates {
+        if release_needs_newer_mind(source_name, url, dir, fetch, rel).is_none() {
+            res.selected = Some(rel.clone());
+            return Ok(());
+        }
+    }
+    res.selected = res.candidates.first().cloned();
+    Ok(())
+}
+
+/// The `min-mind-version` release `rel` declares when this binary does not
+/// meet it (VER-41), reporting the skip. A release whose `mind.toml` cannot be
+/// read (the tag fetch fails) is warned about and treated as fitting, so a
+/// flaky fetch keeps the selection rather than failing the meld or sync.
+fn release_needs_newer_mind(
+    source_name: &str,
+    url: &str,
+    dir: &std::path::Path,
+    fetch: bool,
+    rel: &crate::version::Release,
+) -> Option<String> {
+    let shown = strip_ansi(source_name);
+    let text = match git::tag_mind_toml(url, dir, &rel.tag, fetch) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!(
+                "warning: {shown}: could not read min-mind-version of {}: {}",
+                rel.version,
+                strip_ansi(&e.to_string())
+            );
+            return None;
+        }
+    };
+    let required = text
+        .as_deref()
+        .and_then(crate::mindfile::unmet_min_version_in_text)?;
+    eprintln!(
+        "{shown}: skipped {}: needs mind {}",
+        rel.version,
+        strip_ansi(&required)
+    );
+    Some(required)
 }
 
 /// The error for a range no release satisfies (VER-4, VER-42).
@@ -358,6 +617,19 @@ static ALLOW_BREAKING: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 pub fn set_allow_breaking(on: bool) {
     ALLOW_BREAKING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The release an installed item's commit came from (VER-60): its source's
+/// resolved version, when the source is version-pinned and still at that
+/// commit.
+fn release_version(registry: &Registry, item: &crate::manifest::InstalledItem) -> Option<String> {
+    let source = registry.find(&item.source)?;
+    match &source.pin {
+        Pin::Version(vp) if source.commit.as_deref() == Some(item.commit.as_str()) => {
+            vp.resolved.clone()
+        }
+        _ => None,
+    }
 }
 
 /// A version-pinned source's breaking release (VER-61): the highest stable
@@ -386,8 +658,8 @@ fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
 /// (VER-61..63). Each is listed; an accepted one has its range moved to the
 /// caret of the new release (`^2.0.0`) and is resolved there, so its items then
 /// upgrade through the ordinary pass. `--allow-breaking` accepts them all; on a
-/// terminal without `--yes` each gets its own `[y/N]` prompt; otherwise they are
-/// skipped.
+/// terminal without `--yes` or `--json` each gets its own `[y/N]` prompt;
+/// otherwise they are skipped.
 // spec: VER-61 VER-62 VER-63
 fn settle_breaking_moves(
     paths: &Paths,
@@ -395,10 +667,12 @@ fn settle_breaking_moves(
     in_scope: &dyn Fn(&str) -> bool,
     yes: bool,
     out: &crate::render::OutputCtx,
-) -> Result<()> {
+) -> Result<Vec<BreakingMoveJson>> {
     let allow = ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
-    let interactive = !yes && crate::hook::is_tty();
+    // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
+    let interactive = !yes && !out.json && crate::hook::is_tty();
     let mut changed = false;
+    let mut moves = Vec::new();
     for source in &mut registry.sources {
         if !in_scope(&source.name) {
             continue;
@@ -406,23 +680,31 @@ fn settle_breaking_moves(
         let Some((from, to)) = breaking_release(&source.pin) else {
             continue;
         };
-        let line = format!("{} {from} -> {to} (breaking)", source.name);
+        let shown = strip_ansi(&source.name);
+        let line = format!("{shown} {from} -> {to} (breaking)");
         let accept = if allow {
             true
         } else if interactive {
+            print_release_notes(paths, source);
             confirm(&format!("take breaking release {line}?"))?
         } else {
             false
         };
+        let mut record = BreakingMoveJson {
+            source: shown.clone(),
+            from: from.clone(),
+            to: to.to_string(),
+            applied: false,
+        };
         if !accept {
             if !out.json {
                 println!(
-                    "{} {} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
+                    "{} {shown} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
                     out.warn(),
-                    source.name,
-                    crate::error::shell_quote(&source.name)
+                    crate::error::shell_quote(&shown)
                 );
             }
+            moves.push(record);
             continue;
         }
         let Pin::Version(vp) = &source.pin else {
@@ -434,6 +716,8 @@ fn settle_breaking_moves(
             resolved: None,
             tag: None,
             highest: vp.highest.clone(),
+            highest_tag: vp.highest_tag.clone(),
+            yanked: false,
         });
         let applied = clone_dir_checked(paths, &moved)
             .and_then(|dir| sync_clone_to_pin(&moved, &dir))
@@ -462,21 +746,51 @@ fn settle_breaking_moves(
                 source.pin = pin;
                 source.commit = Some(commit);
                 changed = true;
+                record.applied = true;
             }
             Err(e) => {
                 eprintln!(
-                    "  {} could not take breaking release for {}: {}",
+                    "  {} could not take breaking release for {shown}: {}",
                     out.err(),
-                    source.name,
                     strip_ansi(&e.to_string())
                 );
             }
         }
+        moves.push(record);
     }
     if changed {
         registry.save(paths)?;
     }
-    Ok(())
+    Ok(moves)
+}
+
+/// The most lines of a tag message the breaking prompt shows (VER-64).
+const RELEASE_NOTES_MAX_LINES: usize = 20;
+
+/// Print the breaking release's tag message ahead of its prompt (VER-64),
+/// sanitized like other source-derived text. A lightweight tag, or a message
+/// that cannot be fetched, shows nothing: the notes never block the prompt.
+// spec: VER-64
+fn print_release_notes(paths: &Paths, source: &crate::source::Source) {
+    let Pin::Version(vp) = &source.pin else {
+        return;
+    };
+    let Some(tag) = vp.highest_tag.as_deref() else {
+        return;
+    };
+    let notes = clone_dir_checked(paths, source)
+        .and_then(|dir| git::tag_annotation(&source.url, &dir, tag));
+    let Ok(Some(notes)) = notes else {
+        return;
+    };
+    eprintln!("notes for {}:", strip_ansi(tag));
+    let lines: Vec<&str> = notes.lines().collect();
+    for l in lines.iter().take(RELEASE_NOTES_MAX_LINES) {
+        eprintln!("  {}", strip_ansi(l));
+    }
+    if lines.len() > RELEASE_NOTES_MAX_LINES {
+        eprintln!("  ...");
+    }
 }
 
 /// Bring an existing pinned clone at `dir` to `source`'s recorded pin (CLI-55)
@@ -506,13 +820,29 @@ fn sync_clone_to_pin(
         None => (None, Vec::new()),
     };
     let template = template.unwrap_or(crate::version::Template::Default);
-    let res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
+    let mut res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
+    fit_min_mind_version(&source.name, &source.url, dir, true, &mut res)?;
     let mut next = vp.clone();
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
+    next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
+    // spec: VER-90 -- recorded so `recall` marks it without a fetch.
+    next.yanked = vp
+        .resolved
+        .as_deref()
+        .and_then(crate::version::Version::parse)
+        .is_some_and(|cur| yanked.contains(&cur));
     match &res.selected {
         // spec: VER-46 -- nothing in range is selectable now (every candidate
         // yanked, or the tags gone): stay where the source is.
         None => {}
+        // spec: VER-46 -- a source on a since-yanked release stays there
+        // until a newer in-range release appears; it never steps down.
+        Some(rel)
+            if vp
+                .resolved
+                .as_deref()
+                .and_then(crate::version::Version::parse)
+                .is_some_and(|cur| yanked.contains(&cur) && rel.version <= cur) => {}
         Some(rel) if vp.tag.as_deref() == Some(rel.tag.as_str()) => {
             // spec: VER-44 -- the same release; a tag that now peels to a
             // different commit is not followed.
@@ -521,7 +851,7 @@ fn sync_clone_to_pin(
             {
                 eprintln!(
                     "warning: {}: release tag {} moved from {} to {}; staying at {} (re-meld with --pin to accept it)",
-                    source.name,
+                    strip_ansi(&source.name),
                     strip_ansi(&rel.tag),
                     short(recorded),
                     short(&rel.commit),
@@ -1157,10 +1487,29 @@ fn meld_recursive(
         .map(|m| m.source.pin_directive(&toml_path))
         .transpose()?
         .flatten();
-    let base_pin = curated_pin
-        .or(url_pin)
-        .or(directive_pin)
-        .unwrap_or(Pin::DefaultBranch);
+    let base_pin = curated_pin.or(url_pin).or(directive_pin);
+
+    // spec: VER-50 -- with no pin from any layer, a remote source whose
+    // default-branch mind.toml declares release-tags pins the caret of its
+    // highest stable release. A local path stays linked to its working tree.
+    let mut default_release = false;
+    let base_pin = match base_pin {
+        Some(p) => p,
+        None if consumer_pin == PinRequest::None && !is_local => {
+            match default_version_pin(&source, mindfile.as_ref(), &toml_path, &dir) {
+                Ok(Some(p)) => {
+                    default_release = true;
+                    p
+                }
+                Ok(None) => Pin::DefaultBranch,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            }
+        }
+        None => Pin::DefaultBranch,
+    };
 
     // The consumer flag layers over the base: `--pin branch=`/`tag=` overrides the
     // point (follow), a `--pin` freeze value fixes a point to its current commit
@@ -1173,8 +1522,9 @@ fn meld_recursive(
 
     // spec: VER-42 -- a version pin resolves now, against the default branch's
     // release-tags (VER-3, VER-4), and fails the meld when nothing is in range.
+    // The VER-50 default arrives already resolved.
     let checkout_pin = match checkout_pin {
-        Pin::Version(vp) => {
+        Pin::Version(vp) if vp.resolved.is_none() => {
             let cleanup = |dir: &std::path::Path| {
                 if !is_local {
                     let _ = std::fs::remove_dir_all(dir);
@@ -1194,7 +1544,13 @@ fn meld_recursive(
                 }
             };
             let template = template.unwrap_or(crate::version::Template::Default);
-            let res = match resolve_version(&source.name, &source.url, &vp, &template, &yanked) {
+            let res = resolve_version(&source.name, &source.url, &vp, &template, &yanked).and_then(
+                |mut res| {
+                    fit_min_mind_version(&source.name, &source.url, &dir, !is_local, &mut res)?;
+                    Ok(res)
+                },
+            );
+            let res = match res {
                 Ok(r) => r,
                 Err(e) => {
                     cleanup(&dir);
@@ -1216,10 +1572,11 @@ fn meld_recursive(
     // pin, which may come from the source's mind.toml. Evaluated on the FINAL
     // persisted kind: a `--pin` freeze persists a ref, so it satisfies
     // require-pinned even when the point it freezes is an otherwise-floating branch.
-    let persisted_unpinned = !freeze && checkout_pin.is_floating();
+    // spec: VER-100 -- an exact version is pinned; a range only under
+    // `allow-version-ranges`.
     if let Some(policy) = policy {
         let identity = source.name.clone();
-        if policy.pinned() && persisted_unpinned {
+        if !freeze && policy.forbids_unpinned(&checkout_pin) {
             // POL-20: pinned policy forbids a floating branch (default branch or
             // follow-branch); only a tag / ref / frozen pin is permitted.
             if !is_local {
@@ -1227,6 +1584,17 @@ fn meld_recursive(
             }
             return Err(MindError::UnpinnedSourceForbidden { identity });
         }
+    }
+
+    // spec: VER-52 -- once the policy admits it, say that the meld follows
+    // releases rather than the default branch, and how later releases arrive.
+    if default_release && let Pin::Version(vp) = &checkout_pin {
+        eprintln!(
+            "note: {} follows releases {} (now {}); `mind upgrade` takes compatible releases and asks before a new major",
+            strip_ansi(&source.name),
+            vp.range,
+            vp.resolved.as_deref().unwrap_or("?")
+        );
     }
 
     // Step 3: if the checkout point is not DefaultBranch, the source is a clone at
@@ -1325,7 +1693,8 @@ fn meld_recursive(
     // terminal to ask on, only an explicit `--yes` carries on.
     if let Some(required) = crate::mindfile::unmet_min_version(mindfile.as_ref()) {
         let required = required.to_string();
-        let interactive = !yes && crate::hook::is_tty();
+        // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
+        let interactive = !yes && !json_mode() && crate::hook::is_tty();
         if accept_newer_mind || interactive {
             eprintln!("{}", catalog::newer_mind_warning(&source.name, &required));
             catalog::first_version_warning(&source.name);
@@ -3368,21 +3737,43 @@ pub fn init_source(
         );
     }
 
+    // spec: VER-131 -- a generated mind.toml declares the default release-tag
+    // template when the repo's own tags already include releases under it.
+    // The tags are read from the local repo, so this stays offline (INIT-6).
+    let release_tags = |text: String| -> String {
+        let template = crate::version::Template::parse(crate::scaffold::RELEASE_TAGS)
+            .expect("the default template parses");
+        let found = git::ls_remote_tags(&root.to_string_lossy())
+            .map(|tags| crate::version::releases(&template, &tags).0.len())
+            .unwrap_or(0);
+        if found == 0 {
+            return text;
+        }
+        println!(
+            "  {found} release tag(s) match {}; declaring release-tags",
+            crate::scaffold::RELEASE_TAGS
+        );
+        crate::scaffold::with_release_tags(&text)
+    };
+
     // mind.toml handling: INIT-3 (create if absent) + INIT-12 (patch when flags
     // require it). When flat_skills_flag or namespace is set, always write (patch
     // existing or create with scaffold); otherwise keep the create-if-absent logic.
     if flat_skills_flag || namespace.is_some() {
-        let patched = crate::scaffold::patch_source_meta(
+        let mut patched = crate::scaffold::patch_source_meta(
             pre_toml.as_deref(),
             flat_skills_flag,
             namespace.as_deref(),
         );
+        if pre_toml.is_none() {
+            patched = release_tags(patched);
+        }
         std::fs::write(&toml_path, &patched).map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     } else if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        std::fs::write(&toml_path, crate::scaffold::scaffold())
+        std::fs::write(&toml_path, release_tags(crate::scaffold::scaffold()))
             .map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     }
@@ -4603,6 +4994,7 @@ fn learn_selected(
                 // spec: LNK-19 -- record what LNK-18 dropped on the installed
                 // item, so the degradation outlives the install-time warning.
                 installed.dropped_requires = dropped_requires;
+                installed.version = release_version(&registry, &installed);
                 installed_keys.push(installed.key().into());
                 if !out.json {
                     // Keep the line starting with "learned <key>" (tests assert the
@@ -4748,6 +5140,7 @@ fn learn_collecting_selected(
             Ok(mut installed) => {
                 // spec: LNK-19
                 installed.dropped_requires = dropped_requires;
+                installed.version = release_version(&registry, &installed);
                 installed_keys.push(installed.key().into());
                 manifest.insert(installed);
             }
@@ -7135,10 +7528,9 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     // spec: CLI-209/POL-20 -- the require-pinned gate applies identically to a
     // re-pin: a floating point (default/follow-branch) is forbidden unless the
     // request freezes it.
-    let persisted_unpinned = !freeze && checkout_pin.is_floating();
     if let Some(policy) = policy.as_ref()
-        && policy.pinned()
-        && persisted_unpinned
+        && !freeze
+        && policy.forbids_unpinned(&checkout_pin)
     {
         return Err(MindError::UnpinnedSourceForbidden {
             identity: source_name.to_string(),
@@ -7183,7 +7575,18 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
                 }
             };
             let template = template.unwrap_or(crate::version::Template::Default);
-            let res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
+            let mut res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
+            if target.join(".git").is_dir() {
+                fit_min_mind_version(source_name, &url, &target, true, &mut res)?;
+            } else if is_local {
+                fit_min_mind_version(
+                    source_name,
+                    &url,
+                    std::path::Path::new(&url),
+                    false,
+                    &mut res,
+                )?;
+            }
             match &res.selected {
                 Some(rel) => Pin::Version(filled_version_pin(&vp, rel, &res)),
                 None => return Err(no_matching_release(source_name, &vp, &res)),
@@ -8434,6 +8837,7 @@ pub fn forget(
     paths: &Paths,
     item_ref: Option<&str>,
     unmanaged: bool,
+    dropped: bool,
     yes: bool,
     force: bool,
     dangerously_skip: bool,
@@ -8442,18 +8846,92 @@ pub fn forget(
         return forget_unmanaged_bulk(paths, item_ref, yes);
     }
 
-    // `unmanaged` is false: clap guarantees `item_ref` is Some (required_unless_present).
-    let item_ref = item_ref.expect("item_ref required when --unmanaged is not set");
-
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
-    let parsed = parse_item_ref(item_ref)?;
 
-    // A glob uninstalls every installed match (mirroring `learn`'s selection);
-    // an exact ref honors the kind prefix and source qualifier and errors on an
-    // ambiguous bare name (e.g. one shared by a skill and an agent).
-    let keys: Vec<String> = if is_glob(&parsed.name) {
-        let matches = select_installed(&manifest.items, &parsed);
+    let keys: Vec<String> = if dropped {
+        // spec: CLI-245
+        let keys = dropped_item_keys(paths, &manifest, item_ref)?;
+        if keys.is_empty() {
+            if out.json {
+                return print_json(&MutationResult::new(
+                    "forget",
+                    item_ref.unwrap_or("--dropped"),
+                    "no-op",
+                ));
+            }
+            println!("no dropped items; nothing to forget");
+            return Ok(());
+        }
+        keys
+    } else {
+        // clap guarantees `item_ref` is Some without --unmanaged or --dropped.
+        let item_ref = item_ref.expect("item_ref required without --unmanaged or --dropped");
+        let parsed = parse_item_ref(item_ref)?;
+        forget_ref_keys(paths, &manifest, &parsed, yes)?
+    };
+    if keys.is_empty() {
+        // An exact ref that named an unmanaged item, already removed.
+        return Ok(());
+    }
+    let item_ref = item_ref.unwrap_or("--dropped");
+    forget_keys(
+        paths,
+        &mut manifest,
+        keys,
+        item_ref,
+        yes,
+        force,
+        dangerously_skip,
+    )
+}
+
+/// The installed items `forget --dropped` removes (CLI-245): those whose
+/// source is no longer melded, or whose melded source's catalog has no item
+/// with the same stable identity. An item of a melded source with no clone on
+/// disk is kept. `item_ref` narrows the set like a `forget` glob.
+fn dropped_item_keys(
+    paths: &Paths,
+    manifest: &Manifest,
+    item_ref: Option<&str>,
+) -> Result<Vec<String>> {
+    let registry = Registry::load(paths)?;
+    // A scan error must not make every item look dropped.
+    let catalog = catalog::scan(paths, &registry)?;
+    let candidates: Vec<&crate::manifest::InstalledItem> = match item_ref {
+        Some(r) => select_installed(&manifest.items, &parse_item_ref(r)?),
+        None => manifest.items.values().collect(),
+    };
+    let mut keys: Vec<String> = candidates
+        .into_iter()
+        .filter(|m| match registry.find(&m.source) {
+            None => true,
+            Some(s) => {
+                clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
+                    && !catalog.iter().any(|it| {
+                        it.source == m.source && it.kind == m.kind && it.name == m.bare_name
+                    })
+            }
+        })
+        .map(|m| m.key().into())
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
+/// The manifest keys an explicit `forget <ref>` names. A glob uninstalls every
+/// installed match (mirroring `learn`'s selection); an exact ref honors the
+/// kind prefix and source qualifier and errors on an ambiguous bare name (e.g.
+/// one shared by a skill and an agent). An exact ref naming only an unmanaged
+/// lobe item removes that item here and returns no keys.
+fn forget_ref_keys(
+    paths: &Paths,
+    manifest: &Manifest,
+    parsed: &crate::resolve::ItemRef,
+    yes: bool,
+) -> Result<Vec<String>> {
+    Ok(if is_glob(&parsed.name) {
+        let matches = select_installed(&manifest.items, parsed);
         if matches.is_empty() {
             return Err(MindError::NotInstalled {
                 name: parsed.name.clone(),
@@ -8461,19 +8939,34 @@ pub fn forget(
         }
         matches.iter().map(|it| it.key().into()).collect()
     } else {
-        match crate::resolve::resolve_installed(&manifest.items, &parsed) {
+        match crate::resolve::resolve_installed(&manifest.items, parsed) {
             Ok(it) => vec![it.key().into()],
             // UNM-4: an exact ref that names no managed item may name an
             // unmanaged lobe item; a glob never sweeps unmanaged entries.
             Err(MindError::NotInstalled { .. }) => {
-                let unmanaged_items = crate::unmanaged::scan(paths, &manifest)?;
-                let item = crate::unmanaged::resolve(&unmanaged_items, &parsed)?;
-                return forget_unmanaged_single(item, yes);
+                let unmanaged_items = crate::unmanaged::scan(paths, manifest)?;
+                let item = crate::unmanaged::resolve(&unmanaged_items, parsed)?;
+                forget_unmanaged_single(item, yes)?;
+                Vec::new()
             }
             Err(e) => return Err(e),
         }
-    };
+    })
+}
 
+/// Remove the installed items `keys` (CLI-40..42): confirm a multi-item
+/// removal, warn about dependents of a single one (DEP-60), run each item's
+/// uninstall hooks, and save the manifest.
+fn forget_keys(
+    paths: &Paths,
+    manifest: &mut Manifest,
+    keys: Vec<String>,
+    item_ref: &str,
+    yes: bool,
+    force: bool,
+    dangerously_skip: bool,
+) -> Result<()> {
+    let out = crate::render::ctx();
     // CLI-42: removing more than one item (typically a glob that matched more
     // broadly than intended) lists the matches and confirms first. `--yes` skips;
     // a non-TTY run without `--yes` refuses rather than removing silently.
@@ -8876,7 +9369,8 @@ pub fn sync_with_selector(
                     && let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name)
                 {
                     let old_pin = src.pin.clone();
-                    if old_pin == am.pin {
+                    // spec: VER-101
+                    if same_declared_pin(&old_pin, &am.pin) {
                         // spec: POL-32 -- already at the declared pin; confirmed registered.
                         break 'registered true;
                     }
@@ -9129,6 +9623,8 @@ pub fn sync_with_selector(
     // Save the progress made before reporting any failure, so the recorded
     // commits stay consistent with what is on disk.
     registry.save(paths)?;
+    // spec: VER-91
+    let version_rows = source_versions(&registry, &in_scope);
 
     // DSC-57: re-walk each registered source's refreshed `[discover].sources` and
     // meld any newly-listed nested source not already registered. Register-only
@@ -9383,6 +9879,8 @@ pub fn sync_with_selector(
         });
     }
     let mut upgraded: Vec<String> = Vec::new();
+    let mut version_rows = version_rows;
+    let mut breaking_moves: Vec<BreakingMoveJson> = Vec::new();
     if then_upgrade {
         // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
         // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
@@ -9413,6 +9911,11 @@ pub fn sync_with_selector(
         )?;
         if let Some(result) = pass {
             upgraded = result.installed;
+            // spec: VER-91 -- the pass may have settled a breaking release, so
+            // its release state is the current one, and its breaking moves are
+            // this run's.
+            version_rows = result.sources;
+            breaking_moves = result.breaking;
         }
     }
     // spec: CLI-217 -- emitted AFTER the `--upgrade` pass, not before it. The
@@ -9433,6 +9936,8 @@ pub fn sync_with_selector(
         // sanitized (`upgrade_inner_scoped` pushes `display_key()`).
         result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
+        result.sources = version_rows;
+        result.breaking = breaking_moves;
         print_json(&result)?;
     }
     Ok(())
@@ -9848,7 +10353,11 @@ fn upgrade_inner_scoped(
             .iter()
             .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
     };
-    settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    let breaking_moves = settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    // spec: VER-91 -- the `--json` result carries each in-scope version-pinned
+    // source's release state, and the breaking moves apart from the applied
+    // changes.
+    let version_rows = source_versions(&registry, &breaking_scope);
 
     // spec: CLI-234 -- the multi-source disclosure's scope covers every
     // scoping mechanism in play (a filter, a source scope, or a key scope).
@@ -9978,6 +10487,8 @@ fn upgrade_inner_scoped(
         Manifest::load(paths)?
     };
 
+    warn_apparent_breaks(&registry, &manifest, &catalog, hook_scope.as_ref(), &out);
+
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
@@ -10065,6 +10576,8 @@ fn upgrade_inner_scoped(
     let with_profiles = |mut r: MutationResult| {
         r.profile_additions = tracking.additions.clone();
         r.profile_departures = tracking.departures.clone();
+        r.sources = version_rows.clone();
+        r.breaking = breaking_moves.clone();
         r
     };
 
@@ -10252,6 +10765,7 @@ fn upgrade_inner_scoped(
                 // upgrade too, so it reflects the version now on disk (an
                 // upstream edit may have added or removed such an entry).
                 i.dropped_requires = dropped_requires;
+                i.version = release_version(&registry, &i);
                 // spec: PROF-20 -- the install path builds a fresh entry, so
                 // the old one's install reasons are carried over by hand.
                 crate::profile::carry_reasons(&mut i, &up.old);
@@ -10771,6 +11285,113 @@ fn upgrade_item_disposition(
     UpgradeDisposition::Consider
 }
 
+/// Warn about a compatible release move that looks breaking (VER-65): it
+/// drops an installed item, changes an installed item's kind, or removes the
+/// referent of a `{{ns:}}` token in an installed item. Advisory: the upgrade
+/// carries on. `scope` limits it to the sources the pass touches.
+// spec: VER-65
+fn warn_apparent_breaks(
+    registry: &Registry,
+    manifest: &Manifest,
+    catalog: &[CatalogItem],
+    scope: Option<&HashSet<String>>,
+    out: &crate::render::OutputCtx,
+) {
+    let mut any_drop = false;
+    for source in &registry.sources {
+        let Pin::Version(vp) = &source.pin else {
+            continue;
+        };
+        if scope.is_some_and(|s| !s.contains(&source.name)) {
+            continue;
+        }
+        let (Some(to), Some(commit)) = (vp.resolved.as_deref(), source.commit.as_deref()) else {
+            continue;
+        };
+        let installed: Vec<&crate::manifest::InstalledItem> = manifest
+            .items
+            .values()
+            .filter(|i| i.source == source.name)
+            .collect();
+        let Some(moved) = installed.iter().find(|i| i.commit != commit) else {
+            continue;
+        };
+        let from = moved.version.as_deref().unwrap_or("?");
+        // A move from outside the range is a breaking release the user took
+        // (VER-62, VER-63): expected to break, so only a compatible one is
+        // called out. Its drops still earn the `forget --dropped` hint.
+        let compatible = match (vp.parsed_range(), crate::version::Version::parse(from)) {
+            (Some(range), Some(v)) => range.matches(&v),
+            _ => true,
+        };
+        let siblings: Vec<&CatalogItem> =
+            catalog.iter().filter(|c| c.source == source.name).collect();
+        let cases = apparent_break_cases(
+            installed
+                .iter()
+                .map(|i| (i.kind, i.bare_name.as_str(), i.display_key())),
+            &siblings,
+        );
+        for case in cases {
+            any_drop |= case.starts_with("drops ");
+            if !compatible {
+                continue;
+            }
+            let line = format!(
+                "{} {from} -> {} looks breaking: {case}",
+                strip_ansi(&source.name),
+                strip_ansi(to)
+            );
+            if out.json {
+                eprintln!("{} {line}", out.warn());
+            } else {
+                println!("{} {line}", out.warn());
+            }
+        }
+    }
+    // spec: CLI-245 -- a dropped item is never upgraded, so the warning
+    // repeats until it is forgotten; point at the one command that does that.
+    if any_drop {
+        eprintln!("hint: run `mind forget --dropped` to remove items a source no longer offers");
+    }
+}
+
+/// The VER-65 cases a move from `old` items to the catalog `siblings` shows:
+/// an item gone from the catalog, an item whose name now has another kind, and
+/// a `{{ns:}}` token in an item's new text whose referent is gone. `old` is
+/// `(kind, bare name, display key)`. Shared by `upgrade` (VER-65) and `review`
+/// (VER-130).
+pub(crate) fn apparent_break_cases<'a>(
+    old: impl IntoIterator<Item = (ItemKind, &'a str, String)>,
+    siblings: &[&CatalogItem],
+) -> Vec<String> {
+    let mut cases: Vec<String> = Vec::new();
+    for (kind, bare, key) in old {
+        let same_name: Vec<&&CatalogItem> = siblings.iter().filter(|c| c.name == bare).collect();
+        let Some(cat) = same_name.iter().find(|c| c.kind == kind) else {
+            match same_name.first() {
+                None => cases.push(format!("drops {key}")),
+                Some(c) => cases.push(format!(
+                    "changes {} from {} to {}",
+                    strip_ansi(bare),
+                    kind.as_str(),
+                    c.kind.as_str()
+                )),
+            }
+            continue;
+        };
+        for name in crate::namespace::referenced_names(&read_item_text(cat)) {
+            if !siblings.iter().any(|c| c.name == name) {
+                cases.push(format!(
+                    "removes {} referenced by {key}",
+                    strip_ansi(&format!("{{{{ns:{name}}}}}")),
+                ));
+            }
+        }
+    }
+    cases
+}
+
 struct Upgrade {
     cat: CatalogItem,
     old: crate::manifest::InstalledItem,
@@ -10833,6 +11454,19 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
             short(&up.old.commit),
             short(&up.new_commit)
         );
+        // spec: VER-60 -- a version-pinned source shows the release delta too.
+        if let Some(src) = registry.find(&up.cat.source)
+            && let Pin::Version(vp) = &src.pin
+            && src.commit.as_deref() == Some(up.new_commit.as_str())
+            && let Some(to) = &vp.resolved
+        {
+            println!(
+                "    {} {} -> {}",
+                out.dim("version"),
+                up.old.version.as_deref().unwrap_or("?"),
+                to
+            );
+        }
         if let Some(src) = registry.find(&up.cat.source)
             && !up.old.commit.is_empty()
             && !up.new_commit.is_empty()
@@ -10952,6 +11586,14 @@ pub fn recall(
                         .map_err(|e| MindError::json("recall sources", e))?;
                     if let Some(obj) = v.as_object_mut() {
                         insert_profile_json(paths, s, obj);
+                        // spec: VER-91
+                        if let Some(version) = version_json(&s.pin) {
+                            obj.insert(
+                                "version".into(),
+                                serde_json::to_value(version)
+                                    .map_err(|e| MindError::json("recall sources", e))?,
+                            );
+                        }
                     }
                     Ok(v)
                 })
@@ -10987,16 +11629,27 @@ pub fn recall(
                 // MKT-10: show the manifest origin so a native-plugin source is
                 // distinguishable from a convention or mind.toml source.
                 let origin = origin_label(s.origin);
+                // spec: VER-90
+                let release = version_token(&s.pin);
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
-                    out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
+                    out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
             .collect::<Vec<_>>();
         out.print_rows(&rows);
+        // spec: VER-82 VER-90
+        for s in &registry.sources {
+            for mark in version_marks(s) {
+                println!("{mark}");
+            }
+            if let Some(hint) = version_pin_hint(paths, s) {
+                println!("{}", out.dim(&hint));
+            }
+        }
         // spec: PROF-29
         print_profile_block(paths, &registry.sources.iter().collect::<Vec<_>>());
         return Ok(());
@@ -11276,11 +11929,13 @@ pub fn recall(
         // MKT-10: show the manifest origin in the source header so the
         // provenance is visible in the default recall view too.
         let origin = origin_label(s.origin);
+        // spec: VER-90
+        let release = version_token(&s.pin);
         println!(
             "{} {}  {}{}",
             out.bullet(),
             out.bold(&s.name),
-            out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
+            out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
             s.description
                 .as_deref()
                 .map(|d| format!("  {d}"))
@@ -11344,6 +11999,13 @@ pub fn recall(
             ]);
         }
         out.print_rows(&rows);
+        // spec: VER-82 VER-90
+        for mark in version_marks(s) {
+            println!("  {mark}");
+        }
+        if let Some(hint) = version_pin_hint(paths, s) {
+            println!("  {}", out.dim(&hint));
+        }
     }
 
     // UNM-2: list unmanaged lobe items after the sources. Human view only;
@@ -12913,6 +13575,13 @@ struct MutationResult {
     /// depends on them (PROF-25, DEP-60), each naming its dependents.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     kept: Vec<String>,
+    /// Each version-pinned source a `sync` or `upgrade` covered, with its
+    /// release state (VER-91).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<SourceVersionJson>,
+    /// The breaking releases an `upgrade` listed or took (VER-91).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    breaking: Vec<BreakingMoveJson>,
 }
 
 impl MutationResult {
@@ -12933,6 +13602,8 @@ impl MutationResult {
             profile_additions: Vec::new(),
             profile_departures: Vec::new(),
             kept: Vec::new(),
+            sources: Vec::new(),
+            breaking: Vec::new(),
         }
     }
 }
@@ -14441,6 +15112,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         }
     }
 
@@ -15620,6 +16292,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         });
         manifest.save(paths).expect("save manifest");
     }
@@ -16205,6 +16878,34 @@ mod tests {
             }
             other => panic!("expected UnsafeClonePath, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_release_whose_mind_toml_cannot_be_fetched_counts_as_fitting() {
+        // spec: VER-41 -- a failed tag fetch warns and keeps the release
+        // selectable rather than failing the resolution.
+        // A repo with no `origin` remote: the fetch fails locally, never
+        // reaching a network or an enclosing checkout's remote.
+        let (_paths, base) = ns_paths();
+        let not_a_repo = base.join("no-origin");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&not_a_repo)
+            .status()
+            .expect("run git");
+        assert!(init.success());
+        let rel = crate::version::Release {
+            tag: "v1.0.0".into(),
+            version: crate::version::Version::parse("1.0.0").unwrap(),
+            commit: "0".repeat(40),
+        };
+        let url = not_a_repo.to_string_lossy().into_owned();
+        assert_eq!(
+            release_needs_newer_mind("s", &url, &not_a_repo, true, &rel),
+            None
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -369,8 +369,16 @@ EXAMPLES:
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
         /// omit to remove every unmanaged item across all lobes.
         /// With `--profile`: the melded source whose profile to disable.
-        #[arg(required_unless_present = "unmanaged")]
+        /// With `--dropped`: narrows the dropped items to this ref or glob.
+        #[arg(required_unless_present_any = ["unmanaged", "dropped"])]
         item: Option<String>,
+
+        /// Remove every installed item its source no longer offers (marked
+        /// "removed upstream" by `recall`), or whose source is no longer
+        /// melded. With `<item>`, only the dropped items it matches.
+        // spec: CLI-245
+        #[arg(long, conflicts_with_all = ["unmanaged", "profile"])]
+        dropped: bool,
 
         /// Disable this install profile of the source named by `<item>`: drop
         /// it from the source's enabled profiles and forget each item that was
@@ -500,8 +508,9 @@ EXAMPLES:
         /// Take every breaking release a version-pinned source has (a release
         /// outside its range, such as 2.0.0 under `^1.4`) without prompting:
         /// the range moves to the new major and the source's items upgrade.
-        /// `--yes` alone never takes one; without this flag and without a
-        /// terminal, breaking releases are listed and skipped.
+        /// `--yes` alone never takes one; without this flag, and without a
+        /// terminal or under `--json`, breaking releases are listed and
+        /// skipped.
         // spec: VER-63
         #[arg(long)]
         allow_breaking: bool,
@@ -795,6 +804,13 @@ EXAMPLES:
         /// of its items are currently installed.
         #[arg(long = "whole-sources")]
         whole_sources: bool,
+
+        /// Emit a version-pinned source's range as `pin-version` instead of
+        /// freezing it to its recorded commit, so the output tracks
+        /// compatible releases.
+        // spec: VER-120
+        #[arg(long)]
+        ranges: bool,
     },
 
     /// Claim an unmanaged lobe item into a version-controlled source and install

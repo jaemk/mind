@@ -79,6 +79,9 @@ pub struct Policy {
     /// permitted under a lock (POL-56/57). Defaults to `true` (preserves
     /// existing behavior).
     allow_local: bool,
+    /// `[sources].allow-version-ranges`: whether a version range counts as
+    /// pinned under `pinned` (VER-100). An exact version always does.
+    allow_version_ranges: bool,
     /// `[[sources.auto_meld]]` base set (POL-30).
     auto_meld: Vec<AutoMeld>,
     /// `[lobes].lock`: pin the effective agent homes to `lobes_targets` (POL-40).
@@ -170,6 +173,8 @@ struct RawSources {
     /// existing policies without this key continue to work unchanged.
     #[serde(default = "default_true", rename = "allow-local")]
     allow_local: bool,
+    #[serde(default, rename = "allow-version-ranges")]
+    allow_version_ranges: bool,
     #[serde(default)]
     auto_meld: Vec<RawAutoMeld>,
 }
@@ -181,6 +186,7 @@ impl Default for RawSources {
             lock: false,
             pinned: false,
             allow_local: true,
+            allow_version_ranges: false,
             auto_meld: Vec::new(),
         }
     }
@@ -206,6 +212,9 @@ struct RawAutoMeld {
     ref_: Option<String>,
     #[serde(default)]
     follow_branch: Option<String>,
+    /// A release version range (VER-101).
+    #[serde(default)]
+    version: Option<String>,
     /// Install all items from the source after successful provisioning (POL-58).
     #[serde(default)]
     install: bool,
@@ -223,12 +232,13 @@ impl RawAutoMeld {
     fn into_auto_meld(self, path: &Path) -> Result<AutoMeld> {
         let pins = self.tag.is_some() as u8
             + self.ref_.is_some() as u8
-            + self.follow_branch.is_some() as u8;
+            + self.follow_branch.is_some() as u8
+            + self.version.is_some() as u8;
         if pins > 1 {
             return Err(MindError::InvalidPolicy {
                 path: path.display().to_string(),
                 reason: format!(
-                    "auto_meld entry '{}' declares more than one of tag/ref/follow_branch; supply at most one",
+                    "auto_meld entry '{}' declares more than one of tag/ref/follow_branch/version; supply at most one",
                     self.repo
                 ),
             });
@@ -257,6 +267,17 @@ impl RawAutoMeld {
         } else if let Some(branch) = self.follow_branch {
             validate_pin(&branch, &self.repo, path)?;
             Pin::FollowBranch(branch)
+        } else if let Some(v) = self.version {
+            // spec: VER-101
+            let range =
+                crate::version::Range::parse(&v).ok_or_else(|| MindError::InvalidPolicy {
+                    path: path.display().to_string(),
+                    reason: format!(
+                        "auto_meld entry '{}' has an invalid version range {:?}",
+                        self.repo, v
+                    ),
+                })?;
+            Pin::Version(crate::source::VersionPin::unresolved(&range))
         } else {
             Pin::DefaultBranch
         };
@@ -334,12 +355,12 @@ impl Policy {
     fn validate_at(&self, path: &Path) -> Result<()> {
         if self.pinned {
             for am in &self.auto_meld {
-                let is_pinned = matches!(am.pin, Pin::Tag(_) | Pin::Ref(_));
-                if !is_pinned {
+                // spec: VER-101 -- a version entry is accepted on VER-100's terms.
+                if self.forbids_unpinned(&am.pin) {
                     return Err(MindError::InvalidPolicy {
                         path: path.display().to_string(),
                         reason: format!(
-                            "auto_meld entry '{}' must declare a tag or ref because [sources].pinned is true",
+                            "auto_meld entry '{}' must declare a tag, ref, or exact version because [sources].pinned is true",
                             am.repo
                         ),
                     });
@@ -402,6 +423,20 @@ impl Policy {
     /// `[sources].pinned` (POL-20).
     pub fn pinned(&self) -> bool {
         self.pinned
+    }
+
+    /// `[sources].allow-version-ranges` (VER-100).
+    pub fn allow_version_ranges(&self) -> bool {
+        self.allow_version_ranges
+    }
+
+    /// Does `[sources].pinned` refuse `pin` (POL-20)? A tag, a ref, and an
+    /// exact version are pinned; a version range is pinned only under
+    /// `allow-version-ranges` (VER-100); a branch never is.
+    pub fn forbids_unpinned(&self, pin: &Pin) -> bool {
+        self.pinned
+            && pin.is_floating()
+            && !(self.allow_version_ranges && matches!(pin, Pin::Version(_)))
     }
 
     /// The `[[sources.auto_meld]]` base set (POL-30).
@@ -616,6 +651,7 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         lock: raw.sources.lock,
         pinned: raw.sources.pinned,
         allow_local: raw.sources.allow_local,
+        allow_version_ranges: raw.sources.allow_version_ranges,
         auto_meld,
         lobes_lock: raw.lobes.lock,
         lobes_targets: raw.lobes.targets,
@@ -991,7 +1027,10 @@ repo = "github.com/acme/a"
         match err {
             MindError::InvalidPolicy { reason, .. } => {
                 assert!(reason.contains("github.com/acme/a"), "reason: {reason}");
-                assert!(reason.contains("tag or ref"), "reason: {reason}");
+                assert!(
+                    reason.contains("tag, ref, or exact version"),
+                    "reason: {reason}"
+                );
             }
             other => panic!("expected InvalidPolicy, got {other:?}"),
         }
@@ -1021,6 +1060,47 @@ repo = "github.com/acme/b"
 ref = "9f3a1c2e"
 "#;
         assert!(parse(ok).is_ok());
+    }
+
+    // spec: VER-101
+    #[test]
+    fn auto_meld_accepts_a_version_range_on_ver_100_terms() {
+        let entry = |range: &str| {
+            format!("[[sources.auto_meld]]\nrepo = \"github.com/acme/a\"\nversion = \"{range}\"\n")
+        };
+        let p = parse(&entry("^1.2")).unwrap();
+        match &p.auto_meld()[0].pin {
+            Pin::Version(vp) => assert_eq!(vp.range, "^1.2"),
+            other => panic!("expected a version pin, got {other:?}"),
+        }
+
+        // A range that does not parse fails the policy at parse time.
+        assert!(matches!(
+            parse(&entry("not-a-range")).unwrap_err(),
+            MindError::InvalidPolicy { .. }
+        ));
+        // A version is one pin of the at-most-one rule.
+        let two =
+            "[[sources.auto_meld]]\nrepo = \"github.com/acme/a\"\ntag = \"v1\"\nversion = \"^1\"\n";
+        assert!(matches!(
+            parse(two).unwrap_err(),
+            MindError::InvalidPolicy { .. }
+        ));
+
+        // Under pinned, an exact version passes; a range needs allow-version-ranges.
+        let pinned = |range: &str, ranges: bool| {
+            format!(
+                "[sources]\npinned = true\nallow-version-ranges = {ranges}\n{}",
+                entry(range)
+            )
+        };
+        assert!(parse(&pinned("=1.2.3", false)).is_ok());
+        assert!(matches!(
+            parse(&pinned("^1", false)).unwrap_err(),
+            MindError::InvalidPolicy { .. }
+        ));
+        let p = parse(&pinned("^1", true)).unwrap();
+        assert!(p.allow_version_ranges());
     }
 
     // POL-30: auto_meld parses repo plus each pin variant into AutoMeld correctly.
@@ -1440,7 +1520,7 @@ repo = "github.com/other/x"
                     assert!(reason.contains("github.com/other/x"), "reason: {reason}");
                     // Pinned check is evaluated first, so its message wins.
                     assert!(
-                        reason.contains("tag or ref"),
+                        reason.contains("tag, ref, or exact version"),
                         "expected the pinned error to win deterministically: {reason}"
                     );
                     assert!(
@@ -1603,8 +1683,8 @@ tag = "v2.0.0"
         };
         assert_eq!(
             unpinned.to_string(),
-            "source 'github.com/acme/a' must be pinned to a tag or ref: \
-             the managed policy forbids floating branches"
+            "source 'github.com/acme/a' must be pinned to a tag, ref, or exact version: \
+             the managed policy forbids a floating pin"
         );
     }
 

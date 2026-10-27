@@ -272,6 +272,8 @@ pub fn install(
         dropped_requires: Vec::new(),
         profiles: Vec::new(),
         explicit: false,
+        // spec: VER-60 -- stamped by the caller, which knows the source's pin.
+        version: None,
     })
 }
 
@@ -1350,6 +1352,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         };
 
         let fixed = relink(&paths, &item).unwrap();

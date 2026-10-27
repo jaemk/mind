@@ -681,6 +681,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             unmanaged,
             force: _,
+            dropped: _,
             profile: Some(profile),
             dangerously_skip_install_hook_check,
         } if !unmanaged => commands::forget_source_profile(
@@ -694,12 +695,14 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             unmanaged,
             force,
+            dropped,
             profile: _,
             dangerously_skip_install_hook_check,
         } => commands::forget(
             paths,
             item.as_deref(),
             unmanaged,
+            dropped,
             yes,
             force,
             dangerously_skip_install_hook_check,
@@ -919,7 +922,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Dump {
             output,
             whole_sources,
-        } => dump::run(paths, output, whole_sources),
+            ranges,
+        } => dump::run(paths, output, whole_sources, ranges),
         Command::Completions { shell } => {
             commands::completions(shell);
             Ok(())

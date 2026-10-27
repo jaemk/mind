@@ -721,6 +721,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: profiles.iter().map(|s| s.to_string()).collect(),
             explicit,
+            version: None,
         }
     }
 

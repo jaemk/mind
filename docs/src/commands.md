@@ -86,7 +86,7 @@ missing items, or shows each item's state. Alias `add`.
 | `--profile <NAME>` | enable an install profile in addition to `default` (repeatable or comma list) |
 | `--no-default-profile` | leave the `default` profile out |
 | `--all-profiles` | enable every declared profile |
-| `--pin <HEAD\|REF\|branch=NAME\|tag=NAME>` | set the version tracked; also re-pins a melded source; see [Pin a source to a version](pinning.md) |
+| `--pin <HEAD\|REF\|branch=NAME\|tag=NAME\|version=RANGE>` | set the version tracked; also re-pins a melded source; see [Pin a source to a version](pinning.md) |
 | `-N`, `--namespace <PREFIX>` | install items as `<PREFIX>:<name>`; a different namespace registers a separate instance; see [Fix name collisions](collisions.md) |
 | `-r`, `--recursive` | offer the items of every source a curator lists |
 | `-f`, `--force` | overwrite link targets `mind` did not create; on a re-meld, also re-offer every install hook |
@@ -186,6 +186,7 @@ Uninstall items: the store copy and every link. Alias `uninstall`, `unlearn`.
 |------|--------|
 | `--profile <NAME>` | disable a profile of the source named by `ITEM`, forgetting items installed only for it |
 | `--unmanaged` | act on unmanaged lobe items only; with no `ITEM`, all of them |
+| `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them |
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
 | `--dangerously-skip-hook-check` | run uninstall hooks without asking |
 
@@ -197,6 +198,7 @@ mind forget review
 mind forget 'skill:*' --yes
 mind forget owner/repo --profile full
 mind forget --unmanaged
+mind forget --dropped
 ```
 
 ## recall
@@ -267,6 +269,7 @@ on confirmation. `ITEM` is a filter.
 |------|--------|
 | `--source <filter>` | fetch and upgrade only the matching sources; combines with `ITEM` |
 | `--no-sync` | skip the fetch; compare against the clones on disk |
+| `--allow-breaking` | take a version-pinned source's breaking release (the next major) without a prompt; see [Follow release versions](pinning.md#follow-release-versions) |
 | `--dangerously-skip-install-hook-check` | run install or update hook re-runs without asking |
 | `--dangerously-skip-build-hook-check` | run build hooks without asking |
 
@@ -366,11 +369,12 @@ there. See [Adopt items you placed by hand](unmanaged.md).
 ## dump
 
 ```
-mind dump [--output PATH] [--whole-sources]
+mind dump [--output PATH] [--whole-sources] [--ranges]
 ```
 
 Write a `mind.toml` that reproduces your sources, pins, and installed items.
-`--whole-sources` marks every source `install = true`. See
+`--whole-sources` marks every source `install = true`. `--ranges` writes a
+version-pinned source's range (`pin-version`) instead of its commit. See
 [Back up and reproduce your setup](dump.md).
 
 ## review

@@ -12,7 +12,7 @@ release-tags = "v{version}"
 ```
 
 ```sh
-mind meld owner/repo                         # pins ^<latest major> when release-tags is declared
+mind meld owner/repo                         # pins ^<highest release> when release-tags is declared
 mind meld owner/repo --pin version=^1.2      # >=1.2.0, <2.0.0
 mind meld owner/repo --pin version==1.2.3    # hold at exactly 1.2.3
 mind upgrade                                 # compatible moves; breaking ones listed, not applied
@@ -50,8 +50,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 - `VER-10` A tag is a release when stripping the template's prefix and suffix
   leaves a semver version `MAJOR.MINOR.PATCH` with an optional `-prerelease`
   and `+build`. A tag that matches the prefix and suffix but whose remainder is
-  not semver (`v1.2`, `v1.2.3.4`) is skipped, not an error. `review` reports it
-  (VER-130).
+  not semver (`v1.2`, `v1.2.3.4`) is skipped, not an error. `review` reports
+  it when the remainder starts with a digit (VER-130); one that does not
+  (`latest`) is some other tag.
 - `VER-11` Releases order by semver precedence, the same rule `evolve` uses for
   its release tags (storage.md). Build metadata does not order: two tags whose
   versions differ only by `+build`, or the `v1.2.3` / `1.2.3` pair under the
@@ -78,8 +79,9 @@ error names the version gap (DSC-117) instead of a bare schema error.
 
 - `VER-30` A version pin is stored as pin kind `version` (extending STO-18).
   It records the range, the resolved version and the tag name it came from, and
-  the highest stable, non-yanked release seen at the last resolution, whether
-  or not that release is in range. The resolved commit is recorded like any other pin's.
+  the highest stable, non-yanked release seen at the last resolution (version
+  and tag), whether or not that release is in range. The resolved commit is
+  recorded like any other pin's.
 
 ## Resolution
 
@@ -93,14 +95,18 @@ error names the version gap (DSC-117) instead of a bare schema error.
   meet, resolution tries the next-highest, in descending order, and selects the
   first one the binary meets. Each skipped release is reported (`skipped 1.4.0:
   needs mind 0.35`). If no in-range release fits, the highest is selected and
-  the DSC-40 warning applies.
+  the DSC-40 warning applies. Each release's `min-mind-version` is read
+  leniently from its own `mind.toml`, since that file may use keys the running
+  binary predates. A release whose `mind.toml` cannot be fetched is warned
+  about and treated as fitting, so a failed fetch never fails the resolution.
 - `VER-42` `meld` resolves the pin at meld time (CLI-18). If no release is in
   range, the meld fails with `NoMatchingRelease`, which names the range and the
   highest release found, and nothing is registered.
 - `VER-43` `sync` re-resolves every version-pinned source (CLI-55). It moves the
   source to the highest in-range release and updates the recorded commit and
   resolved version. It also updates the highest-seen release (VER-30). `sync`
-  never changes the range itself.
+  never changes the range itself. When no in-range release is selectable (its
+  tags were deleted, or every one is yanked), the source stays where it is.
 - `VER-44` A release tag never moves silently. If the resolved release's tag now
   peels to a different commit than the one recorded, `sync` does not follow it.
   It keeps the recorded commit and warns that the tag moved, naming both
@@ -112,26 +118,42 @@ error names the version gap (DSC-117) instead of a bare schema error.
   the default-branch tip (VER-3). An entry that is not a semver version is a
   `MindToml` error. Resolution never selects a yanked version. A
   source already resolved to a yanked version stays there until a `sync` finds a
-  newer in-range release. `recall` marks the yanked version (VER-90).
+  newer in-range release; it never steps down to an older one. `recall` marks
+  the yanked version (VER-90).
 
 ## Default pin
 
-- `VER-50` When the default-branch `mind.toml` declares `release-tags`, and
-  neither a consumer `--pin` nor a `[source]` pin directive applies, `meld` pins
+- `VER-50` When the default-branch `mind.toml` of a remote source declares
+  `release-tags`, and no other layer supplies a pin (a consumer `--pin`, a
+  `[source]` pin directive, a curator pin, or an item link's ref), `meld` pins
   `version=^<highest stable release>` instead of following the default branch.
-  For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`. If the template
-  matches no stable release, `meld` follows the default branch as before and
-  says so.
+  The highest stable release skips prereleases and yanked versions (VER-46),
+  and a release whose `min-mind-version` the binary does not meet, as VER-41
+  skips one; when no stable release fits, the highest is used and the DSC-40
+  warning applies. For `1.4.2` that is `^1.4.2`; for `0.3.1` it is `^0.3.1`.
+  If the template matches no stable release, `meld` follows the default branch
+  as before and says so. A local source gets no default: it stays linked to its
+  working tree (CLI-27), and an explicit version pin still applies to it
+  (VER-81).
 - `VER-51` `[source]` gains a fourth pin directive, `pin-version = "<range>"`.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
-  `MindToml` error), and a consumer `--pin` overrides it.
+  `MindToml` error), and a consumer `--pin` overrides it. A range that does not
+  parse (VER-20) is a `MindToml` error.
+- `VER-52` When VER-50 applies, `meld` notes on stderr that the source follows
+  releases, naming the range and the selected release, and that `upgrade`
+  takes compatible releases and asks before a new major:
+  `note: <source> follows releases ^1.4.2 (now 1.4.2); ...`. The note follows
+  the managed-policy check (VER-100), so a meld the policy refuses does not
+  print it.
 
 ## Upgrade
 
 - `VER-60` A compatible move (`sync` landed on a newer in-range release)
   appears in `upgrade` as an ordinary content change: the CLI-60 prompt, the
   CLI-62 `--yes`, and the CLI-61 report apply unchanged. The report shows the
-  version delta (`1.4.2 -> 1.5.0`) next to the commit delta.
+  version delta (`version 1.4.2 -> 1.5.0`) next to the commit delta. Each
+  installed item records the release it was installed from in the manifest;
+  an item installed before that record existed shows `?` as its old version.
 - `VER-61` When the highest-seen release (VER-30) is newer than the resolved
   one and outside a caret range, `upgrade` lists it, one line per source:
   `<source> 1.5.0 -> 2.0.0 (breaking, not applied; ...)`, naming the
@@ -145,17 +167,21 @@ error names the version gap (DSC-117) instead of a bare schema error.
   pin stays and the failure is reported.
 - `VER-63` `upgrade --allow-breaking` accepts every listed breaking move without
   prompting. The `[item]` and `--source` filters (CLI-63) narrow it like any
-  other upgrade. `--yes` alone never accepts a breaking move: with `--yes`, or
-  without a TTY, and without `--allow-breaking`, breaking moves are listed and
-  skipped.
+  other upgrade. `--yes` alone never accepts a breaking move: with `--yes`,
+  under `--json`, or without a TTY, and without `--allow-breaking`, breaking
+  moves are listed and skipped.
 - `VER-64` The breaking prompt shows the target tag's annotation message when it
-  is an annotated tag, sanitized like other source-derived text (`sanitize.rs`).
-  A lightweight tag shows no notes.
+  is an annotated tag, sanitized like other source-derived text (`sanitize.rs`),
+  without a signed tag's signature block and capped at 20 lines. A lightweight
+  tag shows no notes, and neither does a message that cannot be fetched: the
+  notes never block the prompt.
 - `VER-65` A compatible move that looks breaking is warned about: one that drops
   an installed item from the catalog, changes an installed item's kind, or
   removes the referent of a `{{ns:}}` token in an installed item. The warning
-  names each case and the release. It is advisory and does not block the
-  upgrade.
+  names each case and the release, one line each:
+  `<source> 1.0.0 -> 1.1.0 looks breaking: drops agent:gone`. It is advisory
+  and does not block the upgrade. A breaking move the user took (VER-62,
+  VER-63) is not checked, since a new major is expected to break.
 
 ## Hooks
 
@@ -180,18 +206,30 @@ error names the version gap (DSC-117) instead of a bare schema error.
   `release-tags` and checks out the item's path at the selected release.
 - `VER-82` `recall` adds a one-line suggestion for a source with a `tag` pin
   whose tag is a release under its declared `release-tags`:
-  `mind meld <source> --pin version=^<version>`.
+  `mind meld <source> --pin version=^<version>`. `recall` does not fetch, so
+  the template is read from the clone's checkout (the tagged release) rather
+  than the default-branch tip (VER-3). It shows in `recall --sources` and under
+  the source in the status view.
 
 ## Reporting
 
-- `VER-90` `recall` shows a version-pinned source's resolved version and range.
-  It marks a source whose highest-seen release is outside the range ("breaking
-  release available") and a source resolved to a yanked version.
-- `VER-91` `--json` output for `recall --sources`, `sync`, and `upgrade` gives
-  each version-pinned source a `version` object: `range`, `resolved`, `tag`,
-  `highest_available`, `breaking_available` (bool), and `yanked` (bool). The
-  `upgrade` document lists breaking moves in their own array, apart from the
-  applied changes.
+- `VER-90` `recall` (the status view and `--sources`) shows a version-pinned
+  source's resolved version and range in its header (`release 1.4.2 (^1.4.2)`).
+  It marks a source with a breaking release (VER-61) with a line naming the
+  release and the `upgrade --allow-breaking --source` command that takes it
+  ("breaking release 2.0.0 available"), and a source resolved to a since-yanked
+  version (`release 1.1.0 is yanked`). `recall` does not fetch: whether the
+  resolved version is yanked is recorded on the pin at the last `sync`, from
+  the yanked list VER-46 reads.
+- `VER-91` `--json` output gives each version-pinned source a `version` object:
+  `range`, `resolved`, `tag`, `highest_available` (the highest stable release
+  seen, VER-30), `breaking_available` (bool, VER-61), and `yanked` (bool,
+  VER-90). `recall --sources` adds it to each source. A `sync` or `upgrade`
+  result carries a `sources` array of `{source, version}` for the
+  version-pinned sources it covered. The `upgrade` result lists its breaking
+  moves in their own `breaking` array, apart from the applied changes:
+  `{source, from, to, applied}`, `applied` false for one listed and left. A
+  `sync --upgrade` result carries its upgrade pass's `sources` and `breaking`.
 
 ## Policy, curators, and dump
 
@@ -201,21 +239,29 @@ error names the version gap (DSC-117) instead of a bare schema error.
   with `UnpinnedSourceForbidden`.
 - `VER-101` A `[[sources.auto_meld]]` entry accepts `version = "<range>"` as its
   pin (POL-30). The value is validated as a range (VER-22) at policy parse time,
-  and POL-21 accepts it under the same terms as VER-100.
+  and POL-21 accepts it under the same terms as VER-100. POL-55's drift check
+  compares the range only, so the resolution recorded beside it is not drift.
 - `VER-110` A curator's `[[discover.sources]]` entry accepts `pin-version`
   (DSC-41's one-of rule). `curate` re-pins a curated source whose declared range
   changed, as it does for other pin changes.
 - `VER-120` `dump` keeps freezing every source to its recorded commit (DUMP-1).
   `dump --ranges` emits `pin-version = "<range>"` for a version-pinned source
-  instead, so the output tracks compatible releases.
+  instead, so the output tracks compatible releases. An item-link instance
+  keeps its `pin-ref`, since its URL's ref segment is that commit (LNK-13).
 
 ## Author side
 
 - `VER-130` `review` checks a source's `release-tags`: that it parses (VER-2),
   that at least one tag is a release, and which tags match the prefix and suffix
   but are not semver (VER-10). It also runs the VER-65 checks between the
-  highest release and the reviewed tree, so an author sees an apparent break
-  before tagging a compatible version.
+  highest stable, non-yanked release (the one VER-50 pins consumers to; the
+  highest release of any kind when none is stable) and the reviewed tree, so an
+  author sees an apparent break before tagging a compatible version. A template that does not parse fails the
+  `mind.toml` load, the existing `toml-parse-error` hard finding; the rest are
+  advisories: `no-release-tags`, `non-semver-release-tag`, `apparent-break`,
+  and `release-tags-unchecked` when the tags cannot be listed or the highest
+  release cannot be checked out. Tags come from the local repo for a local
+  target and from the remote for a remote or melded one.
 - `VER-131` `init-source` adds `release-tags = "v{version}"` to the generated
   `mind.toml` when the repo already has tags that are releases under that
   template.

@@ -44,6 +44,26 @@ leaves the previous version in place.
 When the scope spans several sources, `upgrade` names each one before running
 any hooks, even with `--yes`.
 
+## Sources that publish releases
+
+A source that publishes semver releases is melded at its highest stable release and
+follows a range (`^1.4.2`), not its default branch. `recall` shows the release
+and range in each source's header. `upgrade` moves such a source only to
+releases inside its range, and shows `version 1.4.2 -> 1.6.0` beside the
+commit delta.
+
+A new major is a breaking release. `upgrade` lists it and leaves it:
+
+```
+! owner/repo 1.6.0 -> 2.0.0 (breaking, not applied; take it with `mind upgrade --allow-breaking --source owner/repo`)
+```
+
+On a terminal it asks `[y/N]` for each one instead, showing the release's tag
+message when there is one. `--yes` never takes a breaking release. Accepting
+moves the range to the new major (`^2.0.0`) and upgrades the source's items.
+Until then, `recall` marks the source "breaking release 2.0.0 available". See
+[Follow release versions](pinning.md#follow-release-versions).
+
 ## Refresh sources without upgrading
 
 ```

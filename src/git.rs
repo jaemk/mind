@@ -450,6 +450,87 @@ pub fn default_branch_mind_toml(url: &str, dir: &Path) -> Result<Option<String>>
     .map(Some)
 }
 
+/// The message of release tag `tag`, fetched into the clone at `dir` without
+/// moving its checkout (VER-64). `None` for a lightweight tag. The signature
+/// block of a signed tag is left out, and the message is size-capped like
+/// other metadata reads (DSC-91). The caller sanitizes it before printing.
+// spec: VER-64
+pub fn tag_annotation(url: &str, dir: &Path, tag: &str) -> Result<Option<String>> {
+    validate_ref_value(tag)?;
+    let tag_ref = format!("refs/tags/{tag}");
+    run(
+        url,
+        Some(dir),
+        &[
+            "fetch",
+            "--depth",
+            "1",
+            "--force",
+            "origin",
+            "--",
+            &format!("+{tag_ref}:{tag_ref}"),
+        ],
+    )?;
+    if run(url, Some(dir), &["cat-file", "-t", &tag_ref])? != "tag" {
+        return Ok(None);
+    }
+    let limit = crate::error::metadata_size_limit();
+    let size = run(url, Some(dir), &["cat-file", "-s", &tag_ref])?;
+    if size.parse::<u64>().map_or(true, |n| n > limit) {
+        return Err(MindError::MetadataTooLarge {
+            path: Path::new(url).join(&tag_ref),
+            limit,
+        });
+    }
+    let text = run(
+        url,
+        Some(dir),
+        &[
+            "for-each-ref",
+            "--format=%(contents:subject)%0a%0a%(contents:body)",
+            &tag_ref,
+        ],
+    )?;
+    Ok((!text.is_empty()).then_some(text))
+}
+
+/// The text of `mind.toml` at release tag `tag` (VER-41), or `None` when that
+/// release has none. A clone (`fetch`) gets the tag from origin first, without
+/// moving its checkout; a local working tree already holds it and is left
+/// untouched. Size-capped like other metadata reads (DSC-91).
+// spec: VER-41
+pub fn tag_mind_toml(url: &str, dir: &Path, tag: &str, fetch: bool) -> Result<Option<String>> {
+    validate_ref_value(tag)?;
+    let tag_ref = format!("refs/tags/{tag}");
+    if fetch {
+        run(
+            url,
+            Some(dir),
+            &[
+                "fetch",
+                "--depth",
+                "1",
+                "--force",
+                "origin",
+                "--",
+                &format!("+{tag_ref}:{tag_ref}"),
+            ],
+        )?;
+    }
+    let spec = format!("{tag_ref}:mind.toml");
+    let Ok(size) = run(url, Some(dir), &["cat-file", "-s", &spec]) else {
+        return Ok(None);
+    };
+    let limit = crate::error::metadata_size_limit();
+    if size.parse::<u64>().map_or(true, |n| n > limit) {
+        return Err(MindError::MetadataTooLarge {
+            path: Path::new(url).join(&spec),
+            limit,
+        });
+    }
+    run(url, Some(dir), &["cat-file", "blob", &spec]).map(Some)
+}
+
 /// Resolve the current HEAD commit sha of a clone.
 pub fn head_commit(url: &str, dir: &Path) -> Result<String> {
     run(url, Some(dir), &["rev-parse", "HEAD"])

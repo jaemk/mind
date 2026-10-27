@@ -137,6 +137,14 @@ pub fn patch_source_meta(
     result
 }
 
+/// The default release-tag template `init-source` declares (VER-131).
+pub const RELEASE_TAGS: &str = "v{version}";
+
+/// VER-131: declare `release-tags = "v{version}"` in a generated `mind.toml`.
+pub fn with_release_tags(content: &str) -> String {
+    set_key(content, "release-tags", &toml_string(RELEASE_TAGS))
+}
+
 /// Replace the active `<key> = ...` line in `content`, or insert it after
 /// the `[source]` header. Non-active (commented) lines are left untouched.
 ///

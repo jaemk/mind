@@ -148,16 +148,18 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 - `POL-20` With `[sources].pinned = true`, every `meld` must resolve to a tag or
   ref pin (`--pin-tag` / `--pin-ref`, or a `[source]` pin directive that resolves
   to a tag or ref, see DSC-41); a floating branch (`--follow-branch` or the
-  default branch) is refused (`UnpinnedSourceForbidden`).
+  default branch) is refused (`UnpinnedSourceForbidden`). A version pin counts
+  as pinned under VER-100.
 - `POL-21` With `pinned = true`, every `[sources].auto_meld` entry must declare a
-  `tag` or `ref`. A policy whose `auto_meld` contains an entry with no pin or with
-  `follow_branch` is invalid (POL-5) and is reported by `mind review --policy`.
+  `tag` or `ref`, or a `version` accepted under VER-101. A policy whose
+  `auto_meld` contains an entry with no pin or with `follow_branch` is invalid
+  (POL-5) and is reported by `mind review --policy`.
 
 ## Auto-meld (org provisioning)
 
 - `POL-30` `[sources].auto_meld` is a list of tables, each with `repo` (a repo
   spec as `meld` accepts: `owner/repo`, a URL, `git@...`, or a path) and an
-  optional pin: `tag`, `ref`, or `follow_branch`.
+  optional pin: `tag`, `ref`, `follow_branch`, or `version` (VER-101).
   `mind` provisions these by melding any that are not already melded. It is a base
   set, not an exclusive one: when `[sources].lock` is off the user may meld
   additional sources beyond it (POL-13); when locked, only `allow`-matching

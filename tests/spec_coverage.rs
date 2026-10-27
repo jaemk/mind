@@ -212,13 +212,9 @@ const ALLOWLIST: &[&str] = &[
     //   `mind hooks run` / `hooks list` (HOOK-100..104, CLI-194..196) are now
     //   implemented and cited from tests/cli_hooks.rs and unit tests in
     //   src/main.rs, src/resolve.rs, and src/hooks_cmd.rs.
-    // Release versions (spec/versions.md, partial): the rest of the feature is
-    // documented ahead of implementation. Each ID moves to a citing test as it
-    // is built. VER-45 states a limitation (a moved non-resolved tag is not
-    // detected), which no test can observe.
-    "VER-41", "VER-45", "VER-46", "VER-50", "VER-51", "VER-60", "VER-64", "VER-65", "VER-70",
-    "VER-81", "VER-82", "VER-90", "VER-91", "VER-100", "VER-101", "VER-110", "VER-120", "VER-130",
-    "VER-131",
+    // Release versions (spec/versions.md): VER-45 states a limitation (a moved
+    // non-resolved tag is not detected), which no test can observe.
+    "VER-45",
 ];
 
 #[test]

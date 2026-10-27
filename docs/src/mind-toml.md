@@ -79,9 +79,20 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
-- **`follow-branch` / `pin-tag` / `pin-ref`**: how `sync` tracks upstream. Declare
+- **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync`
+  tracks upstream. `pin-version` takes a release range such as `"^1"`. Declare
   at most one; two is an error. A consumer `meld --pin` overrides it (see
-  [Pinning a source version](pinning.md)).
+  [Pin a source to a version](pinning.md)).
+- **`release-tags`**: how the source's release tags are named, a template with
+  one `{version}` and literal text around it (`"skills-v{version}"`,
+  `"release/{version}"`), or `true` for the default `v{version}` or bare
+  `{version}`. The version part must be full semver. A plain meld of a source
+  that declares it pins the caret of its highest stable release. See
+  [Name your release tags](releasing.md#name-your-release-tags).
+- **`yanked`**: release versions (`["1.4.1"]`) a version pin never selects.
+  A source already on one stays there until a newer release in its range.
+- `release-tags`, `yanked`, and `pin-version` are read from the default
+  branch. An older `mind` rejects them, so set `min-mind-version` alongside.
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
@@ -331,7 +342,7 @@ own items plus the `install = true` (or `install-items`) entries.
 A `[[discover.sources]]` entry may supply configuration for a nested source that
 has no `mind.toml` of its own:
 
-- **`follow-branch`** / **`pin-tag`** / **`pin-ref`**: curator-supplied pin
+- **`follow-branch`** / **`pin-tag`** / **`pin-ref`** / **`pin-version`**: curator-supplied pin
   directive for the nested source. Declare at most one; two is an error. `sync`
   uses whichever is set, the same as if the source had declared it in its own
   `[source]` table. A consumer's explicit `meld --pin` still overrides

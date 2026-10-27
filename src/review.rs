@@ -87,8 +87,145 @@ pub fn review(
     alias: Option<String>,
     fix: bool,
 ) -> Result<ReviewResult> {
-    let (source_dir, _temp_guard, is_local) = resolve_target(paths, target, &alias)?;
-    run_checks(paths, &source_dir, alias, fix, is_local)
+    let (source_dir, _temp_guard, is_local, tags_url) = resolve_target(paths, target, &alias)?;
+    let mut result = run_checks(paths, &source_dir, alias.clone(), fix, is_local)?;
+    // spec: VER-130 -- only a tree whose mind.toml parsed reaches this; a
+    // parse error is already the run's hard finding.
+    if !result.hard.iter().any(|f| f.kind == "toml-parse-error") {
+        release_tag_checks(paths, &source_dir, &tags_url, alias, &mut result)?;
+    }
+    Ok(result)
+}
+
+/// VER-130: check a source's `release-tags` against its tags. A template that
+/// does not parse (VER-2) is Check 1's hard finding; a template matching no tag, and a tag fitting the
+/// template's prefix and suffix whose remainder is not semver (VER-10), are
+/// advisories. The VER-65 checks then run from the highest release to the
+/// reviewed tree, so an apparent break shows before a compatible tag. Tags are
+/// listed from `tags_url`: the local repo for a local target, the remote for a
+/// remote or melded one.
+fn release_tag_checks(
+    paths: &Paths,
+    source_dir: &Path,
+    tags_url: &str,
+    alias: Option<String>,
+    result: &mut ReviewResult,
+) -> Result<()> {
+    let Ok(Some(mindfile)) = MindToml::load(source_dir) else {
+        return Ok(());
+    };
+    // A template that does not parse fails `MindToml::load`, which Check 1
+    // already reports as `toml-parse-error`.
+    let Ok(Some(template)) = mindfile
+        .source
+        .release_template(&source_dir.join("mind.toml"))
+    else {
+        return Ok(());
+    };
+    let tags = match git::ls_remote_tags(tags_url) {
+        Ok(t) => t,
+        Err(e) => {
+            result.advisory.push(Finding::advisory(
+                "release-tags-unchecked",
+                format!("could not list tags to check release-tags {template}: {e}"),
+            ));
+            return Ok(());
+        }
+    };
+    for (tag, _) in &tags {
+        if template.is_near_miss(tag) {
+            result.advisory.push(Finding::advisory(
+                "non-semver-release-tag",
+                format!(
+                    "tag {tag} fits release-tags \"{template}\" but is not a semver version; \
+                     it is never selected"
+                ),
+            ));
+        }
+    }
+    let (releases, _) = crate::version::releases(&template, &tags);
+    // Compare with the release consumers are on: the highest stable,
+    // non-yanked one (VER-50), not a newer prerelease or a yanked version.
+    let yanked = mindfile
+        .source
+        .yanked_versions(&source_dir.join("mind.toml"))
+        .unwrap_or_default();
+    let Some(highest) =
+        crate::version::highest_stable(&releases, &yanked).or_else(|| releases.first())
+    else {
+        result.advisory.push(Finding::advisory(
+            "no-release-tags",
+            format!(
+                "release-tags \"{template}\" matches no tag; a version pin finds nothing until \
+                 a release is tagged"
+            ),
+        ));
+        return Ok(());
+    };
+
+    // The highest release's catalog, from a throwaway clone at its tag.
+    paths.ensure_layout()?;
+    let tmp = paths.tmp_dir().join(format!(
+        "review-release-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    ));
+    let _guard = TempDirGuard(tmp.clone());
+    if let Err(e) = git::clone_at(
+        tags_url,
+        &tmp,
+        &crate::source::Pin::Tag(highest.tag.clone()),
+    ) {
+        result.advisory.push(Finding::advisory(
+            "release-tags-unchecked",
+            format!(
+                "could not check out release {} to compare with: {e}",
+                highest.tag
+            ),
+        ));
+        return Ok(());
+    }
+    let released_mindfile = MindToml::load(&tmp).ok().flatten();
+    let mut released: Vec<CatalogItem> = Vec::new();
+    let mut current: Vec<CatalogItem> = Vec::new();
+    let scanned = scan_source_reporting(
+        &tmp,
+        &build_source(&tmp, &released_mindfile, alias.clone()),
+        &mut released,
+    )
+    .and_then(|_| {
+        scan_source_reporting(
+            source_dir,
+            &build_source(source_dir, &Some(mindfile), alias),
+            &mut current,
+        )
+    });
+    if scanned.is_err() {
+        // Either scan failing is reported by the main checks or not
+        // comparable; the comparison is advisory, so skip it.
+        return Ok(());
+    }
+    let siblings: Vec<&CatalogItem> = current.iter().collect();
+    let cases = crate::commands::apparent_break_cases(
+        released
+            .iter()
+            .map(|c| (c.kind, c.name.as_str(), format!("{}:{}", c.kind, c.name))),
+        &siblings,
+    );
+    for case in cases {
+        result.advisory.push(Finding::advisory(
+            "apparent-break",
+            format!(
+                "since release {} ({}), this tree {case}; a compatible release would break \
+                 consumers on ^{}",
+                highest.version, highest.tag, highest.version
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// `mind review --policy <path>` — validate a managed policy file.
@@ -182,11 +319,11 @@ fn resolve_target(
     paths: &Paths,
     target: &str,
     alias: &Option<String>,
-) -> Result<(PathBuf, Option<TempDirGuard>, bool)> {
+) -> Result<(PathBuf, Option<TempDirGuard>, bool, String)> {
     // Try registry match first (exact or suffix).
     // This covers both the melded-selector case and the "owner/repo" ambiguity.
-    if let Some(dir) = try_registry_match(paths, target)? {
-        return Ok((dir, None, false));
+    if let Some((dir, url)) = try_registry_match(paths, target)? {
+        return Ok((dir, None, false, url));
     }
 
     // spec: CLI-214 -- a target naming an EXISTING directory is reviewed as
@@ -207,7 +344,8 @@ fn resolve_target(
             eprintln!("{note}");
         }
         let _ = alias; // alias is applied at check time, not here
-        return Ok((dir, None, true));
+        let url = dir.to_string_lossy().into_owned();
+        return Ok((dir, None, true, url));
     }
 
     // Parse as a spec (local path or remote).
@@ -223,7 +361,7 @@ fn resolve_target(
             });
         }
         let _ = alias; // alias is applied at check time, not here
-        return Ok((dir, None, true));
+        return Ok((dir, None, true, source.url));
     }
 
     // Remote spec: shallow-clone to a temp dir, register a drop guard.
@@ -240,7 +378,7 @@ fn resolve_target(
     let guard = TempDirGuard(tmp.clone());
 
     git::clone(&source.url, &tmp)?;
-    Ok((tmp, Some(guard), false))
+    Ok((tmp, Some(guard), false, source.url))
 }
 
 /// The advisory note printed when `target` is read as a local directory
@@ -278,8 +416,9 @@ fn shadow_note(target: &str) -> Option<String> {
     ))
 }
 
-/// Look up `target` as a registry selector. Returns the clone dir if found.
-fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
+/// Look up `target` as a registry selector. Returns the clone dir and the
+/// source's url if found.
+fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<(PathBuf, String)>> {
     let registry = Registry::load(paths)?;
     let matches: Vec<&Source> = registry
         .sources
@@ -291,7 +430,7 @@ fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
         [] => Ok(None),
         [only] => {
             let dir = only.clone_dir(paths);
-            Ok(Some(dir))
+            Ok(Some((dir, only.url.clone())))
         }
         many => Err(MindError::AmbiguousSource {
             query: target.to_string(),
@@ -1930,7 +2069,7 @@ mod tests {
             result.is_some(),
             "suffix match in registry must return the clone dir"
         );
-        let dir = result.unwrap();
+        let (dir, _url) = result.unwrap();
         assert!(
             dir.ends_with("agents"),
             "should resolve to the registered clone dir: {dir:?}"
@@ -1967,7 +2106,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let paths = paths_for(base);
 
-        let (resolved, guard, is_local) =
+        let (resolved, guard, is_local, _tags_url) =
             resolve_target(&paths, &dir.to_string_lossy(), &None).unwrap();
         assert_eq!(resolved, dir);
         assert!(is_local, "an existing directory must resolve as local");

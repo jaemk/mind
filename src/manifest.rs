@@ -79,6 +79,12 @@ pub struct InstalledItem {
     /// Omitted when false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub explicit: bool,
+
+    /// The release version `commit` resolved from, when the source is
+    /// version-pinned (VER-60), so `upgrade` can show the version delta.
+    /// Omitted for any other pin, and for items installed before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// `skip_serializing_if` helper: omit a `false` flag from `manifest.json`.
@@ -153,6 +159,7 @@ impl InstalledItem {
             // safe to print as-is.
             profiles: self.profiles.clone(),
             explicit: self.explicit,
+            version: self.version.as_deref().map(s),
         }
     }
 }
@@ -320,6 +327,7 @@ mod tests {
             dropped_requires: Vec::new(),
             profiles: Vec::new(),
             explicit: false,
+            version: None,
         }
     }
 

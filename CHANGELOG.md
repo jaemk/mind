@@ -17,6 +17,49 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tags with `[source].release-tags` (default `v{version}` or a bare
   `{version}`) and can exclude versions with `[source].yanked`. See
   `docs/src/pinning.md`.
+- `[source].pin-version = "<range>"` declares the range a plain meld pins.
+- Version resolution skips a release whose `min-mind-version` the binary does
+  not meet. `upgrade` shows the release delta (`version 1.1.0 -> 1.2.0`),
+  warns when a compatible release drops an installed item, changes its kind,
+  or removes a `{{ns:}}` referent, and shows an annotated tag's message in the
+  breaking-release prompt.
+- `forget --dropped` removes installed items their source no longer offers, or
+  whose source is no longer melded.
+- `[sources].allow-version-ranges` lets a `pinned = true` policy accept a
+  version range. An exact version (`version==1.2.3`) is always pinned.
+  `[[sources.auto_meld]]` entries take `version = "<range>"`.
+- A curator's `[[discover.sources]]` entry takes `pin-version`.
+- `dump --ranges` writes a version-pinned source's range as `pin-version`
+  instead of freezing it to its commit.
+- `review` checks `release-tags`: `no-release-tags`, `non-semver-release-tag`,
+  `apparent-break` since the highest release, and `release-tags-unchecked`.
+- `init-source` declares `release-tags = "v{version}"` when the repo already
+  has matching tags.
+- `recall` suggests `meld --pin version=^<v>` for a source pinned to a release
+  tag.
+- `recall` shows a version-pinned source's release and range, and marks a
+  breaking release available (with the command that takes it) or a resolved
+  release that was since yanked. A source on a yanked release stays there
+  until a newer release in its range appears.
+- `--json` output gives each version-pinned source a `version` object
+  (`recall --sources`, and a `sources` array on `sync` and `upgrade`).
+  `upgrade --json` lists breaking releases in a `breaking` array.
+- A plain meld that pins a release range says so on stderr.
+- docs: "Publish versioned releases" for source maintainers.
+
+### Changed
+
+- A plain `meld` of a remote source that declares `release-tags` pins the
+  caret of its highest stable release (`^1.4.2`) instead of following the
+  default branch. A local path meld still stays linked to its working tree.
+- The `UnpinnedSourceForbidden` message now reads "must be pinned to a tag,
+  ref, or exact version".
+
+### Fixed
+
+- `meld --json` of a source that needs a newer `mind` no longer asks
+  `continue melding ... anyway?` on a terminal. It fails as it does with no
+  terminal; pass `--yes` to meld it anyway.
 
 ## [0.32.1] - 2026-10-22
 

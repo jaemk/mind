@@ -187,7 +187,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   deprecated alias (CLI-202). Supplying more than one (two aliases, or `--pin` plus
   an alias) is `ConflictingPin`. The chosen pin is persisted on the source
   (STO-18). With no pin flag, the source's `[source]` pin directive (DSC-41)
-  applies, else the default is following the remote default branch. `--pin`
+  applies, else a remote source declaring `release-tags` pins the caret of its
+  highest stable release (VER-50), else the default is following the remote
+  default branch. `--pin`
   requires a value, so there is no bare-flag form that could ambiguously consume
   the following positional argument.
 - `CLI-18` `meld` clones at the pinned point and records the resolved HEAD commit.
@@ -207,8 +209,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   proceeds.
 - `CLI-201` `--pin branch=<name>` and `--pin tag=<name>` record a floating pin:
   `branch=<name>` tracks that branch (`follow-branch`); `tag=<name>` tracks that
-  tag (`tag`), which re-points on sync if the upstream tag moves (CLI-55). A value
-  carrying an unrecognized `key=` form (anything but `branch=` or `tag=`) is a
+  tag (`tag`), which re-points on sync if the upstream tag moves (CLI-55).
+  `--pin version=<range>` records a version pin (VER-20). A value carrying an
+  unrecognized `key=` form (anything but `branch=`, `tag=`, or `version=`) is a
   `BadPinSpec` usage error, so a mistyped key is not silently taken as a ref name.
 - `CLI-202` The former `--follow-branch <branch>`, `--pin-tag <tag>`, and
   `--pin-ref <commit>` flags remain as hidden deprecated aliases mapping onto the
@@ -594,6 +597,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   removing any. `--yes` (`-y`) skips the prompt; a non-TTY run without `--yes`
   refuses (`ConfirmationRequired`) rather than removing silently. Removing a
   single exact match is not prompted.
+- `CLI-245` `forget --dropped` removes every installed item its source no
+  longer offers: no catalog item shares its stable identity (source, kind, bare
+  name), as `recall` marks "removed upstream", or its source is no longer
+  melded (`unmeld --keep-items`, CLI-22). An item whose source is melded but
+  whose clone is missing is kept, since nothing says it was dropped. An optional
+  `<item>` ref or glob narrows the set. CLI-42's confirmation applies when more
+  than one item would go. With nothing dropped it says so and removes nothing;
+  under `--json` the outcome is `no-op`.
 
 ## sync
 
@@ -713,7 +724,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `follow-branch` source resets to that branch's current tip and updates the
   recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the
   pinned tag / commit, so its recorded commit moves only if the upstream tag was
-  moved (a moved tag is reset to). `sync` never changes the pin itself (cf.
+  moved (a moved tag is reset to). A version pin re-resolves its range
+  (VER-43). `sync` never changes the pin itself (cf.
   CLI-52 for aliases). `upgrade` and `introspect` operate on the synced (pinned)
   content, so a `pin-tag` source does not report drift as upstream's default
   branch advances past the tag.

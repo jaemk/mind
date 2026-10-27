@@ -469,7 +469,8 @@ run = "make build"
 - `DSC-59` A `[discover].sources` entry may carry configuration for the
   nested source that the source itself would normally declare in its own
   `mind.toml`: a pin directive (exactly one of `follow-branch = "<branch>"`,
-  `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`, per DSC-41), `roots = [...]`
+  `pin-tag = "<tag>"`, `pin-ref = "<commit>"`, or `pin-version = "<range>"`,
+  per DSC-41 and VER-110), `roots = [...]`
   (convention scan roots, DSC-50), `add-roots = [...]` (additive convention
   scan roots, DSC-84; gated like `roots`, see DSC-88), `flat-skills = true`
   (flat skill layout, DSC-74; see DSC-77), and one or more hooks as a
@@ -587,9 +588,10 @@ run = "make build"
   decided at meld time (DSC-116). `review` still reports it as a hard
   `incompatible-version` finding (CLI-132).
 - `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
-  `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
+  `pin-tag = "<tag>"`, `pin-ref = "<commit>"`, or `pin-version = "<range>"`
+  (VER-51). It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives
-  no `--follow-branch` / `--pin-tag` / `--pin-ref` flag at meld (CLI-17); a
+  no `--pin` (or deprecated alias) flag at meld (CLI-17); a
   consumer flag overrides it. Declaring more than one is a `MindToml` error. (See
   CLI-18 for clone behavior and CLI-55 for how `sync` treats each pin kind.)
 
@@ -1061,7 +1063,8 @@ field lets the curator opt in to named handling.
   names both versions, `mind evolve`, and `--yes`. `meld --yes` skips the
   question and melds with the warning, and the answer carries to the sources
   that meld walks (`[discover].sources`, a marketplace's entries). With no
-  terminal to ask on and no `--yes`, the meld fails as if declined, and so do
+  terminal to ask on, or under `--json` (LIFE-45), and no `--yes`, the meld
+  fails as if declined, and so do
   the melds that `curate`, `sync`, and a policy auto-meld run on their own.
   The check reads the `mind.toml` at the resolved pin.
 

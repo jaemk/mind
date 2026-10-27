@@ -289,7 +289,7 @@ and verified.
 | `resource` item kind: a store-only file or directory under `resources/`, offered by convention only when an item references it, reached by `{{resources:name}}` | done | [resources.md](resources.md) (RES-1..14) |
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 | Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
-| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking` | partial | [versions.md](versions.md) (VER-1..131) |
+| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking` | done | [versions.md](versions.md) (VER-1..131) |
 
 ## Documents
 

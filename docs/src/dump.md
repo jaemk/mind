@@ -32,11 +32,17 @@ installed from a pasted link reproduces too.
 mind dump                          # to stdout
 mind dump --output snapshot.toml   # to a file
 mind dump --whole-sources          # install = true for every source
+mind dump --ranges                 # keep release ranges instead of commits
 ```
 
 `--whole-sources` drops the per-item filtering and offers each source's full
 catalog instead of the subset you installed. With no sources melded, `dump`
 writes a valid empty super-source.
+
+Every source is frozen to its recorded commit (`pin-ref`). With `--ranges`, a
+source [pinned to a version range](pinning.md#follow-release-versions) is
+written as `pin-version = "^1.2"` instead, so the reproduction takes the
+highest compatible release when it is melded. An item link keeps its commit.
 
 ## Reproduce it
 

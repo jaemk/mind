@@ -68,9 +68,13 @@ lock = true
 # Default is true (local-path melds are evaluated against allow like any source).
 allow-local = false
 
-# Every meld must resolve to a tag or ref; floating branches are refused. When
-# pinned, every auto_meld entry below must declare a tag or ref.
+# Every meld must resolve to a tag, a ref, or an exact release version
+# (`version==1.2.3`); floating branches and version ranges are refused. When
+# pinned, every auto_meld entry below must declare one of those.
 pinned = true
+
+# Also count a release version range (`version=^1.2`) as pinned. Default false.
+allow-version-ranges = true
 
 # Sources mind provisions automatically (melds if not already present), during
 # `sync`. `repo` is a repo spec as `meld` accepts (owner/repo, a URL, git@, or a
@@ -90,6 +94,12 @@ install = true
 repo = "https://github.example.com/platform/security-rules"
 ref = "9f3a1c2e7b1d0a4c5e6f8a9b0c1d2e3f40516273"
 install = true
+
+# A release version range (see "Pin a source to a version"). One of tag, ref,
+# follow_branch, or version per entry.
+[[sources.auto_meld]]
+repo = "acme/skills"
+version = "^2"
 
 [lobes]
 # Lock the agent homes: `config lobes` edits and $MIND_AGENT_HOMES are refused,
