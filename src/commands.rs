@@ -4545,6 +4545,9 @@ impl LearnTarget {
 enum Selection<'a> {
     Ref(&'a str),
     Exact(&'a LearnTarget),
+    /// Several exact targets installed as one closure, so a profile's members
+    /// share one catalog scan and one manifest write (PROF-35).
+    ExactMany(&'a [LearnTarget]),
 }
 
 impl Selection<'_> {
@@ -4554,6 +4557,11 @@ impl Selection<'_> {
         match self {
             Selection::Ref(r) => (*r).to_string(),
             Selection::Exact(t) => t.display(),
+            Selection::ExactMany(ts) => ts
+                .iter()
+                .map(LearnTarget::display)
+                .collect::<Vec<_>>()
+                .join(", "),
         }
     }
 }
@@ -4622,6 +4630,15 @@ fn resolve_learn(
                 });
             }
         },
+        Selection::ExactMany(targets) => targets
+            .iter()
+            .map(|t| {
+                exact_index(&items, t).ok_or_else(|| MindError::ItemNotFound {
+                    query: t.display(),
+                    sources: registry.sources.len(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
 
     // What is already installed (manifest keys are `CatalogItem::key()` form).
@@ -4658,6 +4675,48 @@ fn learn_plan(paths: &Paths, selection: Selection<'_>) -> Result<LearnPlan> {
             .map(|&i| items[i].key().as_str().to_string())
             .collect(),
     })
+}
+
+/// [`learn_plan`] for each of `targets`, resolved separately but against one
+/// catalog scan, one manifest read, and one read of each item's text, so
+/// planning a profile costs one scan however many members it has (PROF-35).
+fn learn_plans(paths: &Paths, targets: &[&LearnTarget]) -> Result<Vec<LearnPlan>> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry = Registry::load(paths)?;
+    let items = catalog::scan(paths, &registry)?;
+    let installed: HashSet<String> = Manifest::load(paths)?.items.keys().cloned().collect();
+    let texts: std::cell::RefCell<std::collections::HashMap<(String, String), String>> =
+        Default::default();
+    let read = |it: &CatalogItem| {
+        let id = (it.source.clone(), it.key().as_str().to_string());
+        texts
+            .borrow_mut()
+            .entry(id)
+            .or_insert_with(|| read_item_text(it))
+            .clone()
+    };
+    targets
+        .iter()
+        .map(|target| {
+            let idx = exact_index(&items, target).ok_or_else(|| MindError::ItemNotFound {
+                query: target.display(),
+                sources: registry.sources.len(),
+            })?;
+            let resolution = crate::deps::resolve(&items, &[idx], &installed, read);
+            let order = resolution.install_order();
+            Ok(LearnPlan {
+                tree: resolution.render_tree(&items),
+                adds_dependencies: resolution.adds_dependencies(),
+                install_count: order.len(),
+                keys: order
+                    .iter()
+                    .map(|&i| items[i].key().as_str().to_string())
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// `mind learn <item> [--dry-run] [--yes]` — install one item, its
@@ -5976,10 +6035,13 @@ fn plan_profile_install(paths: &Paths, req: &ProfileInstall<'_>) -> Result<Profi
         std::collections::BTreeMap::new();
     let mut pending: Vec<String> = Vec::new();
     let mut trees: Vec<String> = Vec::new();
-    for m in members.iter().filter(|m| !m.installed) {
-        // spec: PROF-6 -- each member resolves through the ordinary learn
-        // path, so its closure is DEP-30's.
-        let plan = learn_plan(paths, Selection::Exact(&m.target))?;
+    let fresh: Vec<&ProfileMember> = members.iter().filter(|m| !m.installed).collect();
+    // spec: PROF-6 -- each member resolves through the ordinary learn path,
+    // so its closure is DEP-30's. spec: PROF-35 -- one catalog scan serves
+    // every member.
+    let targets: Vec<&LearnTarget> = fresh.iter().map(|m| &m.target).collect();
+    let plans = learn_plans(paths, &targets)?;
+    for (m, plan) in fresh.into_iter().zip(plans) {
         for key in &plan.keys {
             reasons
                 .entry(key.clone())
@@ -6036,18 +6098,16 @@ fn apply_profile_plan(
         enabled: enabled.into_iter().collect(),
         reasons: plan.reasons.clone(),
     });
-    let mut failure: Option<MindError> = None;
-    for m in plan.fresh() {
-        let r = if collect {
-            learn_collecting_exact(paths, &m.target, flow).map(|_| ())
-        } else {
-            learn_exact(paths, &m.target, false, flow)
-        };
-        if let Err(e) = r {
-            failure = Some(e);
-            break;
-        }
-    }
+    // spec: PROF-35 -- every fresh member installs in one learn pass over
+    // their combined closure, rather than one full learn per member.
+    let targets: Vec<LearnTarget> = plan.fresh().map(|m| m.target.clone()).collect();
+    let failure: Option<MindError> = if targets.is_empty() {
+        None
+    } else if collect {
+        learn_collecting_selected(paths, Selection::ExactMany(&targets), flow).err()
+    } else {
+        learn_selected(paths, Selection::ExactMany(&targets), false, flow).err()
+    };
     let mut manifest = Manifest::load(paths)?;
     let installed_keys: Vec<String> = plan
         .pending
@@ -6112,11 +6172,45 @@ fn print_profile_header(source_name: &str, plan: &ProfilePlan) {
         .map(String::as_str)
         .collect();
     if !others.is_empty() {
+        // spec: PROF-34 -- name commands that still work after the meld.
+        let quoted = crate::error::shell_quote(&strip_ansi(source_name));
         println!(
-            "  not enabled: {} (enable with --profile <name>, or --all-profiles)",
+            "  not enabled: {}; list their items with `mind recall --profiles {quoted}`, \
+             enable one with `mind learn {quoted} --profile <name>` (or --all-profiles)",
             others.join(", ")
         );
     }
+}
+
+/// The PROF-35 progress line printed before a profile install resolves, so a
+/// large source does not look stuck. Not printed under `--json`.
+fn print_profile_progress(paths: &Paths, source_name: &str, selection: &crate::profile::Selection) {
+    if json_mode() {
+        return;
+    }
+    // Only the enabled set's names; an error here (an undeclared name) is
+    // raised by the resolve that follows, so it is not reported twice.
+    let Ok(registry) = Registry::load(paths) else {
+        return;
+    };
+    let Some(source) = registry.find(source_name) else {
+        return;
+    };
+    let Ok(table) = source_profile_table(paths, source) else {
+        return;
+    };
+    let Ok(enabled) = crate::profile::enabled_set(table.as_ref(), selection, source_name) else {
+        return;
+    };
+    if enabled.is_empty() {
+        return;
+    }
+    println!(
+        "{} resolving profile(s) {} of {} ...",
+        crate::render::ctx().bullet(),
+        enabled.join(", "),
+        strip_ansi(source_name)
+    );
 }
 
 /// The pasteable command that installs `plan` later (PROF-9, PROF-10).
@@ -6180,6 +6274,8 @@ pub(crate) fn install_source_profiles(
     req: &ProfileInstall<'_>,
     flow: InstallFlow,
 ) -> Result<ProfileInstallOutcome> {
+    // spec: PROF-35
+    print_profile_progress(paths, req.source_name, req.selection);
     let plan = plan_profile_install(paths, req)?;
     let mut outcome = ProfileInstallOutcome {
         enabled: plan.enabled.clone(),
@@ -6662,6 +6758,8 @@ pub fn learn_source_profiles(
         learn_patterns: &[],
         only_missing_from_snapshot: false,
     };
+    // spec: PROF-35
+    print_profile_progress(paths, &source_name, selection);
     let plan = plan_profile_install(paths, &req)?;
     let out = crate::render::ctx();
     let result = |outcome: &'static str, installed: Vec<String>| {
@@ -6994,6 +7092,161 @@ fn print_profile_block(paths: &Paths, sources: &[&crate::source::Source]) {
     for l in lines {
         println!("{l}");
     }
+}
+
+/// One profile of a `recall --profiles` listing (PROF-31, PROF-32): either its
+/// expansion (`items`, `installed`, `total`) or the `error` expanding it gave.
+#[derive(Serialize, Debug)]
+struct ProfileListing {
+    name: String,
+    enabled: bool,
+    members: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    items: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// One source of a `recall --profiles` listing (PROF-31, PROF-32).
+#[derive(Serialize, Debug)]
+struct SourceProfiles {
+    source: String,
+    profiles: Vec<ProfileListing>,
+}
+
+/// The PROF-31 listing of `source`'s declared profiles, or `None` when it
+/// declares none. Each profile is expanded on its own against the source's
+/// current catalog; an expansion error (or a scan failure) is reported on the
+/// row instead of failing the listing.
+fn source_profile_listing(
+    paths: &Paths,
+    source: &crate::source::Source,
+    manifest: &Manifest,
+) -> Option<SourceProfiles> {
+    let table = display_profile_table(paths, source)?;
+    let enabled = source.profiles.clone().unwrap_or_default();
+    let items = scan_one(paths, source);
+    let profiles = table
+        .iter()
+        .map(|(name, members)| {
+            let mut row = ProfileListing {
+                name: name.clone(),
+                enabled: enabled.contains(name),
+                members: members.iter().map(|m| strip_ansi(m)).collect(),
+                items: None,
+                installed: None,
+                total: None,
+                error: None,
+            };
+            let expansion = items.as_ref().map_err(|e| e.to_string()).and_then(|items| {
+                crate::profile::expand(&table, std::slice::from_ref(name), items, &source.name)
+                    .map(|x| (x, items))
+                    .map_err(|e| e.to_string())
+            });
+            match expansion {
+                Ok((x, items)) => {
+                    let keys: Vec<String> = x
+                        .keys
+                        .keys()
+                        .filter_map(|bare| {
+                            items
+                                .iter()
+                                .find(|it| format!("{}:{}", it.kind.as_str(), it.name) == *bare)
+                                .map(|it| it.key().as_str().to_string())
+                        })
+                        .collect();
+                    let installed = keys
+                        .iter()
+                        .filter(|k| {
+                            manifest
+                                .items
+                                .get(*k)
+                                .is_some_and(|m| m.source == source.name)
+                        })
+                        .count();
+                    row.total = Some(keys.len());
+                    row.installed = Some(installed);
+                    row.items = Some(keys.iter().map(|k| strip_ansi(k)).collect());
+                }
+                Err(e) => row.error = Some(strip_ansi(&e)),
+            }
+            row
+        })
+        .collect();
+    Some(SourceProfiles {
+        source: source.name.clone(),
+        profiles,
+    })
+}
+
+/// `recall --profiles [<source>]` (PROF-31, PROF-32), and `learn <source>
+/// --profile` with no value (PROF-33): each listed source's declared profiles
+/// with their members, enabled state, and installed count, then the `learn`
+/// command that enables each profile that is not enabled.
+// spec: PROF-31 PROF-32 PROF-33
+pub fn list_profiles(paths: &Paths, source_ref: Option<&str>, json: bool) -> Result<()> {
+    let registry = Registry::load(paths)?;
+    let selected: Vec<&crate::source::Source> = match source_ref {
+        Some(r) => {
+            let name = resolve_profile_source(paths, r)?;
+            registry.sources.iter().filter(|s| s.name == name).collect()
+        }
+        None => registry.sources.iter().collect(),
+    };
+    let manifest = Manifest::load(paths)?;
+    let listings: Vec<SourceProfiles> = selected
+        .iter()
+        .filter_map(|s| source_profile_listing(paths, s, &manifest))
+        .collect();
+    if json {
+        return print_json_envelope(&listings);
+    }
+    if listings.is_empty() {
+        match selected.as_slice() {
+            [only] if source_ref.is_some() => {
+                println!("{} declares no profiles", strip_ansi(&only.name))
+            }
+            _ => println!("no melded source declares profiles"),
+        }
+        return Ok(());
+    }
+    let out = crate::render::ctx();
+    for (i, listing) in listings.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("profiles of {}:", strip_ansi(&listing.source));
+        let rows = listing
+            .profiles
+            .iter()
+            .map(|p| {
+                let name = if p.enabled {
+                    format!("{} (enabled)", p.name)
+                } else {
+                    p.name.clone()
+                };
+                let status = match (&p.error, p.installed, p.total) {
+                    (Some(e), _, _) => format!("error: {e}"),
+                    (None, Some(n), Some(m)) => format!("{n}/{m} installed"),
+                    _ => String::new(),
+                };
+                vec![out.bullet(), name, p.members.join(", "), out.dim(&status)]
+            })
+            .collect::<Vec<_>>();
+        out.print_rows(&rows);
+        let quoted = crate::error::shell_quote(&strip_ansi(&listing.source));
+        for p in listing.profiles.iter().filter(|p| !p.enabled) {
+            println!(
+                "  enable {}: mind learn {quoted} --profile {}",
+                p.name, p.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Insert PROF-29's `profiles` (profile name -> declared members, members

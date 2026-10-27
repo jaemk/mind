@@ -78,9 +78,14 @@ them in the source's details dialog, with Enable and Disable actions.
 ### Change profiles later
 
 ```
+mind learn owner/repo --profile          # list the profiles you can enable
+mind recall --profiles owner/repo        # the same, with what each installs
 mind learn owner/repo --profile full     # enable full and install its items
 mind forget owner/repo --profile full    # disable full
 ```
+
+`mind recall --profiles` with no source lists every melded source that declares
+profiles.
 
 Disabling a profile forgets the items that were installed only for it. It keeps
 an item you installed by name, an item another enabled profile includes, and an

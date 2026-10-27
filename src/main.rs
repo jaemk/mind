@@ -614,6 +614,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             no_default_profile,
             all_profiles,
         } => {
+            // spec: PROF-33 -- `--profile` with no value lists the source's
+            // profiles; an empty value beside named ones is ignored.
+            let list_profiles = !profiles.is_empty()
+                && profiles.iter().all(|p| p.trim().is_empty())
+                && !all_profiles;
+            let profiles: Vec<String> = profiles
+                .into_iter()
+                .filter(|p| !p.trim().is_empty())
+                .collect();
             let profile_names = crate::profile::parse_cli_names(&profiles)?;
             let profile_flags =
                 crate::profile::flags_given(&profile_names, no_default_profile, all_profiles);
@@ -667,6 +676,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     "note: --no-default-profile changes nothing for learn, which enables only \
                      the profiles it names"
                 );
+            }
+            if list_profiles {
+                return commands::list_profiles(paths, Some(&item), json);
             }
             // spec: PROF-17 -- `learn <source> --profile/--all-profiles`
             // installs those profiles of an already-melded source.
@@ -785,10 +797,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             kind,
             source,
             tree,
+            profiles,
         } => {
             // spec: AUP-21
             if !json {
                 auto_update::show_unshown(paths);
+            }
+            // spec: PROF-31
+            if let Some(source_ref) = profiles {
+                return commands::list_profiles(paths, source_ref.as_deref(), json);
             }
             commands::recall(
                 paths,
