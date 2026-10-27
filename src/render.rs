@@ -351,6 +351,53 @@ pub fn visible_width(s: &str) -> usize {
     count
 }
 
+/// The width plain output wraps to: `COLUMNS` when set to a number, else the
+/// terminal's width when stdout is one, else 80. Never below 40, so a tiny or
+/// bogus value still leaves room for a prefix and a word.
+pub fn term_width() -> usize {
+    use std::io::IsTerminal;
+    let env = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok());
+    let tty = || {
+        std::io::stdout()
+            .is_terminal()
+            .then(|| crossterm::terminal::size().ok())
+            .flatten()
+            .map(|(cols, _)| usize::from(cols))
+    };
+    env.or_else(tty).unwrap_or(80).max(40)
+}
+
+/// Lay `tokens` out on lines no wider than `width`, joined by single spaces:
+/// the first line starts with `first`, each later one with `cont` (a hanging
+/// indent). A line breaks only between tokens, so a token wider than the room
+/// left overflows its own line rather than being split.
+pub fn wrap_tokens<S: AsRef<str>>(
+    tokens: &[S],
+    first: &str,
+    cont: &str,
+    width: usize,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = first.to_string();
+    let mut empty = true;
+    for token in tokens {
+        let token = token.as_ref();
+        if !empty && visible_width(&line) + 1 + visible_width(token) > width {
+            lines.push(std::mem::replace(&mut line, cont.to_string()));
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(token);
+        empty = false;
+    }
+    lines.push(line);
+    lines
+}
+
 /// Detect whether the active locale advertises UTF-8.
 ///
 /// Checks `LC_ALL`, `LC_CTYPE`, `LANG` in that order (first set wins).
@@ -657,6 +704,50 @@ mod tests {
     // ==========================================================================
     // visible_width
     // ==========================================================================
+
+    // wrap_tokens
+
+    #[test]
+    fn wrap_tokens_keeps_a_short_list_on_one_line() {
+        let lines = wrap_tokens(&["a,", "b,", "c"], "members: ", "         ", 40);
+        assert_eq!(lines, vec!["members: a, b, c"]);
+    }
+
+    #[test]
+    fn wrap_tokens_breaks_between_tokens_with_a_hanging_indent() {
+        let tokens = [
+            "skill:review,",
+            "rule:style,",
+            "agent:planner,",
+            "skill:deploy",
+        ];
+        let lines = wrap_tokens(&tokens, "  m: ", "     ", 30);
+        assert_eq!(
+            lines,
+            vec![
+                "  m: skill:review, rule:style,",
+                "     agent:planner,",
+                "     skill:deploy",
+            ]
+        );
+        assert!(lines.iter().all(|l| visible_width(l) <= 30), "{lines:?}");
+    }
+
+    #[test]
+    fn wrap_tokens_lets_an_oversized_token_overflow_its_own_line() {
+        let long = "x".repeat(50);
+        let lines = wrap_tokens(&["a", long.as_str(), "b"], "> ", "  ", 20);
+        assert_eq!(
+            lines,
+            vec!["> a".to_string(), format!("  {long}"), "  b".into()]
+        );
+    }
+
+    #[test]
+    fn wrap_tokens_with_no_tokens_is_the_bare_prefix() {
+        let lines = wrap_tokens::<&str>(&[], "members: ", "  ", 40);
+        assert_eq!(lines, vec!["members: "]);
+    }
 
     #[test]
     fn visible_width_plain_string_counts_chars() {

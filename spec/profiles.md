@@ -247,13 +247,13 @@ the user named.
 
 - `PROF-31` `recall --profiles [<source>]` lists the declared profiles of each
   melded source that declares any, or of the one source named by a CLI-36
-  selector. Each profile is one row: its name, marked `(enabled)` when it is in
-  the recorded set, its members as declared, and `<n>/<m> installed`, where
-  `<m>` is the size of its expansion against the current catalog and `<n>` how
-  many of those items are installed from this source. A profile whose expansion
-  fails (PROF-5) shows the error in place of the count. Each source then gets one
-  `mind learn <source> --profile <name>` line (the source shell-quoted, CLI-225)
-  per profile that is not enabled. With no selector and no source declaring
+  selector. Each profile shows its name, marked `(enabled)` when it is in the
+  recorded set, its members as declared, and `<n>/<m> installed`, where `<m>`
+  is the size of its expansion against the current catalog and `<n>` how many
+  of those items are installed from this source. A profile whose expansion
+  fails (PROF-5) shows the error in place of the count. Each profile that is not
+  enabled also shows its `mind learn <source> --profile <name>` command (the
+  source shell-quoted, CLI-225). With no selector and no source declaring
   profiles, it says so; a selected source that declares none is reported the
   same way. An unknown or ambiguous selector fails as for `learn <source>
   --profile` (PROF-17). `--profiles` conflicts with `--sources`, `--tree`, an
@@ -279,6 +279,13 @@ the user named.
   for all members, and the members install in one `learn` pass over their
   combined closure, so the time grows with the number of members rather than
   with its square.
+- `PROF-36` The PROF-31 listing prints one block per profile: a heading line
+  with the name and the installed count, the counts aligned across the
+  source's headings, then indented `members:`, `error:`, and `enable:` lines.
+  The members and the error wrap at the output width under a hanging indent,
+  breaking only between members or words; the `enable:` command stays on one
+  line so it copies whole. The width is `COLUMNS` when set, else the terminal's
+  width when stdout is one, else 80, and never below 40.
 
 ## Out of scope
 
