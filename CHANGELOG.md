@@ -24,10 +24,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `[source].pin-version` must be a range. An exact version (`"=1.2.3"`) is a
-  `mind.toml` error at `meld` and a `review` finding, and is never recorded as a
-  recommendation. Consumers still hold a release with `--pin version==1.2.3`,
-  and a curator's `[[discover.sources]]` entry may still pin one.
+- An exact `[source].pin-version` (`"=1.2.3"`) reads as its caret (`^1.2.3`),
+  both as the range a plain meld pins and as the recommendation, and `review`
+  notes it. Consumers still hold a release with `--pin version==1.2.3`, and a
+  curator's `[[discover.sources]]` entry may still pin one.
 
 ## [0.33.0] - 2026-10-26
 

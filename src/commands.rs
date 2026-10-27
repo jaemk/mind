@@ -14454,11 +14454,7 @@ fn auto_update_breaking_move(
     let Some(recommended) = recommended_for_breaking(&source.pin) else {
         return Ok(None);
     };
-    // spec: VER-53 -- an exact recommendation (recorded by an older binary)
-    // would leave the source on a hold auto-update never moves again (AUP-2).
-    let Some(range) = crate::version::Range::parse(&recommended)
-        .filter(|r| !matches!(r, crate::version::Range::Exact(_)))
-    else {
+    let Some(range) = crate::version::Range::parse(&recommended) else {
         return Ok(None);
     };
     let mut moved = source.clone();

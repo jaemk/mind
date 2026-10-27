@@ -525,7 +525,7 @@ fn breaking_moves_follow_the_recommended_range() {
 }
 
 #[test]
-fn an_exact_recommendation_moves_nothing() {
+fn an_exact_recommendation_moves_to_its_caret() {
     // spec: VER-53 AUP-12
     let declare = "auto-update = \"breaking\"\n";
     let sb = melded("auto-major-exact", declare, "--auto-update");
@@ -537,13 +537,17 @@ fn an_exact_recommendation_moves_nothing() {
     );
     let r = sb.mind(&["auto-update", "run"]);
     assert!(r.success, "{}{}", r.stdout, r.stderr);
-    assert_eq!(sb.entry()["pin"]["value"]["range"], "^1");
-    assert!(
-        sb.entry()["pin"]["value"].get("recommended").is_none(),
-        "{}",
-        sb.entry()
+    // A range, so later releases in 2.x keep arriving.
+    assert_eq!(sb.entry()["pin"]["value"]["range"], "^2.0.0");
+    assert_eq!(sb.entry()["pin"]["value"]["resolved"], "2.0.0");
+    sb.commit(
+        &agent("two-one"),
+        &toml(&format!("{declare}pin-version = \"=2.0.0\"\n")),
+        Some("v2.1.0"),
     );
-    assert!(sb.installed_agent().contains("one-zero"));
+    assert!(sb.mind(&["auto-update", "run"]).success);
+    assert_eq!(sb.entry()["pin"]["value"]["resolved"], "2.1.0");
+    assert!(sb.installed_agent().contains("two-one"));
 }
 
 #[test]

@@ -289,7 +289,7 @@ and verified.
 | `resource` item kind: a store-only file or directory under `resources/`, offered by convention only when an item references it, reached by `{{resources:name}}` | done | [resources.md](resources.md) (RES-1..14) |
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 | Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
-| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking`; a source's default-branch `pin-version` (a range, never an exact version) shows as a recommendation next to a breaking release | done | [versions.md](versions.md) (VER-1..142) |
+| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking`; a source's default-branch `pin-version` (an exact version reads as its caret) shows as a recommendation next to a breaking release | done | [versions.md](versions.md) (VER-1..142) |
 | Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
 
 ## Documents

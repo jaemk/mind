@@ -133,9 +133,10 @@ release-tags = "v{version}"
 pin-version = "^1"
 ```
 
-Leave it out otherwise. A consumer's `--pin` overrides it. It must be a range:
-an exact version (`"=1.2.3"`) is an error, since holding one release is the
-consumer's choice (`mind meld <source> --pin version==1.2.3`).
+Leave it out otherwise. A consumer's `--pin` overrides it. It is always a
+range: an exact version (`"=1.2.3"`) reads as `"^1.2.3"`, and `mind review`
+says so, since holding one release is the consumer's choice
+(`mind meld <source> --pin version==1.2.3`).
 
 ## Recommend a new major
 

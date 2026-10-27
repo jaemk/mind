@@ -171,6 +171,22 @@ pub enum ReleaseTags {
     Template(String),
 }
 
+/// `[source].pin-version` as the range it means (VER-53): a source recommends
+/// a range, so an exact version reads as its caret (`=1.2.3` is `^1.2.3`).
+/// Holding one release is the consumer's call (`--pin version==X.Y.Z`).
+// spec: VER-53
+fn source_range(range: crate::version::Range) -> crate::version::Range {
+    match range {
+        crate::version::Range::Exact(v) => crate::version::Range::Caret {
+            major: v.major,
+            minor: Some(v.minor),
+            patch: Some(v.patch),
+            pre: v.pre,
+        },
+        caret => caret,
+    }
+}
+
 impl SourceMeta {
     /// The declared release tag template, or `None` when `release-tags` is
     /// absent. A malformed template, or `release-tags = false`, is a
@@ -230,13 +246,22 @@ impl SourceMeta {
     }
 
     /// The range the author recommends (VER-140): `pin-version`, when it
-    /// parses as a range. Read leniently, so a typo there never fails a
-    /// `sync`; an exact version (VER-53) recommends nothing.
+    /// parses, with an exact version read as its caret (VER-53). Read
+    /// leniently, so a typo there never fails a `sync`.
     pub fn recommended_range(&self) -> Option<crate::version::Range> {
         self.pin_version
             .as_deref()
             .and_then(crate::version::Range::parse)
-            .filter(|r| !matches!(r, crate::version::Range::Exact(_)))
+            .map(source_range)
+    }
+
+    /// Whether `pin-version` is an exact version, which reads as its caret
+    /// (VER-53); `review` says so.
+    pub fn pin_version_is_exact(&self) -> bool {
+        self.pin_version
+            .as_deref()
+            .and_then(crate::version::Range::parse)
+            .is_some_and(|r| matches!(r, crate::version::Range::Exact(_)))
     }
 
     /// Return the single pin declared by this `[source]` section, or `None`
@@ -264,16 +289,7 @@ impl SourceMeta {
                 path: toml_path.to_path_buf(),
                 msg: format!("pin-version {v:?} is not a version range (such as \"^1.2\")"),
             })?;
-            // spec: VER-53 -- a source recommends a range, never one release;
-            // holding a version is the consumer's call (`--pin version==X`).
-            if matches!(range, crate::version::Range::Exact(_)) {
-                return Err(MindError::MindToml {
-                    path: toml_path.to_path_buf(),
-                    msg: format!(
-                        "pin-version {v:?} is an exact version; declare a range such as \"^1.2\" (a consumer holds one release with `meld --pin version==X.Y.Z`)"
-                    ),
-                });
-            }
+            let range = source_range(range);
             set.push((
                 "pin-version",
                 Pin::Version(crate::source::VersionPin::unresolved(&range)),
@@ -2058,25 +2074,27 @@ mod tests {
     }
 
     #[test]
-    fn pin_directive_version_refuses_an_exact_version() {
+    fn an_exact_pin_version_reads_as_its_caret() {
         // spec: VER-53
         let exact = SourceMeta {
             pin_version: Some("=1.2.3".into()),
             ..Default::default()
         };
-        let err = exact
-            .pin_directive(Path::new("/repo/mind.toml"))
-            .unwrap_err();
-        assert!(matches!(err, MindError::MindToml { .. }), "{err:?}");
-        assert!(err.to_string().contains("is an exact version"), "{err}");
-        assert!(
-            exact.recommended_range().is_none(),
-            "an exact pin-version recommends nothing"
-        );
+        assert!(exact.pin_version_is_exact());
+        match exact
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no error")
+        {
+            Some(Pin::Version(v)) => assert_eq!(v.range, "^1.2.3"),
+            other => panic!("expected a version pin, got {other:?}"),
+        }
+        assert_eq!(exact.recommended_range().unwrap().to_string(), "^1.2.3");
+
         let caret = SourceMeta {
             pin_version: Some("^1.2".into()),
             ..Default::default()
         };
+        assert!(!caret.pin_version_is_exact());
         assert_eq!(caret.recommended_range().unwrap().to_string(), "^1.2");
     }
 
