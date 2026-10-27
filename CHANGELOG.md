@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-26
+
 ### Added
 
 - `meld --pin version=<range>` follows a source's semver release tags within a
@@ -32,7 +34,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `dump --ranges` writes a version-pinned source's range as `pin-version`
   instead of freezing it to its commit.
 - `review` checks `release-tags`: `no-release-tags`, `non-semver-release-tag`,
-  `apparent-break` since the highest release, and `release-tags-unchecked`.
+  `apparent-break` since the highest stable release, and
+  `release-tags-unchecked`.
 - `init-source` declares `release-tags = "v{version}"` when the repo already
   has matching tags.
 - `recall` suggests `meld --pin version=^<v>` for a source pinned to a release
@@ -1984,7 +1987,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.32.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/jaemk/mind/compare/v0.32.1...v0.33.0
 [0.32.1]: https://github.com/jaemk/mind/compare/v0.32.0...v0.32.1
 [0.32.0]: https://github.com/jaemk/mind/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/jaemk/mind/compare/v0.30.1...v0.31.0
