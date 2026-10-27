@@ -3620,6 +3620,83 @@ fn learn_force_overwrites_a_conflicting_target() {
 }
 
 #[test]
+fn overwrite_accepts_every_conflict_of_a_meld_and_a_learn() {
+    // spec: CLI-246
+    let plant = |sb: &Sandbox| {
+        write(&sb.claude_home.join("rules/style.md"), "the user's rule\n");
+        write(
+            &sb.claude_home.join("skills/review/SKILL.md"),
+            "the user's skill\n",
+        );
+    };
+    let is_link = |p: std::path::PathBuf| {
+        std::fs::symlink_metadata(&p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    };
+
+    // Without the flag, a non-TTY meld refuses the first conflict.
+    let sb = Sandbox::new();
+    plant(&sb);
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(
+        !r.success,
+        "meld must refuse a foreign target: {}",
+        r.stdout
+    );
+    assert!(r.stderr.contains("not managed by mind"), "{}", r.stderr);
+    assert!(!is_link(sb.claude_home.join("rules/style.md")));
+
+    // With --overwrite, every conflict is replaced in one run.
+    let sb = Sandbox::new();
+    plant(&sb);
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes", "--overwrite"]);
+    assert!(r.success, "meld --overwrite: {} {}", r.stdout, r.stderr);
+    assert!(is_link(sb.claude_home.join("rules/style.md")));
+    assert!(is_link(sb.claude_home.join("skills/review")));
+
+    // learn takes the same flag.
+    let sb = melded();
+    plant(&sb);
+    let r = sb.mind(&["learn", "style", "--overwrite"]);
+    assert!(r.success, "learn --overwrite: {} {}", r.stdout, r.stderr);
+    assert!(is_link(sb.claude_home.join("rules/style.md")));
+}
+
+#[test]
+fn remeld_overwrite_does_not_rerun_hooks_that_already_ran() {
+    // spec: CLI-246 HOOK-60
+    let sb = Sandbox::bare("remeld-overwrite");
+    let marker = sb.base.join("hook-ran");
+    let m = marker.to_str().unwrap().to_owned();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!("[[hooks]]\nrun = \"touch {m}\"\nevent = \"install\"\n"),
+    );
+    let spec = sb.source_spec();
+    let meld = |extra: &str| {
+        let mut args = vec![
+            "meld",
+            spec.as_str(),
+            "--link-only",
+            "--dangerously-skip-install-hook-check",
+        ];
+        if !extra.is_empty() {
+            args.push(extra);
+        }
+        assert!(sb.mind(&args).success);
+    };
+    meld("");
+    assert!(marker.exists(), "the first meld runs the hook");
+    std::fs::remove_file(&marker).unwrap();
+    meld("--overwrite");
+    assert!(
+        !marker.exists(),
+        "--overwrite must not re-run a hook already run at this commit"
+    );
+}
+
+#[test]
 fn recall_lists_and_shows_item_details() {
     // spec: CLI-70, CLI-71
     let sb = melded();

@@ -113,7 +113,8 @@ manifest, and store.
   description, and offers Install when the item is not installed, else Forget (an
   unmanaged item offers Forget with the not-managed warning, UNM-5). For a source
   it shows its name and installed/available item counts, and offers Install all
-  available items, Uninstall all installed items, and Unmeld; an action is omitted
+  available items, Uninstall all installed items, and Unmeld (plus the profile
+  actions of TUI-78 and TUI-79); an action is omitted
   when it would do nothing (no Install-all with nothing available, no Uninstall-all
   with nothing installed). j/k move the highlight, Enter or y runs the highlighted
   action, and Esc, q, or n dismisses without acting. An Install action arms the
@@ -231,10 +232,33 @@ manifest, and store.
   those kept for a dependent (DEP-60). A preview that fails (an undeclared
   name, a broken table) cancels the action with an inline error. The confirmed
   change runs like the TUI's other installs (TUI-20): stdout captured, `yes`,
-  and a link conflict surfaced as an error. The installed-item dialog names the
+  and a link conflict handled per TUI-80. The installed-item dialog names the
   profiles the item was installed for, noting an item also asked for by name.
   Installing a single item from the TUI marks it explicit (PROF-20), as `learn`
   of an exact ref does; a bulk install (a glob) does not.
+- `TUI-79` When a source has enabled profiles, the source details dialog
+  (TUI-26) offers "Install enabled profiles (<names>)", placed first among the
+  install actions (ahead of Install all, else ahead of Unmeld). It runs `learn
+  <source> --profile <name>` for each enabled profile (PROF-17), installing the
+  members not yet installed. Its confirm lists the keys it would install,
+  computed read-only as TUI-78 does, or says nothing is left to install.
+- `TUI-80` When an install (a single item, Install all, a profile Enable, or
+  TUI-79) stops on a link target mind did not create (`LinkOccupied`, LIFE-41),
+  the TUI does not just show the error: it opens a fresh confirm naming the
+  path and offering to run the same install again with `--force` (CLI-35),
+  replacing that target and any other in the way. Declining leaves the target
+  untouched. A forced run that fails, a non-install action, or any other error
+  is shown inline as before (TUI-24).
+- `TUI-81` The confirm modal owns the keyboard: `y` confirms, `n` or Esc
+  cancels, TUI-82's `f` force-confirms, and every other key is ignored. So
+  Enter cannot reopen a details dialog over the modal and a tree action (`i`,
+  `d`, navigation) cannot act behind it.
+- `TUI-82` An install's confirm (the actions TUI-80 covers) also offers `f`,
+  shown in its key hint: confirm and run it with `--force` up front, so every
+  link target in the way is replaced in one run instead of stopping at the
+  first conflict. Other actions and an already-forced retry do not show or
+  take `f`. A meld from the meld input takes `--overwrite` (CLI-246) the same
+  way (TUI-77).
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.

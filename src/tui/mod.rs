@@ -341,21 +341,34 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
         return;
     }
 
-    // Normal mode.
-    // Esc while a confirm modal is up must cancel the action, not wipe the
-    // search filter (key_to_intent maps Esc -> SearchClear unconditionally).
-    // spec: TUI-24
-    if app.modal_visible && k.code == KeyCode::Esc {
-        app.apply_intent(crate::tui::event::Intent::CancelAction);
-        return;
-    }
-    let intent = crate::tui::event::key_to_intent(k);
+    // --- Confirm modal: it owns the keyboard (TUI-81). y confirms, f confirms
+    // an install with --force (TUI-82), n or Esc cancels, and every other key
+    // is ignored, so Enter cannot reopen a dialog over it and a tree action
+    // cannot act behind it. Esc must cancel here rather than wipe the search
+    // filter (key_to_intent maps Esc -> SearchClear unconditionally).
+    // spec: TUI-24 TUI-81 TUI-82
+    let intent = if app.modal_visible {
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.apply_intent(crate::tui::event::Intent::CancelAction);
+                return;
+            }
+            KeyCode::Char('y') if k.modifiers.is_empty() => {}
+            KeyCode::Char('f') if k.modifiers.is_empty() && app.force_pending_action() => {}
+            _ => return,
+        }
+        crate::tui::event::Intent::ConfirmAction
+    } else {
+        crate::tui::event::key_to_intent(k)
+    };
     match intent {
         crate::tui::event::Intent::Quit => {
             app.quit = true;
         }
         crate::tui::event::Intent::ConfirmAction => {
             if let Some(pending) = app.take_pending_action() {
+                // Kept for a TUI-80 retry if the install stops on a conflict.
+                let kind = pending.kind.clone();
                 // Execute the action under the exclusive lock (TUI-25).
                 // For Meld actions: the preview temp clone is discarded after the
                 // action regardless of outcome (TUI-30):
@@ -390,9 +403,8 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                             msg
                         });
                     }
-                    Err(e) => {
-                        app.set_error(format!("{e}"));
-                    }
+                    // spec: TUI-80 -- a link conflict offers a --force retry.
+                    Err(e) => app.offer_force_retry(kind, &e),
                 }
             } else {
                 app.confirm_selected();
@@ -457,7 +469,15 @@ fn run_set_namespace(paths: &Paths, app: &mut app::App, source: String, new_alia
 fn run_profile_preview(paths: &Paths, app: &mut app::App, req: &app::ProfilePreviewRequest) {
     let preview = crate::lock::open(paths).and_then(|lock| {
         let _guard = lock.read()?;
-        crate::commands::profile_change_preview(paths, &req.source, &req.profile, req.enable)
+        match (req.enable, req.profiles.as_slice()) {
+            (true, profiles) => {
+                crate::commands::profiles_install_preview(paths, &req.source, profiles)
+            }
+            (false, [profile]) => {
+                crate::commands::profile_change_preview(paths, &req.source, profile, false)
+            }
+            (false, _) => Ok(crate::commands::ProfileChangePreview::default()),
+        }
     });
     app.apply_profile_preview(preview);
 }
@@ -717,6 +737,43 @@ mod tests {
             app.pending_action.is_none(),
             "the key that closed help must not also fall through to an action"
         );
+    }
+
+    #[test]
+    fn confirm_modal_owns_the_keyboard() {
+        // spec: TUI-81 TUI-82 - with the confirm up, Enter does not open a
+        // dialog over it, tree actions do not act behind it, `f` on an action
+        // that cannot be forced is ignored, and `n` cancels.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Sync,
+            "Sync all?".to_string(),
+        ));
+        app.modal_visible = true;
+
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('i'),
+            KeyCode::Char('d'),
+            KeyCode::Char('f'),
+            KeyCode::Down,
+        ] {
+            handle_key(&paths, &mut app, key(code));
+            assert!(app.modal_visible, "{code:?} must leave the confirm up");
+            assert!(app.dialog.is_none(), "{code:?} must not open a dialog");
+            assert!(
+                matches!(
+                    app.pending_action.as_ref().map(|p| &p.kind),
+                    Some(ActionKind::Sync)
+                ),
+                "{code:?} must leave the pending action as it was"
+            );
+        }
+
+        handle_key(&paths, &mut app, key(KeyCode::Char('n')));
+        assert!(!app.modal_visible, "n must cancel");
+        assert!(app.pending_action.is_none());
     }
 
     #[test]

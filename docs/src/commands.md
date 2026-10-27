@@ -91,6 +91,7 @@ missing items, or shows each item's state. Alias `add`.
 | `-N`, `--namespace <PREFIX>` | install items as `<PREFIX>:<name>`; a different namespace registers a separate instance; see [Fix name collisions](collisions.md) |
 | `-r`, `--recursive` | offer the items of every source a curator lists |
 | `-f`, `--force` | overwrite link targets `mind` did not create; on a re-meld, also re-offer every install hook |
+| `--overwrite` | overwrite every link target `mind` did not create, without a prompt per conflict; no hook re-offer |
 | `--local` | install into the current project's lobe only |
 | `--root <DIR>` | scan these directories instead of the source's own roots (repeatable) |
 | `--add-root <DIR>` | scan these directories in addition to the source's own discovery (repeatable) |
@@ -157,6 +158,7 @@ Alias `install`.
 | `--all-profiles` | install and enable every declared profile |
 | `-n`, `--dry-run` | show what would install, change nothing |
 | `-f`, `--force` | overwrite a link target `mind` did not create |
+| `--overwrite` | the same as `--force` here; shared with `meld` |
 | `--local` | install into the current project's lobe only |
 | `--pin` | for an item link, freeze the URL's branch at its current commit (takes no value) |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
