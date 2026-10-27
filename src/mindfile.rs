@@ -147,6 +147,19 @@ pub struct SourceMeta {
     pub release_tags: Option<ReleaseTags>,
     /// Versions that version-pin resolution never selects (VER-46).
     pub yanked: Option<Vec<String>>,
+    /// The highest auto-update level the maintainer wants (AUP-5): `true`,
+    /// `"compatible"`, or `"breaking"`.
+    #[serde(rename = "auto-update")]
+    pub auto_update: Option<RawAutoUpdate>,
+}
+
+/// The raw `[source].auto-update` value, before
+/// [`SourceMeta::auto_update_level`] validates it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RawAutoUpdate {
+    Flag(bool),
+    Level(String),
 }
 
 /// The raw `[source].release-tags` value, before [`SourceMeta::release_template`]
@@ -156,6 +169,22 @@ pub struct SourceMeta {
 pub enum ReleaseTags {
     Flag(bool),
     Template(String),
+}
+
+/// `[source].pin-version` as the range it means (VER-53): a source recommends
+/// a range, so an exact version reads as its caret (`=1.2.3` is `^1.2.3`).
+/// Holding one release is the consumer's call (`--pin version==X.Y.Z`).
+// spec: VER-53
+fn source_range(range: crate::version::Range) -> crate::version::Range {
+    match range {
+        crate::version::Range::Exact(v) => crate::version::Range::Caret {
+            major: v.major,
+            minor: Some(v.minor),
+            patch: Some(v.patch),
+            pre: v.pre,
+        },
+        caret => caret,
+    }
 }
 
 impl SourceMeta {
@@ -194,6 +223,47 @@ impl SourceMeta {
             .collect()
     }
 
+    /// The declared auto-update level (AUP-5): `true` is `compatible`; `false`,
+    /// `"off"`, or any other value is a `MindToml` error.
+    // spec: AUP-5
+    pub fn auto_update_level(&self, toml_path: &Path) -> Result<Option<crate::auto_update::Level>> {
+        use crate::auto_update::Level;
+        let bad = |shown: String| MindError::MindToml {
+            path: toml_path.to_path_buf(),
+            msg: format!("auto-update {shown} must be true, \"compatible\", or \"breaking\""),
+        };
+        match &self.auto_update {
+            None => Ok(None),
+            Some(RawAutoUpdate::Flag(true)) => Ok(Some(Level::Compatible)),
+            Some(RawAutoUpdate::Flag(false)) => Err(bad("false".into())),
+            Some(RawAutoUpdate::Level(s)) => match Level::parse(s) {
+                Some(Level::Off) | None => {
+                    Err(bad(format!("{:?}", crate::sanitize::strip_ansi(s))))
+                }
+                Some(level) => Ok(Some(level)),
+            },
+        }
+    }
+
+    /// The range the author recommends (VER-140): `pin-version`, when it
+    /// parses, with an exact version read as its caret (VER-53). Read
+    /// leniently, so a typo there never fails a `sync`.
+    pub fn recommended_range(&self) -> Option<crate::version::Range> {
+        self.pin_version
+            .as_deref()
+            .and_then(crate::version::Range::parse)
+            .map(source_range)
+    }
+
+    /// Whether `pin-version` is an exact version, which reads as its caret
+    /// (VER-53); `review` says so.
+    pub fn pin_version_is_exact(&self) -> bool {
+        self.pin_version
+            .as_deref()
+            .and_then(crate::version::Range::parse)
+            .is_some_and(|r| matches!(r, crate::version::Range::Exact(_)))
+    }
+
     /// Return the single pin declared by this `[source]` section, or `None`
     /// if none is declared. More than one declared pin, or a `pin-version`
     /// range that does not parse, is a `MindToml` error (DSC-41, VER-51).
@@ -217,10 +287,9 @@ impl SourceMeta {
         if let Some(v) = &self.pin_version {
             let range = crate::version::Range::parse(v).ok_or_else(|| MindError::MindToml {
                 path: toml_path.to_path_buf(),
-                msg: format!(
-                    "pin-version {v:?} is not a version range (such as \"^1.2\" or \"=1.2.3\")"
-                ),
+                msg: format!("pin-version {v:?} is not a version range (such as \"^1.2\")"),
             })?;
+            let range = source_range(range);
             set.push((
                 "pin-version",
                 Pin::Version(crate::source::VersionPin::unresolved(&range)),
@@ -1068,20 +1137,39 @@ struct SourceOnly {
     source: SourceMeta,
 }
 
-/// The release template and yanked list declared by `text`, a `mind.toml`
-/// read from the default branch (VER-3, VER-46).
-pub fn release_meta_from_text(
-    text: &str,
-    toml_path: &Path,
-) -> Result<(Option<Template>, Vec<Version>)> {
+/// What a default-branch `mind.toml` says about releases (VER-3): the tag
+/// template, the yanked list (VER-46), and the range it recommends (VER-140).
+#[derive(Debug, Default)]
+pub struct ReleaseMeta {
+    pub template: Option<Template>,
+    pub yanked: Vec<Version>,
+    pub recommended: Option<String>,
+    /// The declared auto-update level (AUP-5).
+    pub auto_update: Option<crate::auto_update::Level>,
+}
+
+impl ReleaseMeta {
+    /// The release metadata `meta` declares. A malformed template, yanked
+    /// entry, or auto-update level is a `MindToml` error; a `pin-version` that
+    /// does not parse recommends nothing.
+    pub fn from_source(meta: &SourceMeta, toml_path: &Path) -> Result<ReleaseMeta> {
+        Ok(ReleaseMeta {
+            template: meta.release_template(toml_path)?,
+            yanked: meta.yanked_versions(toml_path)?,
+            recommended: meta.recommended_range().map(|r| r.to_string()),
+            auto_update: meta.auto_update_level(toml_path)?,
+        })
+    }
+}
+
+/// The release metadata declared by `text`, a `mind.toml` read from the
+/// default branch (VER-3, VER-46, VER-140).
+pub fn release_meta_from_text(text: &str, toml_path: &Path) -> Result<ReleaseMeta> {
     let parsed: SourceOnly = toml::from_str(text).map_err(|e| MindError::Toml {
         path: sanitized_path(toml_path),
         msg: crate::sanitize::strip_ansi(&e.to_string()),
     })?;
-    Ok((
-        parsed.source.release_template(toml_path)?,
-        parsed.source.yanked_versions(toml_path)?,
-    ))
+    ReleaseMeta::from_source(&parsed.source, toml_path)
 }
 
 impl MindToml {
@@ -1133,6 +1221,8 @@ impl MindToml {
         // entry fails the load, not the later resolution.
         parsed.source.release_template(&sanitized_path(&file))?;
         parsed.source.yanked_versions(&sanitized_path(&file))?;
+        // spec: AUP-5
+        parsed.source.auto_update_level(&sanitized_path(&file))?;
         // spec: NS-25 — a declared `[source].prefix` that is a reserved
         // item-kind word is rejected at load, before it can reach the
         // effective-prefix resolution.
@@ -1981,6 +2071,31 @@ mod tests {
             }
             other => panic!("expected a version pin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_exact_pin_version_reads_as_its_caret() {
+        // spec: VER-53
+        let exact = SourceMeta {
+            pin_version: Some("=1.2.3".into()),
+            ..Default::default()
+        };
+        assert!(exact.pin_version_is_exact());
+        match exact
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no error")
+        {
+            Some(Pin::Version(v)) => assert_eq!(v.range, "^1.2.3"),
+            other => panic!("expected a version pin, got {other:?}"),
+        }
+        assert_eq!(exact.recommended_range().unwrap().to_string(), "^1.2.3");
+
+        let caret = SourceMeta {
+            pin_version: Some("^1.2".into()),
+            ..Default::default()
+        };
+        assert!(!caret.pin_version_is_exact());
+        assert_eq!(caret.recommended_range().unwrap().to_string(), "^1.2");
     }
 
     #[test]

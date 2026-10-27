@@ -483,6 +483,20 @@ fn run_checks(
             hard.push(Finding::hard("conflicting-pin", format!("{e}")));
             // Don't abort here; other checks may still be useful.
         }
+        // spec: VER-53 -- an exact pin-version still works, as its caret, but
+        // likely is not what the maintainer meant.
+        if mf.source.pin_version_is_exact()
+            && let Some(v) = mf.source.pin_version.as_deref()
+        {
+            let v = crate::sanitize::strip_ansi(v);
+            let caret = v.trim_start_matches('=');
+            advisory.push(Finding::advisory(
+                "exact-pin-version",
+                format!(
+                    "[source].pin-version \"{v}\" reads as \"^{caret}\": a source recommends a range, and a consumer holds one release with `--pin version=={caret}`"
+                ),
+            ));
+        }
     }
 
     // --- Check 6 (hoisted): declared hooks advisory ---
@@ -1682,6 +1696,7 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         install_hook_commit: None,
         profiles: None,
         profile_snapshot: None,
+        auto_update: None,
     }
 }
 
@@ -1977,6 +1992,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 

@@ -139,6 +139,12 @@ error names the version gap (DSC-117) instead of a bare schema error.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
   `MindToml` error), and a consumer `--pin` overrides it. A range that does not
   parse (VER-20) is a `MindToml` error.
+- `VER-53` A source recommends a range, never one release: an exact
+  `[source].pin-version = "=X.Y.Z"` reads as its caret, `^X.Y.Z`, both as the
+  range a plain meld pins (VER-51) and as the recommendation (VER-140).
+  `review` reports it as an advisory `exact-pin-version` finding. Holding one
+  release is the consumer's choice (`meld --pin version==X.Y.Z`, VER-20), and
+  a curator's `[[discover.sources]]` entry may still declare one (VER-110).
 - `VER-52` When VER-50 applies, `meld` notes on stderr that the source follows
   releases, naming the range and the selected release, and that `upgrade`
   takes compatible releases and asks before a new major:
@@ -182,6 +188,30 @@ error names the version gap (DSC-117) instead of a bare schema error.
   `<source> 1.0.0 -> 1.1.0 looks breaking: drops agent:gone`. It is advisory
   and does not block the upgrade. A breaking move the user took (VER-62,
   VER-63) is not checked, since a new major is expected to break.
+
+## Recommended range
+
+A maintainer nudges consumers toward a new major by moving the default
+branch's `pin-version` (VER-51) forward, for example from `^1` to `^2`. The
+nudge is a hint only. Taking it still requires the consumer's consent.
+
+- `VER-140` Each resolution (`meld`, a re-pin, `sync`) records the default
+  branch's `[source].pin-version` on the version pin as the source's
+  recommended range, read in the same place as the template (VER-3). The
+  recommendation is refreshed at every `sync`, so one the default branch drops is
+  dropped. A value that does not parse records nothing and fails nothing. The
+  recommendation never changes the consumer's range (VER-43). A `pin-version`
+  supplies the range only at the first meld (DSC-41).
+- `VER-141` When the recommended range admits the breaking release (VER-61),
+  `upgrade` adds the recommendation to the breaking line and to its prompt
+  (`<source> 1.5.0 -> 2.0.0 (breaking, <source> recommends ^2)`), and `recall`
+  adds it to the breaking-release note. Consent is unchanged (VER-62, VER-63):
+  a recommendation is not `--allow-breaking`. There is no hint when the
+  recommendation does not admit the breaking release, or when there is no
+  breaking release, which includes an exact hold.
+- `VER-142` `--json` adds `recommended` (the range, or null) to the `version`
+  object (VER-91), and `recommended` (bool, VER-141) to each entry of
+  `upgrade`'s `breaking` array.
 
 ## Hooks
 
@@ -228,7 +258,8 @@ error names the version gap (DSC-117) instead of a bare schema error.
   result carries a `sources` array of `{source, version}` for the
   version-pinned sources it covered. The `upgrade` result lists its breaking
   moves in their own `breaking` array, apart from the applied changes:
-  `{source, from, to, applied}`, `applied` false for one listed and left. A
+  `{source, from, to, applied, recommended}`, `applied` false for one listed and
+  left (`recommended`, VER-142). A
   `sync --upgrade` result carries its upgrade pass's `sources` and `breaking`.
 
 ## Policy, curators, and dump

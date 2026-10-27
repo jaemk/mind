@@ -13,6 +13,7 @@ same text in the terminal. For the vocabulary, see [Core concepts](concepts.md).
 | [`probe`](#probe) | browse and search what sources offer |
 | [`sync`](#sync) | fetch sources |
 | [`upgrade`](#upgrade) | bring installed items up to date |
+| [`auto-update`](#auto-update) | update version-pinned sources without asking |
 | [`curate`](#curate) | apply what your curators declare |
 | [`introspect`](#introspect) | report drift and broken links |
 | [`hooks`](#hooks) | run or list hooks on demand |
@@ -90,16 +91,19 @@ missing items, or shows each item's state. Alias `add`.
 | `-N`, `--namespace <PREFIX>` | install items as `<PREFIX>:<name>`; a different namespace registers a separate instance; see [Fix name collisions](collisions.md) |
 | `-r`, `--recursive` | offer the items of every source a curator lists |
 | `-f`, `--force` | overwrite link targets `mind` did not create; on a re-meld, also re-offer every install hook |
+| `--overwrite` | overwrite every link target `mind` did not create, without a prompt per conflict; no hook re-offer |
 | `--local` | install into the current project's lobe only |
 | `--root <DIR>` | scan these directories instead of the source's own roots (repeatable) |
 | `--add-root <DIR>` | scan these directories in addition to the source's own discovery (repeatable) |
 | `--flat-skills` | skills are directories at the root, with no `skills/` container |
 | `--install-hook <CMD>` | supply or replace the source's install and update hooks |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
+| `--auto-update[=off\|compatible\|breaking]` | let `auto-update run` update this source; alone, the level the source asks for (else `compatible`); see [Auto-update](updating.md#auto-update) |
 | `--dangerously-skip-install-hook-check` | run install hooks without asking |
 | `--dangerously-skip-build-hook-check` | run item build hooks without asking |
 
-`--root`, `--add-root`, `--flat-skills`, and `--install-hook` apply only at the
+`--auto-update` also applies on a re-meld, so it changes or revokes the level of
+a source you already have. `--root`, `--add-root`, `--flat-skills`, and `--install-hook` apply only at the
 meld that first registers a source; a re-meld notes them as ignored. Without a
 terminal and without `--yes`, `meld` registers the source and installs nothing.
 
@@ -154,6 +158,7 @@ Alias `install`.
 | `--all-profiles` | install and enable every declared profile |
 | `-n`, `--dry-run` | show what would install, change nothing |
 | `-f`, `--force` | overwrite a link target `mind` did not create |
+| `--overwrite` | the same as `--force` here; shared with `meld` |
 | `--local` | install into the current project's lobe only |
 | `--pin` | for an item link, freeze the URL's branch at its current commit (takes no value) |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
@@ -275,6 +280,25 @@ on confirmation. `ITEM` is a filter.
 
 See [Keep everything up to date](updating.md).
 
+## auto-update
+
+```
+mind auto-update run [--if-stale DURATION] [--background]
+```
+
+Sync and upgrade every version-pinned source you granted auto-update
+(`meld --auto-update`), never prompting. A source whose update would run a hook
+is held for `mind upgrade`. If another `mind` holds the lock, the run exits 0
+and does nothing.
+
+| flag | effect |
+|------|--------|
+| `--if-stale <DURATION>` | skip unless the last run is older than this (`30m`, `12h`, `1d`) |
+| `--background` | check `--if-stale`, then run detached and return at once |
+
+`mind config auto-update on` runs it when a Claude session starts. See
+[Auto-update](updating.md#auto-update).
+
 ## curate
 
 ```
@@ -332,6 +356,7 @@ mind config lobes list
 mind config lobes add [PATH] [--preset NAME] [--subdir REL] [--snapshot] [-f]
 mind config lobes remove <PATH> [--snapshot]
 mind config lobes detect
+mind config auto-update <on|off> [--every DURATION]
 ```
 
 `show` prints the config file's location and effective settings. `lobes`
@@ -346,6 +371,11 @@ manages agent homes:
 
 `detect` reports which harnesses are installed and offers to add them. See
 [Use more than one agent](lobes.md) and [Configuration and paths](configuration.md).
+
+`auto-update on` adds a `SessionStart` hook to each Claude lobe's
+`settings.json` that runs `mind auto-update run --if-stale DURATION
+--background` (default `1d`); `off` removes it. See
+[Auto-update](updating.md#auto-update).
 
 ## link-project
 

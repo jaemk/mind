@@ -547,10 +547,19 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   and is not managed by mind (the clobber guard, LIFE-41), replacing the user's
   file, directory, or foreign link. Without `--force`, hitting such a conflict
   prompts on a TTY to overwrite that one target (a yes installs it forced, a no
-  refuses it) and, in a non-TTY context, refuses with `LinkOccupied` as before.
-  The forced overwrite stays transactional: it is decided before staging, so a
-  refusal changes nothing. `meld --force` applies the same to its default
-  install.
+  refuses it, an `a` per CLI-247) and, in a non-TTY context, refuses with
+  `LinkOccupied` as before. The forced overwrite stays transactional: it is
+  decided before staging, so a refusal changes nothing. `meld --force` applies
+  the same to its default install.
+- `CLI-246` `meld --overwrite` and `learn --overwrite` accept every overwrite
+  of a link target mind did not create in the run, without a prompt per
+  conflict, on a TTY or not. For `learn` it is the same as `--force`. For
+  `meld` it is only that: unlike `meld --force`, a re-meld does not re-offer
+  install hooks already run at the current commit (HOOK-60). `--force` wins
+  when both are given.
+- `CLI-247` The CLI-35 overwrite prompt reads `[y/N/a]`. `y` overwrites this
+  target, `a` (or `all`) overwrites it and every later conflict in the same
+  run without asking again, and anything else (a bare Enter, EOF) refuses.
 - `CLI-36` `learn <source> --all` is shorthand for `learn '<source>#*'`: it
   appends the `#*` selector to the positional ref, promoting it from an item name
   to a source qualifier and installing every item of that source (CLI-31), deps

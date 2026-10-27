@@ -281,6 +281,8 @@ and verified.
 | `--json` integers fit i64: the unlimited metadata cap is emitted as `i64::MAX` bytes | done | [cli.md](cli.md) (CLI-242) |
 | A kind-qualified ref with no source selector also matches the effective name `<kind>:<name>`; both matching is ambiguous | done | [namespacing.md](namespacing.md) (NS-74) |
 | An unmanaged lobe workflow claims its harness name in the collision check | done | [workflows.md](workflows.md) (WF-61) |
+| TUI: "Install enabled profiles" in the source dialog; a link conflict offers a `--force` retry; the confirm modal owns the keyboard and takes `f` to confirm an install with `--force` | done | [tui.md](tui.md) (TUI-79..82) |
+| `meld --overwrite` / `learn --overwrite` accept every link-target overwrite without a prompt per conflict; the overwrite prompt takes `a` for all | done | [cli.md](cli.md) (CLI-246, CLI-247) |
 | `--json` carries a workflow's `when_to_use` separately from `description` | done | [workflows.md](workflows.md) (WF-62) |
 | `[discover].workflows` globs match only regular non-symlink `.js` files | done | [discovery.md](discovery.md) (DSC-114) |
 | Item-link skill and tool `TOOL.md` anchors are classified no-follow | done | [discovery.md](discovery.md) (DSC-115) |
@@ -289,7 +291,8 @@ and verified.
 | `resource` item kind: a store-only file or directory under `resources/`, offered by convention only when an item references it, reached by `{{resources:name}}` | done | [resources.md](resources.md) (RES-1..14) |
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 | Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
-| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking` | done | [versions.md](versions.md) (VER-1..131) |
+| Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking`; a source's default-branch `pin-version` (an exact version reads as its caret) shows as a recommendation next to a breaking release | done | [versions.md](versions.md) (VER-1..142) |
+| Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
 
 ## Documents
 
@@ -358,6 +361,9 @@ and verified.
 - [versions.md](versions.md) - release versions: a source's semver release tags,
   version-range pins resolved by `sync`, and the consent rules for taking a
   breaking release at `upgrade`.
+- [auto-update.md](auto-update.md) - auto-update: a trigger that runs release
+  resolution unattended, at the level a source's consumer grants, capped by
+  policy.
 
 ## Conventions
 

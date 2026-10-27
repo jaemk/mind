@@ -106,6 +106,16 @@ pub enum ActionKind {
     /// Disable an enabled profile of a melded source (`forget <source>
     /// --profile <name>`, TUI-78, PROF-25).
     DisableProfile { source: String, profile: String },
+    /// Install every enabled profile's members that are not installed
+    /// (`learn <source> --profile <each>`, TUI-79, PROF-17).
+    InstallProfiles {
+        source: String,
+        profiles: Vec<String>,
+    },
+    /// Re-run an install (`Learn`, `EnableProfile`, `InstallProfiles`) with
+    /// `--force` after it stopped on a link target mind did not create
+    /// (TUI-80), or when the user confirmed it with `f` up front (TUI-82).
+    Forced(Box<ActionKind>),
     /// Unmeld a source (TUI-21).
     Unmeld { name: String, forget: bool },
     /// Sync all sources (TUI-22).
@@ -127,6 +137,17 @@ pub enum ActionKind {
 }
 
 impl ActionKind {
+    /// Whether a link conflict stopping this action can be retried with
+    /// `--force` (TUI-80): the installs, not yet forced.
+    pub fn can_force(&self) -> bool {
+        matches!(
+            self,
+            ActionKind::Learn { .. }
+                | ActionKind::EnableProfile { .. }
+                | ActionKind::InstallProfiles { .. }
+        )
+    }
+
     /// A Meld of `spec` with no flags: what confirming a preview meld runs
     /// (TUI-31).
     pub fn meld(spec: impl Into<String>) -> Self {
@@ -194,8 +215,10 @@ pub struct Dialog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfilePreviewRequest {
     pub source: String,
-    pub profile: String,
-    /// True to enable the profile, false to disable it.
+    /// The profile to enable or disable, or every enabled profile for an
+    /// Install-enabled action (TUI-79).
+    pub profiles: Vec<String>,
+    /// True to install (enable), false to disable.
     pub enable: bool,
 }
 
@@ -1469,9 +1492,33 @@ impl App {
                     }
                 }
             });
+            // spec: TUI-79 -- install what the enabled profiles want, as
+            // opposed to everything the source offers.
+            let install_enabled = (!p.enabled.is_empty()).then(|| {
+                let names = p.enabled.join(", ");
+                DialogAction {
+                    label: format!("Install enabled profiles ({names})"),
+                    kind: ActionKind::InstallProfiles {
+                        source: name.to_string(),
+                        profiles: p.enabled.clone(),
+                    },
+                    description: format!(
+                        "Install the members of {name}'s enabled profiles ({names})?"
+                    ),
+                    learn_ref: None,
+                }
+            });
             let tail = actions.split_off(at);
             actions.extend(profile_actions);
             actions.extend(tail);
+            // Ahead of Install-all: the profile-aware install comes first.
+            if let Some(a) = install_enabled {
+                let first_install = actions
+                    .iter()
+                    .position(|a| matches!(a.kind, ActionKind::Learn { .. }))
+                    .unwrap_or(at);
+                actions.insert(first_install, a);
+            }
         }
 
         Dialog {
@@ -1576,14 +1623,24 @@ impl App {
         }
         // TUI-78: a profile change arms its install/removal preview, computed
         // by the event loop (I/O) before the confirm modal is drawn.
-        if let ActionKind::EnableProfile { source, profile }
-        | ActionKind::DisableProfile { source, profile } = &action.kind
-        {
-            self.pending_profile_preview = Some(ProfilePreviewRequest {
-                source: source.clone(),
-                profile: profile.clone(),
-                enable: matches!(action.kind, ActionKind::EnableProfile { .. }),
-            });
+        match &action.kind {
+            ActionKind::EnableProfile { source, profile }
+            | ActionKind::DisableProfile { source, profile } => {
+                self.pending_profile_preview = Some(ProfilePreviewRequest {
+                    source: source.clone(),
+                    profiles: vec![profile.clone()],
+                    enable: matches!(action.kind, ActionKind::EnableProfile { .. }),
+                });
+            }
+            // spec: TUI-79
+            ActionKind::InstallProfiles { source, profiles } => {
+                self.pending_profile_preview = Some(ProfilePreviewRequest {
+                    source: source.clone(),
+                    profiles: profiles.clone(),
+                    enable: true,
+                });
+            }
+            _ => {}
         }
         self.pending_action = Some(PendingAction::new(action.kind, action.description));
         self.modal_visible = true;
@@ -1627,6 +1684,13 @@ impl App {
             ActionKind::EnableProfile { .. } => {
                 extra.push_str(&section("Installs", &preview.install));
             }
+            // spec: TUI-79
+            ActionKind::InstallProfiles { .. } if preview.install.is_empty() => {
+                extra.push_str("\n\nNothing to install; every member is installed.");
+            }
+            ActionKind::InstallProfiles { .. } => {
+                extra.push_str(&section("Installs", &preview.install));
+            }
             ActionKind::DisableProfile { .. } => {
                 if preview.remove.is_empty() {
                     extra.push_str("\n\nNo items are forgotten.");
@@ -1640,6 +1704,47 @@ impl App {
             _ => {}
         }
         action.description.push_str(&extra);
+    }
+
+    /// An install stopped on a link target mind did not create (`path`):
+    /// offer the same install again with `--force` behind a fresh confirm
+    /// (TUI-80). Anything else, or an already-forced retry, is a plain error.
+    // spec: TUI-80
+    pub fn offer_force_retry(&mut self, kind: ActionKind, error: &crate::error::MindError) {
+        let crate::error::MindError::LinkOccupied { path } = error else {
+            self.set_error(format!("{error}"));
+            return;
+        };
+        if !kind.can_force() {
+            self.set_error(format!("{error}"));
+            return;
+        }
+        let shown = crate::sanitize::strip_ansi(path);
+        self.pending_action = Some(PendingAction::new(
+            ActionKind::Forced(Box::new(kind)),
+            format!(
+                "{shown} is in the way: mind did not create it.\n\nRetry with --force, \
+                 replacing it and any other link target in the way?"
+            ),
+        ));
+        self.modal_visible = true;
+    }
+
+    /// The user confirmed the pending install with `f` (TUI-82): run it with
+    /// `--force`, so every link target in the way is replaced without a
+    /// conflict stop. False (the pending action unchanged) when it is not a
+    /// forceable install.
+    // spec: TUI-82
+    pub fn force_pending_action(&mut self) -> bool {
+        let Some(action) = self.pending_action.as_mut() else {
+            return false;
+        };
+        if !action.kind.can_force() {
+            return false;
+        }
+        let inner = std::mem::replace(&mut action.kind, ActionKind::Sync);
+        action.kind = ActionKind::Forced(Box::new(inner));
+        true
     }
 
     /// User pressed Enter/Return to confirm the pending action.
@@ -4664,7 +4769,7 @@ mod tests {
             app.pending_profile_preview,
             Some(ProfilePreviewRequest {
                 source: "local/agents".to_string(),
-                profile: "full".to_string(),
+                profiles: vec!["full".to_string()],
                 enable: true,
             })
         );
@@ -4672,6 +4777,156 @@ mod tests {
             app.pending_action.as_ref().unwrap().kind,
             ActionKind::EnableProfile { .. }
         ));
+    }
+
+    #[test]
+    fn source_dialog_offers_install_enabled_profiles_first() {
+        // spec: TUI-79 - with an enabled profile, the dialog offers installing
+        // the enabled profiles' members ahead of Install-all; choosing it arms
+        // a preview over every enabled profile.
+        let mut app = open_source_dialog(profile_snapshot());
+        let d = app.dialog.as_ref().unwrap();
+        let labels: Vec<&str> = d.actions.iter().map(|a| a.label.as_str()).collect();
+        let enabled = labels
+            .iter()
+            .position(|l| *l == "Install enabled profiles (default)")
+            .expect("offered");
+        let all = labels
+            .iter()
+            .position(|l| l.starts_with("Install all available"))
+            .expect("still offered");
+        assert!(enabled < all, "{labels:?}");
+
+        app.dialog.as_mut().unwrap().selected = enabled;
+        app.activate_dialog();
+        assert!(app.modal_visible);
+        assert_eq!(
+            app.pending_profile_preview,
+            Some(ProfilePreviewRequest {
+                source: "local/agents".to_string(),
+                profiles: vec!["default".to_string()],
+                enable: true,
+            })
+        );
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().kind,
+            ActionKind::InstallProfiles {
+                source: "local/agents".to_string(),
+                profiles: vec!["default".to_string()],
+            }
+        );
+
+        // No enabled profile, no action.
+        let mut snap = profile_snapshot();
+        snap.source_profiles
+            .get_mut("local/agents")
+            .unwrap()
+            .enabled
+            .clear();
+        let app = open_source_dialog(snap);
+        assert!(
+            !app.dialog
+                .as_ref()
+                .unwrap()
+                .actions
+                .iter()
+                .any(|a| matches!(a.kind, ActionKind::InstallProfiles { .. }))
+        );
+    }
+
+    #[test]
+    fn install_enabled_preview_lists_installs_or_says_nothing() {
+        // spec: TUI-79
+        let mut app = App::new(String::new(), None, None);
+        let kind = ActionKind::InstallProfiles {
+            source: "s".to_string(),
+            profiles: vec!["default".to_string()],
+        };
+        app.pending_action = Some(PendingAction::new(kind.clone(), "Install?".to_string()));
+        app.apply_profile_preview(Ok(crate::commands::ProfileChangePreview {
+            install: vec!["skill:b".to_string()],
+            ..Default::default()
+        }));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().description,
+            "Install?\n\nInstalls:\n  skill:b"
+        );
+        app.pending_action = Some(PendingAction::new(kind, "Install?".to_string()));
+        app.apply_profile_preview(Ok(Default::default()));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().description,
+            "Install?\n\nNothing to install; every member is installed."
+        );
+    }
+
+    #[test]
+    fn a_link_conflict_offers_a_forced_retry_of_an_install() {
+        // spec: TUI-80 - an install stopped by a target mind did not create
+        // re-arms the same install as Forced behind a fresh confirm.
+        let occupied = crate::error::MindError::LinkOccupied {
+            path: "/home/u/.claude/skills/b".to_string(),
+        };
+        let learn = ActionKind::Learn {
+            item_key: "skill:b".to_string(),
+            source: "s".to_string(),
+        };
+        let mut app = App::new(String::new(), None, None);
+        app.offer_force_retry(learn.clone(), &occupied);
+        assert!(app.modal_visible);
+        assert!(app.error.is_none());
+        let pending = app.pending_action.as_ref().unwrap();
+        assert_eq!(pending.kind, ActionKind::Forced(Box::new(learn.clone())));
+        assert!(
+            pending.description.contains("/home/u/.claude/skills/b")
+                && pending.description.contains("--force"),
+            "{}",
+            pending.description
+        );
+
+        // An already-forced retry, a non-install action, or another error is
+        // a plain error.
+        for (kind, err) in [
+            (ActionKind::Forced(Box::new(learn.clone())), &occupied),
+            (ActionKind::Sync, &occupied),
+            (
+                learn,
+                &crate::error::MindError::SourceNotFound {
+                    name: "s".to_string(),
+                },
+            ),
+        ] {
+            let mut app = App::new(String::new(), None, None);
+            app.offer_force_retry(kind, err);
+            assert!(!app.modal_visible);
+            assert!(app.pending_action.is_none());
+            assert!(app.error.is_some());
+        }
+    }
+
+    #[test]
+    fn force_pending_action_wraps_only_a_forceable_install_once() {
+        // spec: TUI-82 - `f` on an install's confirm runs it Forced; any other
+        // action (or one already forced) is left as it was.
+        let learn = ActionKind::Learn {
+            item_key: "skill:b".to_string(),
+            source: "s".to_string(),
+        };
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction::new(learn.clone(), String::new()));
+        assert!(app.force_pending_action());
+        let forced = ActionKind::Forced(Box::new(learn));
+        assert_eq!(app.pending_action.as_ref().unwrap().kind, forced);
+        assert!(
+            !app.force_pending_action(),
+            "a forced action is not re-wrapped"
+        );
+        assert_eq!(app.pending_action.as_ref().unwrap().kind, forced);
+
+        app.pending_action = Some(PendingAction::new(ActionKind::Sync, String::new()));
+        assert!(!app.force_pending_action());
+        assert_eq!(app.pending_action.as_ref().unwrap().kind, ActionKind::Sync);
+        app.pending_action = None;
+        assert!(!app.force_pending_action());
     }
 
     #[test]

@@ -93,6 +93,17 @@ impl MindLock {
     pub fn try_read(&self) -> Option<ReadGuard<'_>> {
         self.inner.try_read().ok().map(|g| ReadGuard { _guard: g })
     }
+
+    /// Try to acquire the lock exclusively without blocking. Returns `None`
+    /// while any other process holds it, so an unattended auto-update run
+    /// steps aside instead of queueing behind the user (AUP-18).
+    // spec: AUP-18
+    pub fn try_write(&mut self) -> Option<WriteGuard<'_>> {
+        self.inner
+            .try_write()
+            .ok()
+            .map(|g| WriteGuard { _guard: g })
+    }
 }
 
 #[cfg(test)]

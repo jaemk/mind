@@ -82,6 +82,8 @@ pub struct Policy {
     /// `[sources].allow-version-ranges`: whether a version range counts as
     /// pinned under `pinned` (VER-100). An exact version always does.
     allow_version_ranges: bool,
+    /// `[sources].auto-update`: the auto-update cap (AUP-30).
+    auto_update: Option<crate::auto_update::Level>,
     /// `[[sources.auto_meld]]` base set (POL-30).
     auto_meld: Vec<AutoMeld>,
     /// `[lobes].lock`: pin the effective agent homes to `lobes_targets` (POL-40).
@@ -175,6 +177,8 @@ struct RawSources {
     allow_local: bool,
     #[serde(default, rename = "allow-version-ranges")]
     allow_version_ranges: bool,
+    #[serde(default, rename = "auto-update")]
+    auto_update: Option<String>,
     #[serde(default)]
     auto_meld: Vec<RawAutoMeld>,
 }
@@ -187,6 +191,7 @@ impl Default for RawSources {
             pinned: false,
             allow_local: true,
             allow_version_ranges: false,
+            auto_update: None,
             auto_meld: Vec::new(),
         }
     }
@@ -430,6 +435,12 @@ impl Policy {
         self.allow_version_ranges
     }
 
+    /// `[sources].auto-update`: the highest level any source auto-updates at
+    /// (AUP-30), `None` when the policy sets no cap.
+    pub fn auto_update_cap(&self) -> Option<crate::auto_update::Level> {
+        self.auto_update
+    }
+
     /// Does `[sources].pinned` refuse `pin` (POL-20)? A tag, a ref, and an
     /// exact version are pinned; a version range is pinned only under
     /// `allow-version-ranges` (VER-100); a branch never is.
@@ -646,12 +657,26 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         }
     };
 
+    // spec: AUP-30
+    let auto_update = match raw.sources.auto_update.as_deref() {
+        None => None,
+        Some(v) => Some(crate::auto_update::Level::parse(v).ok_or_else(|| {
+            MindError::InvalidPolicy {
+                path: path.display().to_string(),
+                reason: format!(
+                    "[sources].auto-update {v:?} must be \"off\", \"compatible\", or \"breaking\""
+                ),
+            }
+        })?),
+    };
+
     let policy = Policy {
         allow: raw.sources.allow,
         lock: raw.sources.lock,
         pinned: raw.sources.pinned,
         allow_local: raw.sources.allow_local,
         allow_version_ranges: raw.sources.allow_version_ranges,
+        auto_update,
         auto_meld,
         lobes_lock: raw.lobes.lock,
         lobes_targets: raw.lobes.targets,

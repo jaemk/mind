@@ -57,11 +57,11 @@ fn execute_inner(
 
     let (result, captured) = if capture {
         // Run the verb with stdout captured so nothing leaks onto the alt-screen.
-        with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys))
+        with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys, false))
     } else {
         // Interactive: the TUI is suspended, so let the verb own the terminal.
         (
-            dispatch(paths, action.kind, &action.upgrade_keys),
+            dispatch(paths, action.kind, &action.upgrade_keys, false),
             String::new(),
         )
     };
@@ -78,8 +78,15 @@ fn execute_inner(
 /// Dispatch one confirmed action to its command function. No verb logic is
 /// reimplemented here (TUI-20..23). `upgrade_keys` is only meaningful for
 /// `ActionKind::Upgrade` (TUI-72, TUI-73): the exact item keys the confirm
-/// modal listed and the user consented to.
-fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<()> {
+/// modal listed and the user consented to. `force` is set only for a
+/// `Forced` retry (TUI-80) and turns an install's link conflict into an
+/// overwrite (`--force`) instead of an error.
+fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: bool) -> Result<()> {
+    let clobber = if force {
+        commands::Clobber::Force
+    } else {
+        commands::Clobber::Error
+    };
     match kind {
         ActionKind::Learn { item_key, source } => {
             // When the user picked an item from a specific source (captured at
@@ -92,14 +99,15 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
             // `yes = true`: the TUI confirms in its own UI (the closure prompt
             // lands in the TUI shard); never block on the CLI's stdin [y/N]
             // prompt from inside raw mode. `Clobber::Error` surfaces a clobber as
-            // an error in the UI rather than reading a terminal prompt.
+            // an error in the UI rather than reading a terminal prompt; the
+            // TUI-80 retry passes `Force`.
             commands::learn(
                 paths,
                 &item_ref,
                 false,
                 commands::InstallFlow {
                     yes: true,
-                    clobber: commands::Clobber::Error,
+                    clobber,
                     dangerously_skip: false,
                     dangerously_skip_build: false,
                 },
@@ -127,24 +135,15 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
         // modal, which lists what installs, was the confirmation, and
         // `Clobber::Error` so a conflict is an inline error, not a prompt.
         ActionKind::EnableProfile { source, profile } => {
-            let selection = crate::profile::Selection {
-                include_default: false,
-                named: vec![profile],
-                all: false,
-            };
-            commands::learn_source_profiles(
-                paths,
-                &source,
-                &selection,
-                false,
-                commands::InstallFlow {
-                    yes: true,
-                    clobber: commands::Clobber::Error,
-                    dangerously_skip: false,
-                    dangerously_skip_build: false,
-                },
-            )?
+            learn_profiles(paths, &source, vec![profile], clobber)?
         }
+        // spec: TUI-79 PROF-17 -- the same verb over every enabled profile:
+        // `learn` installs the members that are not installed.
+        ActionKind::InstallProfiles { source, profiles } => {
+            learn_profiles(paths, &source, profiles, clobber)?
+        }
+        // spec: TUI-80 -- the install the user confirmed again with --force.
+        ActionKind::Forced(inner) => dispatch(paths, *inner, upgrade_keys, true)?,
         // spec: TUI-78 PROF-25 -- `forget <source> --profile <name>`, `yes`
         // for the same reason: the confirm modal listed what is forgotten.
         ActionKind::DisableProfile { source, profile } => {
@@ -206,6 +205,33 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
         }
     }
     Ok(())
+}
+
+/// `learn <source> --profile <each of profiles>` (PROF-17) for the browser:
+/// `yes`, since the confirm modal listed what installs (TUI-78, TUI-79).
+fn learn_profiles(
+    paths: &Paths,
+    source: &str,
+    profiles: Vec<String>,
+    clobber: commands::Clobber,
+) -> Result<()> {
+    let selection = crate::profile::Selection {
+        include_default: false,
+        named: profiles,
+        all: false,
+    };
+    commands::learn_source_profiles(
+        paths,
+        source,
+        &selection,
+        false,
+        commands::InstallFlow {
+            yes: true,
+            clobber,
+            dangerously_skip: false,
+            dangerously_skip_build: false,
+        },
+    )
 }
 
 /// Reduce the captured verb output to a one-line status-bar summary: the last
@@ -1340,6 +1366,65 @@ mod tests {
         assert!(manifest.items.is_empty(), "{:?}", manifest.items.keys());
         let reg = crate::source::Registry::load(&paths).unwrap();
         assert_eq!(reg.sources[0].profiles, None);
+    }
+
+    #[test]
+    fn install_profiles_installs_every_enabled_profiles_missing_members() {
+        // spec: TUI-79 - `learn <source> --profile <each>` over the enabled
+        // profiles installs their members that are not installed.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+        let mut reg = crate::source::Registry::load(&paths).unwrap();
+        reg.sources[0].profiles = Some(vec!["default".to_string(), "full".to_string()]);
+        reg.save(&paths).unwrap();
+
+        execute(
+            &paths,
+            pending(ActionKind::InstallProfiles {
+                source: name,
+                profiles: vec!["default".to_string(), "full".to_string()],
+            }),
+        )
+        .expect("install enabled profiles");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        for key in ["skill:a", "skill:b", "skill:c"] {
+            assert!(manifest.items.contains_key(key), "{key} missing");
+        }
+    }
+
+    #[test]
+    fn a_forced_learn_replaces_a_foreign_target_a_plain_one_refuses() {
+        // spec: TUI-80 TUI-82 - the plain install stops on a target mind did
+        // not create; the forced one (retry or `f`) replaces it.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_profile_repo(&base);
+        let name = register(&paths, &src);
+        let target = paths.claude_home.join("skills/a");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("SKILL.md"), "the user's own\n").unwrap();
+        let learn = ActionKind::Learn {
+            item_key: "skill:a".to_string(),
+            source: name,
+        };
+
+        let err = execute(&paths, pending(learn.clone())).expect_err("plain learn must stop");
+        assert!(
+            matches!(err, crate::error::MindError::LinkOccupied { .. }),
+            "got {err:?}"
+        );
+        assert!(!std::fs::symlink_metadata(&target).unwrap().is_symlink());
+
+        execute(&paths, pending(ActionKind::Forced(Box::new(learn)))).expect("forced learn");
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert!(
+            crate::manifest::Manifest::load(&paths)
+                .unwrap()
+                .items
+                .contains_key("skill:a")
+        );
     }
 
     #[test]

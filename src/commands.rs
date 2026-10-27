@@ -374,6 +374,8 @@ fn filled_version_pin(
         highest_tag: res.highest.as_ref().map(|r| r.tag.clone()),
         // Resolution never selects a yanked version (VER-46).
         yanked: false,
+        recommended: pin.recommended.clone(),
+        auto_update: pin.auto_update,
     }
 }
 
@@ -386,6 +388,8 @@ struct VersionJson {
     highest_available: Option<String>,
     breaking_available: bool,
     yanked: bool,
+    /// The default branch's `pin-version` at the last resolution (VER-142).
+    recommended: Option<String>,
 }
 
 /// `pin`'s [`VersionJson`], `None` for any other pin kind. The tag is
@@ -401,6 +405,7 @@ fn version_json(pin: &Pin) -> Option<VersionJson> {
         highest_available: vp.highest.clone(),
         breaking_available: breaking_release(pin).is_some(),
         yanked: vp.yanked,
+        recommended: vp.recommended.clone(),
     })
 }
 
@@ -434,6 +439,8 @@ struct BreakingMoveJson {
     from: String,
     to: String,
     applied: bool,
+    /// The source's recommended range admits `to` (VER-141).
+    recommended: bool,
 }
 
 /// `recall`'s release lines for a version-pinned source (VER-90): a breaking
@@ -445,8 +452,12 @@ fn version_marks(source: &crate::source::Source) -> Vec<String> {
     let shown = strip_ansi(&source.name);
     let mut lines = Vec::new();
     if let Some((_, to)) = breaking_release(&source.pin) {
+        // spec: VER-141
+        let nudge = recommended_for_breaking(&source.pin)
+            .map(|r| format!(" ({shown} recommends {r})"))
+            .unwrap_or_default();
         lines.push(format!(
-            "note: {shown}: breaking release {to} available; take it with `mind upgrade --allow-breaking --source {}`",
+            "note: {shown}: breaking release {to} available{nudge}; take it with `mind upgrade --allow-breaking --source {}`",
             crate::error::shell_quote(&shown)
         ));
     }
@@ -458,7 +469,81 @@ fn version_marks(source: &crate::source::Source) -> Vec<String> {
             vp.range
         ));
     }
+    // spec: AUP-10 -- the declaration never changes a grant; say so once the
+    // maintainer asks for more than the consumer granted.
+    if let (Some(declared), Some(granted)) = (vp.auto_update, source.auto_update)
+        && granted != crate::auto_update::Level::Off
+        && declared > granted
+    {
+        lines.push(format!(
+            "note: {shown} asks to update automatically, including breaking releases; allow it with `mind meld {} --auto-update=breaking`",
+            crate::error::shell_quote(&shown)
+        ));
+    }
     lines
+}
+
+/// The auto-update level in `recall`'s source header (AUP-11):
+/// ` auto-update compatible`. Empty when the level is `off`.
+// spec: AUP-11
+fn auto_update_token(
+    source: &crate::source::Source,
+    cap: Option<crate::auto_update::Level>,
+) -> String {
+    match auto_update_level(source, cap) {
+        crate::auto_update::Level::Off => String::new(),
+        level => format!(" auto-update {level}"),
+    }
+}
+
+/// A source's auto-update state in `--json` output (AUP-11).
+#[derive(Serialize)]
+struct AutoUpdateStateJson {
+    declared: Option<crate::auto_update::Level>,
+    granted: crate::auto_update::Level,
+    effective: crate::auto_update::Level,
+}
+
+fn auto_update_json(
+    source: &crate::source::Source,
+    cap: Option<crate::auto_update::Level>,
+) -> AutoUpdateStateJson {
+    AutoUpdateStateJson {
+        declared: match &source.pin {
+            Pin::Version(vp) => vp.auto_update,
+            _ => None,
+        },
+        granted: source.auto_update.unwrap_or(crate::auto_update::Level::Off),
+        effective: auto_update_level(source, cap),
+    }
+}
+
+/// The managed policy, for showing auto-update levels (AUP-30). A policy that
+/// fails to load is reported by the verbs that enforce it, not here.
+fn policy_for_display() -> Option<Policy> {
+    Policy::load().ok().flatten()
+}
+
+/// The managed policy's cap on `source`'s auto-update level (AUP-30): its
+/// `[sources].auto-update`, and `compatible` for a source an `auto_meld`
+/// entry pins, since `sync` puts that range back (POL-55) and a breaking move
+/// would only be undone, and its items downgraded, at the next sync.
+// spec: AUP-30
+fn auto_update_cap(
+    policy: Option<&Policy>,
+    source: &crate::source::Source,
+) -> Option<crate::auto_update::Level> {
+    use crate::auto_update::Level;
+    let policy = policy?;
+    let pinned_by_policy = policy
+        .auto_meld()
+        .iter()
+        .any(|am| parse_spec_quiet(&am.repo).is_ok_and(|spec| spec.name == source.name));
+    match (policy.auto_update_cap(), pinned_by_policy) {
+        (cap, false) => cap,
+        (Some(cap), true) => Some(cap.min(Level::Compatible)),
+        (None, true) => Some(Level::Compatible),
+    }
 }
 
 /// The release a version-pinned source is on, for `recall`'s source header
@@ -529,7 +614,9 @@ fn default_version_pin(
             strip_ansi(b)
         );
     }
-    let pin = crate::source::VersionPin::unresolved(&range);
+    let mut pin = crate::source::VersionPin::unresolved(&range);
+    pin.recommended = m.source.recommended_range().map(|r| r.to_string());
+    pin.auto_update = m.source.auto_update_level(toml_path)?;
     Ok(res
         .selected
         .as_ref()
@@ -654,6 +741,18 @@ fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
     Some((vp.resolved.clone().unwrap_or_default(), highest))
 }
 
+/// The range the source recommends when it admits `pin`'s breaking release
+/// (VER-141), for the "recommends ^2" hint. `None` with no breaking release,
+/// no recommendation, or one that does not admit it.
+fn recommended_for_breaking(pin: &Pin) -> Option<String> {
+    let Pin::Version(vp) = pin else {
+        return None;
+    };
+    let (_, to) = breaking_release(pin)?;
+    let recommended = crate::version::Range::parse(vp.recommended.as_deref()?)?;
+    recommended.matches(&to).then(|| recommended.to_string())
+}
+
 /// Settle every in-scope source's breaking release before the upgrade pass
 /// (VER-61..63). Each is listed; an accepted one has its range moved to the
 /// caret of the new release (`^2.0.0`) and is resolved there, so its items then
@@ -681,7 +780,12 @@ fn settle_breaking_moves(
             continue;
         };
         let shown = strip_ansi(&source.name);
-        let line = format!("{shown} {from} -> {to} (breaking)");
+        // spec: VER-141 -- the source's own nudge toward the new major.
+        let recommended = recommended_for_breaking(&source.pin);
+        let line = match &recommended {
+            Some(r) => format!("{shown} {from} -> {to} (breaking, {shown} recommends {r})"),
+            None => format!("{shown} {from} -> {to} (breaking)"),
+        };
         let accept = if allow {
             true
         } else if interactive {
@@ -695,11 +799,16 @@ fn settle_breaking_moves(
             from: from.clone(),
             to: to.to_string(),
             applied: false,
+            recommended: recommended.is_some(),
         };
         if !accept {
             if !out.json {
+                let nudge = recommended
+                    .as_deref()
+                    .map(|r| format!("; {shown} recommends {r}"))
+                    .unwrap_or_default();
                 println!(
-                    "{} {shown} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
+                    "{} {shown} {from} -> {to} (breaking, not applied{nudge}; take it with `mind upgrade --allow-breaking --source {}`)",
                     out.warn(),
                     crate::error::shell_quote(&shown)
                 );
@@ -718,6 +827,8 @@ fn settle_breaking_moves(
             highest: vp.highest.clone(),
             highest_tag: vp.highest_tag.clone(),
             yanked: false,
+            recommended: vp.recommended.clone(),
+            auto_update: vp.auto_update,
         });
         let applied = clone_dir_checked(paths, &moved)
             .and_then(|dir| sync_clone_to_pin(&moved, &dir))
@@ -815,14 +926,21 @@ fn sync_clone_to_pin(
     };
     // spec: VER-3 -- the template and yanked list come from the default
     // branch tip, not from the release the clone is on.
-    let (template, yanked) = match git::default_branch_mind_toml(&source.url, dir)? {
+    let meta = match git::default_branch_mind_toml(&source.url, dir)? {
         Some(text) => crate::mindfile::release_meta_from_text(&text, &dir.join("mind.toml"))?,
-        None => (None, Vec::new()),
+        None => crate::mindfile::ReleaseMeta::default(),
     };
-    let template = template.unwrap_or(crate::version::Template::Default);
+    let yanked = meta.yanked;
+    let template = meta.template.unwrap_or(crate::version::Template::Default);
     let mut res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
     fit_min_mind_version(&source.name, &source.url, dir, true, &mut res)?;
     let mut next = vp.clone();
+    // spec: VER-140 -- recorded fresh each sync, so a recommendation the
+    // default branch dropped is dropped here too.
+    next.recommended = meta.recommended;
+    // spec: AUP-5 -- the declaration too, for the bare `--auto-update`, the
+    // first-meld prompt, and recall's note.
+    next.auto_update = meta.auto_update;
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
     next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
     // spec: VER-90 -- recorded so `recall` marks it without a fetch.
@@ -860,7 +978,7 @@ fn sync_clone_to_pin(
             }
         }
         Some(rel) => {
-            next = filled_version_pin(vp, rel, &res);
+            next = filled_version_pin(&next, rel, &res);
             let pin = Pin::Version(next);
             git::sync_to_pin(&source.url, dir, &pin)?;
             return Ok((git::head_commit(&source.url, dir)?, pin));
@@ -1530,20 +1648,23 @@ fn meld_recursive(
                     let _ = std::fs::remove_dir_all(dir);
                 }
             };
-            let meta = mindfile.as_ref().map(|m| {
-                Ok::<_, MindError>((
-                    m.source.release_template(&toml_path)?,
-                    m.source.yanked_versions(&toml_path)?,
-                ))
-            });
-            let (template, yanked) = match meta.transpose() {
-                Ok(m) => m.unwrap_or((None, Vec::new())),
+            let meta = mindfile
+                .as_ref()
+                .map(|m| crate::mindfile::ReleaseMeta::from_source(&m.source, &toml_path));
+            let meta = match meta.transpose() {
+                Ok(m) => m.unwrap_or_default(),
                 Err(e) => {
                     cleanup(&dir);
                     return Err(e);
                 }
             };
-            let template = template.unwrap_or(crate::version::Template::Default);
+            let template = meta.template.unwrap_or(crate::version::Template::Default);
+            let yanked = meta.yanked;
+            let vp = crate::source::VersionPin {
+                recommended: meta.recommended,
+                auto_update: meta.auto_update,
+                ..vp
+            };
             let res = resolve_version(&source.name, &source.url, &vp, &template, &yanked).and_then(
                 |mut res| {
                     fit_min_mind_version(&source.name, &source.url, &dir, !is_local, &mut res)?;
@@ -4552,6 +4673,58 @@ pub enum Clobber {
     Prompt,
     /// Overwrite the conflicting target without asking (`--force`).
     Force,
+    /// Overwrite every conflicting target without asking, and nothing else
+    /// `--force` implies (a re-meld's HOOK-60 re-offer): `--overwrite`
+    /// (CLI-246).
+    Overwrite,
+}
+
+impl Clobber {
+    /// Whether an occupied link target is replaced without a prompt: by the
+    /// flag (`--force`/`--overwrite`), or because the user answered `a` to an
+    /// earlier overwrite prompt in this run (CLI-247).
+    fn overwrites(self) -> bool {
+        match self {
+            Clobber::Force | Clobber::Overwrite => true,
+            Clobber::Prompt => OVERWRITE_ALL.load(std::sync::atomic::Ordering::Relaxed),
+            Clobber::Error => false,
+        }
+    }
+}
+
+/// Set when the user answers `a` (all) to an overwrite prompt (CLI-247): the
+/// rest of the run overwrites every conflict without asking again.
+static OVERWRITE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The answer to an overwrite prompt: `y` this one, `a` this and every later
+/// one in the run, anything else (or EOF) no.
+#[derive(Debug, PartialEq, Eq)]
+enum OverwriteAnswer {
+    Yes,
+    All,
+    No,
+}
+
+fn parse_overwrite_answer(input: &str) -> OverwriteAnswer {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => OverwriteAnswer::Yes,
+        "a" | "all" => OverwriteAnswer::All,
+        _ => OverwriteAnswer::No,
+    }
+}
+
+/// Prompt `[y/N/a]` to overwrite an occupied link target (CLI-35, CLI-247).
+/// An `a` sets `OVERWRITE_ALL` so later conflicts in the run do not ask.
+fn confirm_overwrite(prompt: &str) -> Result<bool> {
+    let line = prompt_line(&format!("\n{prompt} [y/N/a] "))?;
+    Ok(match parse_overwrite_answer(&line) {
+        OverwriteAnswer::Yes => true,
+        OverwriteAnswer::All => {
+            OVERWRITE_ALL.store(true, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        OverwriteAnswer::No => false,
+    })
 }
 
 /// The install-time options that travel together through the learn/meld chain:
@@ -4939,7 +5112,7 @@ fn learn_selected(
             break;
         }
         let siblings = siblings_of(&items, &target.source);
-        let force = clobber == Clobber::Force;
+        let force = clobber.overwrites();
         // A `learn` never takes the re-install path: DEP-23 drops every already-
         // installed key from the closure above, so nothing reaching here is
         // installed under this effective name (HOOK-125: a repeat `learn` is a
@@ -4957,11 +5130,13 @@ fn learn_selected(
             dangerously_skip_build,
             is_update,
         );
-        // CLI-34: a conflicting (non-mind) target refuses by default. With
+        // CLI-35: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
-        // yes, retry forced. `install` aborts before touching anything on a
-        // clobber, so the retry is safe.
+        // yes, retry forced, and on an `a` also stop asking (CLI-247).
+        // `install` aborts before touching anything on a clobber, so the
+        // retry is safe.
         if let Err(MindError::LinkOccupied { path }) = &result
+            && !force
             && clobber == Clobber::Prompt
             && crate::hook::is_tty()
             && !out.json
@@ -4971,7 +5146,7 @@ fn learn_selected(
             // composing the prompt (not the whole prompt after), so the
             // trailing "exists and is not..." text cannot be swallowed by an
             // unterminated escape in the path.
-            result = if confirm(&format!(
+            result = if confirm_overwrite(&format!(
                 "{} exists and is not managed by mind; overwrite it?",
                 display_path(std::path::Path::new(&path))
             ))? {
@@ -5122,7 +5297,7 @@ fn learn_collecting_selected(
             break;
         }
         let siblings = siblings_of(&items, &target.source);
-        let force = clobber == Clobber::Force;
+        let force = clobber.overwrites();
         // The same defensive guard as the `learn` path above: DEP-23 has
         // already dropped every installed key, so this is false here.
         let is_update = manifest.items.contains_key(target.key().as_str());
@@ -6412,6 +6587,32 @@ pub(crate) struct ProfileChangePreview {
     pub kept: Vec<String>,
 }
 
+/// The effective keys `learn <source> --profile <each of profiles>` would
+/// install (PROF-17): for the TUI's Enable and Install-enabled confirms
+/// (TUI-78, TUI-79). Read-only.
+pub(crate) fn profiles_install_preview(
+    paths: &Paths,
+    source_name: &str,
+    profiles: &[String],
+) -> Result<ProfileChangePreview> {
+    let selection = crate::profile::Selection {
+        include_default: false,
+        named: profiles.to_vec(),
+        all: false,
+    };
+    let req = ProfileInstall {
+        source_name,
+        selection: &selection,
+        learn_patterns: &[],
+        only_missing_from_snapshot: false,
+    };
+    let plan = plan_profile_install(paths, &req)?;
+    Ok(ProfileChangePreview {
+        install: plan.pending.iter().map(|k| strip_ansi(k)).collect(),
+        ..ProfileChangePreview::default()
+    })
+}
+
 /// Preview enabling (`enable`) or disabling `profile` on `source_name`
 /// (TUI-78, PROF-17, PROF-25). Disabling a profile that is not enabled
 /// previews nothing.
@@ -6428,22 +6629,7 @@ pub(crate) fn profile_change_preview(
         });
     };
     if enable {
-        let selection = crate::profile::Selection {
-            include_default: false,
-            named: vec![profile.to_string()],
-            all: false,
-        };
-        let req = ProfileInstall {
-            source_name,
-            selection: &selection,
-            learn_patterns: &[],
-            only_missing_from_snapshot: false,
-        };
-        let plan = plan_profile_install(paths, &req)?;
-        return Ok(ProfileChangePreview {
-            install: plan.pending.iter().map(|k| strip_ansi(k)).collect(),
-            ..ProfileChangePreview::default()
-        });
+        return profiles_install_preview(paths, source_name, &[profile.to_string()]);
     }
     if !source.profiles.iter().flatten().any(|p| p == profile) {
         return Ok(ProfileChangePreview::default());
@@ -7556,25 +7742,28 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     // origin tip, or the working tree of a still-linked local source.
     let checkout_pin = match checkout_pin {
         Pin::Version(vp) => {
-            let (template, yanked) = if target.join(".git").is_dir() {
+            let meta = if target.join(".git").is_dir() {
                 match git::default_branch_mind_toml(&url, &target)? {
                     Some(text) => {
                         crate::mindfile::release_meta_from_text(&text, &target.join("mind.toml"))?
                     }
-                    None => (None, Vec::new()),
+                    None => crate::mindfile::ReleaseMeta::default(),
                 }
             } else {
                 let root = std::path::Path::new(&url);
                 let toml_path = root.join("mind.toml");
                 match MindToml::load(root)? {
-                    Some(m) => (
-                        m.source.release_template(&toml_path)?,
-                        m.source.yanked_versions(&toml_path)?,
-                    ),
-                    None => (None, Vec::new()),
+                    Some(m) => crate::mindfile::ReleaseMeta::from_source(&m.source, &toml_path)?,
+                    None => crate::mindfile::ReleaseMeta::default(),
                 }
             };
-            let template = template.unwrap_or(crate::version::Template::Default);
+            let template = meta.template.unwrap_or(crate::version::Template::Default);
+            let yanked = meta.yanked;
+            let vp = crate::source::VersionPin {
+                recommended: meta.recommended,
+                auto_update: meta.auto_update,
+                ..vp
+            };
             let mut res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
             if target.join(".git").is_dir() {
                 fit_min_mind_version(source_name, &url, &target, true, &mut res)?;
@@ -11575,6 +11764,7 @@ pub fn recall(
 
     if sources {
         let registry = Registry::load(paths)?;
+        let policy = policy_for_display();
         if json {
             // spec: PROF-29 -- each source carries its declared profiles and
             // the enabled ones; a source without profiles is unchanged.
@@ -11594,6 +11784,16 @@ pub fn recall(
                                     .map_err(|e| MindError::json("recall sources", e))?,
                             );
                         }
+                        // spec: AUP-11 -- replaces the bare grant the
+                        // registry serializes.
+                        obj.insert(
+                            "auto_update".into(),
+                            serde_json::to_value(auto_update_json(
+                                s,
+                                auto_update_cap(policy.as_ref(), s),
+                            ))
+                            .map_err(|e| MindError::json("recall sources", e))?,
+                        );
                     }
                     Ok(v)
                 })
@@ -11631,11 +11831,13 @@ pub fn recall(
                 let origin = origin_label(s.origin);
                 // spec: VER-90
                 let release = version_token(&s.pin);
+                // spec: AUP-11
+                let auto = auto_update_token(s, auto_update_cap(policy.as_ref(), s));
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
-                    out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
+                    out.dim(&format!("[{commit}{release}{auto}{ns}{hook}{origin}]")),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
@@ -11903,6 +12105,7 @@ pub fn recall(
         // Fall through: unmanaged lobe items are still worth showing (UNM-2).
     }
 
+    let display_policy = policy_for_display();
     for s in &registry.sources {
         if !source_shown(s) {
             continue;
@@ -11931,11 +12134,13 @@ pub fn recall(
         let origin = origin_label(s.origin);
         // spec: VER-90
         let release = version_token(&s.pin);
+        // spec: AUP-11
+        let auto = auto_update_token(s, auto_update_cap(display_policy.as_ref(), s));
         println!(
             "{} {}  {}{}",
             out.bullet(),
             out.bold(&s.name),
-            out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
+            out.dim(&format!("[{commit}{release}{auto}{ns}{hook}{origin}]")),
             s.description
                 .as_deref()
                 .map(|d| format!("  {d}"))
@@ -13910,8 +14115,15 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         all_profiles,
         recursive,
         force,
+        overwrite,
         local,
+        auto_update,
     } = args;
+    // spec: AUP-8 -- a bad level is refused before the clone.
+    let grant = auto_update
+        .as_deref()
+        .map(parse_auto_update_grant)
+        .transpose()?;
     // spec: HARN-20/HARN-21 -- `--local` restricts the install fan-out to
     // the registered project lobe containing the cwd; without it, plain
     // meld/learn inside such a lobe gets a one-line note that --local is
@@ -13953,10 +14165,14 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     if is_item_link_spec(&repo) {
         crate::profile::reject_on_item_link(&profile_flags)?;
     }
-    // CLI-34: `--force` overwrites a conflicting target; otherwise a
-    // conflict prompts on a TTY (Clobber::Prompt).
+    // CLI-35: `--force` overwrites a conflicting target; otherwise a
+    // conflict prompts on a TTY (Clobber::Prompt). spec: CLI-246 --
+    // `--overwrite` accepts every conflict but, unlike `--force`, leaves the
+    // HOOK-60 re-offer to the pending hooks.
     let clobber = if force {
         Clobber::Force
+    } else if overwrite {
+        Clobber::Overwrite
     } else {
         Clobber::Prompt
     };
@@ -13972,7 +14188,8 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     let source_ident = instance_name(&repo, alias.as_deref()).unwrap_or_else(|_| repo.clone());
     // CLI-12: re-melding an already-melded source is not an error; it
     // ensures the items are installed, else reports their status.
-    if is_melded(paths, &repo, alias.as_deref())? {
+    let already_melded = is_melded(paths, &repo, alias.as_deref())?;
+    if already_melded {
         // spec: CLI-206 -- name every discovery flag this invocation
         // carries; remeld() cannot apply any of them (it never
         // re-clones or re-registers) and reports so explicitly.
@@ -14134,8 +14351,522 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             emit_meld_json_result(meld_sum, vec![], 0, None)?;
         }
     }
+    apply_auto_update_grant(paths, &source_ident, grant, !already_melded, yes, json)?;
     // DSC-56: suggest `mind probe` after melding a curated super-source.
     maybe_probe_hint(paths, &source_ident)
+}
+
+/// What `meld --auto-update[=<level>]` asks for (AUP-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoUpdateGrant {
+    /// Bare `--auto-update`: the level the source declares.
+    Declared,
+    Level(crate::auto_update::Level),
+}
+
+fn parse_auto_update_grant(value: &str) -> Result<AutoUpdateGrant> {
+    if value == "declared" {
+        return Ok(AutoUpdateGrant::Declared);
+    }
+    crate::auto_update::Level::parse(value)
+        .map(AutoUpdateGrant::Level)
+        .ok_or_else(|| MindError::BadAutoUpdate {
+            value: value.to_string(),
+        })
+}
+
+/// Record the consumer's auto-update grant for `source_name` (AUP-8), or,
+/// on the meld that registers a source declaring a level, ask for one
+/// (AUP-9). A grant on anything but a version range pin records nothing and
+/// says so (AUP-2), except `off`, which always revokes.
+// spec: AUP-2 AUP-6 AUP-8 AUP-9
+fn apply_auto_update_grant(
+    paths: &Paths,
+    source_name: &str,
+    grant: Option<AutoUpdateGrant>,
+    newly_melded: bool,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    use crate::auto_update::Level;
+    let mut registry = Registry::load(paths)?;
+    let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) else {
+        return Ok(());
+    };
+    let shown = strip_ansi(&source.name);
+    let (declared, ranged) = match &source.pin {
+        Pin::Version(vp) => (
+            vp.auto_update,
+            !matches!(
+                vp.parsed_range(),
+                None | Some(crate::version::Range::Exact(_))
+            ),
+        ),
+        _ => (None, false),
+    };
+    let level = match grant {
+        Some(AutoUpdateGrant::Declared) => declared.unwrap_or(Level::Compatible),
+        Some(AutoUpdateGrant::Level(level)) => level,
+        None => {
+            let Some(declared) = declared else {
+                return Ok(());
+            };
+            if !newly_melded || !ranged || yes || json || !crate::hook::is_tty() {
+                return Ok(());
+            }
+            let compatible = format!("{shown} asks to update automatically (compatible releases)");
+            let asked = if declared == Level::Breaking
+                && confirm(&format!(
+                    "{shown} asks to update automatically, including breaking releases"
+                ))? {
+                Some(Level::Breaking)
+            } else if confirm_default_yes(&compatible)? {
+                Some(Level::Compatible)
+            } else {
+                None
+            };
+            let Some(level) = asked else {
+                return Ok(());
+            };
+            level
+        }
+    };
+    if level != Level::Off && !ranged {
+        if !json {
+            println!(
+                "note: auto-update applies only to a version range pin; {shown} has none, so nothing was granted"
+            );
+        }
+        return Ok(());
+    }
+    source.auto_update = Some(level);
+    registry.save(paths)?;
+    if !json {
+        println!("auto-update: {shown} {level}");
+    }
+    Ok(())
+}
+
+/// `source`'s auto-update level for a run (AUP-1, AUP-2, AUP-10): `off` for
+/// anything but a version range pin.
+// spec: AUP-2 AUP-10
+fn auto_update_level(
+    source: &crate::source::Source,
+    cap: Option<crate::auto_update::Level>,
+) -> crate::auto_update::Level {
+    use crate::auto_update::Level;
+    let Pin::Version(vp) = &source.pin else {
+        return Level::Off;
+    };
+    if matches!(
+        vp.parsed_range(),
+        None | Some(crate::version::Range::Exact(_))
+    ) {
+        return Level::Off;
+    }
+    crate::auto_update::effective(source.auto_update, cap)
+}
+
+/// Why moving `source` (already at its new commit in `dir`) would need hook
+/// consent a run cannot give (AUP-17): a pending source-level hook, or an
+/// installed item whose new content declares an install, update, or build
+/// hook. `None` when the move runs no hook.
+// spec: AUP-17
+fn auto_update_hold_reason(
+    paths: &Paths,
+    source: &crate::source::Source,
+    dir: &std::path::Path,
+    manifest: &Manifest,
+) -> Result<Option<String>> {
+    let pending = pending_update_hooks(source, dir);
+    if !pending.hooks.is_empty() {
+        return Ok(Some(format!("its {} hook needs consent", pending.event)));
+    }
+    let mut catalog: Vec<CatalogItem> = Vec::new();
+    catalog::scan_source(paths, source, &mut catalog)?;
+    for installed in manifest.items.values().filter(|i| i.source == source.name) {
+        let Some(cat) = catalog.iter().find(|c| {
+            c.kind == installed.kind
+                && c.name == installed.bare_name
+                && c.source == installed.source
+        }) else {
+            continue;
+        };
+        let has_hook = cat.build.is_some()
+            || cat.hooks.iter().any(|h| {
+                matches!(
+                    h.event,
+                    crate::mindfile::HookEvent::Install | crate::mindfile::HookEvent::Update
+                )
+            });
+        if has_hook && cat.content_hash()? != installed.hash {
+            return Ok(Some(format!(
+                "{} has a hook that needs consent",
+                installed.display_key()
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// At `breaking`, move `source` to its recommended range when that range
+/// admits its breaking release (AUP-12). Returns the new commit and pin, or
+/// `None` when nothing breaking is recommended or the recommended range
+/// selects nothing (the source then stays at its compatible resolution).
+// spec: AUP-12
+fn auto_update_breaking_move(
+    source: &crate::source::Source,
+    dir: &std::path::Path,
+) -> Result<Option<(String, Pin)>> {
+    let Pin::Version(vp) = &source.pin else {
+        return Ok(None);
+    };
+    let Some(recommended) = recommended_for_breaking(&source.pin) else {
+        return Ok(None);
+    };
+    let Some(range) = crate::version::Range::parse(&recommended) else {
+        return Ok(None);
+    };
+    let mut moved = source.clone();
+    moved.pin = Pin::Version(crate::source::VersionPin {
+        range: range.to_string(),
+        resolved: None,
+        tag: None,
+        yanked: false,
+        ..vp.clone()
+    });
+    let (commit, pin) = sync_clone_to_pin(&moved, dir)?;
+    match &pin {
+        Pin::Version(v) if v.resolved.is_some() => Ok(Some((commit, pin))),
+        _ => Ok(None),
+    }
+}
+
+/// Put `source`'s clone back on the commit the registry records (AUP-17), so a
+/// held or failed move leaves the source and its items agreeing.
+fn auto_update_restore_clone(source: &crate::source::Source, dir: &std::path::Path) -> Result<()> {
+    match source.commit.as_deref() {
+        Some(sha) => git::reset_to_commit(&source.url, dir, sha),
+        None => git::sync_to_pin(&source.url, dir, &source.pin),
+    }
+}
+
+/// A version pin's resolved version, for a run report line.
+fn resolved_version(pin: &Pin) -> String {
+    match pin {
+        Pin::Version(v) => v.resolved.clone().unwrap_or_else(|| "?".into()),
+        _ => "?".into(),
+    }
+}
+
+/// `mind auto-update run`'s `--json` result (AUP-13, AUP-21).
+#[derive(Serialize)]
+struct AutoUpdateJson {
+    // spec: CLI-153 CLI-168 -- the mutating-verb envelope.
+    schema: u8,
+    action: &'static str,
+    target: &'static str,
+    outcome: &'static str,
+    moved: Vec<String>,
+    held: Vec<String>,
+    failed: Vec<String>,
+    breaking: Vec<BreakingMoveJson>,
+}
+
+/// `mind auto-update run` (AUP-15..21): sync and upgrade every source whose
+/// effective level is not `off`, never prompting.
+// spec: AUP-15 AUP-18 AUP-19
+pub fn auto_update_run(
+    paths: &Paths,
+    if_stale: Option<&str>,
+    background: bool,
+    json: bool,
+) -> Result<()> {
+    use crate::auto_update::{Level, Report, State};
+    let every = if_stale
+        .map(crate::auto_update::parse_duration)
+        .transpose()?;
+    let stale = |state: &State| every.is_none_or(|e| state.is_stale(e, crate::auto_update::now()));
+    if background {
+        // spec: AUP-20 -- the trigger must never hold a session up: check the
+        // throttle here, then hand off to a detached child and return.
+        if !stale(&State::load(paths)) {
+            return Ok(());
+        }
+        return spawn_detached_run(if_stale);
+    }
+    let up_to_date = |json: bool| {
+        if json {
+            print_json(&AutoUpdateJson {
+                schema: 1,
+                action: "auto-update run",
+                target: "*",
+                outcome: "skipped",
+                moved: Vec::new(),
+                held: Vec::new(),
+                failed: Vec::new(),
+                breaking: Vec::new(),
+            })
+        } else {
+            Ok(())
+        }
+    };
+    if !stale(&State::load(paths)) {
+        if !json {
+            println!("auto-update: the last run is more recent than --if-stale; nothing to do");
+        }
+        return up_to_date(json);
+    }
+    // spec: AUP-18 -- never queue behind another mind.
+    let mut lock = crate::lock::open(paths)?;
+    let Some(_guard) = lock.try_write() else {
+        if !json {
+            println!("auto-update: another mind command is running; nothing to do");
+        }
+        return up_to_date(json);
+    };
+    // spec: AUP-15 -- every consent gate takes its no-TTY path, and git never
+    // asks for credentials.
+    crate::hook::force_non_interactive();
+    git::set_noninteractive(true);
+
+    let policy = Policy::load()?;
+    let manifest = Manifest::load(paths)?;
+    let mut registry = Registry::load(paths)?;
+    let mut report = Report {
+        time: crate::auto_update::now(),
+        ..Report::default()
+    };
+    let mut breaking: Vec<BreakingMoveJson> = Vec::new();
+    let mut moved_names: Vec<String> = Vec::new();
+    for source in &mut registry.sources {
+        let level = auto_update_level(source, auto_update_cap(policy.as_ref(), source));
+        if level == Level::Off {
+            continue;
+        }
+        // POL-12: a source the locked allowlist no longer admits is not moved.
+        if let Some(p) = policy.as_ref()
+            && p.lock()
+            && !p.allow_matches(&source.base_identity())
+        {
+            continue;
+        }
+        let shown = strip_ansi(&source.name);
+        enum Step {
+            Unchanged(Box<Pin>),
+            Moved(String, Box<Pin>, bool),
+            Held(String),
+        }
+        let current: &crate::source::Source = source;
+        let step = (|| -> Result<Step> {
+            let dir = clone_dir_checked(paths, current)?;
+            let moving = || -> Result<Step> {
+                let (mut commit, mut pin) = sync_clone_to_pin(current, &dir)?;
+                let mut took_breaking = false;
+                if level == Level::Breaking {
+                    let mut probe = current.clone();
+                    probe.pin = pin.clone();
+                    if let Some((c, p)) = auto_update_breaking_move(&probe, &dir)? {
+                        commit = c;
+                        pin = p;
+                        took_breaking = true;
+                    }
+                }
+                if current.commit.as_deref() == Some(commit.as_str()) {
+                    // Nothing moved; keep the refreshed release metadata.
+                    return Ok(Step::Unchanged(Box::new(pin)));
+                }
+                let mut next = current.clone();
+                next.pin = pin.clone();
+                next.commit = Some(commit.clone());
+                if let Some(why) = auto_update_hold_reason(paths, &next, &dir, &manifest)? {
+                    // spec: AUP-17 -- put the clone back where the source is
+                    // recorded, so the source and its items do not disagree.
+                    auto_update_restore_clone(current, &dir)?;
+                    return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
+                }
+                Ok(Step::Moved(commit, Box::new(pin), took_breaking))
+            };
+            let step = moving();
+            if step.is_err() {
+                // A failure after the clone moved (a breaking resolution, the
+                // hold scan) must not leave it ahead of the registry.
+                let _ = auto_update_restore_clone(current, &dir);
+            }
+            step
+        })();
+        match step {
+            Ok(Step::Unchanged(pin)) => source.pin = *pin,
+            Ok(Step::Moved(commit, pin, took_breaking)) => {
+                let from = resolved_version(&source.pin);
+                let to = resolved_version(&pin);
+                report.moved.push(format!("{shown} {from} -> {to}"));
+                if took_breaking {
+                    // spec: AUP-13
+                    breaking.push(BreakingMoveJson {
+                        source: shown.clone(),
+                        from: from.clone(),
+                        to: to.clone(),
+                        applied: true,
+                        recommended: true,
+                    });
+                }
+                source.pin = *pin;
+                source.commit = Some(commit);
+                moved_names.push(source.name.clone());
+            }
+            Ok(Step::Held(why)) => report.held.push(format!("{shown} {why}")),
+            Err(e) => report
+                .failed
+                .push(format!("{shown}: {}", strip_ansi(&e.to_string()))),
+        }
+    }
+    registry.save(paths)?;
+
+    if !moved_names.is_empty() {
+        // The ordinary pass, scoped to what moved, with --yes and no prompts.
+        if let Err(e) = upgrade_inner_scoped(
+            paths,
+            true,
+            None,
+            true,
+            SourceScope::Names(&moved_names, None),
+            None,
+            false,
+            false,
+        ) {
+            report
+                .failed
+                .push(format!("upgrade: {}", strip_ansi(&e.to_string())));
+        }
+    }
+
+    // spec: AUP-19 AUP-21
+    crate::auto_update::append_log(paths, &report);
+    let mut state = State::load(paths);
+    state.last_run = Some(crate::auto_update::now());
+    if !report.is_empty() {
+        state.unshown.push(report.clone());
+    }
+    state.save(paths)?;
+
+    if json {
+        return print_json(&AutoUpdateJson {
+            schema: 1,
+            action: "auto-update run",
+            target: "*",
+            outcome: if report.failed.is_empty() {
+                "ok"
+            } else {
+                "partial"
+            },
+            moved: report.moved,
+            held: report.held,
+            failed: report.failed,
+            breaking,
+        });
+    }
+    for line in &report.moved {
+        println!("auto-update: moved {line}");
+    }
+    for line in &report.held {
+        println!("auto-update: held {line}");
+    }
+    for line in &report.failed {
+        eprintln!("auto-update: failed {line}");
+    }
+    if report.is_empty() {
+        println!("auto-update: everything is up to date");
+    }
+    Ok(())
+}
+
+/// Start `mind auto-update run` in a new session with no terminal and return
+/// (AUP-20). The child inherits nothing it could print to.
+fn spawn_detached_run(if_stale: Option<&str>) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    let exe = std::env::current_exe().map_err(|e| MindError::io("current_exe", e))?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["auto-update", "run"]);
+    if let Some(d) = if_stale {
+        cmd.args(["--if-stale", d]);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: `setsid` is async-signal-safe and touches no Rust state; it
+    // only detaches the child from the parent's session and terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn().map_err(|e| MindError::io(&exe, e))?;
+    Ok(())
+}
+
+/// `mind config auto-update on|off` (AUP-20): add or remove the
+/// `SessionStart` trigger in each Claude lobe's `settings.json`.
+// spec: AUP-20 AUP-30
+pub fn config_auto_update(paths: &Paths, on: bool, every: &str) -> Result<()> {
+    let out = crate::render::ctx();
+    if on {
+        crate::auto_update::parse_duration(every)?;
+        if Policy::load()?.and_then(|p| p.auto_update_cap()) == Some(crate::auto_update::Level::Off)
+        {
+            return Err(MindError::AutoUpdateForbidden);
+        }
+    }
+    let mut changed: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for lobe in paths.agent_homes()? {
+        let shown = strip_ansi(&lobe.path.display().to_string());
+        // A Claude home admits every kind; a harness preset lobe is skill-only.
+        if lobe.kinds.is_some() {
+            if on {
+                skipped.push(shown);
+            }
+            continue;
+        }
+        let file = lobe.path.join("settings.json");
+        let did = if on {
+            crate::auto_update::install_trigger(&file, every)?
+        } else {
+            crate::auto_update::remove_trigger(&file)?
+        };
+        if did {
+            changed.push(strip_ansi(&file.display().to_string()));
+        }
+    }
+    if out.json {
+        let mut r = MutationResult::new(
+            "config auto-update",
+            if on { "on" } else { "off" },
+            if changed.is_empty() { "no-op" } else { "ok" },
+        );
+        r.count = Some(changed.len());
+        return print_json(&r);
+    }
+    for file in &changed {
+        if on {
+            println!("{} added the auto-update trigger to {file}", out.ok());
+        } else {
+            println!("{} removed the auto-update trigger from {file}", out.ok());
+        }
+    }
+    if changed.is_empty() {
+        println!(
+            "auto-update trigger already {}",
+            if on { "installed" } else { "absent" }
+        );
+    }
+    for lobe in &skipped {
+        println!(
+            "note: {lobe} is not a Claude lobe, so it gets no trigger; schedule `mind auto-update run --if-stale {every}` from cron instead"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -14589,6 +15320,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 
@@ -15077,6 +15809,23 @@ mod tests {
         assert!(parse_confirm("whatever", true));
         assert!(!parse_confirm("n", true));
         assert!(!parse_confirm("NO", true));
+    }
+
+    #[test]
+    fn overwrite_prompt_answers_yes_all_or_no() {
+        // spec: CLI-247 - `a` accepts this conflict and every later one; the
+        // default (a bare Enter, EOF, anything else) refuses.
+        assert_eq!(parse_overwrite_answer("y"), OverwriteAnswer::Yes);
+        assert_eq!(parse_overwrite_answer(" YES \n"), OverwriteAnswer::Yes);
+        assert_eq!(parse_overwrite_answer("a"), OverwriteAnswer::All);
+        assert_eq!(parse_overwrite_answer("All\n"), OverwriteAnswer::All);
+        assert_eq!(parse_overwrite_answer(""), OverwriteAnswer::No);
+        assert_eq!(parse_overwrite_answer("n"), OverwriteAnswer::No);
+        assert_eq!(parse_overwrite_answer("maybe"), OverwriteAnswer::No);
+        // The flags overwrite without a prompt; `Error` never does.
+        assert!(Clobber::Force.overwrites());
+        assert!(Clobber::Overwrite.overwrites());
+        assert!(!Clobber::Error.overwrites());
     }
 
     /// Write `policy_toml` to a temp file and point `$MIND_POLICY_FILE` at it,
@@ -16861,6 +17610,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 

@@ -76,6 +76,10 @@ pinned = true
 # Also count a release version range (`version=^1.2`) as pinned. Default false.
 allow-version-ranges = true
 
+# Cap the level `mind auto-update run` takes for every source: "off",
+# "compatible", or "breaking". Absent: no cap.
+auto-update = "compatible"
+
 # Sources mind provisions automatically (melds if not already present), during
 # `sync`. `repo` is a repo spec as `meld` accepts (owner/repo, a URL, git@, or a
 # path); its derived host/owner/repo identity must satisfy `allow` under lock.
@@ -226,6 +230,18 @@ Install hooks follow the same non-TTY path: they are skipped in a non-interactiv
 context. A failed item install is soft-failed (warn, record, continue);
 other items and sources still process, and `sync` exits non-zero if any item
 failed.
+
+### Auto-update cap
+
+`[sources].auto-update` caps the level at which `mind auto-update run` updates
+any source, whatever the consumer granted. `"off"` stops every run and makes
+`mind config auto-update on` an error; `"compatible"` never takes a breaking
+release. An invalid value fails policy parse. A source an
+`[[sources.auto_meld]]` entry pins never takes a breaking release
+automatically, with or without the key, since `sync` restores the entry's
+range. Only a version range pin
+auto-updates, so under `pinned = true` it also needs `allow-version-ranges`.
+See [Auto-update](updating.md#auto-update).
 
 ### Lobe lock
 

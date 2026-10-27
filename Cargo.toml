@@ -26,7 +26,9 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` so `config auto-update` (AUP-20) rewrites a harness's
+# `settings.json` with its keys where the user put them.
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "1"
 glob = "0.3"
 thiserror = "2"

@@ -140,6 +140,9 @@ pub struct Cli {
     pub command: Command,
 }
 
+// Parsed once per process, so the `Meld` variant's size costs nothing;
+// boxing it would only add indirection at every `MeldArgs` use (TUI-77).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Meld with a source repo and install its items (prompts to install; use `--register-only` to skip).
@@ -321,9 +324,17 @@ EXAMPLES:
 
         /// Overwrite a link target that already exists and is not managed by
         /// mind (a user's file/dir/foreign link). Without it, a conflict prompts
-        /// on a TTY and otherwise refuses.
+        /// on a TTY (answer `a` to overwrite the rest without asking) and
+        /// otherwise refuses.
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Accept every overwrite of a link target mind did not create, without
+        /// a prompt per conflict. The same as `--force` for `learn`; kept so
+        /// `learn` and `meld` share the flag.
+        // spec: CLI-246
+        #[arg(long)]
+        overwrite: bool,
 
         /// Run an item's install hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
@@ -850,6 +861,46 @@ EXAMPLES:
         #[arg(short = 'f', long)]
         force: bool,
     },
+
+    /// Update version-pinned sources without being asked, at the level you
+    /// granted each one (`meld --auto-update`).
+    ///
+    /// `mind config auto-update on` installs a trigger that runs `auto-update
+    /// run` when an agent session starts; `run` can also be scheduled from
+    /// cron. A run never prompts: a source whose move would run a hook is held
+    /// back and reported by the next `recall` or `upgrade`.
+    // spec: AUP-15
+    #[command(name = "auto-update")]
+    AutoUpdate {
+        #[command(subcommand)]
+        action: AutoUpdateCmd,
+    },
+}
+
+/// Subcommands of `mind auto-update`.
+#[derive(Debug, Subcommand)]
+pub enum AutoUpdateCmd {
+    /// Sync and upgrade every source whose auto-update level is not off.
+    Run {
+        /// Do nothing when the last completed run is more recent than this
+        /// (`30m`, `12h`, `1d`).
+        // spec: AUP-19
+        #[arg(long, value_name = "DURATION")]
+        if_stale: Option<String>,
+
+        /// Start the run detached and return at once, printing nothing. What
+        /// the session-start trigger uses, so a session never waits on it.
+        // spec: AUP-20
+        #[arg(long)]
+        background: bool,
+    },
+}
+
+/// `config auto-update on|off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 // The `meld` verb's arguments, split out of `Command` so the probe TUI's
@@ -1062,13 +1113,21 @@ pub struct MeldArgs {
     pub recursive: bool,
 
     /// When installing, overwrite link targets that already exist and are not
-    /// managed by mind. Without it, a conflict prompts on a TTY. On a re-meld
+    /// managed by mind. Without it, a conflict prompts on a TTY (answer `a` to
+    /// overwrite the rest without asking). On a re-meld
     /// of an already-melded source, `--force` ALSO re-offers every one of the
     /// source's install hooks, even those already run at the current commit
     /// (not just the pending ones an ordinary re-meld re-offers).
     // spec: HOOK-60
     #[arg(short = 'f', long)]
     pub force: bool,
+
+    /// Accept every overwrite of a link target mind did not create, without a
+    /// prompt per conflict. Unlike `--force`, a re-meld does not re-offer
+    /// install hooks that already ran.
+    // spec: CLI-246
+    #[arg(long)]
+    pub overwrite: bool,
 
     /// Install the source's item(s) into ONLY the current project's lobe --
     /// a registered lobe whose directory lives under the current working
@@ -1078,6 +1137,23 @@ pub struct MeldArgs {
     // spec: HARN-20 HARN-21
     #[arg(long)]
     pub local: bool,
+
+    /// Let `mind auto-update run` update this source without asking.
+    /// `--auto-update` alone grants the level the source declares
+    /// (`[source].auto-update`, else `compatible`); `=compatible` takes
+    /// releases inside the range, `=breaking` also takes the new major the
+    /// source recommends (`pin-version`), and `=off` revokes the
+    /// grant. Applies to a version range pin only. Unlike the discovery
+    /// flags, this also takes effect against an already-melded source.
+    // spec: AUP-8
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "declared"
+    )]
+    pub auto_update: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1090,6 +1166,20 @@ pub enum ConfigCmd {
     Lobes {
         #[command(subcommand)]
         action: LobesCmd,
+    },
+
+    /// Install (`on`) or remove (`off`) the auto-update trigger: a Claude
+    /// Code `SessionStart` hook, in each Claude lobe's `settings.json`, that
+    /// runs `mind auto-update run` in the background.
+    // spec: AUP-20
+    #[command(name = "auto-update")]
+    AutoUpdate {
+        #[arg(value_enum)]
+        state: OnOff,
+
+        /// How often the trigger may run (`30m`, `12h`, `1d`).
+        #[arg(long, value_name = "DURATION", default_value = "1d")]
+        every: String,
     },
 }
 

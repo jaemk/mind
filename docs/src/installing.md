@@ -98,8 +98,10 @@ references.
 
 `mind` never overwrites a file or link it did not create. If
 `~/.claude/skills/review` already exists and is not one of its links, `learn`
-asks on a terminal and refuses otherwise. Move the existing entry aside, or
-pass `--force` to replace it. To bring a hand-placed item under management
+asks on a terminal and refuses otherwise. Answer `a` to replace it and every
+later conflict in the same run. Move the existing entry aside, or pass
+`--overwrite` (to `meld` or `learn`) to replace every such entry without
+asking. To bring a hand-placed item under management
 instead, see [Adopt items you placed by hand](unmanaged.md).
 
 ## Installing into one project only
