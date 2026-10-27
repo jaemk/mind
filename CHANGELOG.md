@@ -6,12 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-27
+
 ### Added
 
 - Version pins accept any cargo version requirement, not only caret and exact
   forms: comparators and comparator lists (`--pin 'version=<2.0'`,
   `'version=>=1.2, <1.5'`), tilde (`~1.2`), wildcards (`1.*`), and a partial
-  exact (`=1.2`). The same ranges work in `[source].pin-version` and a policy
+  exact (`=1.2`). `'version=*'` tracks every stable release, taking a new
+  major like any other upgrade. The same ranges work in `[source].pin-version` and a policy
   `auto_meld` entry. A release above the range is offered as a breaking move
   like one past a caret.
 
@@ -2065,7 +2068,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.35.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/jaemk/mind/compare/v0.35.1...v0.36.0
 [0.35.1]: https://github.com/jaemk/mind/compare/v0.35.0...v0.35.1
 [0.35.0]: https://github.com/jaemk/mind/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/jaemk/mind/compare/v0.33.0...v0.34.0
