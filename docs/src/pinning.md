@@ -20,6 +20,7 @@ mind meld owner/repo --pin branch=stable     # follow the stable branch
 | `branch=<name>` | follow that branch; `sync` moves to its latest commit |
 | `tag=<name>` | follow that tag; `sync` moves if the tag is re-pointed |
 | `version=<range>` | follow semver release tags in a range; `sync` moves to the highest release in range |
+| `version=*` | follow every tagged release, new majors included |
 
 ```
 # Freeze
@@ -59,6 +60,20 @@ mind meld owner/repo --pin version==1.2.3        # hold at exactly 1.2.3
 Quote a range that contains `<`, `>`, `*`, or a space so the shell passes it
 through.
 
+### Track every release
+
+To follow every tagged release, use `*`:
+
+```
+mind meld owner/repo --pin 'version=*'
+```
+
+`sync` and `upgrade` then move the source to the newest stable release,
+whatever its major. A new major is an ordinary upgrade, never a breaking
+release to accept. Prereleases are still skipped. Use this rather than
+`branch=<default>` when you want released code only, not every commit on the
+branch.
+
 `sync` (and `upgrade`, which syncs first) moves the source to the highest
 release in range. A prerelease is selected only when the range names one
 (`^1.3.0-rc.1`). A release whose `min-mind-version` this `mind` does not meet
@@ -83,7 +98,7 @@ The prompt shows the release tag's message when the tag is annotated.
 Accepting moves the range to the new major (`^2.0.0`) and upgrades the
 source's items. `--yes` alone never takes a breaking release, and without a
 terminal it is listed and skipped. An exact hold (`=1.2.3`) is never offered
-one. No release move, compatible or breaking, consents to the source's hooks:
+one, and neither is `*`, which already admits every release. No release move, compatible or breaking, consents to the source's hooks:
 they are prompted as usual, or skipped without a terminal.
 
 A release tag that is re-pointed after `mind` resolved it is not followed:

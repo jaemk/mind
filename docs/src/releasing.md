@@ -133,6 +133,9 @@ release-tags = "v{version}"
 pin-version = "^1"
 ```
 
+To have a plain meld track every tagged release instead, new majors included,
+set `pin-version = "*"`.
+
 Leave it out otherwise. A consumer's `--pin` overrides it. It is always a
 range: an exact version (`"=1.2.3"`) reads as `"^1.2.3"`, and `mind review`
 says so, since holding one release is the consumer's choice
