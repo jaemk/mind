@@ -147,6 +147,19 @@ pub struct SourceMeta {
     pub release_tags: Option<ReleaseTags>,
     /// Versions that version-pin resolution never selects (VER-46).
     pub yanked: Option<Vec<String>>,
+    /// The highest auto-update level the maintainer wants (AUP-5): `true`,
+    /// `"compatible"`, or `"breaking"`.
+    #[serde(rename = "auto-update")]
+    pub auto_update: Option<RawAutoUpdate>,
+}
+
+/// The raw `[source].auto-update` value, before
+/// [`SourceMeta::auto_update_level`] validates it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum RawAutoUpdate {
+    Flag(bool),
+    Level(String),
 }
 
 /// The raw `[source].release-tags` value, before [`SourceMeta::release_template`]
@@ -192,6 +205,28 @@ impl SourceMeta {
                 })
             })
             .collect()
+    }
+
+    /// The declared auto-update level (AUP-5): `true` is `compatible`; `false`,
+    /// `"off"`, or any other value is a `MindToml` error.
+    // spec: AUP-5
+    pub fn auto_update_level(&self, toml_path: &Path) -> Result<Option<crate::auto_update::Level>> {
+        use crate::auto_update::Level;
+        let bad = |shown: String| MindError::MindToml {
+            path: toml_path.to_path_buf(),
+            msg: format!("auto-update {shown} must be true, \"compatible\", or \"breaking\""),
+        };
+        match &self.auto_update {
+            None => Ok(None),
+            Some(RawAutoUpdate::Flag(true)) => Ok(Some(Level::Compatible)),
+            Some(RawAutoUpdate::Flag(false)) => Err(bad("false".into())),
+            Some(RawAutoUpdate::Level(s)) => match Level::parse(s) {
+                Some(Level::Off) | None => {
+                    Err(bad(format!("{:?}", crate::sanitize::strip_ansi(s))))
+                }
+                Some(level) => Ok(Some(level)),
+            },
+        }
     }
 
     /// The range the author recommends (VER-140): `pin-version`, when it
@@ -1083,17 +1118,20 @@ pub struct ReleaseMeta {
     pub template: Option<Template>,
     pub yanked: Vec<Version>,
     pub recommended: Option<String>,
+    /// The declared auto-update level (AUP-5).
+    pub auto_update: Option<crate::auto_update::Level>,
 }
 
 impl ReleaseMeta {
-    /// The release metadata `meta` declares. A malformed template or yanked
-    /// entry is a `MindToml` error; a `pin-version` that does not parse
-    /// recommends nothing.
+    /// The release metadata `meta` declares. A malformed template, yanked
+    /// entry, or auto-update level is a `MindToml` error; a `pin-version` that
+    /// does not parse recommends nothing.
     pub fn from_source(meta: &SourceMeta, toml_path: &Path) -> Result<ReleaseMeta> {
         Ok(ReleaseMeta {
             template: meta.release_template(toml_path)?,
             yanked: meta.yanked_versions(toml_path)?,
             recommended: meta.recommended_range().map(|r| r.to_string()),
+            auto_update: meta.auto_update_level(toml_path)?,
         })
     }
 }
@@ -1157,6 +1195,8 @@ impl MindToml {
         // entry fails the load, not the later resolution.
         parsed.source.release_template(&sanitized_path(&file))?;
         parsed.source.yanked_versions(&sanitized_path(&file))?;
+        // spec: AUP-5
+        parsed.source.auto_update_level(&sanitized_path(&file))?;
         // spec: NS-25 — a declared `[source].prefix` that is a reserved
         // item-kind word is rejected at load, before it can reach the
         // effective-prefix resolution.

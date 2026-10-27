@@ -149,3 +149,24 @@ each consumer sees after their next `sync`:
 The same hint shows in the `upgrade` prompt and in `recall`. Taking the new
 major still needs the consumer's yes or `--allow-breaking`. A recommendation
 that does not include the breaking release shows nothing.
+
+## Ask for automatic updates
+
+```toml
+[source]
+release-tags = "v{version}"
+auto-update = "breaking"   # or true / "compatible"
+```
+
+This asks consumers who run `mind config auto-update on` to let your source
+update without them running `upgrade`. A consumer is asked once, when they meld
+on a terminal, and can allow it later with `mind meld <source> --auto-update`.
+
+- `compatible` (or `true`) takes each new release inside the consumer's range.
+- `breaking` also moves them to a new major, but only after you recommend it:
+  tag `2.0.0`, then set `pin-version = "^2"` on the default branch when they
+  should move.
+
+Lowering the level applies at the next run; raising it only shows the consumer
+a note until they allow it. A release whose update would run one of your hooks
+is never applied automatically, because a hook needs the consumer's consent.

@@ -779,6 +779,31 @@ pub enum MindError {
     )]
     BadPinSpec { value: String },
 
+    /// AUP-8: a `--auto-update` value that is not a level.
+    #[error("invalid --auto-update value '{value}': expected off, compatible, or breaking")]
+    BadAutoUpdate { value: String },
+
+    /// AUP-6: a consumer granting `breaking` to a source that does not declare it.
+    #[error(
+        "{} does not declare auto-update = \"breaking\", so it cannot be granted; grant compatible instead",
+        crate::sanitize::strip_ansi(source_name)
+    )]
+    AutoUpdateNotDeclared { source_name: String },
+
+    /// AUP-30: the managed policy turns auto-update off.
+    #[error("auto-update is turned off by the managed policy ([sources].auto-update = \"off\")")]
+    AutoUpdateForbidden,
+
+    /// AUP-19, AUP-20: a duration that is not `<n>m`, `<n>h`, or `<n>d`.
+    #[error(
+        "invalid duration '{value}': expected a whole number followed by m, h, or d (30m, 12h, 1d)"
+    )]
+    BadDuration { value: String },
+
+    /// AUP-20: a harness `settings.json` that cannot take the trigger.
+    #[error("{}: {msg}", path.display())]
+    SettingsJson { path: PathBuf, msg: String },
+
     /// VER-4, VER-42: a version pin whose range no release satisfies. `highest`
     /// is the highest release found, `None` when no tag is a release at all.
     /// DSC-95: `source_name` is the source's own identity and `main.rs` prints
@@ -1806,6 +1831,11 @@ impl MindError {
             MindError::GitNotFound => "git-not-found",
             MindError::ConflictingPin { .. } => "conflicting-pin",
             MindError::BadPinSpec { .. } => "bad-pin-spec",
+            MindError::BadAutoUpdate { .. } => "bad-auto-update",
+            MindError::AutoUpdateNotDeclared { .. } => "auto-update-not-declared",
+            MindError::AutoUpdateForbidden => "auto-update-forbidden",
+            MindError::BadDuration { .. } => "bad-duration",
+            MindError::SettingsJson { .. } => "settings-json",
             MindError::NoMatchingRelease { .. } => "no-matching-release",
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",

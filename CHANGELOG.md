@@ -12,6 +12,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommended range. When it includes a breaking release, `upgrade` and
   `recall` say so next to that release (`acme/skills recommends ^2`), and
   `--json` reports it as `recommended`. Taking the release still needs consent.
+- Auto-update. `mind auto-update run` syncs and upgrades version-pinned
+  sources without prompting, and `mind config auto-update on` runs it from a
+  Claude Code `SessionStart` hook at most once a day. A source updates at the
+  lowest of what its maintainer declares (`[source].auto-update`), what the
+  consumer allowed (`meld --auto-update`), and the managed policy's
+  `[sources].auto-update`. `breaking` moves to a new major once the maintainer
+  recommends it with `pin-version`. A move that would run a hook is held for
+  `mind upgrade`, and the next `recall` or `upgrade` summarizes each run.
 
 ## [0.33.0] - 2026-10-26
 

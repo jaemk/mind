@@ -116,6 +116,15 @@ pub fn parse_hook_choice(input: &str) -> HookChoice {
     }
 }
 
+/// Set for an unattended `auto-update run` (AUP-15): it never prompts, even
+/// when started from a terminal, so every consent gate takes its no-TTY path.
+static NON_INTERACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make every later [`is_tty`] answer no for the rest of the process.
+pub fn force_non_interactive() {
+    NON_INTERACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether stdin is an interactive terminal (the HOOK-22 gate).
 ///
 /// `$MIND_TTY` overrides the answer (HOOK-109) so the interactive branches are
@@ -126,6 +135,9 @@ pub fn parse_hook_choice(input: &str) -> HookChoice {
 /// boolean by [`tty_override`].
 // spec: HOOK-109
 pub fn is_tty() -> bool {
+    if NON_INTERACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     match std::env::var_os("MIND_TTY") {
         Some(v) => tty_override(&v),
         None => std::io::stdin().is_terminal(),

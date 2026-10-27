@@ -2853,6 +2853,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 
@@ -5426,6 +5427,7 @@ mod plugin_tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 
@@ -6754,6 +6756,7 @@ mod lifecycle_tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            auto_update: None,
         }
     }
 
