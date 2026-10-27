@@ -59,6 +59,10 @@ pub struct VersionPin {
     /// The tag `highest` came from, for the breaking prompt's notes (VER-64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highest_tag: Option<String>,
+    /// `resolved` is on the yanked list read at the last sync (VER-46), so
+    /// `recall` can mark it without a fetch (VER-90).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub yanked: bool,
 }
 
 impl VersionPin {
@@ -70,6 +74,7 @@ impl VersionPin {
             tag: None,
             highest: None,
             highest_tag: None,
+            yanked: false,
         }
     }
 

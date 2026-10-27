@@ -137,6 +137,10 @@ error names the version gap (DSC-117) instead of a bare schema error.
   It joins the DSC-41 one-of rule (declaring it with another pin directive is a
   `MindToml` error), and a consumer `--pin` overrides it. A range that does not
   parse (VER-20) is a `MindToml` error.
+- `VER-52` When VER-50 applies, `meld` notes on stderr that the source follows
+  releases, naming the range and the selected release, and that `upgrade`
+  takes compatible releases and asks before a new major:
+  `note: <source> follows releases ^1.4.2 (now 1.4.2); ...`.
 
 ## Upgrade
 
@@ -204,14 +208,22 @@ error names the version gap (DSC-117) instead of a bare schema error.
 
 ## Reporting
 
-- `VER-90` `recall` shows a version-pinned source's resolved version and range.
-  It marks a source whose highest-seen release is outside the range ("breaking
-  release available") and a source resolved to a yanked version.
-- `VER-91` `--json` output for `recall --sources`, `sync`, and `upgrade` gives
-  each version-pinned source a `version` object: `range`, `resolved`, `tag`,
-  `highest_available`, `breaking_available` (bool), and `yanked` (bool). The
-  `upgrade` document lists breaking moves in their own array, apart from the
-  applied changes.
+- `VER-90` `recall` (the status view and `--sources`) shows a version-pinned
+  source's resolved version and range in its header (`release 1.4.2 (^1.4.2)`).
+  It marks a source with a breaking release (VER-61) with a line naming the
+  release and the `upgrade --allow-breaking --source` command that takes it
+  ("breaking release 2.0.0 available"), and a source resolved to a since-yanked
+  version (`release 1.1.0 is yanked`). `recall` does not fetch: whether the
+  resolved version is yanked is recorded on the pin at the last `sync`, from
+  the yanked list VER-46 reads.
+- `VER-91` `--json` output gives each version-pinned source a `version` object:
+  `range`, `resolved`, `tag`, `highest_available` (the highest stable release
+  seen, VER-30), `breaking_available` (bool, VER-61), and `yanked` (bool,
+  VER-90). `recall --sources` adds it to each source. A `sync` or `upgrade`
+  result carries a `sources` array of `{source, version}` for the
+  version-pinned sources it covered. The `upgrade` result lists its breaking
+  moves in their own `breaking` array, apart from the applied changes:
+  `{source, from, to, applied}`, `applied` false for one listed and left.
 
 ## Policy, curators, and dump
 

@@ -37,6 +37,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   has matching tags.
 - `recall` suggests `meld --pin version=^<v>` for a source pinned to a release
   tag.
+- `recall` shows a version-pinned source's release and range, and marks a
+  breaking release available (with the command that takes it) or a resolved
+  release that was since yanked. A source on a yanked release stays there
+  until a newer release in its range appears.
+- `--json` output gives each version-pinned source a `version` object
+  (`recall --sources`, and a `sources` array on `sync` and `upgrade`).
+  `upgrade --json` lists breaking releases in a `breaking` array.
+- A plain meld that pins a release range says so on stderr.
+- docs: "Publish versioned releases" for source maintainers.
 
 ### Changed
 

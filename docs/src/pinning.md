@@ -95,9 +95,15 @@ min-mind-version = "0.33"            # older mind versions reject these keys
 A plain `mind meld owner/repo` of a source that declares `release-tags` pins
 the caret of its highest stable release (`^1.4.2` for `1.4.2`) instead of
 following the default branch. A release whose `min-mind-version` this `mind`
-does not meet is passed over for the next-highest one. With no stable release
-yet it follows the default branch and says so. A local path meld stays linked
-to the working tree; pass `--pin version=<range>` to pin it.
+does not meet is passed over for the next-highest one. The meld prints the
+range it chose. With no stable release yet it follows the default branch and
+says so. A local path meld stays linked to the working tree; pass
+`--pin version=<range>` to pin it.
+
+`recall` shows a version-pinned source's release and range
+(`release 1.4.2 (^1.4.2)`), and marks a breaking release available or a
+resolved release that was since yanked. Maintainers: see
+[Publish versioned releases](releasing.md).
 
 A source pinned with `--pin tag=<tag>` to one of its releases gets a hint in
 `recall` with the `meld --pin version=^<version>` command that follows

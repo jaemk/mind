@@ -372,6 +372,104 @@ fn filled_version_pin(
         tag: Some(selected.tag.clone()),
         highest: res.highest.as_ref().map(|r| r.version.to_string()),
         highest_tag: res.highest.as_ref().map(|r| r.tag.clone()),
+        // Resolution never selects a yanked version (VER-46).
+        yanked: false,
+    }
+}
+
+/// A version-pinned source's release state in `--json` output (VER-91).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct VersionJson {
+    range: String,
+    resolved: Option<String>,
+    tag: Option<String>,
+    highest_available: Option<String>,
+    breaking_available: bool,
+    yanked: bool,
+}
+
+/// `pin`'s [`VersionJson`], `None` for any other pin kind. The tag is
+/// source-controlled, so it is sanitized (DSC-95).
+fn version_json(pin: &Pin) -> Option<VersionJson> {
+    let Pin::Version(vp) = pin else {
+        return None;
+    };
+    Some(VersionJson {
+        range: vp.range.clone(),
+        resolved: vp.resolved.clone(),
+        tag: vp.tag.as_deref().map(strip_ansi),
+        highest_available: vp.highest.clone(),
+        breaking_available: breaking_release(pin).is_some(),
+        yanked: vp.yanked,
+    })
+}
+
+/// One source's [`VersionJson`] in a `sync` or `upgrade` result (VER-91).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct SourceVersionJson {
+    source: String,
+    version: VersionJson,
+}
+
+/// The [`SourceVersionJson`] of every version-pinned source `in_scope` admits.
+fn source_versions(registry: &Registry, in_scope: &dyn Fn(&str) -> bool) -> Vec<SourceVersionJson> {
+    registry
+        .sources
+        .iter()
+        .filter(|s| in_scope(&s.name))
+        .filter_map(|s| {
+            version_json(&s.pin).map(|version| SourceVersionJson {
+                source: strip_ansi(&s.name),
+                version,
+            })
+        })
+        .collect()
+}
+
+/// A breaking release `upgrade` settled (VER-61..63, VER-91): taken, or
+/// listed and left.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct BreakingMoveJson {
+    source: String,
+    from: String,
+    to: String,
+    applied: bool,
+}
+
+/// `recall`'s release lines for a version-pinned source (VER-90): a breaking
+/// release outside its range, and a resolved release since yanked.
+fn version_marks(source: &crate::source::Source) -> Vec<String> {
+    let Pin::Version(vp) = &source.pin else {
+        return Vec::new();
+    };
+    let shown = strip_ansi(&source.name);
+    let mut lines = Vec::new();
+    if let Some((_, to)) = breaking_release(&source.pin) {
+        lines.push(format!(
+            "note: {shown}: breaking release {to} available; take it with `mind upgrade --allow-breaking --source {}`",
+            crate::error::shell_quote(&shown)
+        ));
+    }
+    if vp.yanked
+        && let Some(resolved) = &vp.resolved
+    {
+        lines.push(format!(
+            "warning: {shown}: release {resolved} is yanked; sync moves on when a newer release in {} is tagged",
+            vp.range
+        ));
+    }
+    lines
+}
+
+/// The release a version-pinned source is on, for `recall`'s source header
+/// (VER-90): ` release 1.4.2 (^1.4.2)`. Empty for any other pin kind.
+fn version_token(pin: &Pin) -> String {
+    match pin {
+        Pin::Version(vp) => match &vp.resolved {
+            Some(resolved) => format!(" release {resolved} ({})", vp.range),
+            None => format!(" release ({})", vp.range),
+        },
+        _ => String::new(),
     }
 }
 
@@ -431,6 +529,13 @@ fn default_version_pin(
             strip_ansi(b)
         );
     }
+    // spec: VER-52 -- say that the meld follows releases rather than the
+    // default branch, and how later releases arrive.
+    eprintln!(
+        "note: {} follows releases {range} (now {}); `mind upgrade` takes compatible releases and asks before a new major",
+        strip_ansi(&source.name),
+        chosen.version
+    );
     let pin = crate::source::VersionPin::unresolved(&range);
     Ok(res
         .selected
@@ -569,10 +674,11 @@ fn settle_breaking_moves(
     in_scope: &dyn Fn(&str) -> bool,
     yes: bool,
     out: &crate::render::OutputCtx,
-) -> Result<()> {
+) -> Result<Vec<BreakingMoveJson>> {
     let allow = ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
     let interactive = !yes && crate::hook::is_tty();
     let mut changed = false;
+    let mut moves = Vec::new();
     for source in &mut registry.sources {
         if !in_scope(&source.name) {
             continue;
@@ -580,7 +686,8 @@ fn settle_breaking_moves(
         let Some((from, to)) = breaking_release(&source.pin) else {
             continue;
         };
-        let line = format!("{} {from} -> {to} (breaking)", source.name);
+        let shown = strip_ansi(&source.name);
+        let line = format!("{shown} {from} -> {to} (breaking)");
         let accept = if allow {
             true
         } else if interactive {
@@ -589,15 +696,21 @@ fn settle_breaking_moves(
         } else {
             false
         };
+        let mut record = BreakingMoveJson {
+            source: shown.clone(),
+            from: from.clone(),
+            to: to.to_string(),
+            applied: false,
+        };
         if !accept {
             if !out.json {
                 println!(
-                    "{} {} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
+                    "{} {shown} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
                     out.warn(),
-                    source.name,
-                    crate::error::shell_quote(&source.name)
+                    crate::error::shell_quote(&shown)
                 );
             }
+            moves.push(record);
             continue;
         }
         let Pin::Version(vp) = &source.pin else {
@@ -610,6 +723,7 @@ fn settle_breaking_moves(
             tag: None,
             highest: vp.highest.clone(),
             highest_tag: vp.highest_tag.clone(),
+            yanked: false,
         });
         let applied = clone_dir_checked(paths, &moved)
             .and_then(|dir| sync_clone_to_pin(&moved, &dir))
@@ -638,21 +752,22 @@ fn settle_breaking_moves(
                 source.pin = pin;
                 source.commit = Some(commit);
                 changed = true;
+                record.applied = true;
             }
             Err(e) => {
                 eprintln!(
-                    "  {} could not take breaking release for {}: {}",
+                    "  {} could not take breaking release for {shown}: {}",
                     out.err(),
-                    source.name,
                     strip_ansi(&e.to_string())
                 );
             }
         }
+        moves.push(record);
     }
     if changed {
         registry.save(paths)?;
     }
-    Ok(())
+    Ok(moves)
 }
 
 /// The most lines of a tag message the breaking prompt shows (VER-64).
@@ -716,6 +831,12 @@ fn sync_clone_to_pin(
     let mut next = vp.clone();
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
     next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
+    // spec: VER-90 -- recorded so `recall` marks it without a fetch.
+    next.yanked = vp
+        .resolved
+        .as_deref()
+        .and_then(crate::version::Version::parse)
+        .is_some_and(|cur| yanked.contains(&cur));
     match &res.selected {
         // spec: VER-46 -- nothing in range is selectable now (every candidate
         // yanked, or the tags gone): stay where the source is.
@@ -9492,6 +9613,8 @@ pub fn sync_with_selector(
     // Save the progress made before reporting any failure, so the recorded
     // commits stay consistent with what is on disk.
     registry.save(paths)?;
+    // spec: VER-91
+    let version_rows = source_versions(&registry, &in_scope);
 
     // DSC-57: re-walk each registered source's refreshed `[discover].sources` and
     // meld any newly-listed nested source not already registered. Register-only
@@ -9796,6 +9919,7 @@ pub fn sync_with_selector(
         // sanitized (`upgrade_inner_scoped` pushes `display_key()`).
         result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
+        result.sources = version_rows;
         print_json(&result)?;
     }
     Ok(())
@@ -10211,7 +10335,11 @@ fn upgrade_inner_scoped(
             .iter()
             .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
     };
-    settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    let breaking_moves = settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    // spec: VER-91 -- the `--json` result carries each in-scope version-pinned
+    // source's release state, and the breaking moves apart from the applied
+    // changes.
+    let version_rows = source_versions(&registry, &breaking_scope);
 
     // spec: CLI-234 -- the multi-source disclosure's scope covers every
     // scoping mechanism in play (a filter, a source scope, or a key scope).
@@ -10430,6 +10558,8 @@ fn upgrade_inner_scoped(
     let with_profiles = |mut r: MutationResult| {
         r.profile_additions = tracking.additions.clone();
         r.profile_departures = tracking.departures.clone();
+        r.sources = version_rows.clone();
+        r.breaking = breaking_moves.clone();
         r
     };
 
@@ -11428,6 +11558,14 @@ pub fn recall(
                         .map_err(|e| MindError::json("recall sources", e))?;
                     if let Some(obj) = v.as_object_mut() {
                         insert_profile_json(paths, s, obj);
+                        // spec: VER-91
+                        if let Some(version) = version_json(&s.pin) {
+                            obj.insert(
+                                "version".into(),
+                                serde_json::to_value(version)
+                                    .map_err(|e| MindError::json("recall sources", e))?,
+                            );
+                        }
                     }
                     Ok(v)
                 })
@@ -11463,18 +11601,23 @@ pub fn recall(
                 // MKT-10: show the manifest origin so a native-plugin source is
                 // distinguishable from a convention or mind.toml source.
                 let origin = origin_label(s.origin);
+                // spec: VER-90
+                let release = version_token(&s.pin);
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
-                    out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
+                    out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
             .collect::<Vec<_>>();
         out.print_rows(&rows);
-        // spec: VER-82
+        // spec: VER-82 VER-90
         for s in &registry.sources {
+            for mark in version_marks(s) {
+                println!("{mark}");
+            }
             if let Some(hint) = version_pin_hint(paths, s) {
                 println!("{}", out.dim(&hint));
             }
@@ -11758,11 +11901,13 @@ pub fn recall(
         // MKT-10: show the manifest origin in the source header so the
         // provenance is visible in the default recall view too.
         let origin = origin_label(s.origin);
+        // spec: VER-90
+        let release = version_token(&s.pin);
         println!(
             "{} {}  {}{}",
             out.bullet(),
             out.bold(&s.name),
-            out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
+            out.dim(&format!("[{commit}{release}{ns}{hook}{origin}]")),
             s.description
                 .as_deref()
                 .map(|d| format!("  {d}"))
@@ -11826,7 +11971,10 @@ pub fn recall(
             ]);
         }
         out.print_rows(&rows);
-        // spec: VER-82
+        // spec: VER-82 VER-90
+        for mark in version_marks(s) {
+            println!("  {mark}");
+        }
         if let Some(hint) = version_pin_hint(paths, s) {
             println!("  {}", out.dim(&hint));
         }
@@ -13399,6 +13547,13 @@ struct MutationResult {
     /// depends on them (PROF-25, DEP-60), each naming its dependents.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     kept: Vec<String>,
+    /// Each version-pinned source a `sync` or `upgrade` covered, with its
+    /// release state (VER-91).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<SourceVersionJson>,
+    /// The breaking releases an `upgrade` listed or took (VER-91).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    breaking: Vec<BreakingMoveJson>,
 }
 
 impl MutationResult {
@@ -13419,6 +13574,8 @@ impl MutationResult {
             profile_additions: Vec::new(),
             profile_departures: Vec::new(),
             kept: Vec::new(),
+            sources: Vec::new(),
+            breaking: Vec::new(),
         }
     }
 }

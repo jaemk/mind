@@ -329,10 +329,16 @@ fn the_template_comes_from_the_default_branch() {
 
 #[test]
 fn meld_defaults_to_the_caret_of_the_highest_release() {
-    // spec: VER-50
+    // spec: VER-50 VER-52
     let (sb, [_a, _b, c]) = released("ver-default-pin", RELEASE_TAGS);
     let r = sb.mind(&["meld", &sb.remote_spec(), "--yes"]);
     assert!(r.success, "meld: {}", r.stderr);
+    assert!(
+        r.stderr.contains("follows releases ^2.0.0 (now 2.0.0)")
+            && r.stderr.contains("asks before a new major"),
+        "the meld says it follows releases: {}",
+        r.stderr
+    );
     let (pin, commit) = sb.remote_pin();
     assert_eq!(pin["kind"], "version", "{pin}");
     assert_eq!(pin["value"]["range"], "^2.0.0", "{pin}");
@@ -1326,6 +1332,106 @@ fn upgrade_lists_a_breaking_release_without_applying_it() {
         assert_eq!(commit, b);
         assert!(sb.installed_agent().contains("one-one"));
     }
+}
+
+#[test]
+fn recall_shows_the_release_and_marks_breaking_and_yanked() {
+    // spec: VER-90
+    let (sb, _) = released("ver-recall-marks", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let take = format!(
+        "breaking release 2.0.0 available; take it with `mind upgrade --allow-breaking --source '{}'`",
+        sb.identity()
+    );
+    for args in [vec!["recall", "--sources"], vec!["recall"]] {
+        let r = sb.mind(&args);
+        assert!(r.success, "{args:?}: {}", r.stderr);
+        assert!(
+            r.stdout.contains("release 1.1.0 (^1)"),
+            "{args:?}: {}",
+            r.stdout
+        );
+        assert!(r.stdout.contains(&take), "{args:?}: {}", r.stdout);
+        assert!(!r.stdout.contains("yanked"), "{args:?}: {}", r.stdout);
+    }
+
+    // 1.1.0 is yanked after the source resolved to it: sync records it and
+    // recall marks it without a fetch.
+    sb.commit(
+        "yank",
+        "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.stdout.contains("release 1.1.0 is yanked"), "{}", r.stdout);
+}
+
+#[test]
+fn the_breaking_release_lines_strip_control_bytes_from_the_source_name() {
+    // spec: VER-61 VER-90 DSC-95
+    let (sb, _) = released("ver-break-\u{202e}der", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let r = sb.mind(&["upgrade"]);
+    assert!(r.success, "upgrade: {}", r.stderr);
+    stripped_line(&r.stdout, "(breaking, not applied");
+    let r = sb.mind(&["recall", "--sources"]);
+    stripped_line(&r.stdout, "breaking release 2.0.0 available");
+}
+
+#[test]
+fn json_reports_each_version_pinned_source_and_the_breaking_moves() {
+    // spec: VER-91
+    let (sb, _) = released("ver-json", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    let expected = serde_json::json!({
+        "range": "^1",
+        "resolved": "1.1.0",
+        "tag": "v1.1.0",
+        "highest_available": "2.0.0",
+        "breaking_available": true,
+        "yanked": false,
+    });
+
+    let r = sb.mind(&["recall", "--sources", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("recall JSON");
+    assert_eq!(v["items"][0]["version"], expected, "{v}");
+
+    let r = sb.mind(&["sync", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("sync JSON");
+    assert_eq!(v["sources"][0]["source"], sb.identity().as_str(), "{v}");
+    assert_eq!(v["sources"][0]["version"], expected, "{v}");
+
+    let r = sb.mind(&["upgrade", "--yes", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("upgrade JSON");
+    assert_eq!(v["sources"][0]["version"], expected, "{v}");
+    assert_eq!(
+        v["breaking"],
+        serde_json::json!([{
+            "source": sb.identity(),
+            "from": "1.1.0",
+            "to": "2.0.0",
+            "applied": false,
+        }]),
+        "{v}"
+    );
+
+    let r = sb.mind(&["upgrade", "--allow-breaking", "--yes", "--json"]);
+    let v: Value = serde_json::from_str(r.stdout.trim()).expect("upgrade JSON");
+    assert_eq!(v["breaking"][0]["applied"], true, "{v}");
+    assert_eq!(v["sources"][0]["version"]["range"], "^2.0.0", "{v}");
+    assert_eq!(
+        v["sources"][0]["version"]["breaking_available"], false,
+        "{v}"
+    );
 }
 
 #[test]

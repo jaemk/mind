@@ -80,6 +80,7 @@ Everything below is optional. A `mind.toml` at the repo root enables it; see
 | make one item pull in another | [Dependencies between items](dependencies.md) |
 | ship only some files, or use a non-standard layout | [`[[items]]` and `[discover]`](mind-toml.md#items---explicit-inventory-authoritative) |
 | list other people's repos as a collection | [Curate other repos](curating.md) |
+| have consumers follow your semver releases | [Publish versioned releases](releasing.md) |
 | require a minimum `mind` version | `min-mind-version` in [`[source]`](mind-toml.md#source---repo-metadata) |
 
 Before publishing, run [`mind review`](validate.md) to catch broken references,
