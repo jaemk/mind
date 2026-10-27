@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A source's default-branch `pin-version` is recorded at each `sync` as its
+  recommended range. When it includes a breaking release, `upgrade` and
+  `recall` say so next to that release (`acme/skills recommends ^2`), and
+  `--json` reports it as `recommended`. Taking the release still needs consent.
+
 ## [0.33.0] - 2026-10-26
 
 ### Added

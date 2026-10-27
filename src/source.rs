@@ -63,6 +63,10 @@ pub struct VersionPin {
     /// `recall` can mark it without a fetch (VER-90).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub yanked: bool,
+    /// The range the default branch's `pin-version` recommends, read at the
+    /// last resolution (VER-140). A hint only: it never changes `range`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended: Option<String>,
 }
 
 impl VersionPin {
@@ -75,6 +79,7 @@ impl VersionPin {
             highest: None,
             highest_tag: None,
             yanked: false,
+            recommended: None,
         }
     }
 

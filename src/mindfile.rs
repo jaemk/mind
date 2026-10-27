@@ -194,6 +194,14 @@ impl SourceMeta {
             .collect()
     }
 
+    /// The range the author recommends (VER-140): `pin-version`, when it
+    /// parses. Read leniently, so a typo there never fails a `sync`.
+    pub fn recommended_range(&self) -> Option<crate::version::Range> {
+        self.pin_version
+            .as_deref()
+            .and_then(crate::version::Range::parse)
+    }
+
     /// Return the single pin declared by this `[source]` section, or `None`
     /// if none is declared. More than one declared pin, or a `pin-version`
     /// range that does not parse, is a `MindToml` error (DSC-41, VER-51).
@@ -1068,20 +1076,36 @@ struct SourceOnly {
     source: SourceMeta,
 }
 
-/// The release template and yanked list declared by `text`, a `mind.toml`
-/// read from the default branch (VER-3, VER-46).
-pub fn release_meta_from_text(
-    text: &str,
-    toml_path: &Path,
-) -> Result<(Option<Template>, Vec<Version>)> {
+/// What a default-branch `mind.toml` says about releases (VER-3): the tag
+/// template, the yanked list (VER-46), and the range it recommends (VER-140).
+#[derive(Debug, Default)]
+pub struct ReleaseMeta {
+    pub template: Option<Template>,
+    pub yanked: Vec<Version>,
+    pub recommended: Option<String>,
+}
+
+impl ReleaseMeta {
+    /// The release metadata `meta` declares. A malformed template or yanked
+    /// entry is a `MindToml` error; a `pin-version` that does not parse
+    /// recommends nothing.
+    pub fn from_source(meta: &SourceMeta, toml_path: &Path) -> Result<ReleaseMeta> {
+        Ok(ReleaseMeta {
+            template: meta.release_template(toml_path)?,
+            yanked: meta.yanked_versions(toml_path)?,
+            recommended: meta.recommended_range().map(|r| r.to_string()),
+        })
+    }
+}
+
+/// The release metadata declared by `text`, a `mind.toml` read from the
+/// default branch (VER-3, VER-46, VER-140).
+pub fn release_meta_from_text(text: &str, toml_path: &Path) -> Result<ReleaseMeta> {
     let parsed: SourceOnly = toml::from_str(text).map_err(|e| MindError::Toml {
         path: sanitized_path(toml_path),
         msg: crate::sanitize::strip_ansi(&e.to_string()),
     })?;
-    Ok((
-        parsed.source.release_template(toml_path)?,
-        parsed.source.yanked_versions(toml_path)?,
-    ))
+    ReleaseMeta::from_source(&parsed.source, toml_path)
 }
 
 impl MindToml {

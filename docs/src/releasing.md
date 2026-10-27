@@ -134,3 +134,18 @@ pin-version = "^1"
 ```
 
 Leave it out otherwise. A consumer's `--pin` overrides it.
+
+## Recommend a new major
+
+Existing consumers keep the range they melded with, so moving `pin-version`
+does not move them. Instead, once `2.0.0` is ready, setting `pin-version =
+"^2"` on the default branch adds a recommendation to the breaking-release line
+each consumer sees after their next `sync`:
+
+```text
+! acme/skills 1.5.0 -> 2.0.0 (breaking, not applied; acme/skills recommends ^2; take it with `mind upgrade --allow-breaking --source 'acme/skills'`)
+```
+
+The same hint shows in the `upgrade` prompt and in `recall`. Taking the new
+major still needs the consumer's yes or `--allow-breaking`. A recommendation
+that does not include the breaking release shows nothing.

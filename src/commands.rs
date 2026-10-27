@@ -374,6 +374,7 @@ fn filled_version_pin(
         highest_tag: res.highest.as_ref().map(|r| r.tag.clone()),
         // Resolution never selects a yanked version (VER-46).
         yanked: false,
+        recommended: pin.recommended.clone(),
     }
 }
 
@@ -386,6 +387,8 @@ struct VersionJson {
     highest_available: Option<String>,
     breaking_available: bool,
     yanked: bool,
+    /// The default branch's `pin-version` at the last resolution (VER-142).
+    recommended: Option<String>,
 }
 
 /// `pin`'s [`VersionJson`], `None` for any other pin kind. The tag is
@@ -401,6 +404,7 @@ fn version_json(pin: &Pin) -> Option<VersionJson> {
         highest_available: vp.highest.clone(),
         breaking_available: breaking_release(pin).is_some(),
         yanked: vp.yanked,
+        recommended: vp.recommended.clone(),
     })
 }
 
@@ -434,6 +438,8 @@ struct BreakingMoveJson {
     from: String,
     to: String,
     applied: bool,
+    /// The source's recommended range admits `to` (VER-141).
+    recommended: bool,
 }
 
 /// `recall`'s release lines for a version-pinned source (VER-90): a breaking
@@ -445,8 +451,12 @@ fn version_marks(source: &crate::source::Source) -> Vec<String> {
     let shown = strip_ansi(&source.name);
     let mut lines = Vec::new();
     if let Some((_, to)) = breaking_release(&source.pin) {
+        // spec: VER-141
+        let nudge = recommended_for_breaking(&source.pin)
+            .map(|r| format!(" ({shown} recommends {r})"))
+            .unwrap_or_default();
         lines.push(format!(
-            "note: {shown}: breaking release {to} available; take it with `mind upgrade --allow-breaking --source {}`",
+            "note: {shown}: breaking release {to} available{nudge}; take it with `mind upgrade --allow-breaking --source {}`",
             crate::error::shell_quote(&shown)
         ));
     }
@@ -529,7 +539,8 @@ fn default_version_pin(
             strip_ansi(b)
         );
     }
-    let pin = crate::source::VersionPin::unresolved(&range);
+    let mut pin = crate::source::VersionPin::unresolved(&range);
+    pin.recommended = m.source.recommended_range().map(|r| r.to_string());
     Ok(res
         .selected
         .as_ref()
@@ -654,6 +665,18 @@ fn breaking_release(pin: &Pin) -> Option<(String, crate::version::Version)> {
     Some((vp.resolved.clone().unwrap_or_default(), highest))
 }
 
+/// The range the source recommends when it admits `pin`'s breaking release
+/// (VER-141), for the "recommends ^2" hint. `None` with no breaking release,
+/// no recommendation, or one that does not admit it.
+fn recommended_for_breaking(pin: &Pin) -> Option<String> {
+    let Pin::Version(vp) = pin else {
+        return None;
+    };
+    let (_, to) = breaking_release(pin)?;
+    let recommended = crate::version::Range::parse(vp.recommended.as_deref()?)?;
+    recommended.matches(&to).then(|| recommended.to_string())
+}
+
 /// Settle every in-scope source's breaking release before the upgrade pass
 /// (VER-61..63). Each is listed; an accepted one has its range moved to the
 /// caret of the new release (`^2.0.0`) and is resolved there, so its items then
@@ -681,7 +704,12 @@ fn settle_breaking_moves(
             continue;
         };
         let shown = strip_ansi(&source.name);
-        let line = format!("{shown} {from} -> {to} (breaking)");
+        // spec: VER-141 -- the source's own nudge toward the new major.
+        let recommended = recommended_for_breaking(&source.pin);
+        let line = match &recommended {
+            Some(r) => format!("{shown} {from} -> {to} (breaking, {shown} recommends {r})"),
+            None => format!("{shown} {from} -> {to} (breaking)"),
+        };
         let accept = if allow {
             true
         } else if interactive {
@@ -695,11 +723,16 @@ fn settle_breaking_moves(
             from: from.clone(),
             to: to.to_string(),
             applied: false,
+            recommended: recommended.is_some(),
         };
         if !accept {
             if !out.json {
+                let nudge = recommended
+                    .as_deref()
+                    .map(|r| format!("; {shown} recommends {r}"))
+                    .unwrap_or_default();
                 println!(
-                    "{} {shown} {from} -> {to} (breaking, not applied; take it with `mind upgrade --allow-breaking --source {}`)",
+                    "{} {shown} {from} -> {to} (breaking, not applied{nudge}; take it with `mind upgrade --allow-breaking --source {}`)",
                     out.warn(),
                     crate::error::shell_quote(&shown)
                 );
@@ -718,6 +751,7 @@ fn settle_breaking_moves(
             highest: vp.highest.clone(),
             highest_tag: vp.highest_tag.clone(),
             yanked: false,
+            recommended: vp.recommended.clone(),
         });
         let applied = clone_dir_checked(paths, &moved)
             .and_then(|dir| sync_clone_to_pin(&moved, &dir))
@@ -815,14 +849,18 @@ fn sync_clone_to_pin(
     };
     // spec: VER-3 -- the template and yanked list come from the default
     // branch tip, not from the release the clone is on.
-    let (template, yanked) = match git::default_branch_mind_toml(&source.url, dir)? {
+    let meta = match git::default_branch_mind_toml(&source.url, dir)? {
         Some(text) => crate::mindfile::release_meta_from_text(&text, &dir.join("mind.toml"))?,
-        None => (None, Vec::new()),
+        None => crate::mindfile::ReleaseMeta::default(),
     };
-    let template = template.unwrap_or(crate::version::Template::Default);
+    let yanked = meta.yanked;
+    let template = meta.template.unwrap_or(crate::version::Template::Default);
     let mut res = resolve_version(&source.name, &source.url, vp, &template, &yanked)?;
     fit_min_mind_version(&source.name, &source.url, dir, true, &mut res)?;
     let mut next = vp.clone();
+    // spec: VER-140 -- recorded fresh each sync, so a recommendation the
+    // default branch dropped is dropped here too.
+    next.recommended = meta.recommended;
     next.highest = res.highest.as_ref().map(|r| r.version.to_string());
     next.highest_tag = res.highest.as_ref().map(|r| r.tag.clone());
     // spec: VER-90 -- recorded so `recall` marks it without a fetch.
@@ -860,7 +898,7 @@ fn sync_clone_to_pin(
             }
         }
         Some(rel) => {
-            next = filled_version_pin(vp, rel, &res);
+            next = filled_version_pin(&next, rel, &res);
             let pin = Pin::Version(next);
             git::sync_to_pin(&source.url, dir, &pin)?;
             return Ok((git::head_commit(&source.url, dir)?, pin));
@@ -1530,20 +1568,22 @@ fn meld_recursive(
                     let _ = std::fs::remove_dir_all(dir);
                 }
             };
-            let meta = mindfile.as_ref().map(|m| {
-                Ok::<_, MindError>((
-                    m.source.release_template(&toml_path)?,
-                    m.source.yanked_versions(&toml_path)?,
-                ))
-            });
-            let (template, yanked) = match meta.transpose() {
-                Ok(m) => m.unwrap_or((None, Vec::new())),
+            let meta = mindfile
+                .as_ref()
+                .map(|m| crate::mindfile::ReleaseMeta::from_source(&m.source, &toml_path));
+            let meta = match meta.transpose() {
+                Ok(m) => m.unwrap_or_default(),
                 Err(e) => {
                     cleanup(&dir);
                     return Err(e);
                 }
             };
-            let template = template.unwrap_or(crate::version::Template::Default);
+            let template = meta.template.unwrap_or(crate::version::Template::Default);
+            let yanked = meta.yanked;
+            let vp = crate::source::VersionPin {
+                recommended: meta.recommended,
+                ..vp
+            };
             let res = resolve_version(&source.name, &source.url, &vp, &template, &yanked).and_then(
                 |mut res| {
                     fit_min_mind_version(&source.name, &source.url, &dir, !is_local, &mut res)?;
@@ -7556,25 +7596,27 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     // origin tip, or the working tree of a still-linked local source.
     let checkout_pin = match checkout_pin {
         Pin::Version(vp) => {
-            let (template, yanked) = if target.join(".git").is_dir() {
+            let meta = if target.join(".git").is_dir() {
                 match git::default_branch_mind_toml(&url, &target)? {
                     Some(text) => {
                         crate::mindfile::release_meta_from_text(&text, &target.join("mind.toml"))?
                     }
-                    None => (None, Vec::new()),
+                    None => crate::mindfile::ReleaseMeta::default(),
                 }
             } else {
                 let root = std::path::Path::new(&url);
                 let toml_path = root.join("mind.toml");
                 match MindToml::load(root)? {
-                    Some(m) => (
-                        m.source.release_template(&toml_path)?,
-                        m.source.yanked_versions(&toml_path)?,
-                    ),
-                    None => (None, Vec::new()),
+                    Some(m) => crate::mindfile::ReleaseMeta::from_source(&m.source, &toml_path)?,
+                    None => crate::mindfile::ReleaseMeta::default(),
                 }
             };
-            let template = template.unwrap_or(crate::version::Template::Default);
+            let template = meta.template.unwrap_or(crate::version::Template::Default);
+            let yanked = meta.yanked;
+            let vp = crate::source::VersionPin {
+                recommended: meta.recommended,
+                ..vp
+            };
             let mut res = resolve_version(source_name, &url, &vp, &template, &yanked)?;
             if target.join(".git").is_dir() {
                 fit_min_mind_version(source_name, &url, &target, true, &mut res)?;
