@@ -729,6 +729,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   progress made (the recorded commits of the sources that succeeded), reports
   each failure, and exits non-zero (`SyncFailed`). With a failure, the `--upgrade`
   pass is skipped.
+- `CLI-248` `sync` and `upgrade`'s pre-pass fetch (CLI-169) refresh their
+  sources in parallel, up to 8 at once (CLI-249). Results are reported and recorded in
+  registry order, the same output a one-at-a-time sync produces. While more
+  than one source is fetching, git runs non-interactively (no credential,
+  passphrase, or host-key prompt); a source whose fetch failed where git would
+  have prompted is retried on its own afterwards with prompting allowed.
+- `CLI-249` `MIND_MAX_PARALLEL_FETCHES` sets the CLI-248 limit. A positive
+  integer is used as given; a missing, non-numeric, or zero value means the
+  default, 8. A limit of 1 fetches one source at a time with prompting allowed
+  throughout, as `sync` did before CLI-248.
 - `CLI-55` `sync` resolves each source against its recorded pin (STO-18): a
   `follow-branch` source resets to that branch's current tip and updates the
   recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the

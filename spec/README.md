@@ -56,6 +56,7 @@ and verified.
 | `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | done | CLI-86 |
 | `min-mind-version`: scans warn, `meld` asks before melding (`--yes` carries on), an unparseable too-new `mind.toml` names the version gap, `init-source` writes the running version | done | DSC-40, DSC-116, DSC-117, INIT-13 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
+| `sync` / `upgrade` fetch sources in parallel (up to 8), reporting in registry order; prompt-requiring failures retried serially with prompts; `MIND_MAX_PARALLEL_FETCHES` sets the limit | done | CLI-248, CLI-249 |
 | `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92, CLI-189 |
 | Shell completions + man page | done | CLI-120, CLI-121 |
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |

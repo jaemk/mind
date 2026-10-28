@@ -31,6 +31,7 @@ The legacy spelling `absorb_to` is still read.
 | `MIND_MAX_METADATA_SIZE` | metadata size cap, above `max-metadata-size` |
 | `MIND_POLICY_FILE` | a managed policy file, used only when none exists at the system path |
 | `MIND_HTTP_TIMEOUT_SECS` | request budget for `mind evolve` (default 15) |
+| `MIND_MAX_PARALLEL_FETCHES` | most sources `sync`/`upgrade` fetch at once (default 8; `1` fetches one at a time) |
 | `GH_TOKEN`, `GITHUB_TOKEN` | token `evolve` sends to `api.github.com` |
 | `NO_COLOR` | plain output |
 
