@@ -8734,6 +8734,182 @@ fn sync_continues_past_a_failed_source() {
     );
 }
 
+/// HEAD of a sandbox's source repo.
+fn source_head(sb: &Sandbox) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&sb.source)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// Every `(name, commit)` recorded in `sb`'s registry, in registry order.
+fn recorded_commits(sb: &Sandbox) -> Vec<(String, String)> {
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["name"].as_str().unwrap().to_string(),
+                s["commit"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `count` pinned (cloned, so actually fetched) sources melded into the first
+/// sandbox, each advanced upstream after the meld. The first sandbox is the
+/// mind home; the rest are only their source repos.
+fn advanced_pinned_sources(count: usize) -> Vec<Sandbox> {
+    let sbs: Vec<Sandbox> = (0..count).map(|_| Sandbox::new()).collect();
+    for sb in &sbs {
+        let r = sbs[0].mind(&[
+            "meld",
+            &sb.source_spec(),
+            "--follow-branch",
+            "main",
+            "--register-only",
+        ]);
+        assert!(r.success, "meld: {}", r.stderr);
+    }
+    for sb in &sbs {
+        sb.edit_source();
+    }
+    sbs
+}
+
+#[test]
+fn sync_fetches_many_sources_and_reports_in_registry_order() {
+    // spec: CLI-248 -- more sources than fetch workers: every one is fetched,
+    // and the report and recorded commits follow registry order.
+    let sbs = advanced_pinned_sources(10);
+    let r = sbs[0].mind(&["sync"]);
+    assert!(r.success, "sync: {} / {}", r.stdout, r.stderr);
+
+    let names: Vec<String> = recorded_commits(&sbs[0])
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| l.contains("syncing")).collect();
+    assert_eq!(lines.len(), sbs.len(), "{}", r.stdout);
+    for (line, name) in lines.iter().zip(&names) {
+        assert!(line.contains(name.as_str()), "order: {}", r.stdout);
+        assert!(line.contains("updated"), "fetched: {}", r.stdout);
+    }
+    let commits: Vec<String> = recorded_commits(&sbs[0])
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    let heads: Vec<String> = sbs.iter().map(source_head).collect();
+    assert_eq!(commits, heads);
+}
+
+#[test]
+fn upgrade_prepass_fetches_every_source() {
+    // spec: CLI-248 CLI-169 -- the upgrade pre-pass fetches in parallel too.
+    let sbs = advanced_pinned_sources(3);
+    let r = sbs[0].mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {} / {}", r.stdout, r.stderr);
+    let commits: Vec<String> = recorded_commits(&sbs[0])
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    let heads: Vec<String> = sbs.iter().map(source_head).collect();
+    assert_eq!(commits, heads);
+}
+
+/// A `PATH` with a fake `git` in front: it appends `fetch prompt=<0|on>` to
+/// `<sb.base>/fetches.log` for each fetch, fails a fetch the way a suppressed
+/// credential prompt does whenever prompts are off, and otherwise runs the
+/// real git. Returns the `PATH` value and the log path.
+#[cfg(unix)]
+fn prompt_requiring_git(sb: &Sandbox) -> (String, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+        .expect("git on PATH");
+    let bin = sb.base.join("bin");
+    let log = sb.base.join("fetches.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("git");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = fetch ]; then\n\
+             echo \"fetch prompt=${{GIT_TERMINAL_PROMPT:-on}}\" >> '{log}'\n\
+             if [ \"$GIT_TERMINAL_PROMPT\" = 0 ]; then\n\
+             echo \"fatal: could not read Username for 'x': terminal prompts disabled\" >&2\n\
+             exit 128\n\
+             fi\n\
+             fi\n\
+             exec '{git}' \"$@\"\n",
+            log = log.display(),
+            git = real_git.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    (path.to_str().unwrap().to_string(), log)
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_retries_a_prompt_requiring_fetch_with_prompts_allowed() {
+    // spec: CLI-248 -- the parallel pass fails both sources the way a
+    // suppressed credential prompt does; the serial retry, prompts allowed,
+    // succeeds.
+    let sbs = advanced_pinned_sources(2);
+    let (path, log) = prompt_requiring_git(&sbs[0]);
+
+    let r = sbs[0].mind_env(&["sync"], &[("PATH", path.as_str())]);
+    assert!(r.success, "sync: {} / {}", r.stdout, r.stderr);
+    let log = std::fs::read_to_string(log).unwrap();
+    assert!(log.contains("prompt=0"), "parallel pass ran: {log}");
+    let commits: Vec<String> = recorded_commits(&sbs[0])
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    let heads: Vec<String> = sbs.iter().map(source_head).collect();
+    assert_eq!(commits, heads);
+}
+
+#[cfg(unix)]
+#[test]
+fn max_parallel_fetches_of_one_syncs_serially_with_prompts_allowed() {
+    // spec: CLI-249 -- a limit of 1 is the one-at-a-time sync: no fetch ever
+    // runs with prompts off.
+    let sbs = advanced_pinned_sources(3);
+    let (path, log) = prompt_requiring_git(&sbs[0]);
+
+    let r = sbs[0].mind_env(
+        &["sync"],
+        &[("PATH", path.as_str()), ("MIND_MAX_PARALLEL_FETCHES", "1")],
+    );
+    assert!(r.success, "sync: {} / {}", r.stdout, r.stderr);
+    let log = std::fs::read_to_string(log).unwrap();
+    assert_eq!(log.lines().count(), 3, "one fetch per source: {log}");
+    assert!(
+        !log.contains("prompt=0"),
+        "serial fetches may prompt: {log}"
+    );
+    let commits: Vec<String> = recorded_commits(&sbs[0])
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect();
+    let heads: Vec<String> = sbs.iter().map(source_head).collect();
+    assert_eq!(commits, heads);
+}
+
 #[test]
 fn recall_json_emits_items_and_sources() {
     // spec: CLI-73, CLI-167 - JSON outputs are wrapped in {"schema":1,"items":[...]}.

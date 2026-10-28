@@ -159,6 +159,35 @@ pub fn set_noninteractive(on: bool) {
     NONINTERACTIVE.store(on, Ordering::Relaxed);
 }
 
+/// Whether the process-wide non-interactive git mode is on.
+pub fn is_noninteractive() -> bool {
+    NONINTERACTIVE.load(Ordering::Relaxed)
+}
+
+thread_local! {
+    /// Per-thread non-interactive mode, for git children spawned by a parallel
+    /// fetch worker: concurrent prompts on one terminal would interleave, so a
+    /// worker never prompts (CLI-248).
+    static THREAD_NONINTERACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with every `git` child it spawns on this thread non-interactive.
+pub fn with_noninteractive<R>(f: impl FnOnce() -> R) -> R {
+    let prev = THREAD_NONINTERACTIVE.with(|c| c.replace(true));
+    let out = f();
+    THREAD_NONINTERACTIVE.with(|c| c.set(prev));
+    out
+}
+
+/// Whether `err` is a failure a non-interactive git child reports in place of
+/// a prompt it was not allowed to show: a credential or passphrase prompt
+/// (see [`is_auth_failure`]) or an ssh host-key confirmation.
+pub fn is_suppressed_prompt_failure(err: &MindError) -> bool {
+    is_auth_failure(err)
+        || matches!(err, MindError::Git { stderr, .. }
+            if stderr.to_ascii_lowercase().contains("host key verification failed"))
+}
+
 /// The env pairs that make a `git` child non-interactive. `GIT_TERMINAL_PROMPT=0`
 /// stops git's own credential prompts; wrapping the ssh command in `BatchMode=yes`
 /// stops ssh's passphrase and host-key prompts (`base_ssh` preserves a user's
@@ -176,7 +205,7 @@ fn noninteractive_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
 
 /// Apply the non-interactive environment to a `git` child when the mode is on.
 fn apply_noninteractive_env(cmd: &mut Command) {
-    if !NONINTERACTIVE.load(Ordering::Relaxed) {
+    if !NONINTERACTIVE.load(Ordering::Relaxed) && !THREAD_NONINTERACTIVE.with(|c| c.get()) {
         return;
     }
     let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
@@ -917,6 +946,51 @@ mod tests {
             ssh2.starts_with("ssh -i /my/key ") && ssh2.contains("BatchMode=yes"),
             "custom base ssh command must be preserved and wrapped: {ssh2}"
         );
+    }
+
+    #[test]
+    fn with_noninteractive_applies_the_env_on_this_thread_only() {
+        // spec: CLI-248 - a parallel fetch worker's git children never prompt;
+        // the override is scoped to the closure and to the calling thread.
+        let prompt_off = |cmd: &Command| {
+            cmd.get_envs()
+                .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == Some("0".as_ref()))
+        };
+        let mut inside = Command::new("git");
+        with_noninteractive(|| apply_noninteractive_env(&mut inside));
+        assert!(prompt_off(&inside), "worker git must not prompt");
+
+        // The negative cases read the per-thread flag directly: another test
+        // toggles the process-wide flag concurrently.
+        let thread_flag = || THREAD_NONINTERACTIVE.with(|c| c.get());
+        assert!(!thread_flag(), "override must end with the closure");
+        let other = with_noninteractive(|| std::thread::spawn(thread_flag).join().unwrap());
+        assert!(!other, "override must not leak to another thread");
+    }
+
+    #[test]
+    fn suppressed_prompt_failures_cover_credentials_and_host_keys() {
+        // spec: CLI-248 - the failures a non-interactive git reports in place
+        // of a prompt are the ones a parallel sync retries interactively.
+        let git_err = |stderr: &str| MindError::Git {
+            url: "u".into(),
+            args: vec!["fetch".into()],
+            status: None,
+            stderr: stderr.into(),
+        };
+        assert!(is_suppressed_prompt_failure(&git_err(
+            "fatal: could not read Username for 'https://x': terminal prompts disabled"
+        )));
+        assert!(is_suppressed_prompt_failure(&git_err(
+            "Host key verification failed.\nfatal: Could not read from remote repository."
+        )));
+        assert!(is_suppressed_prompt_failure(&git_err(
+            "git@x: Permission denied (publickey)."
+        )));
+        assert!(!is_suppressed_prompt_failure(&git_err(
+            "fatal: unable to access 'https://x/': Could not resolve host: x"
+        )));
+        assert!(!is_suppressed_prompt_failure(&MindError::GitNotFound));
     }
 
     #[test]

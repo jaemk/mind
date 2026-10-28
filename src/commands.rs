@@ -1013,6 +1013,112 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
     }
 }
 
+/// Bring one source's clone up to date for `sync` / the `upgrade` pre-pass and
+/// return its new HEAD with the pin to record. A linked (no-pin) local source
+/// is its live working tree (CLI-27): nothing is fetched or touched, its HEAD
+/// is only re-read (best effort).
+fn refresh_source(paths: &Paths, source: &crate::source::Source) -> Result<(String, Pin)> {
+    // spec: STO-69 -- validate before any fetch/clone/delete touches it.
+    let dir = clone_dir_checked(paths, source)?;
+    if source.is_linked() {
+        // The working tree must still exist; a deleted one is a sync error
+        // for this source (CLI-54 reports it and continues with the rest).
+        if !dir.is_dir() {
+            return Err(MindError::NotADirectory {
+                path: dir.display().to_string(),
+            });
+        }
+        let new_commit = git::head_commit(&source.url, &dir)
+            .ok()
+            .or_else(|| source.commit.clone())
+            .unwrap_or_default();
+        return Ok((new_commit, source.pin.clone()));
+    }
+    // CLI-55: resolve the source against its recorded pin (never change the
+    // pin itself, only move HEAD to the pinned point). A version pin records
+    // its new resolution (VER-43).
+    sync_clone_to_pin(source, &dir)
+}
+
+/// The default for the most source fetches `refresh_sources` runs at once.
+const DEFAULT_MAX_PARALLEL_FETCHES: usize = 8;
+
+/// Parse a `MIND_MAX_PARALLEL_FETCHES` value: a positive integer, else the
+/// default (missing, non-numeric, and zero all fall back).
+// spec: CLI-249
+fn parse_max_parallel_fetches(raw: Option<&str>) -> usize {
+    match raw.and_then(|v| v.trim().parse::<usize>().ok()) {
+        None | Some(0) => DEFAULT_MAX_PARALLEL_FETCHES,
+        Some(n) => n,
+    }
+}
+
+/// The most source fetches `refresh_sources` runs at once
+/// (`MIND_MAX_PARALLEL_FETCHES`, default 8).
+fn max_parallel_fetches() -> usize {
+    parse_max_parallel_fetches(std::env::var("MIND_MAX_PARALLEL_FETCHES").ok().as_deref())
+}
+
+/// [`refresh_source`] for each of `sources`, fetching up to
+/// [`max_parallel_fetches`] at once. Results come back in input order. A limit
+/// of 1 is the one-at-a-time sync, prompts and all.
+///
+/// Each source's clone is its own directory, so the fetches are independent.
+/// A worker's git children never prompt (concurrent prompts on one terminal
+/// would interleave), so a source that failed where an interactive git would
+/// have prompted (credentials, an ssh passphrase or host key) is retried
+/// serially afterwards with prompting allowed, as a one-at-a-time sync would
+/// have run it.
+// spec: CLI-248
+fn refresh_sources(
+    paths: &Paths,
+    sources: &[&crate::source::Source],
+) -> Vec<Result<(String, Pin)>> {
+    let workers = sources.len().min(max_parallel_fetches());
+    if workers <= 1 {
+        return sources.iter().map(|s| refresh_source(paths, s)).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Vec<(usize, Result<(String, Pin)>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    git::with_noninteractive(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(source) = sources.get(i) else {
+                                break mine;
+                            };
+                            mine.push((i, refresh_source(paths, source)));
+                        }
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    });
+    let mut slots: Vec<Option<Result<(String, Pin)>>> = sources.iter().map(|_| None).collect();
+    for (i, r) in done {
+        slots[i] = Some(r);
+    }
+    slots
+        .into_iter()
+        .zip(sources)
+        .map(|(slot, source)| match slot {
+            Some(Err(e)) if git::is_suppressed_prompt_failure(&e) && !git::is_noninteractive() => {
+                refresh_source(paths, source)
+            }
+            Some(r) => r,
+            // Every index below `sources.len()` is claimed by exactly one worker.
+            None => unreachable!("refresh_sources: source {} was never fetched", source.name),
+        })
+        .collect()
+}
+
 /// Whether a recorded hook has already run at `current` (a real commit) FOR
 /// THIS EVENT.
 ///
@@ -10014,17 +10120,28 @@ pub fn sync_with_selector(
     let total = selected.as_ref().map_or(registry.sources.len(), Vec::len);
     let mut failures: Vec<String> = Vec::new();
     let mut synced = 0usize;
+    // POL-12: with the allowlist locked, a source whose identity is no longer
+    // allowed is not synced.
+    let blocked = |source: &crate::source::Source| {
+        policy
+            .as_ref()
+            .is_some_and(|p| p.lock() && !p.allow_matches(&source.base_identity()))
+    };
+    // spec: CLI-248 -- fetch every source in scope in parallel up front; the
+    // loop below reports and records the results in registry order.
+    let to_sync: Vec<&crate::source::Source> = registry
+        .sources
+        .iter()
+        .filter(|s| in_scope(&s.name) && !blocked(s))
+        .collect();
+    let mut results = refresh_sources(paths, &to_sync).into_iter();
     for source in &mut registry.sources {
         // spec: CLI-231 -- skip sources outside a `[source]` selector's scope.
         if !in_scope(&source.name) {
             continue;
         }
-        // POL-12: with the allowlist locked, do not sync a source whose identity
-        // is no longer allowed; report and skip it (the rest still sync).
-        if let Some(policy) = policy.as_ref()
-            && policy.lock()
-            && !policy.allow_matches(&source.base_identity())
-        {
+        // POL-12: report a blocked source and skip it (the rest still sync).
+        if blocked(source) {
             if !out.json {
                 println!(
                     "{} skipping {}: source not permitted by the managed policy's allowlist",
@@ -10034,47 +10151,21 @@ pub fn sync_with_selector(
             }
             continue;
         }
+        let Some(fetched) = results.next() else {
+            break;
+        };
         if !out.json {
             print!("{} syncing {} ... ", out.bullet(), source.name);
             let _ = std::io::stdout().flush();
         }
-        let refreshed = (|| -> Result<(String, bool, Option<String>, Pin)> {
-            // spec: STO-69 -- validate before any fetch/clone/delete touches it.
-            let dir = clone_dir_checked(paths, source)?;
-            // A linked (no-pin) local source is its live working tree (CLI-27):
-            // there is nothing to fetch and the tree is never touched. Just re-read
-            // its HEAD (best effort) and description. A pinned local source is a
-            // clone and syncs like any other.
-            if source.is_linked() {
-                // The working tree must still exist; a deleted one is a sync error
-                // for this source (CLI-54 reports it and continues with the rest).
-                if !dir.is_dir() {
-                    return Err(MindError::NotADirectory {
-                        path: dir.display().to_string(),
-                    });
-                }
-                let new_commit = git::head_commit(&source.url, &dir)
-                    .ok()
-                    .or_else(|| source.commit.clone())
-                    .unwrap_or_default();
-                let changed = source.commit.as_deref() != Some(new_commit.as_str());
-                // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
-                let desc = MindToml::load(&dir)?
-                    .and_then(|mt| mt.source.description)
-                    .map(|d| strip_ansi(&d));
-                return Ok((new_commit, changed, desc, source.pin.clone()));
-            }
-            // CLI-55: resolve the source against its recorded pin (never change
-            // the pin itself, only move HEAD to the pinned point). A version
-            // pin records its new resolution (VER-43).
-            let (new_commit, pin) = sync_clone_to_pin(source, &dir)?;
+        let refreshed = fetched.and_then(|(new_commit, pin)| {
             let changed = source.commit.as_deref() != Some(new_commit.as_str());
             // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
-            let desc = MindToml::load(&dir)?
+            let desc = MindToml::load(&source.clone_dir(paths))?
                 .and_then(|mt| mt.source.description)
                 .map(|d| strip_ansi(&d));
             Ok((new_commit, changed, desc, pin))
-        })();
+        });
         match refreshed {
             Ok((new_commit, changed, desc, pin)) => {
                 source.pin = pin;
@@ -10469,27 +10560,20 @@ pub(crate) fn sync_sources_for_upgrade_scoped(
         in_scope.as_ref().is_none_or(|s| s.contains(name)) && names.is_none_or(|s| s.contains(name))
     };
 
+    // spec: CLI-248 -- the fetches run in parallel; results apply in order.
+    let to_sync: Vec<&crate::source::Source> = registry
+        .sources
+        .iter()
+        .filter(|s| should_sync(&s.name))
+        .collect();
+    let mut results = refresh_sources(paths, &to_sync).into_iter();
     for source in &mut registry.sources {
         if !should_sync(&source.name) {
             continue;
         }
-        let refreshed = (|| -> Result<(String, Pin)> {
-            // spec: STO-69 -- validate before any fetch/clone/delete touches it.
-            let dir = clone_dir_checked(paths, source)?;
-            if source.is_linked() {
-                if !dir.is_dir() {
-                    return Err(MindError::NotADirectory {
-                        path: dir.display().to_string(),
-                    });
-                }
-                let new_commit = git::head_commit(&source.url, &dir)
-                    .ok()
-                    .or_else(|| source.commit.clone())
-                    .unwrap_or_default();
-                return Ok((new_commit, source.pin.clone()));
-            }
-            sync_clone_to_pin(source, &dir)
-        })();
+        let Some(refreshed) = results.next() else {
+            break;
+        };
         match refreshed {
             Ok((new_commit, pin)) => {
                 source.pin = pin;
@@ -16319,6 +16403,18 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn max_parallel_fetches_parses_a_positive_integer_else_defaults() {
+        // spec: CLI-249
+        assert_eq!(parse_max_parallel_fetches(None), 8);
+        assert_eq!(parse_max_parallel_fetches(Some("")), 8);
+        assert_eq!(parse_max_parallel_fetches(Some("0")), 8);
+        assert_eq!(parse_max_parallel_fetches(Some("-2")), 8);
+        assert_eq!(parse_max_parallel_fetches(Some("many")), 8);
+        assert_eq!(parse_max_parallel_fetches(Some("1")), 1);
+        assert_eq!(parse_max_parallel_fetches(Some(" 32 ")), 32);
     }
 
     // POL-68: an installed item records its source as an *instance* identity,
