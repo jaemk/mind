@@ -99,8 +99,7 @@ missing items, or shows each item's state. Alias `add`.
 | `--install-hook <CMD>` | supply or replace the source's install and update hooks |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
 | `--auto-update[=off\|compatible\|breaking]` | let `auto-update run` update this source; alone, the level the source asks for (else `compatible`); see [Auto-update](updating.md#auto-update) |
-| `--dangerously-skip-install-hook-check` | run install hooks without asking |
-| `--dangerously-skip-build-hook-check` | run item build hooks without asking |
+| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events (`install,update,uninstall,build`) |
 
 `--auto-update` also applies on a re-meld, so it changes or revokes the level of
 a source you already have. `--root`, `--add-root`, `--flat-skills`, and `--install-hook` apply only at the
@@ -130,7 +129,7 @@ source unless it is a glob. Use the full identity for one instance:
 |------|--------|
 | `--keep-items` | drop the source, leave its items installed |
 | `--uninstall-hook <CMD>` | supply or replace the source's uninstall hooks |
-| `--dangerously-skip-hook-check` | run uninstall hooks without asking |
+| `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
 ```
 mind unmeld acme/agents
@@ -162,8 +161,7 @@ Alias `install`.
 | `--local` | install into the current project's lobe only |
 | `--pin` | for an item link, freeze the URL's branch at its current commit (takes no value) |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
-| `--dangerously-skip-install-hook-check` | run an item's install hook without asking |
-| `--dangerously-skip-build-hook-check` | run an item's build hook without asking |
+| `--accept-hooks[=EVENTS]` | run an item's install and build hooks without asking: all, or only the listed events |
 
 `--no-default-profile` is accepted for symmetry with `meld` and changes nothing.
 Installing an item by exact name marks it as asked for, so disabling a profile
@@ -193,7 +191,7 @@ Uninstall items: the store copy and every link. Alias `uninstall`, `unlearn`.
 | `--unmanaged` | act on unmanaged lobe items only; with no `ITEM`, all of them |
 | `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them |
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
-| `--dangerously-skip-hook-check` | run uninstall hooks without asking |
+| `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
 A glob matching several items asks once; `--yes` skips that and the dependents
 question.
@@ -201,10 +199,20 @@ question.
 ```
 mind forget review
 mind forget 'skill:*' --yes
+mind forget 'owner/repo#review'                  # one item from a source
+mind forget 'owner/repo#*' --yes                 # every item from a source
+mind forget 'owner/repo#skill:*'                 # every skill from a source
+mind forget 'local/projects/agents#review'       # one item from a local source
+mind forget 'local/projects/agents#*' --yes      # every item from a local source
+mind forget 'local/projects/agents#skill:*'      # every skill from a local source
 mind forget owner/repo --profile full
 mind forget --unmanaged
 mind forget --dropped
 ```
+
+A source goes before `#`; `mind recall --sources` lists the identities (a
+local path melds as `local/<parent dir>/<dir>`). To drop the source too, use
+[`unmeld`](#unmeld).
 
 ## recall
 
@@ -255,8 +263,7 @@ Installed items do not change. Alias `update`.
 | flag | effect |
 |------|--------|
 | `--upgrade` | then run `upgrade` over the same sources (prefer plain `upgrade`, which syncs first) |
-| `--dangerously-skip-install-hook-check` | with `--upgrade`, run hook re-runs without asking |
-| `--dangerously-skip-build-hook-check` | with `--upgrade`, run build hooks without asking |
+| `--accept-hooks[=EVENTS]` | with `--upgrade`, run hooks without asking: all, or only the listed events |
 
 An unscoped `sync` also provisions [managed policy](policy.md#auto-meld-org-provisioning)
 sources and registers newly listed curated sources. `sync` exits 1 if any fetch
@@ -276,8 +283,7 @@ on confirmation. `ITEM` is a filter.
 | `--source <filter>` | fetch and upgrade only the matching sources; combines with `ITEM` |
 | `--no-sync` | skip the fetch; compare against the clones on disk |
 | `--allow-breaking` | take a version-pinned source's breaking release (the next major) without a prompt; see [Follow release versions](pinning.md#follow-release-versions) |
-| `--dangerously-skip-install-hook-check` | run install or update hook re-runs without asking |
-| `--dangerously-skip-build-hook-check` | run build hooks without asking |
+| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
 
 See [Keep everything up to date](updating.md).
 
@@ -316,8 +322,7 @@ Alias `reconcile`.
 | `--prune` | also uninstall and drop sources a curator no longer lists |
 | `--no-sync` | plan against the clones on disk |
 | `--adopt <IDENTITY>` | hand an existing source to the curator that lists it |
-| `--dangerously-skip-install-hook-check` | run install and update hooks without asking |
-| `--dangerously-skip-build-hook-check` | run build hooks without asking |
+| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
 
 See [Follow a curated collection](curate.md).
 
@@ -344,8 +349,7 @@ is a source filter or a `source#item` ref.
 |--------------|--------|
 | `--event <install\|update\|uninstall\|build>` | which hooks (default `install`; `build` is for items) |
 | `--force`, `--rerun` | re-run hooks already recorded at the current commit |
-| `--dangerously-skip-install-hook-check` | run install or update hooks without asking |
-| `--dangerously-skip-build-hook-check` | run a build hook without asking |
+| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
 
 See [Run setup with hooks](install-hooks.md#running-hooks-on-demand).
 
@@ -458,4 +462,3 @@ These still work as hidden aliases:
 | `--follow-branch B`, `--pin-tag T`, `--pin-ref C` | `--pin branch=B`, `--pin tag=T`, `--pin C` |
 | `--as PREFIX` | `--namespace PREFIX` |
 | `evolve --version V` | `evolve --to V` |
-| `--dangerously-skip-install-hook-check` on `unmeld` or `forget` | `--dangerously-skip-hook-check` |

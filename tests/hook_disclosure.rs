@@ -259,7 +259,11 @@ fn item_update_hook_disclosure_names_event_and_label() {
 
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec]).success, "meld must succeed");
-    let learn = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let learn = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(learn.success, "learn: {}\n{}", learn.stdout, learn.stderr);
 
     // Add a named UPDATE hook, distinct from the install one (a distinct `run`

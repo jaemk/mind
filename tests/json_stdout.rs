@@ -321,7 +321,7 @@ fn config_lobes_add_backfill_warn_is_one_document() {
 // earlier round's decidable scope rule ("convert any println! that begins
 // `note:`/`warning:`") did not select them -- and a marker-prefix rule is
 // precisely why three defects of this class shipped. All are reachable only
-// via a `--dangerously-skip-*` flag (a TTY is otherwise required to reach the
+// via a `--accept-hooks` flag (a TTY is otherwise required to reach the
 // branch that prints them), i.e. the unattended CI invocation that most wants
 // `--json`.
 //
@@ -354,7 +354,7 @@ fn meld_running_install_hook_is_one_document() {
         "meld",
         &sb.source_spec(),
         "--register-only",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
     assert_stdout_is_one_json_document(&r.stdout);
@@ -388,7 +388,7 @@ fn unmeld_running_uninstall_hook_is_one_document() {
         "unmeld",
         "unmeld-leak",
         "--keep-items",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "unmeld: {}\n{}", r.stdout, r.stderr);
     assert_stdout_is_one_json_document(&r.stdout);
@@ -422,12 +422,7 @@ fn learn_running_build_hook_is_one_document() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
 
-    let r = sb.mind(&[
-        "--json",
-        "learn",
-        "builder",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let r = sb.mind(&["--json", "learn", "builder", "--accept-hooks=build"]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     assert_stdout_is_one_json_document(&r.stdout);
     assert!(
@@ -466,7 +461,7 @@ fn learn_running_item_install_hook_is_one_document() {
         "--json",
         "learn",
         "widget",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     assert_stdout_is_one_json_document(&r.stdout);
@@ -507,7 +502,7 @@ fn hooks_run_running_hook_is_one_document() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "hooks-running-leak",
     ]);
     assert!(
@@ -553,7 +548,7 @@ fn a_hooks_own_output_cannot_reach_json_stdout() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "hook-output",
     ]);
     assert!(r.success, "hooks run: {}\n{}", r.stdout, r.stderr);
@@ -1139,7 +1134,7 @@ fn a_streaming_hook_cannot_reach_the_json_document_on_stdout() {
         "meld",
         &spec,
         "--register-only",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
 
@@ -1192,7 +1187,7 @@ fn a_hooks_write_to_the_saved_stdout_fd_cannot_reach_json_stdout() {
         "meld",
         &spec,
         "--register-only",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {} {}", r.stdout, r.stderr);
     let v = assert_stdout_is_one_json_document(&r.stdout);

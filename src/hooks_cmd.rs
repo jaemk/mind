@@ -116,8 +116,7 @@ pub fn run(
     target: &str,
     event: HookEventArg,
     force: bool,
-    dangerously_skip_install: bool,
-    dangerously_skip_build: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     let tally = match resolve_hook_target(paths, target)? {
         HookTarget::Source(selector) => {
@@ -125,17 +124,11 @@ pub fn run(
             if event == HookEventArg::Build {
                 return Err(MindError::BuildEventRequiresItemTarget);
             }
-            run_source_hooks(paths, &selector, event, force, dangerously_skip_install)?
+            run_source_hooks(paths, &selector, event, force, accept)?
         }
-        HookTarget::Item(item_ref) => run_item_hooks(
-            paths,
-            &item_ref,
-            target,
-            event,
-            force,
-            dangerously_skip_install,
-            dangerously_skip_build,
-        )?,
+        HookTarget::Item(item_ref) => {
+            run_item_hooks(paths, &item_ref, target, event, force, accept)?
+        }
     };
 
     // spec: CLI-222 -- a successful run answers `--json` with the HOOK-107/108
@@ -261,7 +254,7 @@ fn run_source_hooks(
     selector: &str,
     event: HookEventArg,
     force: bool,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
 ) -> Result<HookTally> {
     let mut registry = Registry::load(paths)?;
 
@@ -372,7 +365,7 @@ fn run_source_hooks(
                 browse_url.as_deref(),
             );
 
-            match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
+            match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
                 crate::hook::HookAct::Run => {
                     ran += 1;
                     // Unlike the `note:`-prefixed lines around it this is a
@@ -527,9 +520,9 @@ impl HookTally {
     /// whole batch is known before the batch runs. An interactive run is the
     /// user's own decision per hook and is counted as neither a run nor a
     /// consent failure, which is what keeps an interactive decline at exit 0.
-    fn offered(&mut self, count: usize, dangerously_skip: bool) {
+    fn offered(&mut self, count: usize, accepted: bool) {
         self.existed += count;
-        if dangerously_skip {
+        if accepted {
             self.ran += count;
         } else if !crate::hook::is_tty() {
             self.skipped_for_consent += count;
@@ -560,8 +553,7 @@ fn run_item_hooks(
     target: &str,
     event: HookEventArg,
     force: bool,
-    dangerously_skip_install: bool,
-    dangerously_skip_build: bool,
+    accept: crate::hook::Accept,
 ) -> Result<HookTally> {
     let manifest = Manifest::load(paths)?;
     let matches = select_installed(&manifest.items, item_ref);
@@ -585,7 +577,7 @@ fn run_item_hooks(
     for installed in matches {
         match event {
             HookEventArg::Build => {
-                run_item_build(paths, installed, dangerously_skip_build)?;
+                run_item_build(paths, installed, accept.build)?;
             }
             HookEventArg::Install | HookEventArg::Update | HookEventArg::Uninstall => {
                 run_item_lifecycle_hooks(
@@ -593,7 +585,7 @@ fn run_item_hooks(
                     installed,
                     event,
                     force,
-                    dangerously_skip_install,
+                    accept,
                     &mut tally,
                     &mut contributors,
                 )?;
@@ -644,11 +636,7 @@ fn run_item_hooks(
 /// Re-install an item through the transactional path so a failed build leaves
 /// the existing copy untouched (HOOK-103 / LIFE-1 / LIFE-4).
 // spec: HOOK-103
-fn run_item_build(
-    paths: &Paths,
-    installed: &InstalledItem,
-    dangerously_skip_build: bool,
-) -> Result<()> {
+fn run_item_build(paths: &Paths, installed: &InstalledItem, accept_build: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let source = registry
         .sources
@@ -689,7 +677,7 @@ fn run_item_build(
         &commit,
         &catalog_items,
         false,
-        dangerously_skip_build,
+        accept_build,
         &hook_env,
     )?;
     // Same commit, so the same release (VER-60).
@@ -714,7 +702,7 @@ fn run_item_lifecycle_hooks(
     installed: &InstalledItem,
     event: HookEventArg,
     force: bool,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     tally: &mut HookTally,
     contributors: &mut Vec<String>,
 ) -> Result<()> {
@@ -783,14 +771,14 @@ fn run_item_lifecycle_hooks(
                 return Ok(());
             }
             // spec: HOOK-108
-            tally.offered(hooks.len(), dangerously_skip);
+            tally.offered(hooks.len(), accept.event_str(event_name));
             contributors.push(item_hook_target(installed));
             let (recorded, outcome) = crate::install::run_item_install_hooks_partial(
                 catalog_item,
                 &hooks,
                 &store,
                 commit,
-                dangerously_skip,
+                accept,
                 &hook_env,
             );
             // spec: HOOK-110 -- persist whatever ran or was offered before an
@@ -815,15 +803,10 @@ fn run_item_lifecycle_hooks(
                 return Ok(());
             }
             // spec: HOOK-108
-            tally.offered(hooks.len(), dangerously_skip);
+            tally.offered(hooks.len(), accept.uninstall);
             contributors.push(item_hook_target(installed));
             crate::install::run_item_uninstall_hooks(
-                installed,
-                &hooks,
-                &store,
-                commit,
-                dangerously_skip,
-                &hook_env,
+                installed, &hooks, &store, commit, accept, &hook_env,
             )?;
         }
         HookEventArg::Build => unreachable!("build handled by run_item_build"),
@@ -1179,7 +1162,7 @@ fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String 
     format!(
         "note: skipped {event_name} hook '{label}' for {source_name} (not a terminal); \
          re-run unattended with:\n  mind hooks run {quoted} --event {event_name} \
-         --dangerously-skip-install-hook-check"
+         --accept-hooks={event_name}"
     )
 }
 
@@ -1337,7 +1320,7 @@ mod tests {
 
     /// The bypass arm of `offered` short-circuits ahead of the TTY test, so it
     /// predicts "ran" without consulting the environment at all. That is what
-    /// makes `--dangerously-skip-install-hook-check` unable to produce a
+    /// makes `--accept-hooks` unable to produce a
     /// `HooksNotRun` no matter how the process was launched.
     // spec: HOOK-108 HOOK-83
     #[test]

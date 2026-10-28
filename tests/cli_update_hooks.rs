@@ -19,6 +19,8 @@
 //!   HOOK-130: `install:`/`update:`/`uninstall:` frontmatter on any kind
 //!   HOOK-131: a scoped `mind.toml` in a skill's own directory
 //!   HOOK-133: an item manifest is item content: copied into the store, hashed
+//!   CLI-250:  `--accept-hooks=<events>` gates install and update separately
+//!   CLI-251:  the hidden `--dangerously-skip-install-hook-check` still works
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -161,7 +163,7 @@ fn source_update_hook_replaces_the_install_rerun_at_upgrade() {
     let r = sb.mind(&[
         "meld",
         &sb.source_spec(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}", r.stderr);
     assert_eq!(sb.runs("install.log"), 1, "meld runs the install hook");
@@ -176,7 +178,11 @@ fn source_update_hook_replaces_the_install_rerun_at_upgrade() {
     sb.write_and_commit("README.md", "# fixture v2\n");
     assert!(sb.mind(&["sync"]).success, "sync must succeed");
 
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("update.log"),
@@ -192,6 +198,86 @@ fn source_update_hook_replaces_the_install_rerun_at_upgrade() {
     );
 }
 
+/// `--accept-hooks=<events>` accepts only the named events: `install` alone
+/// leaves an update hook to the non-TTY skip, and `update` then runs it.
+#[test]
+fn accept_hooks_events_gate_install_and_update_separately() {
+    // spec: CLI-250 HOOK-150
+    let sb = Sandbox::new("accept-src");
+    let install = sb.tally("install.log");
+    let update = sb.tally("update.log");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[hooks]]\nrun = \"{install}\"\n\n[[hooks]]\nrun = \"{update}\"\nevent = \"update\"\n"
+        ),
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--accept-hooks=update"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(
+        sb.runs("install.log"),
+        0,
+        "--accept-hooks=update must not accept an install hook: {}",
+        r.stdout
+    );
+    let r = sb.mind(&["meld", &sb.source_spec(), "--accept-hooks=install"]);
+    assert!(r.success, "re-meld: {}", r.stderr);
+    assert_eq!(
+        sb.runs("install.log"),
+        1,
+        "the install hook runs: {}",
+        r.stdout
+    );
+
+    sb.write_and_commit("README.md", "# fixture v2\n");
+    let r = sb.mind(&["upgrade", "--yes", "--accept-hooks=install"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("update.log"),
+        0,
+        "--accept-hooks=install must not accept an update hook: {}",
+        r.stdout
+    );
+
+    let r = sb.mind(&["upgrade", "--yes", "--accept-hooks=update"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("update.log"),
+        1,
+        "--accept-hooks=update runs the pending update hook: {}",
+        r.stdout
+    );
+    assert_eq!(sb.runs("install.log"), 1);
+}
+
+/// The hidden pre-rename flag still runs install and update hooks unattended.
+#[test]
+fn legacy_install_hook_flag_still_runs_hooks() {
+    // spec: CLI-251
+    let sb = Sandbox::new("legacy-src");
+    let install = sb.tally("install.log");
+    let update = sb.tally("update.log");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[hooks]]\nrun = \"{install}\"\n\n[[hooks]]\nrun = \"{update}\"\nevent = \"update\"\n"
+        ),
+    );
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(sb.runs("install.log"), 1, "{}", r.stdout);
+
+    sb.write_and_commit("README.md", "# fixture v2\n");
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs("update.log"), 1, "{}", r.stdout);
+}
+
 /// A source that declares no update hook keeps the unchanged behavior: its
 /// install hook is re-offered when the source advances.
 #[test]
@@ -204,14 +290,18 @@ fn source_without_an_update_hook_reruns_its_install_hook() {
     let r = sb.mind(&[
         "meld",
         &sb.source_spec(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}", r.stderr);
     assert_eq!(sb.runs("install.log"), 1);
 
     sb.write_and_commit("README.md", "# fixture v2\n");
     assert!(sb.mind(&["sync"]).success, "sync must succeed");
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("install.log"),
@@ -237,20 +327,28 @@ fn source_update_hook_is_recorded_and_not_rerun_at_the_same_commit() {
         sb.mind(&[
             "meld",
             &sb.source_spec(),
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ])
         .success
     );
     sb.write_and_commit("README.md", "# fixture v2\n");
     assert!(sb.mind(&["sync"]).success);
     assert!(
-        sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"])
-            .success
+        sb.mind(&[
+            "upgrade",
+            "--yes",
+            "--accept-hooks=install,update,uninstall"
+        ])
+        .success
     );
     assert_eq!(sb.runs("update.log"), 1);
 
     // Nothing advanced: the recorded run-commit is current, so nothing pends.
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "second upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("update.log"),
@@ -276,7 +374,7 @@ fn an_unmoved_source_runs_no_update_hook_on_the_first_upgrade() {
     let r = sb.mind(&[
         "meld",
         &sb.source_spec(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}", r.stderr);
     assert_eq!(
@@ -288,7 +386,11 @@ fn an_unmoved_source_runs_no_update_hook_on_the_first_upgrade() {
     // Nothing moved. `sync` records the same commit; `upgrade` must find the
     // update hook settled at it.
     assert!(sb.mind(&["sync"]).success, "sync must succeed");
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("update.log"),
@@ -310,7 +412,11 @@ fn an_unmoved_source_runs_no_update_hook_on_the_first_upgrade() {
     // The source advances: now it is pending and runs.
     sb.write_and_commit("README.md", "# fixture v2\n");
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("update.log"),
@@ -338,7 +444,7 @@ fn an_install_run_does_not_settle_the_same_command_on_the_update_event() {
     let r = sb.mind(&[
         "meld",
         &sb.source_spec(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}", r.stderr);
     assert_eq!(sb.runs("both.log"), 1, "the install hook ran at meld");
@@ -353,7 +459,7 @@ fn an_install_run_does_not_settle_the_same_command_on_the_update_event() {
         &sb.source_id(),
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "hooks run install: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
@@ -370,7 +476,7 @@ fn an_install_run_does_not_settle_the_same_command_on_the_update_event() {
         &sb.source_id(),
         "--event",
         "update",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "hooks run update: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
@@ -396,7 +502,7 @@ fn hooks_run_reports_nothing_pending_instead_of_exiting_silently() {
         sb.mind(&[
             "meld",
             &sb.source_spec(),
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ])
         .success
     );
@@ -406,7 +512,7 @@ fn hooks_run_reports_nothing_pending_instead_of_exiting_silently() {
         "hooks",
         "run",
         &sb.source_id(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "hooks run: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.runs("install.log"), 1, "nothing pending, so nothing ran");
@@ -422,7 +528,7 @@ fn hooks_run_reports_nothing_pending_instead_of_exiting_silently() {
         "run",
         &sb.source_id(),
         "--force",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "forced hooks run: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
@@ -446,7 +552,7 @@ fn a_withdrawn_install_hook_is_not_replayed_at_upgrade() {
         sb.mind(&[
             "meld",
             &sb.source_spec(),
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ])
         .success
     );
@@ -455,7 +561,11 @@ fn a_withdrawn_install_hook_is_not_replayed_at_upgrade() {
     // The source withdraws the hook and advances.
     sb.write_and_commit("mind.toml", "[source]\ndescription = \"no hooks\"\n");
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("install.log"),
@@ -488,7 +598,7 @@ fn a_curated_update_hook_runs_at_upgrade_and_not_at_meld() {
     let r = registry.mind(&[
         "meld",
         &registry.source_spec(),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
@@ -501,7 +611,11 @@ fn a_curated_update_hook_runs_at_upgrade_and_not_at_meld() {
     // The nested source advances.
     nested.write_and_commit("README.md", "# fixture v2\n");
     assert!(registry.mind(&["sync"]).success, "sync must succeed");
-    let r = registry.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = registry.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         registry.runs("curated-update.log"),
@@ -528,7 +642,7 @@ fn a_meld_install_hook_override_covers_the_update_event() {
         &sb.source_spec(),
         "--install-hook",
         &mine,
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.runs("mine.log"), 1, "the consumer's command ran");
@@ -544,7 +658,11 @@ fn a_meld_install_hook_override_covers_the_update_event() {
         &format!("[[hooks]]\nrun = \"{theirs}\"\nevent = \"update\"\n"),
     );
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("theirs.log"),
@@ -583,7 +701,11 @@ fn item_update_hook_replaces_the_install_hook_on_upgrade() {
     );
 
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.runs("install.log"), 1, "a first install runs `install`");
     assert_eq!(sb.runs("update.log"), 0, "a first install skips `update`");
@@ -596,7 +718,11 @@ fn item_update_hook_replaces_the_install_hook_on_upgrade() {
         ),
     );
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("update.log"),
@@ -630,14 +756,22 @@ fn relearning_an_installed_item_is_a_no_op_and_runs_no_hook() {
 
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
     assert!(
-        sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"])
-            .success
+        sb.mind(&[
+            "learn",
+            "scanner",
+            "--accept-hooks=install,update,uninstall"
+        ])
+        .success
     );
     assert_eq!(sb.runs("install.log"), 1);
     assert_eq!(sb.runs("update.log"), 0);
 
     // Same item, same name, already installed: nothing is installed again.
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "re-learn: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains("already installed"),
@@ -674,7 +808,11 @@ fn skill_frontmatter_install_hook_runs_at_learn() {
     );
 
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     let store = sb.mind_home.join("store").join("skill").join("scanner");
     assert!(
@@ -703,7 +841,11 @@ fn item_directory_manifest_hook_runs_and_is_item_content() {
     );
 
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     assert_eq!(
         sb.runs("install.log"),
@@ -724,7 +866,11 @@ fn item_directory_manifest_hook_runs_and_is_item_content() {
         &format!("[[hooks]]\nrun = \"{update}\"\nevent = \"update\"\n"),
     );
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains("upgraded skill:scanner"),

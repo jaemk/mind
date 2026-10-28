@@ -352,7 +352,7 @@ fn hooks_list_json_sanitizes_a_hostile_item_name() {
         sb.mind(&[
             "learn",
             "skill:review",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -480,7 +480,7 @@ fn hooks_list_sanitizes_a_hostile_source_name_in_every_form() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
-    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "widget", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
 
     // The registered source identity, `local/<base-name>/<hostile_dir>`
@@ -896,7 +896,7 @@ fn hooks_list_item_shows_hooks() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld failed: {}", r.stderr);
-    let r = sb.mind(&["learn", "myscan", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "myscan", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn failed: {}", r.stderr);
 
     let r = sb.mind(&["hooks", "list", "item-hooks-src#myscan"]);
@@ -943,7 +943,7 @@ fn hooks_list_json_item_target_answers_with_items_and_no_sources() {
     );
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
     assert!(
-        sb.mind(&["learn", "myscan", "--dangerously-skip-install-hook-check"])
+        sb.mind(&["learn", "myscan", "--accept-hooks=install,update,uninstall"])
             .success
     );
 
@@ -1008,7 +1008,7 @@ fn hooks_list_json_source_target_nests_item_hooks_without_a_source_member() {
     );
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
     assert!(
-        sb.mind(&["learn", "myscan", "--dangerously-skip-install-hook-check"])
+        sb.mind(&["learn", "myscan", "--accept-hooks=install,update,uninstall"])
             .success
     );
 
@@ -1075,7 +1075,7 @@ fn hooks_run_build_event_on_source_target_errors() {
 /// In non-TTY, `hooks run --event install <source>` skips the hook, but
 /// because there WAS a hook to run and consent was unavailable for it (not a
 /// terminal), the command is now a non-zero exit naming the cause and the
-/// exact `--dangerously-skip-install-hook-check` remedy (HOOK-106/HOOK-107),
+/// exact `--accept-hooks=install,update,uninstall` remedy (HOOK-106/HOOK-107),
 /// not a silent exit 0 (U43).
 #[test]
 fn hooks_run_source_install_skips_in_non_tty() {
@@ -1120,7 +1120,7 @@ fn hooks_run_source_install_skips_in_non_tty() {
     );
     assert!(
         out.contains(&format!(
-            "mind hooks run '{identity}' --event install --dangerously-skip-install-hook-check"
+            "mind hooks run '{identity}' --event install --accept-hooks=install"
         )),
         "should print the exact copy-pasteable remedy, re-selecting the event \
          the run selected, with the identity shell-quoted (HOOK-106): {out}"
@@ -1133,9 +1133,9 @@ fn hooks_run_source_install_skips_in_non_tty() {
     );
 }
 
-/// `hooks run --dangerously-skip-install-hook-check` actually runs the hook.
+/// `hooks run --accept-hooks=install,update,uninstall` actually runs the hook.
 #[test]
-fn hooks_run_source_install_runs_with_dangerously_skip() {
+fn hooks_run_source_install_runs_with_accept_hooks() {
     // spec: HOOK-100 HOOK-101 CLI-195
     let sb = Sandbox::new("src-run");
     // The hook creates a sentinel file relative to the clone dir.
@@ -1156,7 +1156,7 @@ fn hooks_run_source_install_runs_with_dangerously_skip() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "src-run",
     ]);
     assert!(
@@ -1189,7 +1189,7 @@ fn hooks_run_source_install_runs_with_dangerously_skip() {
 // pointed at stderr for the whole run (main.rs's `json_stdout`), so no
 // `println!` in this file -- or any other -- can reach stdout, and `main`
 // writes the single document at the end. Both still require
-// `--dangerously-skip-install-hook-check` to reach without a TTY.
+// `--accept-hooks=install,update,uninstall` to reach without a TTY.
 // ---------------------------------------------------------------------------
 
 /// `src/hooks_cmd.rs:run_source_hooks`'s `println!("running {event} hook
@@ -1223,7 +1223,7 @@ fn hooks_run_running_hook_note_is_one_document() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "running-leak",
     ]);
     assert!(
@@ -1261,8 +1261,8 @@ fn hooks_run_build_rebuilding_note_is_one_document() {
     let r = sb.mind(&[
         "learn",
         "widget",
-        "--dangerously-skip-install-hook-check",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=install,update,uninstall",
+        "--accept-hooks=build",
     ]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
 
@@ -1283,7 +1283,7 @@ fn hooks_run_build_rebuilding_note_is_one_document() {
         "run",
         "--event",
         "build",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=build",
         "rebuild-leak#widget",
     ]);
     assert!(
@@ -1321,13 +1321,13 @@ fn hooks_run_source_install_already_ran_not_rerun() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
 
-    // First run: hook executes (dangerously-skip).
+    // First run: hook executes (--accept-hooks).
     let r = sb.mind(&[
         "hooks",
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "src-repeat",
     ]);
     assert!(r.success, "first run: {}\n{}", r.stdout, r.stderr);
@@ -1342,7 +1342,7 @@ fn hooks_run_source_install_already_ran_not_rerun() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "src-repeat",
     ]);
     assert!(r.success, "second run: {}\n{}", r.stdout, r.stderr);
@@ -1377,7 +1377,7 @@ fn hooks_run_source_install_force_reruns_hook() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "src-force",
     ]);
     assert!(r.success, "first run: {}", r.stderr);
@@ -1392,7 +1392,7 @@ fn hooks_run_source_install_force_reruns_hook() {
         "--event",
         "install",
         "--force",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "src-force",
     ]);
     assert!(r.success, "force re-run: {}\n{}", r.stdout, r.stderr);
@@ -1467,7 +1467,7 @@ fn hooks_run_source_no_hooks_prints_note() {
 // ---------------------------------------------------------------------------
 
 /// `hooks run --event install <source>#<item>` runs the item's install hook at
-/// its store location (with --dangerously-skip-install-hook-check).
+/// its store location (with --accept-hooks=install,update,uninstall).
 #[test]
 fn hooks_run_item_install_hook_runs() {
     // spec: HOOK-102 CLI-194
@@ -1490,7 +1490,11 @@ fn hooks_run_item_install_hook_runs() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
     // Learn the item; skip its install hook for the learn step.
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // Now explicitly run the item's install hook.
@@ -1499,7 +1503,7 @@ fn hooks_run_item_install_hook_runs() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-install-src#scanner",
     ]);
     assert!(
@@ -1575,7 +1579,7 @@ fn hooks_run_item_uninstall_hook_skips_in_non_tty() {
     assert!(
         r.stderr.contains(
             "mind hooks run 'item-uninstall-src#fetcher' --event uninstall \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=uninstall"
         ),
         "the remedy must re-select the uninstall event: {}",
         r.stderr
@@ -1587,7 +1591,7 @@ fn hooks_run_item_uninstall_hook_skips_in_non_tty() {
 // ---------------------------------------------------------------------------
 
 /// `hooks run --event build <source>#<item>` re-installs the item transactionally.
-/// With --dangerously-skip-build-hook-check, a build hook runs unattended.
+/// With --accept-hooks=build, a build hook runs unattended.
 #[test]
 fn hooks_run_item_build_reinstalls() {
     // spec: HOOK-103 CLI-195
@@ -1617,7 +1621,7 @@ fn hooks_run_item_build_reinstalls() {
         "run",
         "--event",
         "build",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=build",
         "item-bld#builder",
     ]);
     assert!(
@@ -1672,7 +1676,7 @@ fn hooks_run_item_build_with_force_is_a_benign_no_op() {
         "--event",
         "build",
         "--force",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=build",
         "item-bld-force#builder",
     ]);
     assert!(
@@ -1741,7 +1745,7 @@ fn hooks_run_source_glob_runs_each_matched_source() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "*",
     ]);
     assert!(r.success, "hooks run '*': {}\n{}", r.stdout, r.stderr);
@@ -1784,9 +1788,9 @@ fn hooks_run_item_glob_runs_each_matched_item() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "alpha", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "alpha", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn alpha: {}", r.stderr);
-    let r = sb.mind(&["learn", "beta", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "beta", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn beta: {}", r.stderr);
 
     // `<source>#*` matches BOTH installed items; each item's install hook runs.
@@ -1795,7 +1799,7 @@ fn hooks_run_item_glob_runs_each_matched_item() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "multi-item-src#*",
     ]);
     assert!(r.success, "hooks run item glob: {}\n{}", r.stdout, r.stderr);
@@ -1861,7 +1865,7 @@ fn hooks_run_source_install_skip_stays_pending() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "skip-pending",
     ]);
     assert!(r.success, "bypassed run: {}\n{}", r.stdout, r.stderr);
@@ -1880,7 +1884,7 @@ fn hooks_run_source_install_skip_stays_pending() {
 /// A non-TTY `hooks run` where the install hook already ran at the current
 /// commit has NOTHING to do (HOOK-101's pending filter excludes it before
 /// consent is ever asked), so it stays exit 0 even with no
-/// `--dangerously-skip-install-hook-check` -- unlike the pending case in
+/// `--accept-hooks=install,update,uninstall` -- unlike the pending case in
 /// `hooks_run_source_install_skips_in_non_tty`, which is now an error.
 #[test]
 fn hooks_run_source_install_already_ran_non_tty_stays_exit_zero() {
@@ -1904,7 +1908,7 @@ fn hooks_run_source_install_already_ran_non_tty_stays_exit_zero() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "already-ran-quiet",
     ]);
     assert!(
@@ -1961,7 +1965,7 @@ fn hooks_list_source_shows_pending_then_recorded_commit() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "list-status",
     ]);
     assert!(r.success, "run: {}\n{}", r.stdout, r.stderr);
@@ -2012,7 +2016,7 @@ fn hooks_run_build_failure_leaves_live_copy_untouched() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
     // First install: the build succeeds and the store copy gets built.sentinel.
-    let r = sb.mind(&["learn", "tool:bt", "--dangerously-skip-build-hook-check"]);
+    let r = sb.mind(&["learn", "tool:bt", "--accept-hooks=build"]);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
 
     let store = sb.mind_home.join("store/tool/bt");
@@ -2034,7 +2038,7 @@ fn hooks_run_build_failure_leaves_live_copy_untouched() {
         "run",
         "--event",
         "build",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=build",
         "bld-fail-src#bt",
     ]);
     assert!(
@@ -2137,7 +2141,7 @@ fn hooks_list_plain_source_hash_item_still_resolves_as_item() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "widget", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // "plain-src#widget" is not itself a registered source identity (the
@@ -2228,7 +2232,7 @@ fn hooks_run_link_instance_identity_reaches_and_runs_source_hooks() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         &identity,
     ]);
     assert!(
@@ -2447,7 +2451,7 @@ fn hooks_target_exactly_matching_source_and_item_errors_ambiguous() {
     let r = sb.mind(&[
         "learn",
         "amb-src#dev",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "learn: {}", r.stderr);
 
@@ -2484,7 +2488,7 @@ fn hooks_target_exactly_matching_source_and_item_errors_ambiguous() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         &ambiguous,
     ]);
     assert!(
@@ -2555,7 +2559,7 @@ fn hooks_target_item_only_match_resolves_as_item() {
     );
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "widget", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // "item-only#widget" is not the registered source's identity (that is
@@ -2602,7 +2606,7 @@ fn hooks_target_kind_qualified_escape_forces_item_resolution() {
     let r = sb.mind(&[
         "learn",
         "amb-kind-esc#dev",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "learn: {}", r.stderr);
 
@@ -2660,7 +2664,7 @@ fn hooks_target_source_prefix_escape_forces_source_resolution() {
     let r = sb.mind(&[
         "learn",
         "amb-src-esc#dev",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "learn: {}", r.stderr);
 
@@ -2744,7 +2748,7 @@ fn hooks_run_hooks_not_run_emits_json_error_envelope() {
         "the envelope message must be the full Display text: {message}"
     );
     assert!(
-        message.contains("--dangerously-skip-install-hook-check"),
+        message.contains("--accept-hooks=install"),
         "the envelope message must carry the remedy: {message}"
     );
     assert!(
@@ -2863,7 +2867,7 @@ fn hooks_run_force_on_already_ran_hook_in_non_tty_is_hooks_not_run() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "force-not-run",
     ]);
     assert!(r.success, "bypassed run: {}\n{}", r.stdout, r.stderr);
@@ -3014,7 +3018,7 @@ fn hooks_run_glob_counts_only_the_source_with_pending_work() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "glob-mixed-a",
     ]);
     assert!(r.success, "retire a: {}\n{}", r.stdout, r.stderr);
@@ -3083,7 +3087,7 @@ fn hooks_run_glob_with_nothing_to_do_anywhere_stays_exit_zero() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "glob-quiet-b",
     ]);
     assert!(r.success, "retire b: {}\n{}", r.stdout, r.stderr);
@@ -3120,7 +3124,7 @@ fn hooks_run_with_bypass_never_reports_hooks_not_run() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "bypass-clean",
     ]);
     assert!(r.success, "bypassed run: {}\n{}", r.stdout, r.stderr);
@@ -3159,7 +3163,7 @@ fn hooks_run_item_target_pending_install_hook_is_hooks_not_run_in_non_tty() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
     // Plain (non-TTY) learn: the hook is recorded as SKIPPED (ran_at = None,
-    // HOOK-110), so it is still pending below. `--dangerously-skip-install-hook-check`
+    // HOOK-110), so it is still pending below. `--accept-hooks=install,update,uninstall`
     // would run and record it, filtering it out of the `hooks run` below --
     // exactly the fix HOOK-110 makes.
     let r = sb.mind(&["learn", "scanner"]);
@@ -3194,7 +3198,7 @@ fn hooks_run_item_target_pending_install_hook_is_hooks_not_run_in_non_tty() {
     assert!(
         r.stderr.contains(
             "mind hooks run 'item-silent#scanner' --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         ),
         "the error must carry the copy-pasteable remedy naming the target as \
          typed: {}",
@@ -3269,7 +3273,7 @@ fn hooks_run_item_single_match_glob_remedy_names_the_resolved_identity_not_the_g
     assert!(
         r.stderr.contains(&format!(
             "mind hooks run '{concrete_identity}' --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         )),
         "the remedy must name the resolved concrete identity instead: {}",
         r.stderr
@@ -3281,7 +3285,7 @@ fn hooks_run_item_single_match_glob_remedy_names_the_resolved_identity_not_the_g
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         &concrete_identity,
     ]);
     assert!(
@@ -3330,7 +3334,7 @@ fn hooks_run_skip_note_remedy_names_the_resolved_source_identity() {
     assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains(&format!(
-            "mind hooks run '{identity}' --event install --dangerously-skip-install-hook-check"
+            "mind hooks run '{identity}' --event install --accept-hooks=install"
         )),
         "the note's remedy must name the resolved identity (shell-quoted), not \
          the '*' selector: {}",
@@ -3435,7 +3439,7 @@ fn hooks_run_item_glob_counts_every_skipped_item_hook() {
     // Plain (non-TTY) learn: the install hooks are recorded as SKIPPED
     // (ran_at = None, HOOK-110), not run, so they are still pending for the
     // `hooks run` below (an item hook already RUN, e.g. via
-    // `--dangerously-skip-install-hook-check`, would now be filtered out --
+    // `--accept-hooks=install,update,uninstall`, would now be filtered out --
     // that is exactly what HOOK-110 fixes).
     let r = sb.mind(&["learn", "alpha"]);
     assert!(r.success, "learn alpha: {}", r.stderr);
@@ -3519,10 +3523,10 @@ fn hooks_run_item_glob_matching_several_items_lists_names_not_one_command() {
     assert!(
         !r.stderr.contains(&format!(
             "mind hooks run {identity_alpha} --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         )) && !r.stderr.contains(&format!(
             "mind hooks run {identity_beta} --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         )),
         "with two items contributing, neither alone is the whole remedy, so the \
          error must not synthesize a single command naming just one: {}",
@@ -3536,7 +3540,7 @@ fn hooks_run_item_glob_matching_several_items_lists_names_not_one_command() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         &identity_alpha,
     ]);
     assert!(
@@ -3568,7 +3572,7 @@ fn hooks_run_item_with_no_hooks_for_the_event_stays_exit_zero() {
     );
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "plain", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "plain", "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // The item declares an install hook but no uninstall hook.
@@ -3678,7 +3682,7 @@ fn hooks_run_interactive_decline_prints_the_plain_note_and_exits_zero() {
         r.stdout
     );
     assert!(
-        !r.stdout.contains("--dangerously-skip-install-hook-check"),
+        !r.stdout.contains("--accept-hooks"),
         "an interactive decline is an active choice, so no unattended remedy \
          is suggested: {}",
         r.stdout
@@ -3695,7 +3699,7 @@ fn hooks_run_interactive_decline_prints_the_plain_note_and_exits_zero() {
 }
 
 /// The other arm of the same seam: an accepted prompt runs the hook, with no
-/// `--dangerously-skip-install-hook-check` anywhere in the invocation.
+/// `--accept-hooks=install,update,uninstall` anywhere in the invocation.
 #[test]
 fn hooks_run_interactive_accept_runs_the_hook() {
     // spec: HOOK-109 HOOK-100
@@ -3733,7 +3737,7 @@ fn hooks_run_interactive_accept_runs_the_hook() {
 /// Priority-4 side effect of the CLI-217 fd redirect: under `--json`, fd 1 is
 /// pointed at stderr for the WHOLE run (main.rs's `json_stdout`), including
 /// while `hook::decide` is soliciting an interactive answer
-/// (`--dangerously-skip-...` is not passed here, and `MIND_TTY=1` forces the
+/// (`--accept-hooks` is not passed here, and `MIND_TTY=1` forces the
 /// prompting branch). The disclosure and the prompt text are `print!`/
 /// `println!` in src/hook.rs, exactly as exposed to the redirect as anything
 /// else on this path -- this confirms they still reach the user (on stderr)
@@ -3864,7 +3868,11 @@ fn hooks_run_item_interactive_decline_exits_zero() {
     );
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // `learn` with the bypass already ran the item's install hook; clear its
@@ -4451,10 +4459,10 @@ fn hooks_run_glob_matching_several_sources_lists_names_not_one_command() {
     assert!(
         !r.stderr.contains(&format!(
             "mind hooks run {identity_a} --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         )) && !r.stderr.contains(&format!(
             "mind hooks run {identity_b} --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
         )),
         "with two sources contributing, neither alone is the whole remedy, so \
          the error must not synthesize a single command naming just one: {}",
@@ -4506,7 +4514,7 @@ fn hooks_run_item_target_under_bypass_runs_and_reports_nothing() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-bypass#scanner",
     ]);
     assert!(r.success, "bypassed item run: {}\n{}", r.stdout, r.stderr);
@@ -4651,7 +4659,7 @@ fn hooks_run_item_hook_failure_outranks_the_hooks_not_run_report() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-fails#boom",
     ]);
     assert!(!r.success, "a failing hook must fail the run: {}", r.stdout);
@@ -4710,7 +4718,7 @@ fn hooks_run_item_glob_stops_at_the_first_failing_hook() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-halt#*",
     ]);
     assert!(
@@ -4735,7 +4743,7 @@ fn hooks_run_item_glob_stops_at_the_first_failing_hook() {
 /// run-commit record (HOOK-110), so -- exactly like a source install hook --
 /// a repeat run sees nothing pending and settles to a clean exit 0 instead of
 /// reporting `HooksNotRun` forever. This is the provisioning-script case
-/// HOOK-110 fixes: `learn --dangerously-skip-install-hook-check && hooks run`
+/// HOOK-110 fixes: `learn --accept-hooks=install,update,uninstall && hooks run`
 /// must not fail on the second command for a hook the first already ran.
 #[test]
 fn item_install_hooks_get_an_already_ran_record_so_a_repeat_run_settles() {
@@ -4757,7 +4765,11 @@ fn item_install_hooks_get_an_already_ran_record_so_a_repeat_run_settles() {
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
     assert!(
         sb.sentinel("reco.sentinel").exists(),
@@ -4808,7 +4820,11 @@ fn hooks_run_item_install_hook_pending_again_after_upgrade_to_a_new_commit() {
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
     assert!(
         sb.sentinel("upg.sentinel").exists(),
@@ -4876,7 +4892,11 @@ fn hooks_run_item_force_reruns_an_already_recorded_install_hook() {
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // Plain repeat: the hook already ran at the current commit, so nothing is
@@ -4902,7 +4922,7 @@ fn hooks_run_item_force_reruns_an_already_recorded_install_hook() {
         "--event",
         "install",
         "--force",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-force#scanner",
     ]);
     assert!(
@@ -4944,7 +4964,11 @@ fn hooks_run_item_force_on_already_ran_hook_in_non_tty_is_hooks_not_run() {
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // Without --force, nothing is pending, so the run stays exit 0.
@@ -5011,7 +5035,11 @@ fn hooks_run_item_install_hook_record_does_not_survive_forget_and_relearn() {
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     // Already ran at the current commit: nothing pending.
@@ -5190,7 +5218,7 @@ fn hooks_run_item_partial_failure_keeps_the_records_of_hooks_that_already_ran() 
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-partial#scanner",
     ]);
     assert!(
@@ -5240,7 +5268,7 @@ fn hooks_run_item_partial_failure_keeps_the_records_of_hooks_that_already_ran() 
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-partial#scanner",
     ]);
     assert!(
@@ -5317,7 +5345,7 @@ fn hooks_run_item_partial_failure_in_a_long_batch_keeps_every_earlier_record() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-long#scanner",
     ]);
     assert!(
@@ -5370,7 +5398,7 @@ fn hooks_run_item_partial_failure_in_a_long_batch_keeps_every_earlier_record() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-long#scanner",
     ]);
     assert!(
@@ -5439,7 +5467,7 @@ fn hooks_run_item_retry_tally_excludes_the_already_ran_hook() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-retry-tally#scanner",
     ]);
     assert!(!r.success, "hook 2 must fail: {}\n{}", r.stdout, r.stderr);
@@ -5526,7 +5554,7 @@ fn hooks_run_item_build_does_not_rerun_the_items_install_hook() {
         "run",
         "--event",
         "build",
-        "--dangerously-skip-build-hook-check",
+        "--accept-hooks=build",
         "build-vs-install#builder",
     ]);
     assert!(r.success, "build run: {}\n{}", r.stdout, r.stderr);
@@ -5636,7 +5664,7 @@ fn hooks_run_json_item_glob_accumulates_one_tally_over_all_matches() {
         "run",
         "--event",
         "install",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "tally-glob#*",
     ]);
     assert!(
@@ -5739,7 +5767,7 @@ fn hooks_run_json_already_ran_hook_answers_with_a_zeroed_tally() {
         "--json",
         "hooks",
         "run",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "tally-again",
     ]);
     assert!(
@@ -5756,7 +5784,7 @@ fn hooks_run_json_already_ran_hook_answers_with_a_zeroed_tally() {
         "--json",
         "hooks",
         "run",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "tally-again",
     ]);
     assert!(
@@ -5780,7 +5808,7 @@ fn hooks_run_json_already_ran_hook_answers_with_a_zeroed_tally() {
         "hooks",
         "run",
         "--force",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "tally-again",
     ]);
     let doc: serde_json::Value = serde_json::from_str(forced.stdout.trim())
@@ -6322,7 +6350,7 @@ fn hooks_run_source_update_event_runs_update_hooks() {
         "run",
         "--event",
         "update",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "update-src",
     ]);
     assert!(r.success, "hooks run update: {}\n{}", r.stdout, r.stderr);
@@ -6345,7 +6373,7 @@ fn hooks_run_source_update_event_runs_update_hooks() {
         "run",
         "--event",
         "update",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "update-src",
     ]);
     assert!(r.success, "second run: {}\n{}", r.stdout, r.stderr);
@@ -6362,7 +6390,7 @@ fn hooks_run_source_update_event_runs_update_hooks() {
         "--event",
         "update",
         "--force",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "update-src",
     ]);
     assert!(r.success, "forced run: {}\n{}", r.stdout, r.stderr);
@@ -6417,7 +6445,11 @@ fn hooks_run_item_update_event_runs_update_hooks() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "learn",
+        "scanner",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "learn: {}", r.stderr);
 
     let store = sb.mind_home.join("store").join("skill").join("scanner");
@@ -6435,7 +6467,7 @@ fn hooks_run_item_update_event_runs_update_hooks() {
         "run",
         "--event",
         "update",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "item-update-src#scanner",
     ]);
     assert!(

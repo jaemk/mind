@@ -1237,7 +1237,7 @@ impl Sandbox {
         let mut all: Vec<(&str, &str)> = vec![("HOOK_LOG", log.to_str().unwrap())];
         all.extend_from_slice(envs);
         let mut argv: Vec<&str> = args.to_vec();
-        argv.push("--dangerously-skip-install-hook-check");
+        argv.push("--accept-hooks=install,update,uninstall");
         self.mind_env(&argv, &all, stdin)
     }
 
@@ -1328,7 +1328,7 @@ fn nested_source_hooks_see_the_curator_entry_selection() {
             "meld",
             &reg.spec(),
             "--yes",
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ],
         &[("HOOK_LOG", log.to_str().unwrap())],
         None,

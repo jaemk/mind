@@ -228,7 +228,7 @@ nudge is a hint only. Taking it still requires the consumer's consent.
   and HOOK-122 decide which hooks are pending, and each pending hook gets its
   consent prompt (HOOK-20) or the non-TTY skip (HOOK-22). Neither the automatic
   compatible move, `--yes`, nor `--allow-breaking` grants hook consent. Only
-  `--dangerously-skip-install-hook-check` (HOOK-23) does.
+  `--accept-hooks` (HOOK-23) does.
 
 ## Re-pinning, holds, and other source forms
 

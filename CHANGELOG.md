@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-28
+
+### Changed
+
+- The hook consent flags are now one flag, `--accept-hooks`, on every verb that
+  runs hooks (`meld`, `learn`, `forget`, `unmeld`, `upgrade`, `sync --upgrade`,
+  `curate`, `hooks run`). Bare, it runs every hook without the prompt;
+  `--accept-hooks=install,update,uninstall,build` takes any subset. Unlike the
+  old flags, install and update hooks are accepted separately. The
+  `--dangerously-skip-install-hook-check`, `--dangerously-skip-hook-check`, and
+  `--dangerously-skip-build-hook-check` flags still work, hidden from `--help`,
+  and accept what they did before.
+
+### Added
+
+- `forget --help` shows source-qualified examples: one item, every item, and
+  every skill from a source (`'local/projects/agents#*'`), including a local
+  one.
+
 ## [0.36.1] - 2026-10-28
 
 ### Changed
@@ -2082,7 +2101,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.36.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/jaemk/mind/compare/v0.36.1...v0.37.0
 [0.36.1]: https://github.com/jaemk/mind/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/jaemk/mind/compare/v0.35.1...v0.36.0
 [0.35.1]: https://github.com/jaemk/mind/compare/v0.35.0...v0.35.1

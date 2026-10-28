@@ -21,7 +21,7 @@ meld a source you do not control:
   item files are read during discovery, and its declared install/build hooks
   are shell commands `mind` can run. `mind` prompts for explicit consent
   before running a hook (skippable only with an explicit
-  `--dangerously-skip-*` flag); there is no sandbox around a hook once
+  `--accept-hooks`); there is no sandbox around a hook once
   consent is given. Only meld and consent to hooks from sources you trust,
   the same way you would before running their code directly.
 - **A workflow's body is code `mind` neither reads nor gates.** A workflow
@@ -30,7 +30,7 @@ meld a source you do not control:
   object literal out of it (WF-4/WF-5); the rest of the file is never read or
   validated. Installing a workflow links that file into every admitting agent
   home with no consent prompt distinct from any other item -- unlike a hook,
-  there is no `--dangerously-skip-*` gate to decline. `review`'s unconditional
+  there is no `--accept-hooks` gate to decline. `review`'s unconditional
   `workflow-content` finding is the disclosure mechanism for this, not a gate.
 - **Managed policy is the enterprise control.** An organization can lock a
   `mind` client to a trusted-source allowlist, require every source to be

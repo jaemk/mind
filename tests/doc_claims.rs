@@ -28,6 +28,9 @@
 //!   - docs/src/lobes.md: the hand-written `kinds = ["workflow"]` lobe
 //!     the workflow section tells a reader to write admits a workflow and
 //!     nothing else (WF-12).
+//!   - docs/src/commands.md (and `forget --help`): the source-qualified
+//!     `forget` examples for a local source remove one item, every skill, and
+//!     every item (CLI-40, CLI-41).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -372,6 +375,61 @@ fn dead_local_source_recovery_recipe_from_the_docs_works_end_to_end() {
         r.stdout,
         r.stderr
     );
+}
+
+/// The `forget` examples in `mind forget --help` and docs/src/commands.md that
+/// qualify an item by a local source's identity (`local/<parent>/<dir>#...`):
+/// one item, every skill, then every item, each removing only what it names.
+#[test]
+fn forget_examples_for_a_local_source_remove_what_they_name() {
+    // spec: CLI-40 CLI-41
+    let sb = Sandbox::new("forget-local");
+    let source = sb.base.join("agents");
+    write(
+        &source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\n# alpha\n",
+    );
+    write(
+        &source.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\n# beta\n",
+    );
+    write(
+        &source.join("agents/gamma.md"),
+        "---\nname: gamma\ndescription: gamma\n---\n# gamma\n",
+    );
+    init_repo(&source);
+    let r = sb.mind(&["meld", source.to_string_lossy().as_ref(), "--yes"]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    let identity = format!(
+        "local/{}/agents",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    let alpha = sb.claude_home.join("skills/alpha");
+    let beta = sb.claude_home.join("skills/beta");
+    let gamma = sb.claude_home.join("agents/gamma.md");
+    for link in [&alpha, &beta, &gamma] {
+        assert!(link.exists(), "{} must be installed", link.display());
+    }
+
+    // One item.
+    let r = sb.mind(&["forget", &format!("{identity}#alpha")]);
+    assert!(r.success, "forget one: {}\n{}", r.stdout, r.stderr);
+    assert!(!alpha.exists() && beta.exists() && gamma.exists());
+
+    // Every skill.
+    let r = sb.mind(&["forget", &format!("{identity}#skill:*"), "--yes"]);
+    assert!(r.success, "forget skills: {}\n{}", r.stdout, r.stderr);
+    assert!(!beta.exists() && gamma.exists());
+
+    // Every item.
+    let r = sb.mind(&["forget", &format!("{identity}#*"), "--yes"]);
+    assert!(r.success, "forget all: {}\n{}", r.stdout, r.stderr);
+    assert!(!gamma.exists());
+
+    // The source itself stays melded; only `unmeld` drops it.
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.stdout.contains(&identity), "{}", r.stdout);
 }
 
 /// The other half of the recipe's premise: `mind unmeld` of the vanished

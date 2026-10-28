@@ -25,7 +25,7 @@ removes dependencies along with an item; uninstall them separately if you no
 longer want them.
 
 If the item declares an uninstall hook, `forget` runs it after a prompt. A
-non-interactive run skips it unless you pass `--dangerously-skip-hook-check`.
+non-interactive run skips it unless you pass `--accept-hooks`.
 
 ## Clear items a source dropped
 
@@ -63,7 +63,7 @@ rather than a guess. Use the full identity to pick one instance, such as
 
 A source can declare uninstall hooks, which run in its clone before the clone
 is removed. They prompt like install hooks; `--uninstall-hook <cmd>` replaces
-them and `--dangerously-skip-hook-check` runs them without a prompt. A required
+them and `--accept-hooks` runs them without a prompt. A required
 uninstall hook that fails or is aborted leaves the source melded.
 
 ## Remove things mind did not install

@@ -21,7 +21,7 @@ and the exact command), with an explicit warning, framed by a header so the
 disclosure is visibly distinct from the surrounding output. The interactive
 prompt offers run (the default, a bare Enter), skip the hook but still install the
 source and its items, or abort and install nothing. In a non-TTY context the hook
-is skipped instead (HOOK-22); `--dangerously-skip-install-hook-check` runs it
+is skipped instead (HOOK-22); `--accept-hooks` runs it
 unattended for users who have already vetted the source. The prompt is the trust
 boundary; the shown pin and commit let the user inspect the repo at that exact
 point before approving.
@@ -83,10 +83,18 @@ CLI-17).
   POL-32), `mind` never runs a hook silently and never aborts: regardless of the
   interactive default (HOOK-20), it takes the skip path (the source and its items
   install, the tooling is not built) and reports it, unless
-  `--dangerously-skip-install-hook-check` is given.
-- `HOOK-23` `--dangerously-skip-install-hook-check` runs the hook without
-  prompting, and is what enables hooks in non-interactive use. The flag name is
-  deliberately explicit about the risk.
+  `--accept-hooks` accepts the hook's event (HOOK-150).
+- `HOOK-23` `--accept-hooks` runs the hook without prompting, and is what
+  enables hooks in non-interactive use. Bare, it accepts every hook;
+  `--accept-hooks=<events>` accepts only the listed events (HOOK-150, CLI-250).
+- `HOOK-150` `--accept-hooks` takes an optional comma-separated list of hook
+  events: `install`, `update`, `uninstall`, `build`. The flag is repeatable and
+  the lists union. A hook runs unattended only when its own event is listed: an
+  `install` hook (source or item) needs `install`, an `update` hook `update`, an
+  `uninstall` hook `uninstall`, and an item build hook (HOOK-70) `build`. A hook
+  whose event is not listed takes the ordinary path (prompt on a TTY, HOOK-22
+  skip without one). So `upgrade --accept-hooks=install` re-runs a source's
+  pending install hooks but not its update hooks (HOOK-122).
 - `HOOK-24` The consent disclosure (HOOK-20) makes both ways to inspect
   the code one action away. It labels the on-disk clone path as its own line (the
   path HOOK-20 already shows), so the user can open the working tree that will run
@@ -211,7 +219,7 @@ still parsed and folded in (HOOK-50).
   it); it offers no abort because skipping is the graceful decline. A required hook
   keeps the three-way `[Y/n/a]` prompt (HOOK-20). The interactive default is run
   for both; in a non-TTY context every hook is skipped instead (HOOK-22), and
-  `--dangerously-skip-install-hook-check` runs every hook (HOOK-23), optional and
+  `--accept-hooks` runs every hook it accepts (HOOK-23, HOOK-150), optional and
   required alike. `optional` does NOT make the hook's failure tolerable (HOOK-53).
 - `HOOK-53` Any hook's non-zero exit is a hard stop, whether the hook is optional
   or required: at `meld` the clone is removed and nothing is registered
@@ -219,7 +227,7 @@ still parsed and folded in (HOOK-50).
   governs only whether the user may decline to run the hook (HOOK-52), never
   whether it may fail.
 - `HOOK-60` When a hook runs (a chosen run, or an unattended run under
-  `--dangerously-skip-install-hook-check`), `mind` prints a line naming the hook
+  `--accept-hooks`), `mind` prints a line naming the hook
   before running it, so the user sees which step is executing. Re-melding an
   already-melded source (CLI-12) re-offers its install hooks that have not run at
   the source's current commit (a hook skipped at an earlier meld, or added since),
@@ -237,8 +245,7 @@ still parsed and folded in (HOOK-50).
   multi-item confirm, hooks run before the source is removed. They use
   the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
   optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
-  --dangerously-skip-hook-check` (CLI-227; `--dangerously-skip-install-hook-check`
-  is a hidden alias here) runs them unattended. A required
+  --accept-hooks` (or `--accept-hooks=uninstall`, CLI-250) runs them unattended. A required
   uninstall hook that fails or is aborted leaves the source melded. Item uninstall
   hooks run before source uninstall hooks, making teardown the reverse of install
   (HOOK-87).
@@ -334,13 +341,12 @@ only on a tool, and a schema error on any other kind (TOOL-7).
   since the store copy is rebuilt from staging each time. `learn`/`upgrade`
   disclose and prompt for it as part of installing the item; nothing
   beyond the item's content hash is recorded for it.
-- `HOOK-74` `--dangerously-skip-build-hook-check` on `learn`, `upgrade`, `meld`
-  (for its install-all path), and `sync --upgrade` runs an item's build hook
+- `HOOK-74` `--accept-hooks` (bare, or a list naming `build`, HOOK-150) on
+  `learn`, `upgrade`, `meld` (for its install-all path), `sync --upgrade`,
+  `curate`, and `hooks run --event build` runs an item's build hook
   non-interactively (no prompt, treated as approved), enabling build hooks in CI
   and headless scripts. Without it, the HOOK-72 behavior is unchanged: a non-TTY
-  context skips the build hook and prints a note. The flag name mirrors
-  `--dangerously-skip-install-hook-check` (HOOK-23) and is deliberately explicit
-  about the risk. A non-zero exit from the build hook under this flag is still a
+  context skips the build hook and prints a note. A non-zero exit from the build hook under this flag is still a
   hard stop: the staging copy is discarded and the install is left untouched
   (HOOK-71). Approving the run headlessly does not waive the failure contract.
 
@@ -391,7 +397,7 @@ the item is in place and is for host side effects.
   install hook, skipping installs the item without the side effect; for an
   uninstall hook, skipping removes the item without running cleanup. There is no
   abort, so one item's hook never aborts a multi-item `learn`/`forget`. A non-TTY
-  context skips them, and `--dangerously-skip-install-hook-check` runs them
+  context skips them, and `--accept-hooks` runs them
   unattended (HOOK-22, HOOK-23).
 - `HOOK-84` Nothing beyond the item's content hash is recorded for an item's
   install/uninstall hooks (as for `build`, HOOK-73): the install hook re-runs on
@@ -443,8 +449,8 @@ outside the surrounding verb, under the same consent model.
   meld/learn/forget/upgrade flows. It reuses those flows' machinery unchanged: the
   disclosure (HOOK-20, sanitized per HOOK-91), the consent prompt (three-way for a
   required hook, two-way for an optional, build, or item hook, HOOK-52/72/83), the
-  non-TTY skip (HOOK-22/72/83), and the `--dangerously-skip-install-hook-check` /
-  `--dangerously-skip-build-hook-check` bypasses (HOOK-23/74). It is therefore
+  non-TTY skip (HOOK-22/72/83), and the `--accept-hooks` bypass
+  (HOOK-23/74/150). It is therefore
   neither more nor less guarded than an automatic run. A hook's non-zero exit is a
   hard stop with the same contract as an automatic run (HOOK-53); a required hook's
   failure or abort is a non-zero exit for the command.
@@ -527,7 +533,7 @@ outside the surrounding verb, under the same consent model.
   bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
   terminal); re-run unattended with:` followed, on its own indented line, by
   `mind hooks run '<source>' --event <event>
-  --dangerously-skip-install-hook-check`. `<source>` is
+  --accept-hooks=<event>`. `<source>` is
   substituted with the RESOLVED source identity, never the raw selector the
   user typed (which may be a glob or an abbreviated form), and `<event>` with
   the event the run selected, so the printed command is copy-pasteable with no
@@ -649,7 +655,7 @@ outside the surrounding verb, under the same consent model.
   it was offered and skipped rather than run. The record is written by every
   path that runs an item's install hooks -- `learn`, `upgrade`'s reinstall
   cycle, and `hooks run` -- not just `hooks run`, so a hook `learn` skipped
-  (non-TTY) or ran (`--dangerously-skip-install-hook-check`) is reflected
+  (non-TTY) or ran (`--accept-hooks`) is reflected
   immediately, before any `hooks run` of that item. `learn` and `upgrade`
   build the record fresh on every (re)install (HOOK-84 is unaffected: they
   still run or offer every declared install hook regardless of any prior
@@ -659,7 +665,7 @@ outside the surrounding verb, under the same consent model.
   (HOOK-101): every declared install hook is offered regardless of its
   recorded commit, for the same lost-output/transient-failure case `--force`
   exists for on the source side. This closes the gap where a
-  provisioning script doing `mind learn x --dangerously-skip-install-hook-check
+  provisioning script doing `mind learn x --accept-hooks
   && mind hooks run src#x` failed on the second command forever, with a remedy
   that re-runs a side effect the first command already applied. Because
   `learn`/`upgrade` rebuild the record from scratch on every (re)install rather
@@ -672,7 +678,7 @@ outside the surrounding verb, under the same consent model.
   mirroring the source-level record's same guarantee (HOOK-101/HOOK-55): the
   save happens before the error propagates, so a retry after fixing the
   failing hook does not re-offer (and, under
-  `--dangerously-skip-install-hook-check`, re-run) a sibling hook that already
+  `--accept-hooks`, re-run) a sibling hook that already
   applied its side effect. This applies only where the item stays installed
   regardless of the batch's outcome, i.e. `hooks run`; on the `learn`/
   `upgrade` install path a hook's failure rolls the whole just-installed item
@@ -928,7 +934,7 @@ Open questions to resolve:
   expected exact command, plus a pinned commit, so a hook runs unattended only when
   it matches the approved (source, command, commit) triple and is refused otherwise?
 - Bypass control. Should a policy be able to disallow
-  `--dangerously-skip-install-hook-check` (force the prompt, or forbid running
+  `--accept-hooks` (force the prompt, or forbid running
   hooks at all), so a user cannot opt out of the policy's stance?
 - Non-interactive provisioning. `auto_meld` (POL-32) runs during `sync` with no
   TTY, so a declared hook is skipped today (HOOK-22). This is partly resolved for

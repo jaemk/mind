@@ -759,7 +759,7 @@ fn hook_consent_passes_through_to_the_registrations_curate_applies() {
     // With the skip flag it runs, on the same path any meld would take.
     let un = env.mind(&["unmeld", &env.ident("lib"), "--yes"]);
     assert!(un.success, "unmeld failed: {} {}", un.stdout, un.stderr);
-    let skipped = env.mind(&["curate", "--yes", "--dangerously-skip-install-hook-check"]);
+    let skipped = env.mind(&["curate", "--yes", "--accept-hooks=install,update,uninstall"]);
     assert!(skipped.success, "curate failed: {}", skipped.stderr);
     assert!(
         marker.exists(),

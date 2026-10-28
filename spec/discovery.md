@@ -496,7 +496,7 @@ run = "make build"
   nested source ships no `mind.toml`), `roots` governs convention discovery
   (DSC-50) and the supplied hooks run under the same disclosure and safety prompt
   as a source's own hooks (HOOK-50..60), including the non-TTY skip and
-  `--dangerously-skip-install-hook-check`. The curator-supplied pin always
+  `--accept-hooks`. The curator-supplied pin always
   applies (DSC-65): it resolves and is recorded as the source's pin directive
   (DSC-41), so `sync` tracks it. A consumer's explicit `meld` pin flag still
   overrides a curator-supplied pin (DSC-41 precedence).

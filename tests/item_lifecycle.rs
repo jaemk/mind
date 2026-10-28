@@ -6,7 +6,7 @@
 //! (a local git repo melded by filesystem path, with MIND_HOME/CLAUDE_HOME
 //! pointed at temp dirs), exactly as `tests/cli.rs` does. Where a non-TTY test
 //! needs the hooks to actually run, it passes
-//! `--dangerously-skip-install-hook-check` (HOOK-23/83).
+//! `--accept-hooks=install,update,uninstall` (HOOK-23/83).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,7 +186,7 @@ fn item_hooks_array_runs_install_then_uninstall_in_declaration_order() {
     let learn = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         learn.success,
@@ -199,7 +199,7 @@ fn item_hooks_array_runs_install_then_uninstall_in_declaration_order() {
     let forget = sb.mind(&[
         "forget",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         forget.success,
@@ -253,7 +253,7 @@ fn scalar_install_uninstall_still_work_as_one_required_hook_each() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -263,7 +263,7 @@ fn scalar_install_uninstall_still_work_as_one_required_hook_each() {
         sb.mind(&[
             "forget",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -320,7 +320,7 @@ fn unmeld_runs_item_uninstall_hooks_before_source_uninstall_hooks() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success,
         "item must install before unmeld"
@@ -328,7 +328,7 @@ fn unmeld_runs_item_uninstall_hooks_before_source_uninstall_hooks() {
     assert!(read_log(&log).is_empty(), "no teardown hooks at meld/learn");
 
     // unmeld: the item's uninstall hook then the source's uninstall hook.
-    let unmeld = sb.mind(&["unmeld", "nest", "--dangerously-skip-install-hook-check"]);
+    let unmeld = sb.mind(&["unmeld", "nest", "--accept-hooks=install,update,uninstall"]);
     assert!(
         unmeld.success,
         "unmeld should succeed: {} {}",
@@ -351,7 +351,7 @@ fn unmeld_runs_item_uninstall_hooks_before_source_uninstall_hooks() {
 #[test]
 fn unmeld_non_tty_skips_hooks_but_still_removes_source_and_items() {
     // spec: HOOK-87
-    // A non-TTY `unmeld` WITHOUT --dangerously-skip-install-hook-check takes the
+    // A non-TTY `unmeld` WITHOUT --accept-hooks=install,update,uninstall takes the
     // HOOK-22 skip path for every hook (item AND source uninstall), yet the source
     // is still removed and the item is still torn down. No hook side effect lands.
     let sb = Sandbox::new("ntty");
@@ -387,7 +387,7 @@ fn unmeld_non_tty_skips_hooks_but_still_removes_source_and_items() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -396,7 +396,7 @@ fn unmeld_non_tty_skips_hooks_but_still_removes_source_and_items() {
         "item installed before unmeld"
     );
 
-    // No --dangerously-skip flag: non-TTY (stdin is /dev/null) skips every hook.
+    // No --accept-hooks flag: non-TTY (stdin is /dev/null) skips every hook.
     let unmeld = sb.mind(&["unmeld", "ntty"]);
     assert!(
         unmeld.success,
@@ -466,7 +466,7 @@ fn unmeld_yes_runs_item_uninstall_hooks_for_multiple_items_before_source() {
         sb.mind(&[
             "learn",
             "skill:alpha",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -474,17 +474,17 @@ fn unmeld_yes_runs_item_uninstall_hooks_for_multiple_items_before_source() {
         sb.mind(&[
             "learn",
             "skill:beta",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
 
-    // --yes bypasses the multi-item CLI-42 confirm; --dangerously-skip runs hooks.
+    // --yes bypasses the multi-item CLI-42 confirm; --accept-hooks runs hooks.
     let unmeld = sb.mind(&[
         "unmeld",
         "multi",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         unmeld.success,
@@ -521,7 +521,7 @@ fn unmeld_yes_runs_item_uninstall_hooks_for_multiple_items_before_source() {
 // install hooks. At `meld` (without --link-only), the source's `[[hooks]]`
 // install entry runs first (in meld_recursive), and item install hooks run
 // later (in install_melded_source -> learn). Both happen in a single
-// `mind meld --yes --dangerously-skip-install-hook-check` invocation.
+// `mind meld --yes --accept-hooks=install,update,uninstall` invocation.
 // The log therefore records SOURCE-INSTALL first, then ITEM-INSTALL.
 #[test]
 fn meld_runs_source_install_hook_before_item_install_hooks() {
@@ -558,17 +558,17 @@ fn meld_runs_source_install_hook_before_item_install_hooks() {
     let spec = sb.source_spec();
 
     // --yes: install items immediately after meld (no interactive prompt).
-    // --dangerously-skip-install-hook-check: run all hooks unattended (HOOK-23).
+    // --accept-hooks=install,update,uninstall: run all hooks unattended (HOOK-23).
     // Without --link-only so both the source and item install hooks fire.
     let meld = sb.mind(&[
         "meld",
         &spec,
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         meld.success,
-        "meld --yes --dangerously-skip should succeed: {} {}",
+        "meld --yes --accept-hooks should succeed: {} {}",
         meld.stdout, meld.stderr
     );
 
@@ -643,12 +643,16 @@ fn unmeld_item_uninstall_hook_failure_leaves_source_melded() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
 
-    let unmeld = sb.mind(&["unmeld", "failun", "--dangerously-skip-install-hook-check"]);
+    let unmeld = sb.mind(&[
+        "unmeld",
+        "failun",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(
         !unmeld.success,
         "an item uninstall-hook failure must fail the unmeld: {} {}",
@@ -735,7 +739,7 @@ fn item_install_hook_failure_rolls_back_the_item_install() {
     let learn = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !learn.success,
@@ -766,7 +770,7 @@ fn optional_item_hook_parses_and_runs_two_way_without_abort() {
     // spec: HOOK-86
     // Per HOOK-83, item hooks are always two-way (run/skip) regardless of
     // `optional`. Confirm `optional = true` parses and the hook runs unattended
-    // under --dangerously-skip-install-hook-check (which runs optional and
+    // under --accept-hooks=install,update,uninstall (which runs optional and
     // required alike), and that a non-TTY install simply SKIPS it (no abort, the
     // item still installs).
     let sb = Sandbox::new("opt");
@@ -821,7 +825,7 @@ fn optional_item_hook_parses_and_runs_two_way_without_abort() {
     let learn_run = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         learn_run.success,
@@ -1397,7 +1401,7 @@ fn forget_double_failure_reports_hook_error_not_the_save_error() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ])
         .success
     );
@@ -1408,7 +1412,7 @@ fn forget_double_failure_reports_hook_error_not_the_save_error() {
     let r = sb.mind(&[
         "forget",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     // Restore before asserting so the sandbox can be cleaned up either way.
     std::fs::set_permissions(&sb.mind_home, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -87,7 +87,7 @@ auto-update = "compatible"
 # `install = true` (default false): after provisioning, install every item the
 # source offers headlessly (equivalent to `learn '<source>#*' --yes`).
 # `run-build-hooks = true` (default false): also run item build hooks during the
-# headless install; equivalent to --dangerously-skip-build-hook-check. Only
+# headless install; equivalent to --accept-hooks=build. Only
 # meaningful when `install = true`.
 [[sources.auto_meld]]
 repo = "acme/agent-baseline"
@@ -222,7 +222,7 @@ equivalent to running `mind learn '<source>#*' --yes` for that source.
 
 Build hooks for items installed via the `install = true` pass are skipped by
 default, as in any non-interactive run. Set `run-build-hooks = true` on the same entry
-to run them, equivalent to `--dangerously-skip-build-hook-check`. Only
+to run them, equivalent to `--accept-hooks=build`. Only
 set this for sources you control or have audited, since build hooks are arbitrary
 code.
 

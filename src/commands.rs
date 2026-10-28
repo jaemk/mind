@@ -45,7 +45,7 @@ pub fn meld(
     flat_skills: bool,
     pin: PinRequest,
     install_hook: Option<String>,
-    dangerously_skip_install_hook_check: bool,
+    accept: crate::hook::Accept,
     item_kind: Option<ItemKind>,
 ) -> Result<MeldSummary> {
     meld_with_profiles(
@@ -57,7 +57,7 @@ pub fn meld(
         flat_skills,
         pin,
         install_hook,
-        dangerously_skip_install_hook_check,
+        accept,
         item_kind,
         &mut MeldProfiles::None,
         false,
@@ -78,7 +78,7 @@ pub(crate) fn meld_with_profiles(
     flat_skills: bool,
     pin: PinRequest,
     install_hook: Option<String>,
-    dangerously_skip_install_hook_check: bool,
+    accept: crate::hook::Accept,
     item_kind: Option<ItemKind>,
     profiles: &mut MeldProfiles<'_>,
     accept_newer_mind: bool,
@@ -116,7 +116,7 @@ pub(crate) fn meld_with_profiles(
         &mut visited,
         policy.as_ref(),
         install_hook,
-        dangerously_skip_install_hook_check,
+        accept,
         prefer_ssh,
         false, // yes: top-level meld does not yet thread --yes (non-TTY always fires NS-45)
         None,  // a top-level meld has no curator-supplied configuration
@@ -1237,7 +1237,7 @@ fn run_install_hooks(
     mindfile: &Option<MindToml>,
     toml_path: &std::path::Path,
     install_override: Option<&str>,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     force_rerun: bool,
     extra_hooks: Vec<crate::mindfile::ResolvedHook>,
     hook_env: &crate::hook::HookEnv,
@@ -1310,7 +1310,7 @@ fn run_install_hooks(
             browse_url.as_deref(),
         );
 
-        match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
+        match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. A progress line, not an
                 // aside: stdout in text mode, and unreachable from `--json`
@@ -1470,7 +1470,7 @@ fn meld_recursive(
     visited: &mut HashSet<String>,
     policy: Option<&Policy>,
     install_hook: Option<String>,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
     prefer_ssh: bool,
     yes: bool,
     curated: Option<CuratedConfig>,
@@ -2304,7 +2304,7 @@ fn meld_recursive(
         &mindfile,
         &toml_path,
         install_hook.as_deref(),
-        dangerously_skip_hook_check,
+        accept,
         false,
         // DSC-61: curator-supplied hooks (when applied) run through the same
         // disclosure/safety-prompt/non-TTY-skip path as a source's own hooks.
@@ -2436,7 +2436,7 @@ fn meld_recursive(
                 visited,
                 policy,
                 None, // no consumer install hook for nested sources
-                dangerously_skip_hook_check,
+                accept,
                 prefer_ssh, // nested sources inherit the SSH preference
                 false,      // nested sources inherit non-interactive mode but not --yes
                 Some(curated),
@@ -2616,7 +2616,7 @@ fn meld_recursive(
                 visited,
                 policy,
                 None, // no install hook override
-                dangerously_skip_hook_check,
+                accept,
                 prefer_ssh,
                 false, // marketplace nested sources inherit non-interactive
                 None,  // no curator config
@@ -4168,7 +4168,7 @@ fn run_uninstall_hooks(
     idx: usize,
     source_name: &str,
     uninstall_hook: Option<&str>,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<bool> {
     let clone_dir = registry.sources[idx].clone_dir(paths);
     let source_pin = registry.sources[idx].pin.clone();
@@ -4214,7 +4214,7 @@ fn run_uninstall_hooks(
             browse_url.as_deref(),
         );
 
-        match crate::hook::decide(&disclosure, h.optional, dangerously_skip_hook_check)? {
+        match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. Same as the install-hook
                 // line above. spec: CLI-217
@@ -4249,7 +4249,7 @@ fn run_uninstall_hooks(
     Ok(true)
 }
 
-/// `mind unmeld <name> [--unlink-only] [--yes] [--dangerously-skip-install-hook-check]`
+/// `mind unmeld <name> [--unlink-only] [--yes] [--accept-hooks]`
 /// — drop a source. `name` may be the full `owner/repo`, an unambiguous repo
 /// basename, or a glob (`*`, `?`, `[`) matched against each source's identity and
 /// its trailing-suffix forms (CLI-28); a glob removes every source it matches,
@@ -4257,14 +4257,14 @@ fn run_uninstall_hooks(
 /// every item installed from a matched source is uninstalled (via its file
 /// registry) before the source is removed (CLI-21); `--unlink-only` keeps the
 /// items and only removes the source (CLI-22). Runs the source's declared
-/// uninstall hooks (HOOK-54) before removal; `dangerously_skip_hook_check`
+/// uninstall hooks (HOOK-54) before removal; `accept.uninstall`
 /// bypasses the prompt. `yes` skips the removal confirmations (CLI-42).
 pub fn unmeld(
     paths: &Paths,
     name: &str,
     unlink_only: bool,
     yes: bool,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
     uninstall_hook: Option<String>,
 ) -> Result<()> {
     let out = crate::render::ctx();
@@ -4369,7 +4369,7 @@ pub fn unmeld(
             &source_name,
             unlink_only,
             yes || multi,
-            dangerously_skip_hook_check,
+            accept,
             uninstall_hook.as_deref(),
         )?;
     }
@@ -4387,7 +4387,7 @@ fn unmeld_one(
     source_name: &str,
     unlink_only: bool,
     yes: bool,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
     uninstall_hook: Option<&str>,
 ) -> Result<()> {
     let out = crate::render::ctx();
@@ -4416,14 +4416,8 @@ fn unmeld_one(
     // run on this path (before the source is removed), since the unlink-only path
     // has no multi-item confirmation to worry about.
     if unlink_only {
-        let proceed = run_uninstall_hooks(
-            paths,
-            &registry,
-            idx,
-            &source_name,
-            uninstall_hook,
-            dangerously_skip_hook_check,
-        )?;
+        let proceed =
+            run_uninstall_hooks(paths, &registry, idx, &source_name, uninstall_hook, accept)?;
         if !proceed {
             // User aborted the unmeld via the hook prompt; source stays.
             return Ok(());
@@ -4519,13 +4513,7 @@ fn unmeld_one(
                 item_catalog_match(&item_catalog, &item)
                     .map(|c| c.uninstall_hooks())
                     .unwrap_or_default();
-            if let Err(e) = uninstall_item(
-                paths,
-                &item,
-                &uninstall_hooks,
-                &commit,
-                dangerously_skip_hook_check,
-            ) {
+            if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, accept) {
                 // A hook failed: persist what was removed and the surviving item,
                 // and stop (the source itself stays melded, mirroring HOOK-54).
                 manifest.items.insert(key.clone(), item);
@@ -4540,16 +4528,9 @@ fn unmeld_one(
 
     // HOOK-54/87: the source's uninstall hooks run AFTER every item has been
     // removed, still in the clone, before the clone and registry entry are
-    // dropped. Non-TTY: skip with a note; dangerously_skip_hook_check runs them
+    // dropped. Non-TTY: skip with a note; `accept.uninstall` runs them
     // unattended. An abort or required-hook failure leaves the source melded.
-    let proceed = run_uninstall_hooks(
-        paths,
-        &registry,
-        idx,
-        &source_name,
-        uninstall_hook,
-        dangerously_skip_hook_check,
-    )?;
+    let proceed = run_uninstall_hooks(paths, &registry, idx, &source_name, uninstall_hook, accept)?;
     if !proceed {
         // User aborted the source uninstall hook; source stays (items already
         // removed are kept removed, mirroring a partial teardown).
@@ -4894,15 +4875,13 @@ fn confirm_overwrite(prompt: &str) -> Result<bool> {
 
 /// The install-time options that travel together through the learn/meld chain:
 /// whether to skip confirmation (`yes`), how to treat an occupied link target
-/// (`clobber`), whether to run item install/uninstall hooks unattended
-/// (`dangerously_skip`), and whether to run item build hooks unattended
-/// (`dangerously_skip_build`, HOOK-74).
+/// (`clobber`), and which hook events run unattended (`accept`: the lifecycle
+/// hooks, HOOK-83, and the item build hook, HOOK-74).
 #[derive(Clone, Copy)]
 pub struct InstallFlow {
     pub yes: bool,
     pub clobber: Clobber,
-    pub dangerously_skip: bool,
-    pub dangerously_skip_build: bool,
+    pub accept: crate::hook::Accept,
 }
 
 /// Apply `--local` install scoping for one `learn`/`meld` invocation
@@ -5046,7 +5025,7 @@ pub fn learn_link(
             false,
             pin_req,
             None,
-            flow.dangerously_skip,
+            flow.accept,
             item_kind, // spec: CLI-239
         )?;
     } else {
@@ -5098,8 +5077,7 @@ fn learn_selected(
     let InstallFlow {
         yes,
         clobber,
-        dangerously_skip,
-        dangerously_skip_build,
+        accept,
     } = flow;
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -5285,16 +5263,7 @@ fn learn_selected(
         // guard, not a behavioral claim -- if the closure ever stopped
         // excluding installed items, this would still pick the update hooks.
         let is_update = manifest.items.contains_key(target.key().as_str());
-        let mut result = install_item(
-            paths,
-            target,
-            &commit,
-            &siblings,
-            force,
-            dangerously_skip,
-            dangerously_skip_build,
-            is_update,
-        );
+        let mut result = install_item(paths, target, &commit, &siblings, force, accept, is_update);
         // CLI-35: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
         // yes, retry forced, and on an `a` also stop asking (CLI-247).
@@ -5315,16 +5284,7 @@ fn learn_selected(
                 "{} exists and is not managed by mind; overwrite it?",
                 display_path(std::path::Path::new(&path))
             ))? {
-                install_item(
-                    paths,
-                    target,
-                    &commit,
-                    &siblings,
-                    true,
-                    dangerously_skip,
-                    dangerously_skip_build,
-                    is_update,
-                )
+                install_item(paths, target, &commit, &siblings, true, accept, is_update)
             } else {
                 Err(MindError::LinkOccupied { path })
             };
@@ -5404,10 +5364,7 @@ fn learn_collecting_selected(
     flow: InstallFlow,
 ) -> Result<Vec<String>> {
     let InstallFlow {
-        clobber,
-        dangerously_skip,
-        dangerously_skip_build,
-        ..
+        clobber, accept, ..
     } = flow;
     let policy = Policy::load()?;
     let (registry, items, resolution) = resolve_learn(paths, selection)?;
@@ -5466,16 +5423,7 @@ fn learn_collecting_selected(
         // The same defensive guard as the `learn` path above: DEP-23 has
         // already dropped every installed key, so this is false here.
         let is_update = manifest.items.contains_key(target.key().as_str());
-        let result = install_item(
-            paths,
-            target,
-            &commit,
-            &siblings,
-            force,
-            dangerously_skip,
-            dangerously_skip_build,
-            is_update,
-        );
+        let result = install_item(paths, target, &commit, &siblings, force, accept, is_update);
         match result {
             Ok(mut installed) => {
                 // spec: LNK-19
@@ -6529,7 +6477,7 @@ pub fn forget_source_profile(
     source_ref: &str,
     profile: &str,
     yes: bool,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     let out = crate::render::ctx();
     let names = crate::profile::parse_cli_names(&[profile.to_string()])?;
@@ -6621,7 +6569,7 @@ pub fn forget_source_profile(
                 .map(|c| c.uninstall_hooks())
                 .unwrap_or_default();
         let commit = source.commit.clone().unwrap_or_default();
-        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, dangerously_skip) {
+        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, accept) {
             manifest.items.insert(key.clone(), item);
             // spec: LIFE-48 -- a save failure here must not mask `e`.
             if let Err(se) = manifest.save(paths) {
@@ -7651,8 +7599,7 @@ fn track_profiles_for_upgrade(
                 InstallFlow {
                     yes: true,
                     clobber: Clobber::Error,
-                    dangerously_skip: false,
-                    dangerously_skip_build: false,
+                    accept: crate::hook::Accept::default(),
                 },
                 true,
             )?;
@@ -7718,7 +7665,7 @@ fn print_profile_additions(tracking: &ProfileTracking) {
 /// Each item from `source_name` that is not yet installed is attempted
 /// independently via `learn` so a single failure does not abort installation of
 /// the remaining items (POL-60). Build hooks are skipped unless `run_build_hooks`
-/// is `true` (POL-59, same as `--dangerously-skip-build-hook-check`). Install
+/// is `true` (POL-59, same as `--accept-hooks=build`). Install
 /// hooks follow the standard non-TTY path: they are skipped in a non-interactive
 /// context (HOOK-72).
 ///
@@ -7742,8 +7689,10 @@ pub fn install_provisioned_items(
     let flow = InstallFlow {
         yes: true,
         clobber: Clobber::Prompt,
-        dangerously_skip: false,
-        dangerously_skip_build: run_build_hooks,
+        accept: crate::hook::Accept {
+            build: run_build_hooks,
+            ..crate::hook::Accept::default()
+        },
     };
 
     // Load the registry and scan items for this source only.
@@ -7860,11 +7809,9 @@ pub fn remeld(
     profile_flags: Option<&crate::profile::Selection>,
 ) -> Result<()> {
     // `yes` rides inside `flow` for the install calls; remeld itself only needs
-    // the clobber (hook force-rerun) and the dangerously-skip flag.
+    // the clobber (hook force-rerun) and the accepted hook events.
     let InstallFlow {
-        clobber,
-        dangerously_skip: dangerously_skip_hook_check,
-        ..
+        clobber, accept, ..
     } = flow;
     let out = crate::render::ctx();
     // spec: STO-58/CLI-12 -- a re-meld targets the specific instance named by the
@@ -7931,7 +7878,7 @@ pub fn remeld(
                 &mindfile,
                 &toml_path,
                 None,
-                dangerously_skip_hook_check,
+                accept,
                 force_rerun,
                 Vec::new(),
                 &hook_env,
@@ -8715,9 +8662,8 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 /// Install one item, then run its install hook (HOOK-81) as the final step. On a
 /// hook failure, roll the just-installed item back (remove its links and store
 /// copy via the file registry) so it is left not installed, then propagate the
-/// error. `dangerously_skip` runs item install/uninstall hooks unattended
-/// (HOOK-83); `dangerously_skip_build` runs the item's build hook unattended
-/// (HOOK-74).
+/// error. `accept` names the item hook events (HOOK-83) and the build hook
+/// (HOOK-74) that run unattended.
 ///
 /// `is_update` says this install replaces an existing install of the same
 /// effective name, in which case the item's update hooks run in place of its
@@ -8732,8 +8678,7 @@ fn install_item(
     commit: &str,
     siblings: &[CatalogItem],
     force: bool,
-    dangerously_skip: bool,
-    dangerously_skip_build: bool,
+    accept: crate::hook::Accept,
     is_update: bool,
 ) -> Result<crate::manifest::InstalledItem> {
     // spec: LIFE-50 -- refuse cleanly on a platform mind's symlink model does not
@@ -8752,7 +8697,7 @@ fn install_item(
         commit,
         siblings,
         force,
-        dangerously_skip_build,
+        accept.build,
         &hook_env,
     )?;
     // HOOK-86: run every resolved install hook in declaration order (the scalar
@@ -8765,7 +8710,7 @@ fn install_item(
             &install_hooks,
             &store,
             commit,
-            dangerously_skip,
+            accept,
             &hook_env,
         ) {
             // spec: HOOK-110 -- persist the ran/skipped outcome on the item's
@@ -8793,7 +8738,7 @@ fn uninstall_item(
     item: &crate::manifest::InstalledItem,
     uninstall_hooks: &[&crate::mindfile::ResolvedHook],
     commit: &str,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     if !uninstall_hooks.is_empty() {
         let store = paths.mind_home.join(&item.store);
@@ -8804,7 +8749,7 @@ fn uninstall_item(
                 uninstall_hooks,
                 &store,
                 commit,
-                dangerously_skip,
+                accept,
                 &hook_env,
             )?;
         }
@@ -9188,7 +9133,7 @@ pub fn absorb(
             false,
             PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None, // absorb melds a directory, never an item link
         );
         if let Err(e) = meld_err {
@@ -9238,8 +9183,7 @@ pub fn absorb(
     let learn_flow = InstallFlow {
         yes: true,               // already confirmed above
         clobber: Clobber::Force, // stray lobe copies handled by Force
-        dangerously_skip: false,
-        dangerously_skip_build: false,
+        accept: crate::hook::Accept::default(),
     };
     let learn_err: Result<()> = if out.json {
         learn_collecting(paths, &qualified_ref, learn_flow).map(|_| ())
@@ -9259,7 +9203,14 @@ pub fn absorb(
         // nothing was installed from it, learn failed) and name the dest
         // commit, which is left in place because the dest repo is the user's.
         if freshly_melded {
-            let _ = unmeld_one(paths, &dest_source_name, false, true, false, None);
+            let _ = unmeld_one(
+                paths,
+                &dest_source_name,
+                false,
+                true,
+                crate::hook::Accept::default(),
+                None,
+            );
         }
         crate::render::warn(format!(
             "absorb left commit '{}' in {}; remove it with git if unwanted",
@@ -9439,7 +9390,7 @@ pub fn forget(
     dropped: bool,
     yes: bool,
     force: bool,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     if unmanaged {
         return forget_unmanaged_bulk(paths, item_ref, yes);
@@ -9474,15 +9425,7 @@ pub fn forget(
         return Ok(());
     }
     let item_ref = item_ref.unwrap_or("--dropped");
-    forget_keys(
-        paths,
-        &mut manifest,
-        keys,
-        item_ref,
-        yes,
-        force,
-        dangerously_skip,
-    )
+    forget_keys(paths, &mut manifest, keys, item_ref, yes, force, accept)
 }
 
 /// The installed items `forget --dropped` removes (CLI-245): those whose
@@ -9563,7 +9506,7 @@ fn forget_keys(
     item_ref: &str,
     yes: bool,
     force: bool,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     let out = crate::render::ctx();
     // CLI-42: removing more than one item (typically a glob that matched more
@@ -9672,7 +9615,7 @@ fn forget_keys(
             .unwrap_or_default();
         // A hook failure stops here, leaving this item (and the rest) installed;
         // the manifest is saved with what remains.
-        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, dangerously_skip) {
+        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, accept) {
             manifest.items.insert(key.clone(), item);
             // spec: LIFE-48 -- a save failure here must not mask `e`.
             if let Err(se) = manifest.save(paths) {
@@ -9848,14 +9791,12 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
     Ok(())
 }
 
-/// `mind sync [--upgrade] [--dangerously-skip-install-hook-check]
-/// [--dangerously-skip-build-hook-check]` — fetch every source and refresh its
-/// recorded commit. With `--upgrade`, an `upgrade` pass runs after the refresh
-/// (reporting pending upgrades and prompting before applying, exactly like
-/// `mind upgrade`), so one command both fetches upstream and applies pending
-/// upgrades. Both `dangerously_skip_hook_check` and
-/// `dangerously_skip_build_hook_check` are forwarded to the `upgrade` pass so
-/// hooks can run unattended in CI; they are unused when `--upgrade` is absent.
+/// `mind sync [--upgrade] [--accept-hooks[=EVENTS]]` — fetch every source and
+/// refresh its recorded commit. With `--upgrade`, an `upgrade` pass runs after
+/// the refresh (reporting pending upgrades and prompting before applying,
+/// exactly like `mind upgrade`), so one command both fetches upstream and
+/// applies pending upgrades. `accept` is forwarded to the `upgrade` pass so
+/// hooks can run unattended in CI; it is unused when `--upgrade` is absent.
 ///
 /// spec: LIFE-49 -- M1: `yes` is the same global `--yes` the CLI already
 /// threads into `mind upgrade`/`mind forget`; it is forwarded to the
@@ -9870,17 +9811,9 @@ pub fn sync(
     paths: &Paths,
     then_upgrade: bool,
     yes: bool,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
-    sync_with_selector(
-        paths,
-        None,
-        then_upgrade,
-        yes,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
-    )
+    sync_with_selector(paths, None, then_upgrade, yes, accept)
 }
 
 /// Resolve a `[source]` filter (CLI-231) to the names of every melded source it
@@ -9910,8 +9843,7 @@ pub fn sync_with_selector(
     source_selector: Option<&str>,
     then_upgrade: bool,
     yes: bool,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     let out = crate::render::ctx();
     // spec: CLI-231 -- a `[source]` selector narrows the sync to matching
@@ -10006,8 +9938,8 @@ pub fn sync_with_selector(
                     false, // skip (not error) if a same-URL entry is already present
                     &mut visited,
                     Some(policy),
-                    None,  // auto-meld supplies no install hook
-                    false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
+                    None,                           // auto-meld supplies no install hook
+                    crate::hook::Accept::default(), // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
                     prefer_ssh,
                     true, // auto-meld is non-interactive (no collision prompt)
                     None, // auto-meld has no curator-supplied configuration
@@ -10375,8 +10307,8 @@ pub fn sync_with_selector(
                 false,
                 &mut visited,
                 policy.as_ref(),
-                None,  // a re-walked nested source supplies no install hook
-                false, // sync is non-TTY: its hooks take the HOOK-22 skip path
+                None, // a re-walked nested source supplies no install hook
+                crate::hook::Accept::default(), // sync is non-TTY: its hooks take the HOOK-22 skip path
                 prefer_ssh,
                 true, // sync re-walk is non-interactive (no collision prompt)
                 Some(todo.curated),
@@ -10490,8 +10422,7 @@ pub fn sync_with_selector(
                 SourceScope::Names(names, source_selector)
             }),
             None,
-            dangerously_skip_hook_check,
-            dangerously_skip_build_hook_check,
+            accept,
         )?;
         if let Some(result) = pass {
             upgraded = result.installed;
@@ -10601,17 +10532,9 @@ pub fn upgrade(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
-    emit_upgrade_result(upgrade_inner(
-        paths,
-        yes,
-        item_ref,
-        false,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
-    )?)
+    emit_upgrade_result(upgrade_inner(paths, yes, item_ref, false, accept)?)
 }
 
 /// `mind upgrade --no-sync` — skip the pre-upgrade source fetch (CLI-169).
@@ -10619,17 +10542,9 @@ pub fn upgrade_no_sync(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
-    emit_upgrade_result(upgrade_inner(
-        paths,
-        yes,
-        item_ref,
-        true,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
-    )?)
+    emit_upgrade_result(upgrade_inner(paths, yes, item_ref, true, accept)?)
 }
 
 /// `mind upgrade --source <filter> [item]` — the upgrade pass scoped to the
@@ -10644,8 +10559,7 @@ pub fn upgrade_source(
     item_ref: Option<&str>,
     source_selector: &str,
     no_sync: bool,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
@@ -10654,8 +10568,7 @@ pub fn upgrade_source(
         no_sync,
         SourceScope::Filter(source_selector),
         None,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
+        accept,
     )?)
 }
 
@@ -10672,8 +10585,7 @@ pub(crate) fn upgrade_sources_no_sync(
     paths: &Paths,
     yes: bool,
     sources: &[String],
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
@@ -10682,8 +10594,7 @@ pub(crate) fn upgrade_sources_no_sync(
         true,
         SourceScope::Names(sources, None),
         None,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
+        accept,
     )?)
 }
 
@@ -10703,7 +10614,7 @@ pub(crate) fn meld_curated_entry(
     entry: &crate::mindfile::NestedSource,
     policy: Option<&Policy>,
     prefer_ssh: bool,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
     skipped: &mut Vec<SkippedEntry>,
 ) -> Result<usize> {
     entry.validate(toml_path)?; // spec: DSC-64
@@ -10727,7 +10638,7 @@ pub(crate) fn meld_curated_entry(
         &mut visited,
         policy,
         None, // no consumer install hook
-        dangerously_skip_hook_check,
+        accept,
         prefer_ssh,
         true, // non-interactive: `curate` has already taken the user's decision
         Some(curated),
@@ -10766,8 +10677,7 @@ pub fn upgrade_no_sync_keys(
     paths: &Paths,
     yes: bool,
     keys: &[String],
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
@@ -10776,8 +10686,7 @@ pub fn upgrade_no_sync_keys(
         true,
         SourceScope::All,
         Some(keys),
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
+        accept,
     )?)
 }
 
@@ -10803,8 +10712,7 @@ fn upgrade_inner(
     yes: bool,
     item_ref: Option<&str>,
     no_sync: bool,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<Option<MutationResult>> {
     upgrade_inner_scoped(
         paths,
@@ -10813,8 +10721,7 @@ fn upgrade_inner(
         no_sync,
         SourceScope::All,
         None,
-        dangerously_skip_hook_check,
-        dangerously_skip_build_hook_check,
+        accept,
     )
 }
 
@@ -10851,8 +10758,7 @@ fn upgrade_inner_scoped(
     no_sync: bool,
     source_scope: SourceScope<'_>,
     key_scope: Option<&[String]>,
-    dangerously_skip_hook_check: bool,
-    dangerously_skip_build_hook_check: bool,
+    accept: crate::hook::Accept,
 ) -> Result<Option<MutationResult>> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
@@ -11006,7 +10912,7 @@ fn upgrade_inner_scoped(
     rerun_source_hooks(
         paths,
         &mut registry,
-        dangerously_skip_hook_check,
+        accept,
         hook_scope.as_ref(),
         policy.as_ref(),
     )?;
@@ -11333,8 +11239,7 @@ fn upgrade_inner_scoped(
             &up.new_commit,
             &siblings,
             false,
-            dangerously_skip_hook_check,
-            dangerously_skip_build_hook_check,
+            accept,
             is_update,
         ) {
             Ok(mut i) => {
@@ -11376,7 +11281,7 @@ fn upgrade_inner_scoped(
                 &old_for_uninstall,
                 &up.cat.uninstall_hooks(),
                 &up.old.commit,
-                dangerously_skip_hook_check,
+                accept,
             ) {
                 // The new copy is already live on disk (install_item succeeded
                 // above); record it before propagating. Recording it keeps the
@@ -11444,8 +11349,7 @@ fn upgrade_inner_scoped(
         let flow = InstallFlow {
             yes: true,
             clobber: Clobber::Prompt,
-            dangerously_skip: dangerously_skip_hook_check,
-            dangerously_skip_build: dangerously_skip_build_hook_check,
+            accept,
         };
         let keys = apply_profile_plan(paths, source_name, plan, flow, out.json)?;
         applied.extend(keys.iter().map(|k| strip_ansi(k)));
@@ -11469,7 +11373,7 @@ fn upgrade_inner_scoped(
 /// current commit.
 ///
 /// Same trust boundary as `meld`: prompt and disclose, unless
-/// `--dangerously-skip-install-hook-check` is set or there is no TTY. In
+/// `--accept-hooks` is set or there is no TTY. In
 /// `upgrade`, Abort is treated as Skip: the source is already registered, so
 /// declining the re-run just leaves the existing install in place. Persists the
 /// registry only if a hook was run and its recorded commit advanced.
@@ -11477,7 +11381,7 @@ fn upgrade_inner_scoped(
 fn rerun_source_hooks(
     paths: &Paths,
     registry: &mut Registry,
-    dangerously_skip_hook_check: bool,
+    accept: crate::hook::Accept,
     in_scope: Option<&HashSet<String>>,
     policy: Option<&Policy>,
 ) -> Result<()> {
@@ -11518,11 +11422,11 @@ fn rerun_source_hooks(
         let clone_path = dir.display().to_string();
 
         for hook in pending.hooks {
-            let run = if dangerously_skip_hook_check {
+            let run = if accept.event_str(event) {
                 // HOOK-23: re-run without prompting.
                 if !json_mode() {
                     println!(
-                        "note: running {event} hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                        "note: running {event} hook for {} without the safety prompt (--accept-hooks)",
                         source.name
                     );
                 }
@@ -14493,8 +14397,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         pin_tag,
         pin_ref,
         install_hook,
-        dangerously_skip_install_hook_check,
-        dangerously_skip_build_hook_check,
+        accept,
         register_only,
         kind,
         learn_patterns,
@@ -14507,6 +14410,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         local,
         auto_update,
     } = args;
+    let accept = accept.accept();
     // spec: AUP-8 -- a bad level is refused before the clone.
     let grant = auto_update
         .as_deref()
@@ -14567,8 +14471,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     let flow = InstallFlow {
         yes,
         clobber,
-        dangerously_skip: dangerously_skip_install_hook_check,
-        dangerously_skip_build: dangerously_skip_build_hook_check,
+        accept,
     };
     // spec: STO-58 -- the alias is part of the source identity, so the
     // instance a re-meld/install targets is `host/owner/repo@<alias>`.
@@ -14634,7 +14537,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             flat_skills,
             pin,
             install_hook,
-            dangerously_skip_install_hook_check,
+            accept,
             item_kind,
             &mut meld_profiles,
             yes, // spec: DSC-116
@@ -15120,8 +15023,7 @@ pub fn auto_update_run(
             true,
             SourceScope::Names(&moved_names, None),
             None,
-            false,
-            false,
+            crate::hook::Accept::default(),
         ) {
             report
                 .failed
@@ -16632,7 +16534,7 @@ mod tests {
             false,
             PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -16644,8 +16546,7 @@ mod tests {
                 InstallFlow {
                     yes: true,
                     clobber: Clobber::Force,
-                    dangerously_skip: true,
-                    dangerously_skip_build: true,
+                    accept: crate::hook::Accept::ALL,
                 },
             )
             .expect("learn");
@@ -16693,7 +16594,12 @@ mod tests {
         // out of date (see above).
         let confirmed_keys = vec!["skill:applies".to_string(), "skill:ghost".to_string()];
 
-        let result = upgrade_no_sync_keys(&paths, true, &confirmed_keys, false, false);
+        let result = upgrade_no_sync_keys(
+            &paths,
+            true,
+            &confirmed_keys,
+            crate::hook::Accept::default(),
+        );
         assert!(
             result.is_ok(),
             "a partially-inapplicable confirmed set must not abort the run: {:?}",
@@ -16776,7 +16682,7 @@ mod tests {
 
     /// A recorded install hook the source's clone no longer declares must not be
     /// re-offered: the disclosure would say `Event: install` for a command no
-    /// site declares, and a `--dangerously-skip-install-hook-check` run would
+    /// site declares, and a `--accept-hooks` run would
     /// execute it unattended at a commit the author controls.
     // spec: HOOK-55
     #[test]

@@ -31,7 +31,7 @@ use crate::paths::{Paths, mkdir_p};
 /// the same source (including `item` itself), used to validate `{{ns:}}` name
 /// tokens and to resolve the `{{self}}` / `{{tools:}}` / `{{path:}}` path tokens
 /// to store paths. The recorded hash is of the *source* content so drift
-/// detection compares like with like. `dangerously_skip_build` runs a build hook
+/// detection compares like with like. `accept_build` runs a build hook
 /// non-interactively without prompting (HOOK-74); without it a non-TTY context
 /// skips the build hook (HOOK-72). `hook_env` is the profile environment the
 /// build hook runs with (HOOK-140).
@@ -41,7 +41,7 @@ pub fn install(
     commit: &str,
     siblings: &[CatalogItem],
     force: bool,
-    dangerously_skip_build: bool,
+    accept_build: bool,
     hook_env: &crate::hook::HookEnv,
 ) -> Result<InstalledItem> {
     let kind = item.kind;
@@ -148,17 +148,10 @@ pub fn install(
     //     the swap, so a failed build is rolled back with staging and never
     //     touches the live install (HOOK-70..74). It is arbitrary code, so it is
     //     disclosed and prompted on a TTY; a non-TTY context skips it (the item
-    //     installs unbuilt, HOOK-72); `dangerously_skip_build` runs it unattended
+    //     installs unbuilt, HOOK-72); `accept_build` runs it unattended
     //     (HOOK-74).
     if let Some(build) = &item.build
-        && let Err(e) = run_build_hook(
-            item,
-            build,
-            &staging,
-            commit,
-            dangerously_skip_build,
-            hook_env,
-        )
+        && let Err(e) = run_build_hook(item, build, &staging, commit, accept_build, hook_env)
     {
         let _ = remove_path(&staging);
         return Err(e);
@@ -774,18 +767,18 @@ fn expand_references(
 
 /// Run an item's build hook in its staging directory. Disclosed and prompted on
 /// a TTY (two-way: run, or skip and install unbuilt); a non-TTY context skips it
-/// (HOOK-72); `dangerously_skip` runs it unattended (HOOK-74). A non-zero exit
+/// (HOOK-72); `accepted` runs it unattended (HOOK-74). A non-zero exit
 /// is a hard stop (HOOK-71) the caller rolls back.
 fn run_build_hook(
     item: &CatalogItem,
     build: &str,
     staging: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accepted: bool,
     hook_env: &crate::hook::HookEnv,
 ) -> Result<()> {
     // spec: HOOK-72 HOOK-74
-    let run = if dangerously_skip {
+    let run = if accepted {
         true
     } else if !crate::hook::is_tty() {
         // spec: CLI-217
@@ -816,7 +809,7 @@ fn run_build_hook(
         // spec: CLI-217
         println!("running build hook for {}", item.display_key());
         crate::hook::run_hook(build, staging, &item.source, "build", "build", hook_env)?;
-    } else if crate::hook::is_tty() && !dangerously_skip {
+    } else if crate::hook::is_tty() && !accepted {
         // spec: CLI-217
         crate::render::note(format!(
             "note: skipped build hook for {}; its tooling is not built",
@@ -844,7 +837,7 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
 /// HOOK-120/125, or "uninstall", HOOK-82) in the item's store directory: the
 /// final step of an install/update, or the step before a removal. Disclosed and
 /// prompted two-way (run / skip) on a TTY; a non-TTY context skips it;
-/// `dangerously_skip` runs it unattended (HOOK-83). A non-zero exit is a
+/// `accepted` runs it unattended (HOOK-83). A non-zero exit is a
 /// `HookFailed` hard stop the caller acts on (install/update rolls back;
 /// uninstall leaves the item installed).
 ///
@@ -872,7 +865,7 @@ fn run_item_hook(
     cmd: &str,
     store: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accepted: bool,
     hook_env: &crate::hook::HookEnv,
 ) -> Result<bool> {
     // The noun for the side effect the hook applies, per event: install and
@@ -882,7 +875,7 @@ fn run_item_hook(
         _ => "its cleanup is not run",
     };
     let cwd = hook_cwd(store);
-    let run = if dangerously_skip {
+    let run = if accepted {
         true
     } else if !crate::hook::is_tty() {
         // spec: CLI-217
@@ -918,7 +911,7 @@ fn run_item_hook(
         // spec: CLI-217
         println!("running {event} hook for {display_key}");
         crate::hook::run_hook(cmd, &cwd, source, event, event, hook_env)?;
-    } else if crate::hook::is_tty() && !dangerously_skip {
+    } else if crate::hook::is_tty() && !accepted {
         // spec: CLI-217
         crate::render::note(format!(
             "note: skipped {event} hook for {display_key}; {effect}"
@@ -959,19 +952,11 @@ pub fn run_item_install_hooks(
     hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     hook_env: &crate::hook::HookEnv,
 ) -> Result<Vec<crate::source::RecordedHook>> {
     let mut recorded = Vec::with_capacity(hooks.len());
-    run_item_install_hooks_recording(
-        item,
-        hooks,
-        store,
-        commit,
-        dangerously_skip,
-        hook_env,
-        &mut recorded,
-    )?;
+    run_item_install_hooks_recording(item, hooks, store, commit, accept, hook_env, &mut recorded)?;
     Ok(recorded)
 }
 
@@ -989,7 +974,7 @@ pub fn run_item_install_hooks_partial(
     hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     hook_env: &crate::hook::HookEnv,
 ) -> (Vec<crate::source::RecordedHook>, Result<()>) {
     let mut recorded = Vec::with_capacity(hooks.len());
@@ -998,7 +983,7 @@ pub fn run_item_install_hooks_partial(
         hooks,
         store,
         commit,
-        dangerously_skip,
+        accept,
         hook_env,
         &mut recorded,
     );
@@ -1016,7 +1001,7 @@ fn run_item_install_hooks_recording(
     hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     hook_env: &crate::hook::HookEnv,
     recorded: &mut Vec<crate::source::RecordedHook>,
 ) -> Result<()> {
@@ -1033,7 +1018,7 @@ fn run_item_install_hooks_recording(
             &hook.run,
             store,
             commit,
-            dangerously_skip,
+            accept.event(hook.event),
             hook_env,
         )?;
         recorded.push(crate::source::RecordedHook {
@@ -1052,7 +1037,7 @@ pub fn run_item_uninstall_hooks(
     hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
-    dangerously_skip: bool,
+    accept: crate::hook::Accept,
     hook_env: &crate::hook::HookEnv,
 ) -> Result<()> {
     for hook in hooks {
@@ -1065,7 +1050,7 @@ pub fn run_item_uninstall_hooks(
             &hook.run,
             store,
             commit,
-            dangerously_skip,
+            accept.uninstall,
             hook_env,
         )?;
     }

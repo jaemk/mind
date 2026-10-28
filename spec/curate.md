@@ -132,8 +132,7 @@ A *curator* is a registered source that declares `[discover].sources` in its
   applied stay applied (each is an ordinary meld/learn/upgrade/unmeld, each
   individually transactional).
 - `CUR-11` Registering and installing run the ordinary consent-gated lifecycle
-  hooks (HOOK-20, HOOK-50); `--dangerously-skip-install-hook-check` and
-  `--dangerously-skip-build-hook-check` pass through as they do on
+  hooks (HOOK-20, HOOK-50); `--accept-hooks` passes through as it does on
   `sync --upgrade`. `curate` adds no hook path of its own.
 - `CUR-12` `curate` proposes only what a curator declares. It never installs an
   item no entry names, never registers a source no list contains, and never

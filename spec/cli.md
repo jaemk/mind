@@ -7,9 +7,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
 | `meld [<repo>] [--register-only] [--learn <NAME\|GLOB>] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>]` | connect a source (default `.`), then install its items (`--learn` narrows to the matching subset) |
 | `init-source [<path>] [--template] [--marketplace] [--flat-skills] [-N\|--namespace <prefix>]` | scaffold `mind.toml` + detect references (maintainer) |
-| `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-hook-check]` (alias: `remove`/`rm`) | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
-| `learn <item> [--dangerously-skip-install-hook-check]` (alias: `install`) | install |
-| `forget <item> [--dangerously-skip-hook-check]` (aliases: `unlearn`, `uninstall`) | uninstall |
+| `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--accept-hooks[=<events>]]` (alias: `remove`/`rm`) | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
+| `learn <item> [--accept-hooks[=<events>]]` (alias: `install`) | install |
+| `forget <item> [--accept-hooks[=<events>]]` (aliases: `unlearn`, `uninstall`) | uninstall |
 | `sync [source]` (alias: `update`) | refresh sources (all, or one matching `[source]`) |
 | `upgrade [--yes] [--no-sync] [item]` | upgrade installed; syncs first by default |
 | `recall [item] [--sources] [--kind K] [--source S] [--json]` (aliases: `status`, `list`) | status: sources with their items (install state marked); `--sources` narrows to sources |
@@ -494,17 +494,29 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   remove them later. This is the opt-out from the default item removal (CLI-21),
   mirroring `meld --register-only` (CLI-165).
 - `unmeld` runs the source's uninstall hooks before removal and accepts
-  `--dangerously-skip-hook-check` to run them unattended, and
+  `--accept-hooks` to run them unattended (CLI-250), and
   `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
   install-hooks.md, HOOK-54, HOOK-59).
-- `CLI-227` `unmeld` and `forget`'s hook-consent flag is
-  `--dangerously-skip-hook-check`. `--dangerously-skip-install-hook-check` (the
-  original spelling) is kept as a hidden alias: both gate an UNINSTALL hook on
-  these two verbs, despite the "install" in the old name, which the rename
-  fixes without breaking a script that already passes the old spelling.
-  `meld`/`learn`/`sync`/`upgrade`/`hooks run`, whose install-hook flag really
-  does gate an install hook, keep `--dangerously-skip-install-hook-check`
-  unchanged.
+- `CLI-227` `unmeld` and `forget` still accept both of their pre-CLI-250
+  spellings, `--dangerously-skip-hook-check` and
+  `--dangerously-skip-install-hook-check`, hidden, each gating the uninstall
+  hooks those verbs run (CLI-251).
+- `CLI-250` Every verb that runs hooks (`meld`, `learn`, `forget`, `unmeld`,
+  `upgrade`, `sync --upgrade`, `curate`, `hooks run`) takes one consent flag,
+  `--accept-hooks[=<events>]`. Bare, it runs every hook without the safety
+  prompt; with `=<events>`, a comma-separated list of `install`, `update`,
+  `uninstall`, `build`, only the hooks for those events (HOOK-150). The value
+  must be attached with `=`, so a bare `--accept-hooks` never consumes the next
+  word as its value. The flag is repeatable. An unknown event, or an empty list
+  (`--accept-hooks=`), is a usage error. Naming an event the verb never runs
+  (`forget --accept-hooks=build`) is accepted and changes nothing. On `sync`
+  it requires `--upgrade`, as the hooks only run in that pass.
+- `CLI-251` The `--dangerously-skip-*` flags `--accept-hooks` replaced keep
+  working on every verb in CLI-250, hidden from `--help`:
+  `--dangerously-skip-install-hook-check` and `--dangerously-skip-hook-check`
+  each mean `--accept-hooks=install,update,uninstall` (what the old flag gated
+  wherever it appeared), and `--dangerously-skip-build-hook-check` means
+  `--accept-hooks=build`. They combine with `--accept-hooks` as a union.
 - `CLI-230` `unmeld` accepts `remove` and `rm` as additional visible aliases,
   for symmetry with `learn`'s `install` alias and `forget`'s `unlearn`/
   `uninstall` aliases.
@@ -845,9 +857,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   for a source or an item target; `build` is valid only for an item target (a source
   has no build hook, HOOK-103). For a source install or update run, only *pending* hooks
   run by default (HOOK-55, HOOK-124); `--force` also re-runs hooks already recorded at
-  the current commit (HOOK-101). The `--dangerously-skip-install-hook-check` and
-  `--dangerously-skip-build-hook-check` flags apply as they do to the automatic flows
-  (HOOK-23/74).
+  the current commit (HOOK-101). `--accept-hooks` applies as it does to the automatic flows
+  (HOOK-23/74/150, CLI-250).
 - `CLI-228` `mind hooks run --rerun` is a visible alias for `--force` (CLI-195):
   same flag, same field, just a name that reads as "re-run recorded hooks"
   rather than the borrowed `meld --force` clobber sense. Both spellings are

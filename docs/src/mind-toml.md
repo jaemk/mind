@@ -76,7 +76,7 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   creates the file. Run `mind evolve` to update.
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
-  prompted before it runs (`--dangerously-skip-install-hook-check` runs it
+  prompted before it runs (`--accept-hooks` runs it
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref` / `pin-version`**: how `sync`
@@ -363,7 +363,7 @@ has no `mind.toml` of its own:
   source. Each entry has the same shape as a source's own `[[hooks]]` entry: a
   required `run` field, and optional `name`, `optional`, and `event` fields. They
   run under the same disclosure and safety prompt as the source's own hooks
-  (including the non-TTY skip and `--dangerously-skip-install-hook-check`).
+  (including the non-TTY skip and `--accept-hooks`).
 
 `roots`, `add-roots`, `flat-skills`, and the hooks apply ONLY when the nested
 source ships no `mind.toml`. If the nested source has one, that file is

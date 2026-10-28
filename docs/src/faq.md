@@ -47,8 +47,8 @@ is, and its skills, agents, commands, and workflows become items. See
 ## Does it run code from the repos I meld?
 
 Only hooks a source declares, and only after showing you the exact command and
-asking. Without a terminal, hooks are skipped unless you pass a
-`--dangerously-skip-...` flag. `mind review <repo>` lists a source's hooks
+asking. Without a terminal, hooks are skipped unless you pass
+`--accept-hooks`. `mind review <repo>` lists a source's hooks
 before you meld it. See [Run setup with hooks](install-hooks.md).
 
 ## Does it make network calls on its own?

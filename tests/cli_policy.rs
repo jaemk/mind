@@ -562,7 +562,7 @@ fn upgrade_reruns_install_hook_for_admitted_alias_instance_under_locked_allowlis
             "--namespace",
             "myalias",
             "--register-only",
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
@@ -599,7 +599,7 @@ fn upgrade_reruns_install_hook_for_admitted_alias_instance_under_locked_allowlis
             "upgrade",
             "--no-sync",
             "-y",
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );

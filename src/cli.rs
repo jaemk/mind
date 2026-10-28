@@ -30,6 +30,81 @@ pub enum HookEventArg {
     Build,
 }
 
+/// A hook event `--accept-hooks` may name.
+// spec: CLI-250
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AcceptEventArg {
+    Install,
+    Update,
+    Uninstall,
+    Build,
+}
+
+/// `--accept-hooks`, shared by every verb that runs hooks, plus the hidden
+/// `--dangerously-skip-*` spellings it replaced.
+// spec: CLI-250 CLI-251
+#[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
+pub struct AcceptHooksArgs {
+    /// Run hooks without the safety prompt: every hook, or only those for the
+    /// listed events (`--accept-hooks=install,update,uninstall,build`). This
+    /// executes arbitrary code from the source; only use it for a source you
+    /// trust. Without it, a non-TTY run skips each hook and prints a note.
+    #[arg(
+        long,
+        value_name = "EVENTS",
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        value_delimiter = ','
+    )]
+    pub accept_hooks: Option<Vec<AcceptEventArg>>,
+
+    /// Deprecated: `--accept-hooks=install,update,uninstall`.
+    #[arg(long, hide = true)]
+    pub dangerously_skip_install_hook_check: bool,
+
+    /// Deprecated: `--accept-hooks=install,update,uninstall`.
+    #[arg(long, hide = true)]
+    pub dangerously_skip_hook_check: bool,
+
+    /// Deprecated: `--accept-hooks=build`.
+    #[arg(long, hide = true)]
+    pub dangerously_skip_build_hook_check: bool,
+}
+
+impl AcceptHooksArgs {
+    /// The events these flags accept. A bare `--accept-hooks` accepts every
+    /// event; each legacy flag accepts what it gated before the rename.
+    pub fn accept(&self) -> crate::hook::Accept {
+        use crate::hook::Accept;
+        let mut accept = match &self.accept_hooks {
+            None => Accept::default(),
+            Some(events) if events.is_empty() => Accept::ALL,
+            Some(events) => {
+                let mut a = Accept::default();
+                for e in events {
+                    match e {
+                        AcceptEventArg::Install => a.install = true,
+                        AcceptEventArg::Update => a.update = true,
+                        AcceptEventArg::Uninstall => a.uninstall = true,
+                        AcceptEventArg::Build => a.build = true,
+                    }
+                }
+                a
+            }
+        };
+        if self.dangerously_skip_install_hook_check || self.dangerously_skip_hook_check {
+            accept.install = true;
+            accept.update = true;
+            accept.uninstall = true;
+        }
+        if self.dangerously_skip_build_hook_check {
+            accept.build = true;
+        }
+        accept
+    }
+}
+
 use crate::error::ItemKind;
 
 /// An item kind as accepted on the command line
@@ -229,19 +304,9 @@ EXAMPLES:
         #[arg(long, value_name = "CMD")]
         uninstall_hook: Option<String>,
 
-        /// Run uninstall hooks without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run skips the hook and prints a note.
-        /// `--dangerously-skip-install-hook-check` is a deprecated alias kept for
-        /// backwards compatibility.
-        // spec: CLI-227 - renamed from --dangerously-skip-install-hook-check,
-        // which gated an UNINSTALL hook despite its name; old spelling is a
-        // hidden alias.
-        #[arg(
-            long = "dangerously-skip-hook-check",
-            alias = "dangerously-skip-install-hook-check"
-        )]
-        dangerously_skip_install_hook_check: bool,
+        // spec: CLI-227 CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Install items into every configured agent home (default ~/.claude).
@@ -342,18 +407,9 @@ EXAMPLES:
         #[arg(long)]
         overwrite: bool,
 
-        /// Run an item's install hook without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run skips the hook and prints a note.
-        #[arg(long)]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run an item's build hook without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run skips the build hook and prints a
-        /// note, so the item's tooling is not built.
-        #[arg(long)]
-        dangerously_skip_build_hook_check: bool,
+        // spec: CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
 
         /// Install the item(s) into ONLY the current project's lobe -- a
         /// registered lobe whose directory lives under the current working
@@ -378,11 +434,23 @@ EXAMPLES:
 EXAMPLES:
     mind forget review
     mind forget 'skill:*' --yes
+    mind forget 'owner/repo#review'                  # one item from a source
+    mind forget 'owner/repo#*' --yes                 # every item from a source
+    mind forget 'owner/repo#skill:*'                 # every skill from a source
+    mind forget 'local/projects/agents#review'       # one item from a local source
+    mind forget 'local/projects/agents#*' --yes      # every item from a local source
+    mind forget 'local/projects/agents#skill:*'      # every skill from a local source
+    mind forget owner/repo --profile full
     mind forget --unmanaged
-    mind forget owner/repo --profile full"
+    mind forget --dropped
+
+    A source goes before `#`; `mind recall --sources` lists the identities (a
+    local path melds as `local/<parent dir>/<dir>`). Quote a glob so the shell
+    does not expand it. To drop the source too, use `mind unmeld`."
     )]
     Forget {
-        /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
+        /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`,
+        /// or source-qualified `owner/repo#name`, `'owner/repo#*'`.
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
         /// omit to remove every unmanaged item across all lobes.
         /// With `--profile`: the melded source whose profile to disable.
@@ -422,19 +490,9 @@ EXAMPLES:
         #[arg(short = 'f', long)]
         force: bool,
 
-        /// Run an item's uninstall hook without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run skips the hook and prints a note.
-        /// `--dangerously-skip-install-hook-check` is a deprecated alias kept for
-        /// backwards compatibility.
-        // spec: CLI-227 - renamed from --dangerously-skip-install-hook-check,
-        // which gated an UNINSTALL hook despite its name; old spelling is a
-        // hidden alias.
-        #[arg(
-            long = "dangerously-skip-hook-check",
-            alias = "dangerously-skip-install-hook-check"
-        )]
-        dangerously_skip_install_hook_check: bool,
+        // spec: CLI-227 CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Refresh melded source clones and catalogs (all, or only those matching
@@ -445,7 +503,13 @@ EXAMPLES:
     /// several sources with no ambiguity check, and every match is synced --
     /// that is intentional, since `sync` is a non-destructive refresh.
     // spec: CLI-172
-    #[command(visible_alias = "update")]
+    #[command(
+        visible_alias = "update",
+        mut_arg("accept_hooks", |a| a.requires("upgrade")),
+        mut_arg("dangerously_skip_install_hook_check", |a| a.requires("upgrade")),
+        mut_arg("dangerously_skip_hook_check", |a| a.requires("upgrade")),
+        mut_arg("dangerously_skip_build_hook_check", |a| a.requires("upgrade"))
+    )]
     Sync {
         /// Only sync the source(s) matching this filter: an exact name, a
         /// trailing suffix like `repo` or `owner/repo` (every source it
@@ -472,17 +536,10 @@ EXAMPLES:
         #[arg(long)]
         upgrade: bool,
 
-        /// Run install- and update-hook re-runs without the safety prompt during
-        /// the `--upgrade` pass (executes arbitrary code; only with `--upgrade`).
-        #[arg(long, requires = "upgrade")]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run item build hooks without the safety prompt during the `--upgrade`
-        /// pass. This executes arbitrary code from the source; only use it for a
-        /// source you trust. Without this flag, a non-TTY run skips build hooks
-        /// and prints a note. Only valid with `--upgrade`.
-        #[arg(long, requires = "upgrade")]
-        dangerously_skip_build_hook_check: bool,
+        // spec: CLI-250 -- applies to the `--upgrade` pass, so every spelling
+        // requires `--upgrade` (the `mut_arg`s on the variant).
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Upgrade installed items to their latest source version.
@@ -532,20 +589,9 @@ EXAMPLES:
         #[arg(long)]
         allow_breaking: bool,
 
-        /// Re-run a source's install or update hook without the safety prompt
-        /// when its commit advanced. This executes arbitrary code from the source; only
-        /// use it for a source you trust. Without this flag, a non-TTY upgrade
-        /// (CI, scripts) skips the hook re-run and just prints a note; pass this
-        /// to run it unattended.
-        #[arg(long)]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run item build hooks without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY upgrade skips build hooks and prints a
-        /// note, so the item's tooling is not rebuilt.
-        #[arg(long)]
-        dangerously_skip_build_hook_check: bool,
+        // spec: CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Upgrade the `mind` binary itself to the latest release (or a version
@@ -808,14 +854,9 @@ EXAMPLES:
         #[arg(long, value_name = "IDENTITY")]
         adopt: Option<String>,
 
-        /// Run install- and update-hook re-runs without the safety prompt
-        /// (executes arbitrary code from the source).
-        #[arg(long)]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run item build hooks without the safety prompt.
-        #[arg(long)]
-        dangerously_skip_build_hook_check: bool,
+        // spec: CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Write a super-source `mind.toml` reproducing the current melded and
@@ -1040,19 +1081,9 @@ pub struct MeldArgs {
     #[arg(long, value_name = "CMD")]
     pub install_hook: Option<String>,
 
-    /// Run the install hook without the safety prompt. This executes
-    /// arbitrary code from the source; only use it for a source you trust.
-    /// Without this flag, a non-TTY run (CI, scripts) skips the hook and just
-    /// prints a note, so the tooling is not built; pass this to run it unattended.
-    #[arg(long)]
-    pub dangerously_skip_install_hook_check: bool,
-
-    /// Run item build hooks without the safety prompt during the install-all
-    /// pass. This executes arbitrary code from the source; only use it for a
-    /// source you trust. Without this flag, a non-TTY run skips build hooks
-    /// and prints a note, so the item's tooling is not built.
-    #[arg(long)]
-    pub dangerously_skip_build_hook_check: bool,
+    // spec: CLI-250
+    #[command(flatten)]
+    pub accept: AcceptHooksArgs,
 
     /// Only register the source; do not prompt to install its items. By
     /// default, `meld` previews the source's items and offers to install them
@@ -1314,18 +1345,9 @@ pub enum HooksCmd {
         #[arg(long, visible_alias = "rerun")]
         force: bool,
 
-        /// Run install or update hooks without the safety prompt. This executes
-        /// arbitrary code from the source; only use it for a source you trust.
-        /// Without this flag, a non-TTY run skips install or update hooks and
-        /// prints a note.
-        #[arg(long)]
-        dangerously_skip_install_hook_check: bool,
-
-        /// Run the item build hook without the safety prompt when `--event build`
-        /// is given. This executes arbitrary code; only use it for a source
-        /// you trust.
-        #[arg(long)]
-        dangerously_skip_build_hook_check: bool,
+        // spec: CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// List the hooks for a source or item without running any.

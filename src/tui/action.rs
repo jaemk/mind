@@ -108,8 +108,7 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
                 commands::InstallFlow {
                     yes: true,
                     clobber,
-                    dangerously_skip: false,
-                    dangerously_skip_build: false,
+                    accept: crate::hook::Accept::default(),
                 },
             )?;
             // spec: TUI-78 PROF-20 -- installing one item from the browser
@@ -121,9 +120,15 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
         // spec: TUI-20
         // `yes = true`: the TUI confirms destructive actions in its own UI
         // (TUI-24) and acts on a single resolved item, so never read a CLI prompt.
-        ActionKind::Forget { item_key } => {
-            commands::forget(paths, Some(&item_key), false, false, true, true, false)?
-        }
+        ActionKind::Forget { item_key } => commands::forget(
+            paths,
+            Some(&item_key),
+            false,
+            false,
+            true,
+            true,
+            crate::hook::Accept::default(),
+        )?,
         // spec: TUI-21 TUI-30 TUI-77 -- the same end-to-end verb `mind meld`
         // runs, with the flags typed into the meld input (`--pin`,
         // `--profile`, `--kind`, ...). `yes: false`: a meld always runs with
@@ -146,19 +151,28 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
         ActionKind::Forced(inner) => dispatch(paths, *inner, upgrade_keys, true)?,
         // spec: TUI-78 PROF-25 -- `forget <source> --profile <name>`, `yes`
         // for the same reason: the confirm modal listed what is forgotten.
-        ActionKind::DisableProfile { source, profile } => {
-            commands::forget_source_profile(paths, &source, &profile, true, false)?
-        }
+        ActionKind::DisableProfile { source, profile } => commands::forget_source_profile(
+            paths,
+            &source,
+            &profile,
+            true,
+            crate::hook::Accept::default(),
+        )?,
         // spec: TUI-21
         // The TUI's `forget` toggle maps to the inverted `--unlink-only`; `yes =
         // true` so it never reads a CLI prompt from inside raw mode.
-        ActionKind::Unmeld { name, forget } => {
-            commands::unmeld(paths, &name, !forget, true, false, None)?
-        }
+        ActionKind::Unmeld { name, forget } => commands::unmeld(
+            paths,
+            &name,
+            !forget,
+            true,
+            crate::hook::Accept::default(),
+            None,
+        )?,
         // spec: TUI-22 -- `then_upgrade: false` here, so the new `yes` param
         // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
         // (no --upgrade) this action mirrors.
-        ActionKind::Sync => commands::sync(paths, false, false, false, false)?,
+        ActionKind::Sync => commands::sync(paths, false, false, crate::hook::Accept::default())?,
         // spec: TUI-72 TUI-73 - `yes: true` so it applies without prompting on
         // stdin. Use the NO-SYNC, KEY-SCOPED upgrade: the confirm modal's
         // pending list was computed from an authoritative (memo-bypassing)
@@ -186,11 +200,14 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
         // actual meaning; keep the key-scoped call for the named, non-empty set.
         // spec: TUI-76
         ActionKind::Upgrade if upgrade_keys.is_empty() => {
-            commands::upgrade_no_sync(paths, true, None, false, false)?
+            commands::upgrade_no_sync(paths, true, None, crate::hook::Accept::default())?
         }
-        ActionKind::Upgrade => {
-            commands::upgrade_no_sync_keys(paths, true, upgrade_keys, false, false)?
-        }
+        ActionKind::Upgrade => commands::upgrade_no_sync_keys(
+            paths,
+            true,
+            upgrade_keys,
+            crate::hook::Accept::default(),
+        )?,
         // spec: TUI-23 CLI-112
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,
@@ -228,8 +245,7 @@ fn learn_profiles(
         commands::InstallFlow {
             yes: true,
             clobber,
-            dangerously_skip: false,
-            dangerously_skip_build: false,
+            accept: crate::hook::Accept::default(),
         },
     )
 }
@@ -818,7 +834,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -829,8 +845,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn");
@@ -941,7 +956,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -952,8 +967,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn alpha");
@@ -964,8 +978,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn beta");
@@ -1091,7 +1104,7 @@ mod tests {
                 false,
                 commands::PinRequest::None,
                 None,
-                false,
+                crate::hook::Accept::default(),
                 None,
             )
             .expect("meld");
@@ -1102,8 +1115,7 @@ mod tests {
                 commands::InstallFlow {
                     yes: true,
                     clobber: commands::Clobber::Force,
-                    dangerously_skip: true,
-                    dangerously_skip_build: true,
+                    accept: crate::hook::Accept::ALL,
                 },
             )
             .expect("learn");
@@ -1163,7 +1175,7 @@ mod tests {
         make_stale_fixture(&sync_paths, &_td2);
         let old_commit_2 = recorded_commit(&sync_paths);
 
-        commands::upgrade(&sync_paths, true, None, false, false)
+        commands::upgrade(&sync_paths, true, None, crate::hook::Accept::default())
             .expect("sync-first upgrade should succeed");
         let sync_commit = recorded_commit(&sync_paths);
         assert_ne!(
@@ -1275,7 +1287,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1625,7 +1637,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld prerequisite");
@@ -1675,7 +1687,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1969,7 +1981,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1980,8 +1992,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Error,
-                dangerously_skip: false,
-                dangerously_skip_build: false,
+                accept: crate::hook::Accept::default(),
             },
         )
         .expect("learn skill:build");
@@ -2053,7 +2064,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -2064,8 +2075,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Error,
-                dangerously_skip: false,
-                dangerously_skip_build: false,
+                accept: crate::hook::Accept::default(),
             },
         )
         .expect("learn skill:build");
@@ -2167,7 +2177,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -2178,8 +2188,7 @@ mod tests {
             commands::InstallFlow {
                 yes: true,
                 clobber: commands::Clobber::Error,
-                dangerously_skip: false,
-                dangerously_skip_build: false,
+                accept: crate::hook::Accept::default(),
             },
         )
         .expect("learn skill:build");
@@ -2332,7 +2341,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld dep-source");
@@ -2460,7 +2469,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld chain-source");
@@ -2540,7 +2549,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld dep-source");
@@ -2668,7 +2677,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld source-alpha");
@@ -2681,7 +2690,7 @@ mod tests {
             false,
             commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld source-beta");
