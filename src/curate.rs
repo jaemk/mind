@@ -38,8 +38,8 @@ pub struct CurateFlags {
     pub no_sync: bool,
     /// CUR-16: stamp provenance on one unowned identity instead of planning.
     pub adopt: Option<String>,
-    pub dangerously_skip_hook_check: bool,
-    pub dangerously_skip_build_hook_check: bool,
+    /// The hook events run without the safety prompt (`--accept-hooks`).
+    pub accept: crate::hook::Accept,
 }
 
 /// One proposed change, in the shape `--json` emits (CUR-13). `action` carries
@@ -603,8 +603,7 @@ fn apply(
     let flow = InstallFlow {
         yes: true,
         clobber: commands::Clobber::Prompt,
-        dangerously_skip: flags.dangerously_skip_hook_check,
-        dangerously_skip_build: flags.dangerously_skip_build_hook_check,
+        accept: flags.accept,
     };
     // spec: CUR-6 -- the upgrade pass runs once over every source that needs it,
     // not once per source: one report, one hook re-run pass.
@@ -631,7 +630,7 @@ fn apply(
                     entry,
                     policy.as_ref(),
                     prefer_ssh,
-                    flags.dangerously_skip_hook_check,
+                    flags.accept,
                     &mut skipped,
                 )?;
                 registry.save(paths)?;
@@ -702,7 +701,7 @@ fn apply(
                     &glob::Pattern::escape(source),
                     false,
                     true,
-                    flags.dangerously_skip_hook_check,
+                    flags.accept,
                     None,
                 )?;
                 applied.push(format!("unlist:{source}"));
@@ -714,13 +713,7 @@ fn apply(
     if !upgrade_scope.is_empty() {
         // Already fetched by CUR-2 (or deliberately not, under --no-sync), so
         // the pass never re-fetches here.
-        commands::upgrade_sources_no_sync(
-            paths,
-            true,
-            &upgrade_scope,
-            flags.dangerously_skip_hook_check,
-            flags.dangerously_skip_build_hook_check,
-        )?;
+        commands::upgrade_sources_no_sync(paths, true, &upgrade_scope, flags.accept)?;
     }
     if !out.json && !applied.is_empty() {
         println!("{} applied {} change(s)", out.ok(), applied.len());

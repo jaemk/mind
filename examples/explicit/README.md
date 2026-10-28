@@ -59,7 +59,7 @@ Install both items:
 
 ```
 mind learn style
-mind learn scan --dangerously-skip-install-hook-check
+mind learn scan --accept-hooks
 ```
 
 `learn scan` runs the install hook and prints:
@@ -84,7 +84,7 @@ Remove the learned items in reverse order. Forgetting `scan` fires the uninstall
 hook:
 
 ```
-mind forget scan --dangerously-skip-install-hook-check
+mind forget scan --accept-hooks
 ```
 
 Output:

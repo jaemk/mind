@@ -116,9 +116,8 @@ mind upgrade --yes
 ```
 
 A non-interactive run skips install and build hooks unless you pass
-`--dangerously-skip-install-hook-check` and
-`--dangerously-skip-build-hook-check`. Both run code from the source, so use
-them only for sources you trust. See [Scripts and CI](scripting.md).
+`--accept-hooks`. It runs code from the source, so use
+it only for sources you trust. See [Scripts and CI](scripting.md).
 
 ## Auto-update
 

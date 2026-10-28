@@ -214,7 +214,7 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 - `POL-59` Build hooks for items installed via the POL-58 pass are skipped by
   default, following the standard non-TTY skip path (HOOK-72). Setting
   `run-build-hooks = true` on the auto_meld entry enables them, equivalent to
-  `--dangerously-skip-build-hook-check`. Install hooks follow the same non-TTY
+  `--accept-hooks=build`. Install hooks follow the same non-TTY
   path: they are not prompted and are skipped in a non-interactive context.
 - `POL-60` Per-item install failures during the POL-58 pass are soft-failed in the
   same manner as provisioning failures (POL-34): each failed item is warned about on

@@ -81,8 +81,7 @@ mind recall --json | jq '.items[].items[] | select(.installed | not)'
 The last line lists items offered but not installed; fail the job if anything
 you expected appears. Hooks are skipped without a terminal. If the sources are
 yours and their install or build hooks must run, add
-`--dangerously-skip-install-hook-check` and
-`--dangerously-skip-build-hook-check`. See [Scripts and CI](scripting.md).
+`--accept-hooks`. See [Scripts and CI](scripting.md).
 
 ## Enforcing it
 

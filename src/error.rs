@@ -1357,7 +1357,7 @@ pub enum MindError {
     /// HOOK-107 (source targets) / HOOK-108 (item targets): a `hooks run
     /// <target>` invocation found at least one hook that existed and needed
     /// running, but EVERY one of them was skipped for want of consent (no
-    /// terminal, and `--dangerously-skip-install-hook-check` not given) - so
+    /// terminal, and `--accept-hooks` not given) - so
     /// the run did nothing, silently, in the state where a provisioning script
     /// most needs to know it. A run with nothing to do (no hooks declared, or
     /// every install hook already ran at the current commit) is unaffected and
@@ -1469,7 +1469,7 @@ fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[
             format!(
                 "hooks run '{one}': {skipped} hook(s) had work to do but were skipped for want \
                  of consent (not a terminal); re-run unattended with:\n  mind hooks run {quoted} \
-                 --event {event} --dangerously-skip-install-hook-check"
+                 --event {event} --accept-hooks={event}"
             )
         }
         _ => {
@@ -1483,7 +1483,7 @@ fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[
                 "hooks run '{target}': {skipped} hook(s) had work to do but were skipped for \
                  want of consent (not a terminal), across {} matched target(s){names}; re-run \
                  each individually with 'mind hooks run <name> --event {event} \
-                 --dangerously-skip-install-hook-check', substituting each resolved name above \
+                 --accept-hooks={event}', substituting each resolved name above \
                  for <name>",
                 resolved.len()
             )
@@ -3255,9 +3255,7 @@ mod tests {
         // metacharacters, since quoting is applied unconditionally rather than
         // only when something "looks dangerous" (`shell_quote`).
         assert!(
-            msg.contains(
-                "mind hooks run 'myrepo' --event install --dangerously-skip-install-hook-check"
-            ),
+            msg.contains("mind hooks run 'myrepo' --event install --accept-hooks=install"),
             "must give the copy-pasteable, shell-quoted remedy: {msg}"
         );
     }
@@ -3277,9 +3275,7 @@ mod tests {
         };
         let msg = e.to_string();
         assert!(
-            msg.contains(
-                "mind hooks run 'myrepo' --event uninstall --dangerously-skip-install-hook-check"
-            ),
+            msg.contains("mind hooks run 'myrepo' --event uninstall --accept-hooks=uninstall"),
             "the remedy must re-select the uninstall event: {msg}"
         );
         assert!(
@@ -3317,10 +3313,10 @@ mod tests {
         assert!(
             !msg.contains(
                 "mind hooks run github.com/a/one --event install \
-             --dangerously-skip-install-hook-check"
+             --accept-hooks=install"
             ) && !msg.contains(
                 "mind hooks run github.com/a/two --event install \
-                     --dangerously-skip-install-hook-check"
+                     --accept-hooks=install"
             ),
             "must not synthesize a single command for either resolved name either \
              (both had work, so neither alone is the whole remedy): {msg}"

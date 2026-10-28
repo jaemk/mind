@@ -3679,7 +3679,7 @@ fn remeld_overwrite_does_not_rerun_hooks_that_already_ran() {
             "meld",
             spec.as_str(),
             "--link-only",
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
         ];
         if !extra.is_empty() {
             args.push(extra);
@@ -6624,7 +6624,11 @@ fn upgrade_mid_batch_failure_still_saves_the_earlier_successful_upgrades() {
     );
     assert!(sb.mind(&["sync"]).success);
 
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(
         !r.success,
         "the batch must fail on review's install hook: {} {}",
@@ -6705,7 +6709,7 @@ fn upgrade_mid_batch_failure_still_saves_earlier_upgrades_under_json() {
         "--json",
         "upgrade",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -7100,7 +7104,7 @@ fn unmeld_glob_aborts_remaining_sources_when_one_item_hook_fails() {
         fail.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success,
         "install greet (with its uninstall hook)"
@@ -7109,7 +7113,7 @@ fn unmeld_glob_aborts_remaining_sources_when_one_item_hook_fails() {
         fail.mind(&[
             "learn",
             "skill:other",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success,
         "install other from the good source"
@@ -7119,12 +7123,12 @@ fn unmeld_glob_aborts_remaining_sources_when_one_item_hook_fails() {
     let good_full = format!("{}/glob-abort", good.base_name());
 
     // `*glob-abort` matches both; `--yes` clears the multi-source confirmation,
-    // `--dangerously-skip-install-hook-check` runs the hooks unattended.
+    // `--accept-hooks=install,update,uninstall` runs the hooks unattended.
     let r = fail.mind(&[
         "unmeld",
         "*glob-abort",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -10365,13 +10369,13 @@ fn example_explicit_item_hooks_fire() {
     // spec: HOOK-81, HOOK-82
     // The explicit example's `scan` skill declares per-item install/uninstall
     // hooks whose scripts ship under components/scan/hooks/. On a non-TTY they
-    // are skipped unless `--dangerously-skip-install-hook-check` is passed, which
+    // are skipped unless `--accept-hooks=install,update,uninstall` is passed, which
     // runs them. The install hook fires at learn (HOOK-81) and the uninstall hook
     // fires at forget (HOOK-82); each prints a recognizable line.
     let sb = Sandbox::from_example("explicit");
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
 
-    let learn = sb.mind(&["learn", "scan", "--dangerously-skip-install-hook-check"]);
+    let learn = sb.mind(&["learn", "scan", "--accept-hooks=install,update,uninstall"]);
     assert!(learn.success, "{} {}", learn.stdout, learn.stderr);
     assert!(
         learn.stdout.contains("explicit-example: scan installed"),
@@ -10379,7 +10383,7 @@ fn example_explicit_item_hooks_fire() {
         learn.stdout
     );
 
-    let forget = sb.mind(&["forget", "scan", "--dangerously-skip-install-hook-check"]);
+    let forget = sb.mind(&["forget", "scan", "--accept-hooks=install,update,uninstall"]);
     assert!(forget.success, "{} {}", forget.stdout, forget.stderr);
     assert!(
         forget.stdout.contains("explicit-example: scan removed"),
@@ -15217,7 +15221,7 @@ fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
     //                    plus `print!("{stdout_str}")` -- the hook's own output
     //   src/hook.rs      the same pair for the hook's stderr, also on stdout
     // `hook::decide` returns `Run` in a non-TTY only when
-    // `--dangerously-skip-install-hook-check` is passed, so this is exactly the
+    // `--accept-hooks=install,update,uninstall` is passed, so this is exactly the
     // unattended/CI invocation the flag exists for, and it is also the one that
     // most wants `--json`. The hook's own stdout is the worst of the three: it
     // is arbitrary text chosen by the SOURCE AUTHOR, so a `--json` consumer's
@@ -15232,7 +15236,7 @@ fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
         "meld",
         &sb.source_spec(),
         "--json",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld --json: {} {}", r.stdout, r.stderr);
     serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
@@ -15471,16 +15475,16 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
 }
 
 #[test]
-fn meld_dangerously_skip_runs_hook_and_records_it() {
+fn meld_accept_hooks_runs_hook_and_records_it() {
     // spec: HOOK-23, HOOK-10, HOOK-31, HOOK-55
-    // --dangerously-skip-install-hook-check runs the hook without prompting
+    // --accept-hooks=install,update,uninstall runs the hook without prompting
     // (HOOK-23). It runs in the clone after checkout (HOOK-10), so its marker
     // lands in the clone dir, and the registry records both the command and the
     // commit it ran at (HOOK-31).
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
 
-    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "meld should succeed: {}", r.stderr);
 
     // HOOK-10: the hook ran in the clone dir.
@@ -15512,7 +15516,7 @@ fn meld_hook_nonzero_exit_fails_and_registers_nothing() {
     let sb = sandbox_with_declared_hook("agents", "exit 1");
     let spec = sb.source_spec();
 
-    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(
         !r.success,
         "a non-zero hook exit must fail the meld: stdout={} stderr={}",
@@ -15553,7 +15557,7 @@ fn meld_hook_nonzero_exit_fails_and_registers_nothing() {
 fn meld_install_hook_flag_supplies_hook_without_mind_toml() {
     // spec: HOOK-2
     // --install-hook supplies a hook for a repo that ships no mind.toml. With
-    // --dangerously-skip-install-hook-check it runs, and the registry records
+    // --accept-hooks=install,update,uninstall it runs, and the registry records
     // the supplied command and a non-null run-commit.
     let sb = Sandbox::new(); // no mind.toml
     let spec = sb.source_spec();
@@ -15563,7 +15567,7 @@ fn meld_install_hook_flag_supplies_hook_without_mind_toml() {
         &spec,
         "--install-hook",
         "touch hookran",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld should succeed: {}", r.stderr);
 
@@ -15592,7 +15596,7 @@ fn recall_sources_shows_install_hook_marker() {
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
     assert!(
-        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+        sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"])
             .success
     );
 
@@ -15620,7 +15624,7 @@ fn upgrade_source_hook_rerun_mid_batch_failure_saves_earlier_hook_runs() {
         a.mind(&[
             "meld",
             &a.source_spec(),
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -15636,7 +15640,11 @@ fn upgrade_source_hook_rerun_mid_batch_failure_saves_earlier_hook_runs() {
     a.edit_source();
     assert!(a.mind(&["sync"]).success);
 
-    let r = a.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = a.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(
         !r.success,
         "must fail on B's hook: {} {}",
@@ -15684,14 +15692,14 @@ fn remeld_hook_failure_mid_batch_saves_earlier_successful_hook_run() {
         ),
     );
     let spec = sb.source_spec();
-    // Initial meld: non-TTY, no --dangerously-skip -> both hooks are offered
+    // Initial meld: non-TTY, no --accept-hooks -> both hooks are offered
     // and SKIPPED (ran_at stays None for both).
     assert!(sb.mind(&["meld", &spec]).success);
 
-    // Re-meld with --dangerously-skip-install-hook-check: both pending hooks
+    // Re-meld with --accept-hooks=install,update,uninstall: both pending hooks
     // run unattended, in declaration order; the first succeeds, the second
     // fails, stopping the batch.
-    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(
         !r.success,
         "the re-meld must fail on the second hook: {} {}",
@@ -15719,7 +15727,7 @@ fn upgrade_reruns_hook_after_source_advances() {
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
     assert!(
-        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+        sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"])
             .success,
         "initial meld should run the hook and record commit C1"
     );
@@ -15739,7 +15747,7 @@ fn upgrade_reruns_hook_after_source_advances() {
     );
 
     // upgrade sees the new commit and re-runs the hook.
-    let ev = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    let ev = sb.mind(&["upgrade", "-y", "--accept-hooks=install,update,uninstall"]);
     assert!(ev.success, "upgrade failed: {} {}", ev.stdout, ev.stderr);
     assert!(
         marker.exists(),
@@ -15750,7 +15758,7 @@ fn upgrade_reruns_hook_after_source_advances() {
     // The recorded run-commit advanced to the new commit; a second upgrade with
     // no source change must NOT re-run the hook.
     std::fs::remove_file(&marker).unwrap();
-    let again = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    let again = sb.mind(&["upgrade", "-y", "--accept-hooks=install,update,uninstall"]);
     assert!(again.success, "second upgrade failed: {}", again.stderr);
     assert!(
         !marker.exists(),
@@ -15763,12 +15771,12 @@ fn sync_upgrade_runs_hook_rerun_only_with_the_skip_check_flag() {
     // spec: HOOK-11, HOOK-23
     // `sync --upgrade` drives an upgrade pass, so it must honor the same hook
     // re-run rules. In a non-TTY context the re-run is skipped (HOOK-22), and
-    // `--dangerously-skip-install-hook-check` threaded through `sync` is what
+    // `--accept-hooks=install,update,uninstall` threaded through `sync` is what
     // runs it unattended (HOOK-23) -- the CI workflow the flag exists for.
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
     assert!(
-        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+        sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"])
             .success,
         "initial meld should run the hook and record commit C1"
     );
@@ -15795,12 +15803,16 @@ fn sync_upgrade_runs_hook_rerun_only_with_the_skip_check_flag() {
         "sync --upgrade without the flag must not re-run the hook (HOOK-22)"
     );
 
-    // `sync --upgrade --dangerously-skip-install-hook-check`: the flag now
+    // `sync --upgrade --accept-hooks=install,update,uninstall`: the flag now
     // reaches the upgrade pass, which re-runs the still-warranted hook unattended.
-    let with_flag = sb.mind(&["sync", "--upgrade", "--dangerously-skip-install-hook-check"]);
+    let with_flag = sb.mind(&[
+        "sync",
+        "--upgrade",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(
         with_flag.success,
-        "sync --upgrade --dangerously-skip-install-hook-check failed: {} {}",
+        "sync --upgrade --accept-hooks=install,update,uninstall failed: {} {}",
         with_flag.stdout, with_flag.stderr
     );
     assert!(
@@ -15815,7 +15827,7 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     // spec: HOOK-11
     // A scoped `upgrade <item>` must NOT re-run install hooks (arbitrary code) for
     // sources unrelated to the targeted item. Meld a hooked source (`agents`,
-    // recorded via --dangerously-skip-install-hook-check) plus a second,
+    // recorded via --accept-hooks=install,update,uninstall) plus a second,
     // hook-free source (`tools`); learn an item only from `tools`; advance the
     // hooked source and sync. A scoped upgrade targeting the `tools` item must
     // leave the hooked source's marker untouched, while an UNSCOPED upgrade (the
@@ -15827,7 +15839,7 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
             .mind(&[
                 "meld",
                 &agents_spec,
-                "--dangerously-skip-install-hook-check"
+                "--accept-hooks=install,update,uninstall"
             ])
             .success,
         "initial meld of the hooked source should run the hook and record its commit"
@@ -15868,7 +15880,7 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
         "upgrade",
         "tools#skill:review",
         "-y",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         scoped.success,
@@ -15882,7 +15894,7 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     );
 
     // Positive control: an UNSCOPED upgrade DOES re-run the hooked source's hook.
-    let unscoped = agents.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    let unscoped = agents.mind(&["upgrade", "-y", "--accept-hooks=install,update,uninstall"]);
     assert!(
         unscoped.success,
         "unscoped upgrade failed: {} {}",
@@ -16355,7 +16367,7 @@ fn upgrade_disclosure_fires_before_the_hook_rerun_pass_and_under_yes() {
         one.mind(&[
             "meld",
             &one.source_spec(),
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -16363,7 +16375,7 @@ fn upgrade_disclosure_fires_before_the_hook_rerun_pass_and_under_yes() {
         one.mind(&[
             "meld",
             &two.source_spec(),
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -16386,7 +16398,7 @@ fn upgrade_disclosure_fires_before_the_hook_rerun_pass_and_under_yes() {
         "upgrade",
         "skills#*",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         r.success,
@@ -16404,7 +16416,7 @@ fn upgrade_disclosure_fires_before_the_hook_rerun_pass_and_under_yes() {
     // ..."), both of which contain "install hook for".
     let disclosure_pos = r.stdout.find("matched 2 sources").expect("checked above");
     let hook_marker_pos = r.stdout.find("install hook for").expect(
-        "both sources' hooks are due to re-run under --dangerously-skip-install-hook-check",
+        "both sources' hooks are due to re-run under --accept-hooks=install,update,uninstall",
     );
     assert!(
         disclosure_pos < hook_marker_pos,
@@ -16472,7 +16484,7 @@ fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
             .mind(&[
                 "meld",
                 &agents_spec,
-                "--dangerously-skip-install-hook-check"
+                "--accept-hooks=install,update,uninstall"
             ])
             .success,
         "initial meld of the hooked source should run the hook and record its commit"
@@ -16498,7 +16510,7 @@ fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
         "tools",
         "--upgrade",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         r.success,
@@ -16519,7 +16531,7 @@ fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
         "agents",
         "--upgrade",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         r2.success,
@@ -16545,7 +16557,7 @@ fn upgrade_source_does_not_rerun_an_unrelated_sources_hook() {
             .mind(&[
                 "meld",
                 &agents_spec,
-                "--dangerously-skip-install-hook-check"
+                "--accept-hooks=install,update,uninstall"
             ])
             .success
     );
@@ -16562,7 +16574,7 @@ fn upgrade_source_does_not_rerun_an_unrelated_sources_hook() {
         "--source",
         "tools",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
@@ -16575,7 +16587,7 @@ fn upgrade_source_does_not_rerun_an_unrelated_sources_hook() {
         "--source",
         "agents",
         "--yes",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r2.success, "{} {}", r2.stdout, r2.stderr);
     assert!(
@@ -16600,7 +16612,7 @@ fn glob_scoped_upgrade_does_not_rerun_unrelated_source_hook() {
             .mind(&[
                 "meld",
                 &agents_spec,
-                "--dangerously-skip-install-hook-check"
+                "--accept-hooks=install,update,uninstall"
             ])
             .success,
         "initial meld of the hooked source should run the hook and record its commit"
@@ -16639,7 +16651,7 @@ fn glob_scoped_upgrade_does_not_rerun_unrelated_source_hook() {
         "upgrade",
         "tools#*",
         "-y",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         scoped.success,
@@ -16653,7 +16665,7 @@ fn glob_scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     );
 
     // Positive control: an unscoped upgrade DOES re-run the hooked source's hook.
-    let unscoped = agents.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    let unscoped = agents.mind(&["upgrade", "-y", "--accept-hooks=install,update,uninstall"]);
     assert!(
         unscoped.success,
         "unscoped upgrade failed: {} {}",
@@ -16677,7 +16689,7 @@ fn upgrade_skips_disallowed_source_hook_when_locked() {
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
     assert!(
-        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+        sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"])
             .success,
         "initial meld should run the hook and record its commit"
     );
@@ -16697,7 +16709,7 @@ fn upgrade_skips_disallowed_source_hook_when_locked() {
         "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
     );
     let r = sb.mind_env(
-        &["upgrade", "-y", "--dangerously-skip-install-hook-check"],
+        &["upgrade", "-y", "--accept-hooks=install,update,uninstall"],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
     assert!(
@@ -17361,7 +17373,7 @@ fn remeld_reoffers_pending_install_hooks_and_force_reruns() {
             "meld",
             &spec,
             "--link-only",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -17374,7 +17386,7 @@ fn remeld_reoffers_pending_install_hooks_and_force_reruns() {
             "meld",
             &spec,
             "--link-only",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -17390,7 +17402,7 @@ fn remeld_reoffers_pending_install_hooks_and_force_reruns() {
             &spec,
             "--link-only",
             "--force",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -17429,7 +17441,7 @@ fn install_hook_stdout_streams_to_mind_stdout() {
         "meld",
         &spec,
         "--link-only",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
     assert!(
@@ -17473,7 +17485,7 @@ fn install_hook_stderr_goes_to_mind_stderr_not_stdout() {
         "meld",
         &spec,
         "--link-only",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
     assert!(
@@ -17502,7 +17514,7 @@ fn install_hook_stderr_goes_to_mind_stderr_not_stdout() {
 fn meld_runs_multiple_install_hooks_with_dangerous_flag() {
     // spec: HOOK-50
     // A source with two [[hooks]] entries (both event = "install") runs both
-    // hooks in declaration order when --dangerously-skip-install-hook-check is
+    // hooks in declaration order when --accept-hooks=install,update,uninstall is
     // given. Both marker files must exist after the meld succeeds.
     let sb = Sandbox::bare("multi-hook");
     let marker1 = sb.base.join("marker1");
@@ -17519,7 +17531,7 @@ fn meld_runs_multiple_install_hooks_with_dangerous_flag() {
     let r = sb.mind(&[
         "meld",
         &spec,
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "--link-only",
     ]);
     assert!(
@@ -17550,7 +17562,7 @@ fn meld_runs_multiple_install_hooks_with_dangerous_flag() {
 #[test]
 fn meld_non_tty_skips_install_hooks_and_still_registers_source() {
     // spec: HOOK-22 (preserved with multi-hook)
-    // Without --dangerously-skip-install-hook-check, a non-TTY meld skips all
+    // Without --accept-hooks=install,update,uninstall, a non-TTY meld skips all
     // hooks, prints a skip note, and still registers the source.
     let sb = Sandbox::bare("multi-hook-skip");
     let marker1 = sb.base.join("skip-marker1");
@@ -17613,7 +17625,7 @@ fn optional_install_hook_failure_aborts_meld() {
     let r = sb.mind(&[
         "meld",
         &spec,
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
         "--link-only",
     ]);
     assert!(
@@ -17639,7 +17651,7 @@ fn required_install_hook_failure_aborts_meld() {
     sb.write_and_commit("mind.toml", toml);
     let spec = sb.source_spec();
 
-    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(
         !r.success,
         "meld must fail when a required install hook exits non-zero: {} {}",
@@ -17657,7 +17669,7 @@ fn required_install_hook_failure_aborts_meld() {
 #[test]
 fn unmeld_runs_uninstall_hook_with_dangerous_flag() {
     // spec: HOOK-54
-    // A source with an event = "uninstall" hook: after meld, `unmeld --dangerously-skip-install-hook-check`
+    // A source with an event = "uninstall" hook: after meld, `unmeld --accept-hooks=install,update,uninstall`
     // runs the hook and removes the source from the registry.
     let sb = Sandbox::bare("uninstall-hook");
     let uninstall_marker = sb.base.join("uninstall-ran");
@@ -17682,7 +17694,7 @@ fn unmeld_runs_uninstall_hook_with_dangerous_flag() {
     let unmeld = sb.mind(&[
         "unmeld",
         "uninstall-hook",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         unmeld.success,
@@ -17724,7 +17736,7 @@ fn unmeld_uninstall_hook_override_replaces_declared() {
         "uninstall-override",
         "--uninstall-hook",
         &format!("touch {om}"),
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         unmeld.success,
@@ -17850,7 +17862,7 @@ fn init_source_scaffold_offers_hook_examples() {
 #[test]
 fn recall_sources_marks_multi_hook_source() {
     // spec: HOOK-58
-    // After a multi-hook meld (with --dangerously-skip-install-hook-check so the
+    // After a multi-hook meld (with --accept-hooks=install,update,uninstall so the
     // hooks are recorded), `recall --sources` contains a `hook` token indicating
     // the source has hooks.
     let sb = Sandbox::bare("hook-report");
@@ -17869,7 +17881,7 @@ fn recall_sources_marks_multi_hook_source() {
         sb.mind(&[
             "meld",
             &spec,
-            "--dangerously-skip-install-hook-check",
+            "--accept-hooks=install,update,uninstall",
             "--link-only"
         ])
         .success,
@@ -17918,7 +17930,7 @@ fn pinned_local_meld_hook_failure_leaves_no_orphan_clone() {
         &spec,
         "--pin-ref",
         &sha,
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -17964,7 +17976,7 @@ fn upgrade_pending_filter_treats_none_ran_at_as_always_pending() {
     // source). The predicate `ran_at.is_none() || ran_at != commit` ensures this.
     //
     // The test melds a local source declaring a hook (non-TTY meld skips it,
-    // recording ran_at=null), then runs `upgrade --dangerously-skip-install-hook-check`.
+    // recording ran_at=null), then runs `upgrade --accept-hooks=install,update,uninstall`.
     // The hook must re-run (marker appears) proving the none-pending filter works.
     let sb = Sandbox::bare("upgrade-pending");
     let marker = sb.base.join("upgrade-pending-ran");
@@ -17993,7 +18005,7 @@ fn upgrade_pending_filter_treats_none_ran_at_as_always_pending() {
     );
 
     // Upgrade with the dangerous flag: the skipped (ran_at=null) hook must re-run.
-    let upgrade = sb.mind(&["upgrade", "--dangerously-skip-install-hook-check"]);
+    let upgrade = sb.mind(&["upgrade", "--accept-hooks=install,update,uninstall"]);
     assert!(
         upgrade.success,
         "upgrade should succeed: {} {}",
@@ -18097,7 +18109,7 @@ fn unmeld_failing_uninstall_hook_leaves_source_melded() {
     let r = sb.mind(&[
         "unmeld",
         "failing-uninstall-hook",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -19265,7 +19277,7 @@ fn sandbox_with_item_hooks(name: &str) -> Sandbox {
 fn learn_runs_item_install_hook_in_store_dir() {
     // spec: HOOK-81, HOOK-83
     // An item install hook runs as the final install step, in the item's store
-    // directory, when run unattended via --dangerously-skip-install-hook-check.
+    // directory, when run unattended via --accept-hooks=install,update,uninstall.
     let sb = sandbox_with_item_hooks("agents");
     let spec = sb.source_spec();
     // Register without auto-installing (so the install runs under our flag).
@@ -19274,7 +19286,7 @@ fn learn_runs_item_install_hook_in_store_dir() {
     let r = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "learn should succeed: {} {}", r.stdout, r.stderr);
 
@@ -19337,7 +19349,7 @@ fn learn_item_install_hook_failure_rolls_back_the_install() {
     let r = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -19370,7 +19382,7 @@ fn forget_runs_item_uninstall_hook() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19378,7 +19390,7 @@ fn forget_runs_item_uninstall_hook() {
     let r = sb.mind(&[
         "forget",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         r.success,
@@ -19407,7 +19419,7 @@ fn forget_without_flag_skips_item_uninstall_hook_in_non_tty() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19441,7 +19453,7 @@ fn forget_item_uninstall_hook_failure_leaves_item_installed() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19449,7 +19461,7 @@ fn forget_item_uninstall_hook_failure_leaves_item_installed() {
     let r = sb.mind(&[
         "forget",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         !r.success,
@@ -19473,7 +19485,7 @@ fn unmeld_runs_item_uninstall_hook() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19482,7 +19494,7 @@ fn unmeld_runs_item_uninstall_hook() {
         "unmeld",
         "agents",
         "-y",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
         r.success,
@@ -19511,7 +19523,7 @@ fn item_install_hook_reruns_on_reinstall() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19523,7 +19535,7 @@ fn item_install_hook_reruns_on_reinstall() {
         sb.mind(&[
             "forget",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19535,7 +19547,7 @@ fn item_install_hook_reruns_on_reinstall() {
     let r = sb.mind(&[
         "learn",
         "skill:greet",
-        "--dangerously-skip-install-hook-check",
+        "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
@@ -19557,7 +19569,7 @@ fn in_place_upgrade_reruns_install_hook_but_not_uninstall_hook() {
         sb.mind(&[
             "learn",
             "skill:greet",
-            "--dangerously-skip-install-hook-check"
+            "--accept-hooks=install,update,uninstall"
         ])
         .success
     );
@@ -19569,7 +19581,7 @@ fn in_place_upgrade_reruns_install_hook_but_not_uninstall_hook() {
         "---\ndescription: greet the user\n---\n# greet v2\n",
     );
     assert!(sb.mind(&["sync"]).success);
-    let r = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["upgrade", "-y", "--accept-hooks=install,update,uninstall"]);
     assert!(
         r.success,
         "upgrade should succeed: {} {}",
@@ -20671,7 +20683,7 @@ fn curator_applies_follow_branch_roots_and_hook_when_nested_has_no_mind_toml() {
         ),
     );
     let spec = registry.source_spec();
-    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = registry.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
     // DSC-61: roots applied -> the pkg-only item is discovered.
@@ -20739,7 +20751,7 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
         ),
     );
     let spec = registry.source_spec();
-    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = registry.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
     // DSC-60: a warning fires because roots/hooks are gated and suppressed.
@@ -21008,7 +21020,7 @@ fn curator_hooks_do_not_leak_across_nested_entries() {
         ),
     );
     let spec = registry.source_spec();
-    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = registry.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
     let alpha_clone = registry
@@ -21088,7 +21100,7 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
         ),
     );
     let spec = registry.source_spec();
-    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    let r = registry.mind(&["meld", &spec, "--accept-hooks=install,update,uninstall"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
     // DSC-60: the warning fires because roots/hooks are present and gated.
@@ -21209,7 +21221,7 @@ fn curator_hook_skipped_under_non_tty_without_skip_flag() {
     // The curator hook runs through the same disclosure/safety path as a source's
     // own hooks, INCLUDING the non-TTY skip (HOOK-22). The integration harness is
     // non-TTY (piped stdin), so a meld WITHOUT
-    // `--dangerously-skip-install-hook-check` must SKIP the curator hook (its
+    // `--accept-hooks=install,update,uninstall` must SKIP the curator hook (its
     // marker is never created) rather than run it silently, while the meld itself
     // still succeeds and the source is registered.
     let nested = make_unonboarded_nested("skiphook");
@@ -21227,7 +21239,7 @@ fn curator_hook_skipped_under_non_tty_without_skip_flag() {
         ),
     );
     let spec = registry.source_spec();
-    // No --dangerously-skip-install-hook-check: non-TTY must take the skip path.
+    // No --accept-hooks=install,update,uninstall: non-TTY must take the skip path.
     let r = registry.mind(&["meld", &spec]);
     assert!(
         r.success,

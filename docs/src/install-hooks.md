@@ -42,7 +42,8 @@ commit, clone path, and exact command before running anything, and prompts
 `[Y/n/a]` with three choices: run the hook (the default, a bare Enter), skip it
 but still install the source and its items, or abort and install nothing. In a
 non-TTY context (CI, scripts) the hook is skipped and a note is printed;
-`--dangerously-skip-install-hook-check` runs it unattended. Overriding a source's
+`--accept-hooks` runs it unattended (`--accept-hooks=install` accepts only
+install hooks; see [Scripts and CI](scripting.md#hooks)). Overriding a source's
 declared install hook with `--install-hook` is announced in the prompt, which
 shows both the declared and the overriding command.
 
@@ -59,7 +60,7 @@ A skipped hook is recorded and re-offered by `mind upgrade`, so you can run it
 later without the source needing to advance first. On an `upgrade` re-run the
 source is already installed, so abort is treated as skip. `upgrade` also re-runs
 the hook when a source advances to a new commit. `sync --upgrade` accepts
-`--dangerously-skip-install-hook-check` so a CI pipeline can run hook re-runs
+`--accept-hooks` so a CI pipeline can run hook re-runs
 unattended. Without the flag, a non-TTY `sync --upgrade` skips hook re-runs (the
 same as `upgrade`).
 
@@ -108,8 +109,7 @@ before the clone is removed. They use the same safety-prompt model as install
 hooks: required hooks prompt run / skip / abort-the-unmeld; optional hooks prompt
 run / skip; a non-TTY `unmeld` skips them and notes it. `unmeld --uninstall-hook
 <cmd>` supplies or overrides the source's declared uninstall hooks. `unmeld
---dangerously-skip-hook-check` runs them unattended (`--dangerously-skip-install-hook-check`,
-the original spelling, is kept as a hidden alias). A required uninstall hook that
+--accept-hooks` runs them unattended. A required uninstall hook that
 fails or is aborted leaves the source melded.
 
 ## Running hooks on demand
@@ -158,8 +158,7 @@ item to be installed. `--event build` rebuilds the item through the normal
 transactional install path, so a failed rebuild leaves the existing copy
 untouched.
 
-The `--dangerously-skip-install-hook-check` and `--dangerously-skip-build-hook-check`
-flags apply exactly as they do to the automatic flows: without them a non-TTY run
+`--accept-hooks` applies exactly as it does to the automatic flows: without it a non-TTY run
 skips the hooks, and a required hook's failure or abort is a non-zero exit.
 
 `mind hooks list <target>` reports the hooks in effect for a source and its

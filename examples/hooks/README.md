@@ -19,7 +19,7 @@ at unmeld.
   abort the meld); an optional hook (`optional = true`) prompts run/skip only, so
   declining never blocks the meld.
 * Non-TTY behavior: with no terminal to prompt on, hooks are skipped rather than
-  run blind, unless you pass `--dangerously-skip-install-hook-check` to run them
+  run blind, unless you pass `--accept-hooks` to run them
   unattended.
 
 Convention discovery stays on: there is no `[[items]]` or `[discover]`, so the
@@ -74,7 +74,7 @@ since skipping it never blocks the meld.
 mind meld /tmp/hooks-demo
 
 # Unattended (e.g. CI / non-TTY): run the install hooks without prompting.
-mind meld /tmp/hooks-demo --dangerously-skip-install-hook-check
+mind meld /tmp/hooks-demo --accept-hooks
 ```
 
 After the install hooks run, confirm they executed by checking the marker files:
@@ -131,7 +131,7 @@ listed by `hooks list` and does not run at `meld`.
 `../../spec/install-hooks.md` - normative rules for the hook feature. IDs
 demonstrated here: HOOK-20 (disclosure header and prompt), HOOK-21 (skip
 behavior), HOOK-22 (non-TTY skips hooks), HOOK-23
-(`--dangerously-skip-install-hook-check`), HOOK-50 (`[[hooks]]` array),
+(`--accept-hooks`), HOOK-50 (`[[hooks]]` array),
 HOOK-51 (hook fields: `run`, `name`, `optional`, `event`), HOOK-52 (optional
 two-way `[Y/n]` prompt), HOOK-54 (uninstall hooks at `unmeld`), HOOK-120
 (the `update` event), HOOK-121 (update hooks run at `upgrade`, never at

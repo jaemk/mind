@@ -590,13 +590,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             name,
             keep_items,
             uninstall_hook,
-            dangerously_skip_install_hook_check,
+            accept,
         } => commands::unmeld(
             paths,
             &name,
             keep_items,
             yes,
-            dangerously_skip_install_hook_check,
+            accept.accept(),
             uninstall_hook,
         ),
         Command::Learn {
@@ -607,8 +607,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dry_run,
             force,
             overwrite,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
+            accept,
             local,
             profiles,
             no_default_profile,
@@ -639,8 +638,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 } else {
                     commands::Clobber::Prompt
                 },
-                dangerously_skip: dangerously_skip_install_hook_check,
-                dangerously_skip_build: dangerously_skip_build_hook_check,
+                accept: accept.accept(),
             };
             // spec: LNK-6 -- a deep tree/blob URL one-shots: register the
             // item-link instance, then install its skill. spec: CLI-200 -- `--pin`
@@ -709,13 +707,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             force: _,
             dropped: _,
             profile: Some(profile),
-            dangerously_skip_install_hook_check,
+            accept,
         } if !unmanaged => commands::forget_source_profile(
             paths,
             item.as_deref().unwrap_or_default(),
             &profile,
             yes,
-            dangerously_skip_install_hook_check,
+            accept.accept(),
         ),
         Command::Forget {
             item,
@@ -723,7 +721,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             force,
             dropped,
             profile: _,
-            dangerously_skip_install_hook_check,
+            accept,
         } => commands::forget(
             paths,
             item.as_deref(),
@@ -731,29 +729,21 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dropped,
             yes,
             force,
-            dangerously_skip_install_hook_check,
+            accept.accept(),
         ),
         Command::Sync {
             source,
             upgrade,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
-        } => commands::sync_with_selector(
-            paths,
-            source.as_deref(),
-            upgrade,
-            yes,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
-        ),
+            accept,
+        } => commands::sync_with_selector(paths, source.as_deref(), upgrade, yes, accept.accept()),
         Command::Upgrade {
             item,
             source,
             no_sync,
             allow_breaking,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
+            accept,
         } => {
+            let accept = accept.accept();
             // spec: AUP-21
             if !json {
                 auto_update::show_unshown(paths);
@@ -763,31 +753,11 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if let Some(source) = source {
                 // spec: CLI-244 - scope the sync and the pass to one source.
-                commands::upgrade_source(
-                    paths,
-                    yes,
-                    item.as_deref(),
-                    &source,
-                    no_sync,
-                    dangerously_skip_install_hook_check,
-                    dangerously_skip_build_hook_check,
-                )
+                commands::upgrade_source(paths, yes, item.as_deref(), &source, no_sync, accept)
             } else if no_sync {
-                commands::upgrade_no_sync(
-                    paths,
-                    yes,
-                    item.as_deref(),
-                    dangerously_skip_install_hook_check,
-                    dangerously_skip_build_hook_check,
-                )
+                commands::upgrade_no_sync(paths, yes, item.as_deref(), accept)
             } else {
-                commands::upgrade(
-                    paths,
-                    yes,
-                    item.as_deref(),
-                    dangerously_skip_install_hook_check,
-                    dangerously_skip_build_hook_check,
-                )
+                commands::upgrade(paths, yes, item.as_deref(), accept)
             }
         }
         Command::Evolve { check, version } => selfupdate::run(check, yes, version),
@@ -936,16 +906,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 target,
                 event,
                 force,
-                dangerously_skip_install_hook_check,
-                dangerously_skip_build_hook_check,
-            } => hooks_cmd::run(
-                paths,
-                &target,
-                event,
-                force,
-                dangerously_skip_install_hook_check,
-                dangerously_skip_build_hook_check,
-            ),
+                accept,
+            } => hooks_cmd::run(paths, &target, event, force, accept.accept()),
             HooksCmd::List { target } => hooks_cmd::list(paths, &target),
         },
         // spec: CUR-1 -- one pass over every registered curator.
@@ -954,8 +916,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             prune,
             no_sync,
             adopt,
-            dangerously_skip_install_hook_check,
-            dangerously_skip_build_hook_check,
+            accept,
         } => curate::run(
             paths,
             curate::CurateFlags {
@@ -966,8 +927,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 prune,
                 no_sync,
                 adopt,
-                dangerously_skip_hook_check: dangerously_skip_install_hook_check,
-                dangerously_skip_build_hook_check,
+                accept: accept.accept(),
             },
         ),
         Command::Dump {
@@ -1494,7 +1454,7 @@ mod tests {
     }
 
     /// `hooks run --event` accepts install, uninstall, build value variants and
-    /// parses correctly. Force, dangerously-skip flags parse as expected.
+    /// parses correctly. `--force` and `--accept-hooks` parse as expected.
     // spec: CLI-195
     #[test]
     fn hooks_run_flags_parse() {
@@ -1509,15 +1469,13 @@ mod tests {
                         target,
                         event,
                         force,
-                        dangerously_skip_install_hook_check,
-                        dangerously_skip_build_hook_check,
+                        accept,
                     },
             } => {
                 assert_eq!(target, "agents");
                 assert_eq!(event, HookEventArg::Install);
                 assert!(!force);
-                assert!(!dangerously_skip_install_hook_check);
-                assert!(!dangerously_skip_build_hook_check);
+                assert_eq!(accept.accept(), crate::hook::Accept::default());
             }
             other => panic!("expected HooksCmd::Run, got {other:?}"),
         }
@@ -1531,8 +1489,7 @@ mod tests {
             "--event",
             "build",
             "--force",
-            "--dangerously-skip-install-hook-check",
-            "--dangerously-skip-build-hook-check",
+            "--accept-hooks",
         ])
         .expect("hooks run with all flags should parse");
         match cli.command {
@@ -1541,15 +1498,13 @@ mod tests {
                     HooksCmd::Run {
                         event,
                         force,
-                        dangerously_skip_install_hook_check,
-                        dangerously_skip_build_hook_check,
+                        accept,
                         ..
                     },
             } => {
                 assert_eq!(event, HookEventArg::Build);
                 assert!(force);
-                assert!(dangerously_skip_install_hook_check);
-                assert!(dangerously_skip_build_hook_check);
+                assert_eq!(accept.accept(), crate::hook::Accept::ALL);
             }
             other => panic!("expected HooksCmd::Run, got {other:?}"),
         }
@@ -1596,72 +1551,184 @@ mod tests {
         );
     }
 
-    /// `sync --upgrade --dangerously-skip-install-hook-check` must parse and the
-    /// flag must be forwarded to the upgrade pass so non-TTY CI can trigger hook
-    /// re-runs unattended (HOOK-11, HOOK-23). Verified here by inspecting the
-    /// parsed struct; the end-to-end behavior is covered by tests/cli.rs.
-    // spec: HOOK-11 HOOK-23
+    /// `sync --upgrade --accept-hooks` must parse and the flag must be forwarded
+    /// to the upgrade pass so non-TTY CI can trigger hook re-runs unattended
+    /// (HOOK-11, HOOK-23). Verified here by inspecting the parsed struct; the
+    /// end-to-end behavior is covered by tests/cli.rs.
+    // spec: HOOK-11 HOOK-23 CLI-250
     #[test]
-    fn sync_dangerously_skip_install_hook_check_parses() {
-        // Without the flag: parses, field is false.
-        let cli = Cli::try_parse_from(["mind", "sync", "--upgrade"])
-            .expect("sync --upgrade should parse");
-        match cli.command {
+    fn sync_accept_hooks_parses() {
+        let sync_accept = |args: &[&str]| match Cli::try_parse_from(args)
+            .expect("sync should parse")
+            .command
+        {
             Command::Sync {
-                upgrade,
-                dangerously_skip_install_hook_check,
-                ..
+                upgrade, accept, ..
             } => {
                 assert!(upgrade, "--upgrade should be true");
-                assert!(
-                    !dangerously_skip_install_hook_check,
-                    "flag absent: should be false"
-                );
+                accept.accept()
             }
             other => panic!("expected Sync, got {other:?}"),
-        }
-
-        // With the flag: parses, field is true.
-        let cli = Cli::try_parse_from([
-            "mind",
-            "sync",
-            "--upgrade",
-            "--dangerously-skip-install-hook-check",
-        ])
-        .expect("sync --upgrade --dangerously-skip-install-hook-check should parse");
-        match cli.command {
-            Command::Sync {
-                upgrade,
-                dangerously_skip_install_hook_check,
-                ..
-            } => {
-                assert!(upgrade, "--upgrade should be true");
-                assert!(
-                    dangerously_skip_install_hook_check,
-                    "flag present: should be true"
-                );
-            }
-            other => panic!("expected Sync, got {other:?}"),
-        }
-
-        // Flag without --upgrade is now a parse error (HOOK-23: the flag requires
-        // --upgrade so it cannot be a silent no-op).
-        assert!(
-            Cli::try_parse_from(["mind", "sync", "--dangerously-skip-install-hook-check"]).is_err(),
-            "sync --dangerously-skip-install-hook-check without --upgrade must be a parse error"
-        );
-
-        // Confirm the lock mode is still Exclusive with the new flag.
+        };
         assert_eq!(
-            mode_of(&[
-                "mind",
-                "sync",
-                "--upgrade",
-                "--dangerously-skip-install-hook-check"
-            ]),
-            LockMode::Exclusive,
-            "sync --upgrade --dangerously-skip-install-hook-check must take the exclusive lock"
+            sync_accept(&["mind", "sync", "--upgrade"]),
+            crate::hook::Accept::default()
         );
+        assert_eq!(
+            sync_accept(&["mind", "sync", "--upgrade", "--accept-hooks"]),
+            crate::hook::Accept::ALL
+        );
+
+        // Every spelling requires --upgrade so it cannot be a silent no-op.
+        for flag in [
+            "--accept-hooks",
+            "--accept-hooks=install",
+            "--dangerously-skip-install-hook-check",
+            "--dangerously-skip-hook-check",
+            "--dangerously-skip-build-hook-check",
+        ] {
+            assert!(
+                Cli::try_parse_from(["mind", "sync", flag]).is_err(),
+                "sync {flag} without --upgrade must be a parse error"
+            );
+        }
+
+        // Confirm the lock mode is still Exclusive with the flag.
+        assert_eq!(
+            mode_of(&["mind", "sync", "--upgrade", "--accept-hooks"]),
+            LockMode::Exclusive,
+            "sync --upgrade --accept-hooks must take the exclusive lock"
+        );
+    }
+
+    /// `--accept-hooks` alone accepts every event, `=a,b` (or a repeat) only
+    /// the named ones, an unknown event is a usage error, and the bare form
+    /// does not swallow a following positional.
+    // spec: CLI-250
+    #[test]
+    fn accept_hooks_parses_events() {
+        use crate::hook::Accept;
+        let upgrade_accept = |args: &[&str]| match Cli::try_parse_from(args)
+            .expect("upgrade should parse")
+            .command
+        {
+            Command::Upgrade { accept, .. } => accept.accept(),
+            other => panic!("expected Upgrade, got {other:?}"),
+        };
+        assert_eq!(upgrade_accept(&["mind", "upgrade"]), Accept::default());
+        assert_eq!(
+            upgrade_accept(&["mind", "upgrade", "--accept-hooks"]),
+            Accept::ALL
+        );
+        assert_eq!(
+            upgrade_accept(&["mind", "upgrade", "--accept-hooks=install,build"]),
+            Accept {
+                install: true,
+                build: true,
+                ..Accept::default()
+            }
+        );
+        assert_eq!(
+            upgrade_accept(&[
+                "mind",
+                "upgrade",
+                "--accept-hooks=update",
+                "--accept-hooks=uninstall",
+            ]),
+            Accept {
+                update: true,
+                uninstall: true,
+                ..Accept::default()
+            }
+        );
+        assert!(
+            Cli::try_parse_from(["mind", "upgrade", "--accept-hooks=deploy"]).is_err(),
+            "an unknown event must be a usage error"
+        );
+        assert!(
+            Cli::try_parse_from(["mind", "upgrade", "--accept-hooks="]).is_err(),
+            "an empty event list must be a usage error"
+        );
+
+        // The bare flag takes no value, so the next word stays the positional.
+        match Cli::try_parse_from(["mind", "upgrade", "--accept-hooks", "review"])
+            .expect("upgrade --accept-hooks <item> should parse")
+            .command
+        {
+            Command::Upgrade { item, accept, .. } => {
+                assert_eq!(item.as_deref(), Some("review"));
+                assert_eq!(accept.accept(), Accept::ALL);
+            }
+            other => panic!("expected Upgrade, got {other:?}"),
+        }
+
+        // Every verb that runs hooks takes the flag.
+        for args in [
+            &["mind", "meld", "owner/repo", "--accept-hooks"][..],
+            &["mind", "learn", "review", "--accept-hooks"],
+            &["mind", "forget", "review", "--accept-hooks"],
+            &["mind", "unmeld", "owner/repo", "--accept-hooks"],
+            &["mind", "upgrade", "--accept-hooks"],
+            &["mind", "sync", "--upgrade", "--accept-hooks"],
+            &["mind", "curate", "--accept-hooks"],
+            &["mind", "hooks", "run", "repo", "--accept-hooks"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?} should parse");
+        }
+    }
+
+    /// The pre-rename `--dangerously-skip-*` spellings still parse, hidden from
+    /// `--help`, and accept exactly what they gated before.
+    // spec: CLI-251 CLI-227
+    #[test]
+    fn legacy_hook_flags_map_onto_accept_hooks() {
+        use crate::hook::Accept;
+        let lifecycle = Accept {
+            install: true,
+            update: true,
+            uninstall: true,
+            build: false,
+        };
+        let upgrade_accept = |flag: &str| match Cli::try_parse_from(["mind", "upgrade", flag])
+            .expect("legacy flag should parse")
+            .command
+        {
+            Command::Upgrade { accept, .. } => accept.accept(),
+            other => panic!("expected Upgrade, got {other:?}"),
+        };
+        assert_eq!(
+            upgrade_accept("--dangerously-skip-install-hook-check"),
+            lifecycle
+        );
+        assert_eq!(upgrade_accept("--dangerously-skip-hook-check"), lifecycle);
+        assert_eq!(
+            upgrade_accept("--dangerously-skip-build-hook-check"),
+            Accept {
+                build: true,
+                ..Accept::default()
+            }
+        );
+        // CLI-227: `forget`/`unmeld` keep both of their old spellings.
+        for flag in [
+            "--dangerously-skip-hook-check",
+            "--dangerously-skip-install-hook-check",
+        ] {
+            match Cli::try_parse_from(["mind", "forget", "review", flag])
+                .expect("legacy forget flag should parse")
+                .command
+            {
+                Command::Forget { accept, .. } => assert!(accept.accept().uninstall),
+                other => panic!("expected Forget, got {other:?}"),
+            }
+        }
+
+        let mut cmd = Cli::command();
+        let upgrade = cmd
+            .find_subcommand_mut("upgrade")
+            .expect("upgrade subcommand");
+        let help = upgrade.render_long_help().to_string();
+        assert!(help.contains("--accept-hooks"), "{help}");
+        assert!(!help.contains("dangerously"), "{help}");
     }
 
     /// `evolve` (the binary self-update verb) parses with and without its flags

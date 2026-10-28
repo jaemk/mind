@@ -114,104 +114,84 @@ fn config_lobes_add_help_names_both_force_effects() {
     );
 }
 
-// ---- CLI-227: unmeld/forget's uninstall-hook consent flag is renamed -----
+// ---- CLI-250/CLI-251: `--accept-hooks`, legacy spellings hidden ----------
 
 #[test]
-fn unmeld_dangerously_skip_hook_check_help_shows_new_name() {
-    // spec: CLI-227
+fn hook_verbs_help_shows_accept_hooks_not_legacy_flags() {
+    // spec: CLI-250 CLI-251
     let sb = Sandbox::new();
-    let out = sb.help(&["unmeld", "--help"]);
-    assert!(
-        out.contains("--dangerously-skip-hook-check"),
-        "unmeld --help must show the renamed flag: {out}"
-    );
+    for verb in [
+        &["meld", "--help"][..],
+        &["learn", "--help"],
+        &["forget", "--help"],
+        &["unmeld", "--help"],
+        &["upgrade", "--help"],
+        &["sync", "--help"],
+        &["curate", "--help"],
+        &["hooks", "run", "--help"],
+    ] {
+        let out = sb.help(verb);
+        assert!(
+            out.contains("--accept-hooks"),
+            "{verb:?} must show --accept-hooks: {out}"
+        );
+        assert!(
+            !out.contains("dangerously"),
+            "{verb:?} must hide the legacy --dangerously-skip-* flags: {out}"
+        );
+    }
 }
 
 #[test]
-fn unmeld_accepts_new_flag_and_legacy_alias_both() {
-    // spec: CLI-227 - the new spelling and the old (deprecated, hidden) alias
-    // must both parse: a run against a nonexistent source must fail with the
-    // ordinary SourceNotFound error, never a clap parse error, for either.
+fn unmeld_accepts_new_flag_and_legacy_spellings() {
+    // spec: CLI-227 CLI-250 CLI-251 - the new spelling and every old (hidden)
+    // one must parse: a run against a nonexistent source must fail with the
+    // ordinary SourceNotFound error, never a clap parse error, for each.
     let sb = Sandbox::new();
-    let new_flag = sb.mind(&["unmeld", "no-such-source", "--dangerously-skip-hook-check"]);
-    assert!(!new_flag.success, "{}", new_flag.stderr);
-    assert!(
-        !looks_like_a_clap_parse_error(&new_flag.stderr),
-        "the new flag name must parse: {}",
-        new_flag.stderr
-    );
-    assert!(
-        new_flag.stderr.contains("no melded source matches"),
-        "must fail with SourceNotFound, not a parse error: {}",
-        new_flag.stderr
-    );
-
-    let old_flag = sb.mind(&[
-        "unmeld",
-        "no-such-source",
-        "--dangerously-skip-install-hook-check",
-    ]);
-    assert!(!old_flag.success, "{}", old_flag.stderr);
-    assert!(
-        !looks_like_a_clap_parse_error(&old_flag.stderr),
-        "the legacy alias must still parse: {}",
-        old_flag.stderr
-    );
-    assert!(
-        old_flag.stderr.contains("no melded source matches"),
-        "legacy alias must fail with SourceNotFound, not a parse error: {}",
-        old_flag.stderr
-    );
-}
-
-#[test]
-fn forget_dangerously_skip_hook_check_help_shows_new_name() {
-    // spec: CLI-227
-    let sb = Sandbox::new();
-    let out = sb.help(&["forget", "--help"]);
-    assert!(
-        out.contains("--dangerously-skip-hook-check"),
-        "forget --help must show the renamed flag: {out}"
-    );
-}
-
-#[test]
-fn forget_accepts_new_flag_and_legacy_alias_both() {
-    // spec: CLI-227
-    let sb = Sandbox::new();
-    let new_flag = sb.mind(&[
-        "forget",
-        "skill:no-such-item",
+    for flag in [
+        "--accept-hooks",
+        "--accept-hooks=uninstall",
         "--dangerously-skip-hook-check",
-    ]);
-    assert!(!new_flag.success, "{}", new_flag.stderr);
-    assert!(
-        !looks_like_a_clap_parse_error(&new_flag.stderr),
-        "the new flag name must parse: {}",
-        new_flag.stderr
-    );
-    assert!(
-        new_flag.stderr.contains("is not installed"),
-        "must fail with NotInstalled, not a parse error: {}",
-        new_flag.stderr
-    );
-
-    let old_flag = sb.mind(&[
-        "forget",
-        "skill:no-such-item",
         "--dangerously-skip-install-hook-check",
-    ]);
-    assert!(!old_flag.success, "{}", old_flag.stderr);
-    assert!(
-        !looks_like_a_clap_parse_error(&old_flag.stderr),
-        "the legacy alias must still parse: {}",
-        old_flag.stderr
-    );
-    assert!(
-        old_flag.stderr.contains("is not installed"),
-        "legacy alias must fail with NotInstalled, not a parse error: {}",
-        old_flag.stderr
-    );
+    ] {
+        let r = sb.mind(&["unmeld", "no-such-source", flag]);
+        assert!(!r.success, "{}", r.stderr);
+        assert!(
+            !looks_like_a_clap_parse_error(&r.stderr),
+            "{flag} must parse: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("no melded source matches"),
+            "{flag} must fail with SourceNotFound, not a parse error: {}",
+            r.stderr
+        );
+    }
+}
+
+#[test]
+fn forget_accepts_new_flag_and_legacy_spellings() {
+    // spec: CLI-227 CLI-250 CLI-251
+    let sb = Sandbox::new();
+    for flag in [
+        "--accept-hooks",
+        "--accept-hooks=uninstall",
+        "--dangerously-skip-hook-check",
+        "--dangerously-skip-install-hook-check",
+    ] {
+        let r = sb.mind(&["forget", "skill:no-such-item", flag]);
+        assert!(!r.success, "{}", r.stderr);
+        assert!(
+            !looks_like_a_clap_parse_error(&r.stderr),
+            "{flag} must parse: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("is not installed"),
+            "{flag} must fail with NotInstalled, not a parse error: {}",
+            r.stderr
+        );
+    }
 }
 
 // ---- CLI-230: `unmeld` gains `remove`/`rm` visible aliases ----------------
@@ -510,6 +490,25 @@ fn meld_learn_forget_help_include_examples_block() {
         assert!(
             out.contains("EXAMPLES"),
             "[{verb}] --help must include an EXAMPLES block: {out}"
+        );
+    }
+}
+
+#[test]
+fn forget_help_examples_show_source_qualified_refs() {
+    // spec: CLI-40 CLI-41
+    let sb = Sandbox::new();
+    let out = sb.help(&["forget", "--help"]);
+    for example in [
+        "mind forget 'local/projects/agents#review'",
+        "mind forget 'local/projects/agents#*' --yes",
+        "mind forget 'local/projects/agents#skill:*'",
+        "mind forget 'owner/repo#*' --yes",
+        "mind recall --sources",
+    ] {
+        assert!(
+            out.contains(example),
+            "forget --help must show `{example}`: {out}"
         );
     }
 }

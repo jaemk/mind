@@ -65,9 +65,8 @@ that it is managed like any curated source.
 A failure on one source (an unreadable curator, a bad pin, a scan error) is
 listed under `skipped` and does not stop the run. A non-interactive run without
 `--yes` reports the plan and applies nothing. Registering and installing run
-the same hook prompts as `meld` and `learn`, so the
-`--dangerously-skip-install-hook-check` and
-`--dangerously-skip-build-hook-check` flags exist on `curate` too. Pending
+the same hook prompts as `meld` and `learn`, so
+`--accept-hooks` works on `curate` too. Pending
 changes exit 0; under `--json`, `outcome` is `clean`, `pending`, or `applied`.
 
 ## Make your own

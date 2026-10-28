@@ -1307,7 +1307,7 @@ fn forget_profile_uninstall_hook_failure_rolls_back_and_saves_the_manifest() {
         "--profile",
         "full",
         "--yes",
-        "--dangerously-skip-hook-check",
+        "--accept-hooks=uninstall",
     ]);
     assert!(
         !r.success,

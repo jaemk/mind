@@ -23,17 +23,22 @@ install.
 
 ## Hooks
 
-Install, update, and uninstall hooks are skipped without a terminal, with a
-note. To run them unattended:
+Install, update, uninstall, and build hooks are skipped without a terminal,
+with a note. `--accept-hooks` runs them unattended on every verb that runs
+hooks (`meld`, `learn`, `forget`, `unmeld`, `upgrade`, `sync --upgrade`,
+`curate`, `hooks run`). Bare, it accepts every hook; with a list, only those
+events:
 
-| hook | flag | verbs |
-|------|------|-------|
-| a source's or item's install/update hook | `--dangerously-skip-install-hook-check` | `meld`, `learn`, `upgrade`, `sync --upgrade`, `curate`, `hooks run` |
-| an item's build hook | `--dangerously-skip-build-hook-check` | `meld`, `learn`, `upgrade`, `sync --upgrade`, `curate`, `hooks run` |
-| an uninstall hook | `--dangerously-skip-hook-check` | `unmeld`, `forget` |
+```sh
+mind upgrade --yes --accept-hooks                   # every hook
+mind upgrade --yes --accept-hooks=install,update    # not build hooks
+mind forget scan --accept-hooks=uninstall
+```
 
-Each runs code from the source without asking. Use them only for sources you
-trust. See [Run setup with hooks](install-hooks.md).
+The events are `install`, `update`, `uninstall`, and `build`. Any hook whose
+event is not listed is skipped as usual. This runs code from the source
+without asking, so use it only for sources you trust. See
+[Run setup with hooks](install-hooks.md).
 
 ## JSON output
 

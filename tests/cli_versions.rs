@@ -1010,7 +1010,11 @@ fn a_version_move_never_grants_hook_consent() {
     assert_eq!(runs(), 0, "--allow-breaking is not hook consent");
 
     // Only the dangerous flag runs it.
-    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&[
+        "upgrade",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(r.success, "upgrade: {}", r.stderr);
     assert_eq!(runs(), 1, "{}", r.stdout);
 }

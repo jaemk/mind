@@ -1,9 +1,9 @@
-//! Integration tests for item build hooks with `--dangerously-skip-build-hook-check`.
+//! Integration tests for item build hooks with `--accept-hooks=build`.
 //!
 //! Before HOOK-74, build hooks could not run in a non-TTY context at all (HOOK-72
 //! skips them). These tests exercise the new headless path and its invariants:
 //!
-//! - (a) build hook runs during `learn --dangerously-skip-build-hook-check`
+//! - (a) build hook runs during `learn --accept-hooks=build`
 //! - (b) a failing build hook rolls the install back (HOOK-71)
 //! - (c) the build hook re-runs when the item is reinstalled/upgraded (HOOK-73)
 //! - (d) without the flag, a non-TTY context still skips the build hook (HOOK-72)
@@ -105,7 +105,7 @@ fn git(dir: &Path, args: &[&str]) {
 #[test]
 fn build_hook_runs_when_flag_is_given() {
     // spec: HOOK-71 HOOK-74
-    // With --dangerously-skip-build-hook-check, the build hook must execute
+    // With --accept-hooks=build, the build hook must execute
     // during `learn`. The hook creates a sentinel file inside the tool's staging
     // directory, which ends up in the store after the swap (HOOK-71: the hook
     // runs in staging, its output lands in the store atomically on success).
@@ -132,14 +132,10 @@ fn build_hook_runs_when_flag_is_given() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
 
-    let learn = sb.mind(&[
-        "learn",
-        "tool:mytool",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let learn = sb.mind(&["learn", "tool:mytool", "--accept-hooks=build"]);
     assert!(
         learn.success,
-        "learn with --dangerously-skip-build-hook-check must succeed: {} {}",
+        "learn with --accept-hooks=build must succeed: {} {}",
         learn.stdout, learn.stderr
     );
 
@@ -180,11 +176,7 @@ fn failing_build_hook_rolls_back_install() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
 
-    let learn = sb.mind(&[
-        "learn",
-        "tool:badtool",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let learn = sb.mind(&["learn", "tool:badtool", "--accept-hooks=build"]);
     assert!(
         !learn.success,
         "learn must fail when the build hook exits non-zero (HOOK-71): {} {}",
@@ -240,11 +232,7 @@ fn build_hook_reruns_on_reinstall() {
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
 
     // First learn: build hook runs once.
-    let learn1 = sb.mind(&[
-        "learn",
-        "tool:counter",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let learn1 = sb.mind(&["learn", "tool:counter", "--accept-hooks=build"]);
     assert!(
         learn1.success,
         "first learn must succeed: {} {}",
@@ -262,11 +250,7 @@ fn build_hook_reruns_on_reinstall() {
 
     // Forget and re-learn (reinstall): build hook runs again.
     assert!(sb.mind(&["forget", "tool:counter"]).success);
-    let learn2 = sb.mind(&[
-        "learn",
-        "tool:counter",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let learn2 = sb.mind(&["learn", "tool:counter", "--accept-hooks=build"]);
     assert!(
         learn2.success,
         "second learn must succeed: {} {}",
@@ -312,7 +296,7 @@ fn build_hook_reruns_on_upgrade() {
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
 
     // First install.
-    let learn = sb.mind(&["learn", "tool:utool", "--dangerously-skip-build-hook-check"]);
+    let learn = sb.mind(&["learn", "tool:utool", "--accept-hooks=build"]);
     assert!(
         learn.success,
         "initial learn must succeed: {} {}",
@@ -333,7 +317,7 @@ fn build_hook_reruns_on_upgrade() {
         "tools/utool/TOOL.md",
         "---\ndescription: upgradeable tool v2\n---\n# utool\n",
     );
-    let upgrade = sb.mind(&["upgrade", "--yes", "--dangerously-skip-build-hook-check"]);
+    let upgrade = sb.mind(&["upgrade", "--yes", "--accept-hooks=build"]);
     assert!(
         upgrade.success,
         "upgrade must succeed: {} {}",
@@ -358,7 +342,7 @@ fn build_hook_reruns_on_upgrade() {
 #[test]
 fn build_hook_is_skipped_without_flag_in_non_tty() {
     // spec: HOOK-72
-    // Without --dangerously-skip-build-hook-check, the non-TTY (stdin=null)
+    // Without --accept-hooks=build, the non-TTY (stdin=null)
     // context must skip the build hook and still succeed (the item installs
     // unbuilt). The sentinel file that the hook would create must NOT exist.
     let sb = Sandbox::new("skip");
@@ -383,7 +367,7 @@ fn build_hook_is_skipped_without_flag_in_non_tty() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
 
-    // No --dangerously-skip-build-hook-check: hook must be skipped.
+    // No --accept-hooks=build: hook must be skipped.
     let learn = sb.mind(&["learn", "tool:skiptool"]);
     assert!(
         learn.success,
@@ -439,11 +423,7 @@ fn build_hook_output_streams_like_every_other_hook() {
 
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
-    let learn = sb.mind(&[
-        "learn",
-        "tool:mytool",
-        "--dangerously-skip-build-hook-check",
-    ]);
+    let learn = sb.mind(&["learn", "tool:mytool", "--accept-hooks=build"]);
     assert!(
         learn.success,
         "learn failed: {} {}",

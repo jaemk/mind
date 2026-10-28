@@ -71,7 +71,7 @@ and verified.
 | `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
-| Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
+| Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--accept-hooks` | done | [install-hooks.md](install-hooks.md) |
 | Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, uninstall hooks at `unmeld`, `init-source` scaffold | done | [install-hooks.md](install-hooks.md) (HOOK-50..60) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | Explicit item dependencies: optional `requires:` frontmatter key, unioned with the `{{ns:}}`-derived edges | done | DEP-4, DEP-5, DEP-6 |
@@ -151,7 +151,7 @@ and verified.
 | Conventional verb aliases (add/install/uninstall/update/search/list/doctor/self-update); `detach` and `config target` removed | done | CLI-172 |
 | meld/unmeld help states the install/uninstall defaults | done | CLI-173, CLI-174 |
 | Exit-code contract: 0 success, 1 runtime error, 2 usage error | done | CLI-175 |
-| `--dangerously-skip-build-hook-check`: run item build hooks non-interactively (CI installs) | done | HOOK-74 |
+| `--accept-hooks=build`: run item build hooks non-interactively (CI installs) | done | HOOK-74 |
 | `[source].namespace` canonical mind.toml key; `prefix` deprecated parse alias; `init-source` rewrites | done | DSC-82 |
 | Frontmatter reader strips a leading UTF-8 BOM | done | DSC-23 |
 | `compare_url` suppressed for gitlab/bitbucket hosts (GitHub-shaped link was wrong for those forges) | done | CLI-188 |
@@ -226,7 +226,9 @@ and verified.
 | TUI: Esc on a settled search filter arms a clear on the first press and only clears on a second consecutive Esc | done | TUI-69 |
 | TUI status/error line's row budget scales with terminal height instead of a flat 3-row ceiling | done | TUI-70 |
 | `probe` also falls back to the non-interactive listing under `--ascii` or a non-UTF-8 locale | done | TUI-71 |
-| `--dangerously-skip-hook-check` renamed from `--dangerously-skip-install-hook-check` for `unmeld`/`forget` (an uninstall-hook flag); old spelling kept as a hidden alias | done | CLI-227 |
+| `unmeld`/`forget` still accept both pre-`--accept-hooks` spellings (`--dangerously-skip-hook-check`, `--dangerously-skip-install-hook-check`), hidden | done | CLI-227 |
+| `--accept-hooks[=<events>]` on every hook-running verb: bare accepts every hook, a list (`install,update,uninstall,build`) only those events | done | CLI-250, HOOK-150 |
+| The `--dangerously-skip-*` hook flags are hidden spellings of `--accept-hooks` | done | CLI-251 |
 | `mind hooks run --rerun` is a visible alias for `--force` | done | CLI-228 |
 | `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |
 | `evolve` refuses a Homebrew-managed binary (canonical path under a `Cellar`) and points at `brew upgrade mind`; `--check` still reports | done | CLI-243 |

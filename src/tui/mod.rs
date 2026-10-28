@@ -925,7 +925,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1042,7 +1042,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1146,7 +1146,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1316,7 +1316,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");

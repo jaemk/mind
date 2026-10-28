@@ -37,6 +37,50 @@ impl HookEnv {
     }
 }
 
+/// The hook events run without the safety prompt (`--accept-hooks`, HOOK-23,
+/// HOOK-74, HOOK-83). The default accepts nothing: every hook is prompted on a
+/// TTY and skipped without one.
+// spec: HOOK-150
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Accept {
+    pub install: bool,
+    pub update: bool,
+    pub uninstall: bool,
+    pub build: bool,
+}
+
+impl Accept {
+    /// Every event: what a bare `--accept-hooks` gives.
+    pub const ALL: Accept = Accept {
+        install: true,
+        update: true,
+        uninstall: true,
+        build: true,
+    };
+
+    /// Whether a lifecycle hook for `event` runs without the prompt.
+    pub fn event(self, event: crate::mindfile::HookEvent) -> bool {
+        use crate::mindfile::HookEvent;
+        match event {
+            HookEvent::Install => self.install,
+            HookEvent::Update => self.update,
+            HookEvent::Uninstall => self.uninstall,
+        }
+    }
+
+    /// [`Accept::event`] by the event's `mind.toml` spelling; an unknown
+    /// spelling is never accepted.
+    pub fn event_str(self, event: &str) -> bool {
+        match event {
+            "install" => self.install,
+            "update" => self.update,
+            "uninstall" => self.uninstall,
+            "build" => self.build,
+            _ => false,
+        }
+    }
+}
+
 /// The profile state an in-flight profile change leaves behind (HOOK-141),
 /// set while a profile install is applied or a profile is disabled, so hooks
 /// run deep inside the ordinary install/uninstall path see it before it is
@@ -268,11 +312,11 @@ pub enum HookAct {
 }
 
 /// Resolve whether to run a hook from its disclosure and flags: a
-/// `--dangerously-skip` run is unattended (HOOK-23), a non-TTY skips (HOOK-22),
+/// `--accept-hooks` run is unattended (HOOK-23), a non-TTY skips (HOOK-22),
 /// an optional hook prompts two-way (run/skip, HOOK-52), and a required hook
 /// prompts three-way (run/skip/abort, HOOK-20). An optional hook never aborts.
-pub fn decide(disclosure: &str, optional: bool, dangerously_skip: bool) -> Result<HookAct> {
-    if dangerously_skip {
+pub fn decide(disclosure: &str, optional: bool, accepted: bool) -> Result<HookAct> {
+    if accepted {
         return Ok(HookAct::Run);
     }
     if !is_tty() {
@@ -608,20 +652,51 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    /// `decide` runs unattended under `--dangerously-skip` (HOOK-23) and skips in
+    /// `decide` runs unattended under `--accept-hooks` (HOOK-23) and skips in
     /// a non-TTY context (HOOK-22) without prompting, for both optional and
     /// required hooks. (The interactive run/skip/abort branches need a TTY and are
     /// covered by the prompt-parsing tests.)
     // spec: HOOK-22, HOOK-23
     #[test]
-    fn decide_dangerously_skip_runs_and_non_tty_skips() {
-        // dangerously_skip => Run regardless of optionality (no prompt).
+    fn decide_accepted_runs_and_non_tty_skips() {
+        // accepted => Run regardless of optionality (no prompt).
         assert_eq!(decide("d", false, true).unwrap(), HookAct::Run);
         assert_eq!(decide("d", true, true).unwrap(), HookAct::Run);
         // Test runs with no TTY on stdout, so a non-skip decision is Skip, never
         // Abort or Run (HOOK-22: never run silently).
         assert_eq!(decide("d", false, false).unwrap(), HookAct::Skip);
         assert_eq!(decide("d", true, false).unwrap(), HookAct::Skip);
+    }
+
+    /// `Accept` answers per event: each field gates only its own event, and an
+    /// unknown event spelling is never accepted.
+    // spec: HOOK-150
+    #[test]
+    fn accept_gates_each_event_on_its_own() {
+        use crate::mindfile::HookEvent;
+        let none = Accept::default();
+        for e in [HookEvent::Install, HookEvent::Update, HookEvent::Uninstall] {
+            assert!(!none.event(e));
+            assert!(Accept::ALL.event(e));
+        }
+        let update = Accept {
+            update: true,
+            ..Accept::default()
+        };
+        assert!(update.event(HookEvent::Update));
+        assert!(!update.event(HookEvent::Install));
+        assert!(!update.event(HookEvent::Uninstall));
+        assert!(update.event_str("update"));
+        assert!(!update.event_str("install"));
+        assert!(!update.event_str("build"));
+        assert!(
+            Accept {
+                build: true,
+                ..Accept::default()
+            }
+            .event_str("build")
+        );
+        assert!(!Accept::ALL.event_str("deploy"));
     }
 
     /// `$MIND_TTY` is read as a boolean: the falsey spellings mean "not a

@@ -659,7 +659,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1114,7 +1114,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1125,8 +1125,7 @@ mod tests {
             crate::commands::InstallFlow {
                 yes: true,
                 clobber: crate::commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn");
@@ -1303,7 +1302,7 @@ mod tests {
             false,
             crate::commands::PinRequest::None,
             None,
-            false,
+            crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
@@ -1314,8 +1313,7 @@ mod tests {
             crate::commands::InstallFlow {
                 yes: true,
                 clobber: crate::commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn");
@@ -1431,8 +1429,7 @@ mod tests {
             crate::commands::InstallFlow {
                 yes: true,
                 clobber: crate::commands::Clobber::Force,
-                dangerously_skip: true,
-                dangerously_skip_build: true,
+                accept: crate::hook::Accept::ALL,
             },
         )
         .expect("learn");
