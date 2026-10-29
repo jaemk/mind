@@ -40,6 +40,38 @@ event is not listed is skipped as usual. This runs code from the source
 without asking, so use it only for sources you trust. See
 [Run setup with hooks](install-hooks.md).
 
+Under `--json`, a run that considered any hook adds a `hooks` array to its
+document, one result per hook in the order they were considered. A failed run
+adds it to the error envelope, with the failing hook last:
+
+```json
+{"schema": 1, "error": {"kind": "hook-failed", "message": "..."},
+ "hooks": [{"at": "2026-10-28T14:03:09Z", "run": "20261028T140301Z-4242",
+            "verb": "meld", "event": "install", "label": "setup",
+            "source": "github.com/owner/repo", "command": "make setup",
+            "commit": "<sha>", "outcome": "failed", "exit_code": 2,
+            "signal": null, "duration_ms": 840, "log": null}]}
+```
+
+`outcome` is `ok`, `failed`, `skipped`, `declined`, `aborted`, or
+`interrupted`. An item hook also carries `item` (`kind:name`), and a
+consumer's `--install-hook` or `--uninstall-hook` override carries
+`replaced`, the declared commands it ran in place of. `exit_code`, `signal`,
+and `duration_ms` are `null` for a hook that did not run. Pass `--hook-log` to
+save each hook's output; `log` then names the file. The same records are kept
+in `~/.mind/hooks/history.jsonl` for `mind hooks history`. See
+[Hook results and logs](install-hooks.md#hook-results-and-logs).
+
+A run that stops on a failed hook exits 3, and one stopped by a Ctrl-C during a
+hook exits 130, so a script can tell them from other errors without `--json`.
+
+To keep logs only for hooks that fail, which suits CI:
+
+```sh
+mind upgrade --yes --accept-hooks --hook-log-keep failed
+mind hooks history --since 1d --failed --show
+```
+
 ## JSON output
 
 `--json` is a global flag, accepted before or after the verb. Every verb answers
@@ -60,9 +92,15 @@ Shapes:
 - `review`: `{"schema": 1, "action": "review", "outcome": "clean|advisory|failed",
   "hard": [...], "advisory": [...], "fixed": [...]}`, each finding being
   `{"kind": "<slug>", "message": "<text>"}`.
-- `hooks list`: each matched source's or item's hooks. `hooks run`: a tally,
+- `hooks list`: each matched source's or item's hooks, each with its `last`
+  result when there is one. `hooks run`: a tally,
   `{"schema": 1, "action": "hooks-run", "target": "...", "event": "...",
   "existed": N, "ran": N, "skipped": N}`.
+- `hooks history`: `{"schema": 1, "action": "hooks-history", "records": [...]}`;
+  with `--show`, each record that has a log also carries `output`, its text
+  (`null` when the file is gone).
+- Any verb that considered a hook: a `hooks` array of results (see
+  [Hooks](#hooks)).
 - `curate`: one document whose `outcome` is `clean`, `pending`, or `applied`.
 - `auto-update run`: `{"schema": 1, "action": "auto-update run", "target": "*",
   "outcome": "ok|partial|skipped", "moved": [...], "held": [...], "failed":
@@ -94,8 +132,10 @@ Command-line usage errors (exit 2) stay plain text.
 | exit | meaning |
 |------|---------|
 | 0 | success, including "nothing to do" and `curate` with pending changes |
-| 1 | any runtime error |
+| 1 | any other runtime error |
 | 2 | a command-line usage error |
+| 3 | a hook failed (`hook-failed`) |
+| 130 | a Ctrl-C interrupted a hook (`hook-interrupted`) |
 
 Specific cases:
 

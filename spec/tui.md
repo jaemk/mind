@@ -259,6 +259,17 @@ manifest, and store.
   first conflict. Other actions and an already-forced retry do not show or
   take `f`. A meld from the meld input takes `--overwrite` (CLI-246) the same
   way (TUI-77).
+- `TUI-83` The details dialog (TUI-26) shows the newest hook result from the
+  hook history (HOOK-163) for what it describes, as `last hook: <outcome>
+  <event>[ '<label>'][ (<status>)] <at>`: a source's dialog for the source's
+  own hooks (the label is the hook's name), an installed item's dialog for
+  that item's hooks. Nothing is shown when the history holds no record for
+  it. The snapshot carries the history, so the line follows the poll
+  (TUI-15).
+- `TUI-84` When an action stops on a hook failure or interruption (HOOK-30,
+  HOOK-171), the status bar shows the error and, on the next line, a pointer
+  to `mind hooks history --limit 1 --show` for the hook's result: the hook's
+  output went to a terminal the TUI has since redrawn over.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.

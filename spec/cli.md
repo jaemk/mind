@@ -912,7 +912,35 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   source's nested installed items are objects (an `item` name plus its own
   `hooks` array), not bare strings, so a later addition (e.g. a per-item
   install/uninstall disclosure record) has somewhere to go without a
-  breaking shape change.
+  breaking shape change. Any hook entry, source or item, also carries `last`,
+  its newest hook history record (HOOK-168), when the history holds one.
+- `CLI-253` `mind hooks history [target] [--failed] [--limit N]` prints recent
+  hook results from the hook history (HOOK-167), oldest first, one line each:
+  time, outcome, event, target, label (a source hook's only, since an item
+  hook's label is its event), the exit status for a hook that ran,
+  the commit, and the verb, plus an indented `log:` line for a saved log.
+  `target` is a source filter or `<source>#<item>` ref as for `hooks list`
+  (CLI-194), but matched against the recorded identities, so it also finds a
+  source that is no longer melded. As for `hooks run` (HOOK-105), a target
+  equal to a recorded source identity is that source even when it contains
+  `#` (an item-link instance), and a `source:` prefix forces the source
+  reading. `--failed` keeps only `failed` results (the same as `--outcome
+  failed`); the other filters are CLI-254, and `--show` prints each result's
+  saved output (HOOK-169).
+  `--limit N` keeps the newest N after filtering. Under `--json` it answers
+  `{"schema": 1, "action": "hooks-history", "target": "...", "records":
+  [...]}` (`target` omitted when none was given), each record the HOOK-160
+  object. It only reads, so it takes the shared lock (STO-41).
+- `CLI-254` `hooks history` also filters by `--outcome <list>` (any of `ok`,
+  `failed`, `skipped`, `declined`, `aborted`, `interrupted`, comma-separated),
+  `--event <list>` (`install`, `update`, `uninstall`, `build`), and `--since
+  <when>`: a duration (`30m`, `2h`, `7d`, counted back from now) or a UTC date
+  or time (`2026-10-28`, `2026-10-28T14:00`, `2026-10-28T14:00:00Z`) that
+  keeps records at or after it. Any other `--since` value, including a date
+  or time with a field out of range (month 13, day 32, hour 24, minute or
+  second 60), is a `bad-history-since` error. Filters combine with AND; within one list,
+  values combine with OR, and `--failed` adds `failed` to the `--outcome`
+  list.
 - `CLI-222` `mind hooks run --json` on a successful run (no `MindError`)
   answers with a count-based result rather than nothing:
 
@@ -1558,9 +1586,12 @@ and per-harness `kinds` defaults.
   effective name of the item or source the verb acted on (e.g. `"skill:review"`,
   `"github.com/owner/repo"`). `outcome` is a short token describing what the verb
   did. The tokens by verb are: `meld` -> `"melded"`, or `"already-melded"` when the
-  source was already registered with nothing new to install; `learn` -> `"installed"`,
+  source was already registered with nothing new to install, or `"aborted"` when
+  the user aborted at an install-hook prompt and nothing was registered; `learn` -> `"installed"`,
   `"up-to-date"` (already installed), or `"dry-run"` (`--dry-run`); `forget` and
-  `unmeld` -> `"removed"`, with `unmeld --unlink-only` -> `"unlinked"`; `sync` ->
+  `unmeld` -> `"removed"`, with `unmeld --unlink-only` -> `"unlinked"`, and
+  `unmeld` -> `"aborted"` when the user aborted at an uninstall-hook prompt and
+  the source stays melded (`count` is the items already removed); `sync` ->
   `"synced"`, or `"no-op"` when there are no sources; `upgrade` -> `"upgraded"`,
   `"renamed"`, or `"up-to-date"`; `absorb` -> `"absorbed"`; `config lobes add`/`remove`
   -> `"added"`/`"removed"`, or `"no-op"` when the lobe was already in the desired
@@ -1677,6 +1708,27 @@ and per-harness `kinds` defaults.
   string a human reads, and `max_metadata_size_bytes` as the byte count a
   consumer compares against, with an unlimited cap rendering as `"unlimited"` /
   `9223372036854775807` (CLI-242).
+  It also reports `hook-history` (the effective cap, default 100, HOOK-164),
+  `hook-log` (HOOK-165), and `hook-log-keep` (default `all`, HOOK-170).
+  These two are also the ones in force: when `--hook-log` or
+  `--hook-log-keep` (CLI-252) changes them for the run, the line shows what
+  the flags set (`true` for the owned directory, else the absolute
+  directory) and a note says so; otherwise it shows the keys as written.
+
+- `CLI-252` `--hook-log[=DIR]` is a global flag that saves each hook's output
+  for that invocation (HOOK-165). Bare, the logs go under
+  `~/.mind/hooks/logs` and are pruned with the history (HOOK-166); with a
+  directory, which must be attached with `=` so a bare `--hook-log` never
+  consumes the next word, they go there and are never pruned (unless that
+  directory is inside `~/.mind/hooks/logs`, HOOK-166). A leading `~` is
+  expanded to the home directory, since a shell leaves one after `=`
+  unexpanded. A relative directory is resolved against the working directory;
+  an empty one (`--hook-log=`) is a usage error. It outranks the `hook-log` config
+  key. The companion `--hook-log-keep <all|failed>` is HOOK-170.
+
+- `CLI-256` `--no-hook-log` is a global flag that turns output logging off
+  for that invocation, whatever the `hook-log` config key says (HOOK-165).
+  Given with `--hook-log` or `--hook-log-keep`, it is a usage error.
 
 - `CLI-242` Every integer mind emits in `--json` fits a signed 64-bit integer,
   so a consumer that parses numbers as `i64` never overflows. The one value that
@@ -1754,15 +1806,24 @@ and per-harness `kinds` defaults.
 - `CLI-100` A command that completes its work exits 0. Any `MindError` is printed
   to stderr (with its source chain) and exits non-zero.
 - `CLI-175` The exit-code contract: 0 for success, 1 for a runtime error
-  (`MindError`), and 2 for a usage error (clap parse failure). Clap handles code 2
-  automatically. Code 1 comes from `ExitCode::FAILURE` in `main`.
+  (`MindError`), and 2 for a usage error (clap parse failure), except the two
+  hook codes of CLI-255. Clap handles code 2 automatically. `main` takes every
+  other code from `MindError::exit_code`.
+- `CLI-255` A run that stops because a hook failed (`hook-failed`, HOOK-30)
+  exits 3; one stopped by a Ctrl-C during a hook (`hook-interrupted`,
+  HOOK-171) exits 130, the shell's code for SIGINT. A script can tell a hook
+  failure from any other error without `--json`. Other hook errors (a user's
+  abort, `hook-aborted`; hooks skipped for want of consent, `hooks-not-run`)
+  stay at 1.
 - `CLI-181` Under `--json`, when a `MindError` occurs the process emits a JSON
-  error envelope on stdout and exits with code 1 (unchanged). The envelope shape
+  error envelope on stdout and exits with the error's code (CLI-175). The envelope shape
   is `{"schema": 1, "error": {"kind": "<slug>", "message": "<display-text>"}}`.
   The `schema` field matches the success-envelope version (currently 1). The
   `message` field is the full `Display` text of the error. Nothing is written to
   stderr in this path. In non-json mode the existing behavior is unchanged: the
-  error message and its source chain are printed to stderr and the process exits 1.
+  error message and its source chain are printed to stderr and the process exits
+  1. In both modes a hook failure or interruption exits with its CLI-255 code
+  instead.
 - `CLI-182` The `kind` field in the JSON error envelope (CLI-181) is a stable
   kebab-case slug assigned once per `MindError` variant and never changed. Scripts
   may branch on `kind` to handle specific failures. Example slugs: `ItemNotFound`

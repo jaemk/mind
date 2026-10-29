@@ -122,13 +122,14 @@ CLI-17).
 ## Execution and recording
 
 - `HOOK-30` A hook runs via the shell in the clone directory with its stdin
-  closed (it cannot consume `mind`'s input). Its stdout and stderr are INHERITED,
-  so its output reaches the terminal as it is produced rather than being
+  closed (it cannot consume `mind`'s input). Its stdout and stderr are INHERITED
+  (unless output logging is on, HOOK-165, which copies them through `mind` as
+  they arrive instead), so its output reaches the terminal as it is produced rather than being
   collected and replayed when it exits. A hook is often the slowest step of a
   meld (a build, a package install); output that arrives only at the end tells
   the user nothing while they wait, and gives them nothing to interrupt on.
   The run is framed by `====== (hook: <name>) ======` before the spawn and
-  `====== (end hook: <name>) ======` after it, so the hook's output stays
+  `====== (end hook: <name>, <status>) ======` after it (HOOK-162), so the hook's output stays
   demarcated from `mind`'s own and from whatever it prints next (e.g. the
   install preview). The frame itself is printed on `mind`'s stdout only, never
   stderr, so `mind meld > /dev/null` discards both frame lines even though the
@@ -185,6 +186,154 @@ CLI-17).
   before the hook's own code runs. The same holds for the TUI, which
   redirects both stdout and stderr by the identical close-on-exec dance while
   an action runs (`tui/action.rs`'s `with_captured_stdout`).
+
+## Hook results
+
+Every hook `mind` considers produces a result record. The records reach the
+caller in the run's `--json` document, persist in a capped history file, and
+can point at a saved copy of the hook's output.
+
+- `HOOK-160` Each hook considered in a run (source or item, any event,
+  including `build`) produces one record:
+
+  ```json
+  {"at": "2026-10-28T14:03:09Z", "run": "20261028T140301Z-4242",
+   "verb": "meld", "event": "install", "label": "setup",
+   "source": "github.com/owner/repo", "item": "skill:scan",
+   "command": "make setup", "commit": "<sha>", "outcome": "ok",
+   "exit_code": 0, "signal": null, "duration_ms": 2100, "log": null}
+  ```
+
+  `outcome` is `ok` (exited 0), `failed` (exited non-zero, killed by a
+  signal, or could not be started; the last carries an `error` member with
+  the reason), `skipped` (not run for want of consent: no terminal and no
+  `--accept-hooks` for its event), `declined` (the user was asked and said
+  no), `aborted` (the user aborted at a required hook's prompt), or
+  `interrupted` (HOOK-171). Where an
+  abort does not stop the operation (the `upgrade` re-run of HOOK-11, which
+  treats it as a skip), the hook is recorded as `declined`. `label` is
+  the heading of the hook's frame (HOOK-30): a source hook's name, else its
+  command (HOOK-51), and an item hook's event. `item` is present only for an
+  item hook. A consumer's override (HOOK-56, HOOK-59) carries a `replaced`
+  array, the declared commands its `command` ran in place of; other records
+  omit it. `exit_code`, `signal`, and `duration_ms` are
+  `null` for a hook that did not run. `at` is the time the hook finished or
+  was passed over, in UTC. `run` is shared by every record of one `mind`
+  process; `verb` names the command that considered the hook. A hook the
+  pending filter holds back (HOOK-60, HOOK-101, HOOK-110), or one a managed
+  policy's locked allowlist keeps from running (POL-12), is not considered
+  and has no record. `duration_ms` runs from the spawn to the hook's exit.
+  Every source-controlled string is sanitized (DSC-95).
+- `HOOK-161` Under `--json`, the run's result document carries the run's
+  records, in order, as a top-level `hooks` array when at least one hook was
+  considered, and has no `hooks` member otherwise. A run that fails carries
+  the same array on its error envelope (CLI-181), the failing hook last, so a
+  caller sees which hook failed and its exit code without parsing the
+  message.
+- `HOOK-162` The closing frame line (HOOK-30) names how a hook that ran
+  exited: `====== (end hook: <name>, exit 0, 2.1s) ======`, or `signal <n>`
+  in place of the exit code. A run under a second is shown in milliseconds
+  (`exit 0, 12ms`). A hook that could not be started keeps the bare
+  `====== (end hook: <name>) ======`, since it has no status.
+- `HOOK-163` Each record is also appended to `~/.mind/hooks/history.jsonl`,
+  one JSON object per line, oldest first, as soon as the hook finishes, so a
+  run that stops partway still leaves the hooks it reached on record,
+  including one interrupted with Ctrl-C (HOOK-171). The file
+  keeps the newest `hook-history` records (default 100) and is rewritten
+  atomically on each write, readable by its owner only (mode 0600 on Unix);
+  lowering the cap trims the file on its next
+  write. A line that does not parse is dropped on the next write rather than
+  failing the run. A failure to write the history
+  warns once on stderr and never fails the hook or the verb.
+- `HOOK-164` The `hook-history` config key sets the cap; `0` turns the
+  history off: nothing is written, and `hooks history` says so, while still
+  showing any records an earlier file holds. A `config.toml` that does not
+  parse leaves every hook setting at its default (history on at 100, no
+  logs); when the file names a hook key (`hook-history`, `hook-log`,
+  `hook-log-keep`), `mind` warns on stderr that it was not applied.
+- `HOOK-165` Output logging saves each hook's output to a file while still
+  showing it. `--hook-log` (CLI-252) turns it on for one run; the `hook-log`
+  config key makes it the default (`true` for the owned directory, a path for
+  a directory of one's own, `false` or absent for off; any other value is a
+  config error naming what the key takes), and `--no-hook-log` (CLI-256)
+  turns it off for one run. An empty `hook-log` path names no directory and
+  means the owned one; a relative one is relative to `~/.mind`, the
+  directory holding `config.toml`. With logging on, the
+  hook's stdout and stderr are piped through `mind` instead of inherited:
+  each chunk is written to `mind`'s own stdout or stderr as it arrives, so the
+  output still streams and each stream keeps its channel, and copied to
+  `<dir>/<run>/<seq>-<event>-<target>.log`, where `<target>` is the source and
+  the hook's name for a source hook, and the source and item for an item hook
+  (each made file-name safe). The log is headed by the hook's event, label (a
+  source hook's only), target, and command, each line tagged `out | ` or
+  `err | ` in arrival order (a line longer than 64 KiB is split, each piece
+  tagged, so output with no newline is not held in memory), and ended with the exit status (`# exit <n>`, `# signal <n>`, or
+  `# not started: <reason>`). Each log is created new and readable by its
+  owner only (mode 0600 on Unix): a file or symlink already at its path is
+  never opened, so the log cannot be created (below). The relative order of the two
+  streams is only as exact as two pipes allow. The cost is the one HOOK-30
+  names: a piped hook does not see a terminal, so tools drop color and
+  progress rendering. A background process the hook leaves writing to those
+  pipes also loses its reader when `mind` exits, so its later writes fail
+  (`SIGPIPE`) rather than reaching the terminal. That is why logging is
+  opt-in. The record's `log` names the file, as an absolute path (a relative
+  `--hook-log` directory is resolved against the working directory at
+  startup), and
+  `mind` prints a note naming it after the frame. A hook that keeps the pipes
+  open past its exit delays `mind` by at most two seconds; output after that
+  still reaches the log, after its exit line. A log that cannot be created
+  warns and the hook runs unlogged.
+- `HOOK-166` A log under `~/.mind/hooks/logs` is owned by `mind`, including
+  one written there because a named directory lies inside it: when its record
+  is trimmed from the history, the log is deleted, and its run directory once
+  empty. Whether a log is owned is decided by its path, with `..` resolved,
+  and only a `.log` file is ever deleted, so a `log` value edited in the
+  history file cannot make eviction delete anything else. A log in any other
+  directory is never deleted. With the history off (HOOK-164) nothing is
+  trimmed, so instead a run's first log under `~/.mind/hooks/logs` deletes
+  each owned `.log` file there last modified more than 30 days ago, and each
+  directory below it that leaves empty, following no symlinks.
+- `HOOK-167` `mind hooks history` (CLI-253) prints the history, filtered by
+  target, outcome, event, and time (CLI-254).
+- `HOOK-168` `hooks list` shows, under each hook, its newest history record
+  (matched on source, item, event, and command, where a record matches a
+  declared command it ran in place of, its `replaced`): `last: <outcome>
+  (<status>) <at>, ran in its place: <command>, log: <path>`, the
+  `(<status>)` only for a hook that was started, `ran in its place` only for
+  an override's record, and `log` only when one was saved. A hook with no
+  record in the history shows nothing extra; the `ran at <commit>` status
+  (HOOK-55) still says it last succeeded there.
+- `HOOK-169` `hooks history --show` prints each shown record's saved log
+  after its line, verbatim and sanitized (DSC-95) line by line, so each log
+  line stays a line and a large log is streamed rather than read whole, or
+  notes that the log is
+  no longer on disk. Under `--json` each such record gains an `output`
+  member: the log's text, or `null` when it is gone. A record with no log
+  gets no `output`.
+- `HOOK-170` `--hook-log-keep <all|failed>` (or the `hook-log-keep` config
+  key, the flag outranking it) chooses which logs a logging run keeps. With
+  `failed`, a hook that exits 0 has its log deleted as soon as it exits, and
+  its record has no `log`; a hook that fails, cannot start, or is
+  interrupted keeps its log. The flag also turns logging on, to the owned
+  directory, for a run in which neither `--hook-log` nor the `hook-log` key
+  did; the config key alone does not.
+- `HOOK-171` A Ctrl-C while a hook runs reaches the hook and `mind` (the
+  terminal signals the whole process group). `mind` does not die with it: it
+  waits for the hook to exit, records it as `interrupted` with its exit code
+  or signal, ends its log as usual, prints the closing frame line, and then
+  stops with a `hook-interrupted` error (exit 130, CLI-255), whatever the
+  hook's own exit, since the user asked `mind` to stop. A second Ctrl-C while
+  the hook still runs (a hook that traps or ignores SIGINT) ends `mind` at
+  once, killed by the signal, with no record written; the hook is left to
+  exit on its own. When `mind`'s SIGINT is already ignored (a background
+  job), it is left that way and the hook inherits it.
+- `HOOK-172` A hook that fails, is aborted, or is interrupted stops the run
+  even where `mind` otherwise skips a failing entry and carries on: a nested
+  or marketplace source whose own install hook fails during `meld` or `sync`
+  is not skipped as a clone failure (DSC-79), and a curator entry's profile
+  member whose hook fails during `curate` is not skipped as an invalid
+  selection (CUR-15). The run ends with the hook's error and its CLI-255 exit
+  code.
 
 ## Validation (`mind review`)
 
@@ -464,6 +613,16 @@ outside the surrounding verb, under the same consent model.
   transient-failure case), mirroring `meld --force` (HOOK-60). Each install hook
   that runs updates its recorded run-commit exactly as an automatic run does
   (HOOK-55); uninstall hooks stay unrecorded (they fire only here and at `unmeld`).
+- `HOOK-111` A source target honors the consumer's recorded `--install-hook`
+  override (HOOK-56) as `upgrade` does: for `--event install` the override
+  replaces every declared install hook (and is offered even when none is
+  declared), and for `--event update` it replaces the declared update hooks
+  when there are any. It runs as one required hook, under the same pending
+  filter and `--force`, with the loud override note in its disclosure naming
+  the declared commands it replaced, and its result record carries them as
+  `replaced` (HOOK-160). So `hooks run` never runs a declared command the
+  consumer replaced, with or without `--accept-hooks`. Uninstall hooks are
+  unaffected (HOOK-59's override is given per `unmeld`, not recorded).
 - `HOOK-102` An item target (`<source>#<item>`) runs that item's install or
   uninstall hooks (HOOK-80/86) for the selected event, in place: with the working
   directory set to the item's installed store location (HOOK-81), against the

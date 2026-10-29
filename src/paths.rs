@@ -584,6 +584,17 @@ impl Paths {
     /// mechanical shard wires them up; until then the unit tests exercise it.
     // spec: STO-43
     pub fn atomic_write(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        Self::atomic_write_with(target, bytes, false)
+    }
+
+    /// [`Self::atomic_write`] for a file only its owner may read: the temp file
+    /// is mode 0600 on Unix before any byte is written, so the target never
+    /// exists with wider permissions, even for a moment.
+    pub fn atomic_write_private(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        Self::atomic_write_with(target, bytes, true)
+    }
+
+    fn atomic_write_with(target: &std::path::Path, bytes: &[u8], private: bool) -> Result<()> {
         let dir = target
             .parent()
             .ok_or_else(|| MindError::io(target, std::io::Error::other("no parent directory")))?;
@@ -601,6 +612,15 @@ impl Paths {
         use std::io::Write as _;
         let write_result = std::fs::File::create(&tmp_path)
             .and_then(|mut f| {
+                // On the open file, so a leftover temp from a crashed run is
+                // narrowed too before the new bytes go in.
+                #[cfg(unix)]
+                if private {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                }
+                #[cfg(not(unix))]
+                let _ = private;
                 f.write_all(bytes)?;
                 f.sync_all()
             })

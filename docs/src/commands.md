@@ -37,6 +37,9 @@ Accepted before or after any verb.
 | `--ascii` | plain ASCII output, no color or Unicode |
 | `-v`, `--verbose` | extra advisory output, such as unguarded-reference warnings |
 | `--max-metadata-size <SIZE>` | metadata size cap for this run; see [Configuration](configuration.md#metadata-size-cap) |
+| `--hook-log[=DIR]` | save each hook's output to a log file; see [Hook results and logs](install-hooks.md#hook-results-and-logs) |
+| `--no-hook-log` | save no hook output logs this run, whatever the `hook-log` config key says |
+| `--hook-log-keep <all\|failed>` | keep every log, or only failed hooks' logs (turns logging on) |
 
 ## Selecting items and sources
 
@@ -340,10 +343,11 @@ links without changing versions. Alias `doctor`.
 ```
 mind hooks run <TARGET> [OPTIONS]
 mind hooks list <TARGET>
+mind hooks history [TARGET] [FILTERS] [--limit N] [--show]
 ```
 
-Run a source's or item's hooks outside the usual verbs, or list them. `TARGET`
-is a source filter or a `source#item` ref.
+Run a source's or item's hooks outside the usual verbs, list them, or show
+recent hook results. `TARGET` is a source filter or a `source#item` ref.
 
 | flag (`run`) | effect |
 |--------------|--------|
@@ -351,7 +355,17 @@ is a source filter or a `source#item` ref.
 | `--force`, `--rerun` | re-run hooks already recorded at the current commit |
 | `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
 
-See [Run setup with hooks](install-hooks.md#running-hooks-on-demand).
+| flag (`history`) | effect |
+|------------------|--------|
+| `--failed` | only hooks that failed |
+| `--outcome <LIST>` | only these outcomes (`ok`, `failed`, `skipped`, `declined`, `aborted`, `interrupted`) |
+| `--event <LIST>` | only these events (`install`, `update`, `uninstall`, `build`) |
+| `--since <WHEN>` | only results since a duration ago (`2h`, `7d`) or a UTC date or time |
+| `--limit <N>` | only the newest N results |
+| `--show` | print each result's saved output |
+
+See [Run setup with hooks](install-hooks.md#running-hooks-on-demand) and
+[Hook results and logs](install-hooks.md#hook-results-and-logs).
 
 ## config
 

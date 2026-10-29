@@ -6,6 +6,56 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-28
+
+### Added
+
+- Hook results: every hook mind considers is reported with its outcome (`ok`,
+  `failed`, `skipped`, `declined`, `aborted`), exit code or signal, and run
+  time. Under `--json` they are the document's `hooks` array, and a failed run
+  carries them on the error envelope. The closing frame line shows the exit
+  status (`====== (end hook: setup, exit 0, 2.1s) ======`).
+- `~/.mind/hooks/history.jsonl` keeps the newest 100 hook results
+  (`hook-history` in `config.toml` sets the count; `0` turns it off).
+  `mind hooks history [target] [--failed] [--limit N]` shows them, and
+  `hooks list` shows each hook's last result.
+- `--hook-log[=DIR]` (or `hook-log` in `config.toml`) saves each hook's output
+  to a log file named for the source and the hook or item, while still
+  showing it, readable only by you. Logs under `~/.mind/hooks/logs` are
+  deleted when their result leaves the history, or after 30 days with the
+  history off. `--no-hook-log` turns it off for one run.
+- `--hook-log-keep failed` (or `hook-log-keep = "failed"`) keeps only the logs
+  of hooks that did not succeed.
+- `mind hooks history` filters by `--outcome`, `--event`, and `--since`, and
+  `--show` prints each result's saved output.
+- A Ctrl-C during a hook is recorded as `interrupted`; `mind` waits for the
+  hook to exit, then stops with exit 130. A second Ctrl-C ends `mind` at once.
+- `hooks list` shows the last result of a hook replaced by `--install-hook`,
+  naming the command that ran in its place.
+- The `probe` TUI's details dialog shows the last hook result, and a hook
+  failure in the TUI points at `mind hooks history`.
+
+### Changed
+
+- The closing hook frame line now includes the exit status, so a script
+  matching `====== (end hook: <name>) ======` exactly must match the prefix
+  instead.
+- A run that stops on a failed hook exits 3 instead of 1.
+
+### Fixed
+
+- A nested or marketplace source whose install hook failed was skipped as a
+  clone failure and the meld succeeded; the failure now stops the meld. A
+  curator profile member's failed hook during `curate` likewise stops the run
+  instead of being skipped as an invalid selection.
+- `meld --json` aborted at an install-hook prompt reported `"outcome":
+  "melded"`; it now reports `"aborted"`.
+- `unmeld --json` aborted at an uninstall-hook prompt wrote no document; it now
+  answers with `"outcome": "aborted"`.
+- `hooks run` ran a source's declared install and update hooks even when the
+  source was melded with `--install-hook`; it now runs the override in their
+  place, as `upgrade` does.
+
 ## [0.37.0] - 2026-10-28
 
 ### Changed
@@ -2101,7 +2151,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/jaemk/mind/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/jaemk/mind/compare/v0.36.1...v0.37.0
 [0.36.1]: https://github.com/jaemk/mind/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/jaemk/mind/compare/v0.35.1...v0.36.0

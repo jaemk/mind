@@ -11,6 +11,7 @@ mod frontmatter;
 mod git;
 mod hash;
 mod hook;
+mod hook_log;
 mod hooks_cmd;
 mod ignore;
 mod install;
@@ -173,8 +174,32 @@ mod json_stdout {
     pub fn flush_pending() {
         let doc = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(doc) = doc {
-            write_out(&doc);
+            write_out(&with_hooks(doc));
         }
+    }
+
+    /// `doc` with this run's hook results as its `hooks` member (HOOK-161),
+    /// when any hook was considered and `doc` is a JSON object. Added where
+    /// the document is written (here, or `commands::print_json` when stdout
+    /// was not reserved), so every verb that runs hooks reports them without
+    /// each building the member itself.
+    // spec: HOOK-161
+    pub fn with_hooks(doc: String) -> String {
+        let records = crate::hook_log::records();
+        if records.is_empty() {
+            return doc;
+        }
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&doc) else {
+            return doc;
+        };
+        let Some(obj) = value.as_object_mut() else {
+            return doc;
+        };
+        let Ok(hooks) = serde_json::to_value(&records) else {
+            return doc;
+        };
+        obj.insert("hooks".to_string(), hooks);
+        serde_json::to_string_pretty(&value).unwrap_or(doc)
     }
 
     /// Emit `value` as the run's answer INSTEAD of anything recorded (CLI-181:
@@ -216,6 +241,14 @@ mod json_stdout {
         {
             envelope["details"] = details;
         }
+        // spec: HOOK-161 -- a failed run reports the hooks it considered too,
+        // the failing one last.
+        let records = crate::hook_log::records();
+        if !records.is_empty()
+            && let Ok(hooks) = serde_json::to_value(&records)
+        {
+            envelope["hooks"] = hooks;
+        }
         envelope
     }
 }
@@ -247,8 +280,9 @@ fn main() -> std::process::ExitCode {
             if json {
                 // spec: CLI-181 -- emit the error as a JSON envelope on stdout so
                 // that scripts parsing stdout get a machine-readable reason. The
-                // exit code is unchanged (FAILURE = 1). Plain-text stderr output
-                // is suppressed; the envelope carries the full Display message.
+                // exit code is the error's own, as in text mode (CLI-175).
+                // Plain-text stderr output is suppressed; the envelope carries
+                // the full Display message.
                 // spec: CLI-221 -- folds in any findings the verb recorded
                 // before failing (e.g. `commands::review`'s hard findings)
                 // as the envelope's `details` member.
@@ -265,7 +299,9 @@ fn main() -> std::process::ExitCode {
                     src = e.source();
                 }
             }
-            std::process::ExitCode::FAILURE
+            // spec: CLI-175 CLI-255 -- a hook failure or interruption has its
+            // own code, so a script can tell it from other errors.
+            std::process::ExitCode::from(err.exit_code())
         }
     }
 }
@@ -351,9 +387,10 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
         | Command::Review { .. }
         | Command::Introspect { fix: false, .. }
         | Command::Dump { .. }
-        // hooks list is read-only: it reports but never runs or records anything.
+        // hooks list and hooks history are read-only: they report but never
+        // run or record anything.
         | Command::Hooks {
-            action: HooksCmd::List { .. },
+            action: HooksCmd::List { .. } | HooksCmd::History { .. },
         }
         | Command::Config {
             action:
@@ -481,6 +518,7 @@ fn run(cli: Cli) -> Result<()> {
     // completion script or a user from reading the manual.
     if !matches!(cli.command, Command::Completions { .. } | Command::Man) {
         install_metadata_limit(&cli, &paths)?;
+        configure_hook_log(&cli, &paths);
     }
 
     // spec: STO-40 STO-41 STO-42
@@ -498,6 +536,90 @@ fn run(cli: Cli) -> Result<()> {
             let _guard = lock.read()?;
             dispatch(cli, &paths)
         }
+    }
+}
+
+/// Set up this run's hook results (HOOK-163..HOOK-165): the history file and
+/// its cap from the `hook-history` key, and output logging from `--hook-log`,
+/// else the `hook-log` key. A config that will not parse leaves the defaults
+/// (history on, no logs), with a warning when it names a hook key.
+// spec: HOOK-164 HOOK-165
+fn configure_hook_log(cli: &Cli, paths: &Paths) {
+    // spec: HOOK-164 -- not every verb reads config for anything else (a
+    // source's `hooks run` does not), so when the file names a hook key, say
+    // here that it was not applied rather than drop it silently.
+    let cfg = config::Config::load(paths).unwrap_or_else(|e| {
+        let names_hook_key = std::fs::read_to_string(paths.config_file())
+            .map(|t| {
+                t.contains("hook-history")
+                    || t.contains("hook_history")
+                    || t.contains("hook-log")
+                    || t.contains("hook_log")
+            })
+            .unwrap_or(false);
+        if names_hook_key {
+            eprintln!("warning: hook settings in config.toml not applied, using the defaults: {e}");
+        }
+        config::Config::default()
+    });
+    let cap = cfg.hook_history.unwrap_or(hook_log::DEFAULT_HISTORY);
+    // Anchored like a named directory, so a relative `MIND_HOME` still gives
+    // absolute log paths (HOOK-165) and the ownership check compares like with
+    // like (HOOK-166).
+    let owned = owned_dir(paths);
+    let owned_logs = owned.clone();
+    let history = hook_log::anchor(&hook_log::history_file(&paths.mind_home));
+    // Clap refuses an empty `--hook-log=`.
+    let logs = match &cli.hook_log {
+        // spec: CLI-256
+        _ if cli.no_hook_log => None,
+        Some(None) => Some(owned),
+        // `--hook-log=~/x` needs the `=`, and the shell leaves a `~` after
+        // one unexpanded, so expand it here as the config key is (CLI-252).
+        Some(Some(dir)) => Some(hook_log::anchor(&commands::expand_tilde(
+            &dir.to_string_lossy(),
+        ))),
+        None => hook_log::config_logs(cfg.hook_log.as_ref(), &owned, &paths.mind_home),
+    };
+    // spec: HOOK-170 -- the flag names logs to keep, so it also turns logging
+    // on (to the owned directory) when nothing else did; the config key only
+    // shapes logging that is on.
+    let logs = match (logs, cli.hook_log_keep) {
+        (None, Some(_)) => Some(owned_dir(paths)),
+        (logs, _) => logs,
+    };
+    let keep = cli.hook_log_keep.or(cfg.hook_log_keep).unwrap_or_default();
+    hook_log::configure(hook_log::RunConfig {
+        verb: verb_name(&cli.command).to_string(),
+        history: (cap > 0).then_some((history, cap)),
+        logs,
+        keep,
+        owned_logs,
+    });
+}
+
+/// The owned log directory, anchored (HOOK-165, HOOK-166).
+fn owned_dir(paths: &Paths) -> std::path::PathBuf {
+    hook_log::anchor(&hook_log::owned_logs_dir(&paths.mind_home))
+}
+
+/// The verb a hook record names (HOOK-160).
+fn verb_name(command: &Command) -> &'static str {
+    match command {
+        Command::Meld(_) => "meld",
+        Command::Unmeld { .. } => "unmeld",
+        Command::Learn { .. } => "learn",
+        Command::Forget { .. } => "forget",
+        Command::Sync { .. } => "sync",
+        Command::Upgrade { .. } => "upgrade",
+        Command::Curate { .. } => "curate",
+        Command::Absorb { .. } => "absorb",
+        Command::Probe { .. } => "probe",
+        Command::Hooks {
+            action: HooksCmd::Run { .. },
+        } => "hooks run",
+        Command::AutoUpdate { .. } => "auto-update",
+        _ => "other",
     }
 }
 
@@ -909,6 +1031,26 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 accept,
             } => hooks_cmd::run(paths, &target, event, force, accept.accept()),
             HooksCmd::List { target } => hooks_cmd::list(paths, &target),
+            HooksCmd::History {
+                target,
+                failed,
+                outcome,
+                event,
+                since,
+                limit,
+                show,
+            } => hooks_cmd::history(
+                paths,
+                &hooks_cmd::HistoryQuery {
+                    target,
+                    failed,
+                    outcomes: outcome,
+                    events: event,
+                    since,
+                    limit,
+                    show,
+                },
+            ),
         },
         // spec: CUR-1 -- one pass over every registered curator.
         Command::Curate {
@@ -1094,6 +1236,7 @@ mod tests {
             &["mind", "link-project"],
             &["mind", "hooks", "run", "agents"],
             &["mind", "hooks", "list", "agents"],
+            &["mind", "hooks", "history"],
             &["mind", "review", "/some/path"],
             &["mind", "review", "--policy", "/etc/mind/policy.toml"],
         ] {
@@ -1171,6 +1314,7 @@ mod tests {
         (&["curate"], &["mind", "curate", "--check"]),
         (&["hooks", "run"], &["mind", "hooks", "run", "agents"]),
         (&["hooks", "list"], &["mind", "hooks", "list", "agents"]),
+        (&["hooks", "history"], &["mind", "hooks", "history"]),
         // The CLI-218 exclusions.
         (&["dump"], &["mind", "dump"]),
         (&["completions"], &["mind", "completions", "bash"]),
@@ -1450,6 +1594,12 @@ mod tests {
             mode_of(&["mind", "hooks", "list", "agents"]),
             LockMode::Shared,
             "hooks list must take the shared lock"
+        );
+        // spec: HOOK-167
+        assert_eq!(
+            mode_of(&["mind", "hooks", "history"]),
+            LockMode::Shared,
+            "hooks history only reads, so it takes the shared lock"
         );
     }
 

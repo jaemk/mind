@@ -433,7 +433,7 @@ fn build_hook_output_streams_like_every_other_hook() {
     // The frame is mind's own output, so it is on stdout ...
     assert!(
         learn.stdout.contains("====== (hook: build) ======")
-            && learn.stdout.contains("====== (end hook: build) ======"),
+            && learn.stdout.contains("====== (end hook: build, exit 0, "),
         "the build hook must be framed: {}",
         learn.stdout
     );

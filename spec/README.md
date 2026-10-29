@@ -228,6 +228,16 @@ and verified.
 | `probe` also falls back to the non-interactive listing under `--ascii` or a non-UTF-8 locale | done | TUI-71 |
 | `unmeld`/`forget` still accept both pre-`--accept-hooks` spellings (`--dangerously-skip-hook-check`, `--dangerously-skip-install-hook-check`), hidden | done | CLI-227 |
 | `--accept-hooks[=<events>]` on every hook-running verb: bare accepts every hook, a list (`install,update,uninstall,build`) only those events | done | CLI-250, HOOK-150 |
+| Hook results: one record per hook considered (outcome, exit code or signal, run time) in the `--json` document and error envelope, and on the closing frame line | done | HOOK-160, HOOK-161, HOOK-162 |
+| Hook history: the newest `hook-history` results (default 100) in `~/.mind/hooks/history.jsonl`, shown by `mind hooks history` and as each hook's last result in `hooks list` | done | HOOK-163, HOOK-164, HOOK-167, HOOK-168, CLI-253 |
+| Hook output logs: `--hook-log[=DIR]` / `hook-log` save each hook's output while still streaming it; owned logs are pruned with the history | done | HOOK-165, HOOK-166, CLI-252 |
+| `hooks history --show` prints saved hook output; `--outcome`, `--event`, `--since` filters | done | HOOK-169, CLI-254 |
+| `--hook-log-keep failed` / `hook-log-keep` keep only the logs of hooks that did not succeed | done | HOOK-170 |
+| A Ctrl-C during a hook is recorded as `interrupted` and stops `mind` with exit 130 | done | HOOK-171, CLI-255 |
+| A failed hook exits 3, distinct from other errors | done | CLI-255 |
+| An override's hook record names the declared commands it replaced, so `hooks list` shows its last result | done | HOOK-160, HOOK-168 |
+| `hooks run` applies the recorded `--install-hook` override to install and update hooks, as `upgrade` does | done | HOOK-111 |
+| The TUI details dialog shows the last hook result; a hook failure points at `hooks history` | done | TUI-83, TUI-84 |
 | The `--dangerously-skip-*` hook flags are hidden spellings of `--accept-hooks` | done | CLI-251 |
 | `mind hooks run --rerun` is a visible alias for `--force` | done | CLI-228 |
 | `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |

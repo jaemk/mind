@@ -523,8 +523,9 @@ fn run_interactive_meld(paths: &Paths, app: &mut app::App, args: crate::cli::Mel
                 msg
             });
         }
+        // spec: TUI-84
         Err(e) => {
-            app.set_error(format!("{e}"));
+            app.set_error(app::action_error_text(&e));
         }
     }
 }
@@ -673,6 +674,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         });
         app
     }

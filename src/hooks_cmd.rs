@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::catalog::CatalogItem;
 use crate::cli::HookEventArg;
 use crate::error::{MindError, Result};
+use crate::hook_log::{HookRecord, Outcome};
 use crate::manifest::{InstalledItem, Manifest};
 use crate::mindfile::{HookEvent, MindToml, ResolvedHook};
 use crate::paths::Paths;
@@ -17,18 +18,11 @@ use crate::resolve::{
 use crate::sanitize::strip_ansi;
 use crate::source::{Pin, RecordedEvent, RecordedHook, RecordedSourceHook, Registry, Source};
 
-/// [`crate::commands`]'s `print_json`, mirrored here so `hooks_cmd` stays
-/// self-contained (the same duplication rationale as `pin_description` below):
-/// route through `json_stdout::record` when stdout is reserved (CLI-217), or
-/// print directly otherwise.
+/// Emit a result document through [`crate::commands`]'s `print_json`, which
+/// records it when stdout is reserved (CLI-217) and adds the run's hook
+/// results either way (HOOK-161).
 fn emit_json<T: Serialize>(value: &T) -> Result<()> {
-    if crate::json_stdout::is_reserved() {
-        let s =
-            serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
-        crate::json_stdout::record(s);
-        return Ok(());
-    }
-    crate::render::print_json(value)
+    crate::commands::print_json(value)
 }
 
 /// `mind hooks run --json`'s result document (CLI-222): the HOOK-107/HOOK-108
@@ -79,6 +73,10 @@ struct SourceHookJson {
     /// recorded run state).
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
+    /// The hook's newest history record (HOOK-168); absent when the history
+    /// holds none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last: Option<HookRecord>,
 }
 
 /// One item's hooks -- either nested under a `SourceHooksJson` (its `source`
@@ -100,6 +98,9 @@ struct ItemHookJson {
     event: &'static str,
     required: bool,
     command: String,
+    /// The hook's newest history record (HOOK-168).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last: Option<HookRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +311,23 @@ fn run_source_hooks(
         };
         let event_name = event_label(event);
 
+        // spec: HOOK-111 HOOK-56 -- the consumer's recorded override replaces
+        // the declared install hooks, and the declared update hooks when there
+        // are any, exactly as `upgrade` applies it.
+        let override_cmd = source.override_command().map(str::to_string);
+        let (resolved, replaced) = match (&override_cmd, hook_event) {
+            (Some(cmd), HookEvent::Install) => {
+                crate::hook::apply_hook_override(resolved, Some(cmd), hook_event)
+            }
+            (Some(cmd), HookEvent::Update)
+                if resolved.iter().any(|h| h.event == HookEvent::Update) =>
+            {
+                crate::hook::apply_hook_override(resolved, Some(cmd), hook_event)
+            }
+            _ => (resolved, None),
+        };
+        let replaced = replaced.unwrap_or_default();
+
         let hooks: Vec<&ResolvedHook> = resolved.iter().filter(|h| h.event == hook_event).collect();
 
         if hooks.is_empty() {
@@ -352,6 +370,12 @@ fn run_source_hooks(
             existed += 1;
             source_contributed = true;
 
+            // spec: HOOK-111 -- only the override itself replaced anything.
+            let replaced_here: &[String] = if override_cmd.as_deref() == Some(h.run.as_str()) {
+                &replaced
+            } else {
+                &[]
+            };
             let disclosure = crate::hook::hook_disclosure_text(
                 h.label(),
                 h.event.as_str(),
@@ -361,10 +385,17 @@ fn run_source_hooks(
                 &commit,
                 &clone_path,
                 &h.run,
-                None,
+                (!replaced_here.is_empty())
+                    .then(|| replaced_here.join("; "))
+                    .as_deref(),
                 browse_url.as_deref(),
             );
 
+            let site = crate::hook_log::Site {
+                item: None,
+                commit: current.as_deref(),
+                replaced: replaced_here,
+            };
             match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
                 crate::hook::HookAct::Run => {
                     ran += 1;
@@ -392,6 +423,7 @@ fn run_source_hooks(
                         event_name,
                         h.label(),
                         &hook_env,
+                        site,
                     ) {
                         if registry_dirty {
                             let _ = registry.save(paths);
@@ -411,6 +443,8 @@ fn run_source_hooks(
                     }
                 }
                 crate::hook::HookAct::Skip => {
+                    // spec: HOOK-160
+                    crate::hook_log::not_run(&source_name, site, event_name, h.label(), &h.run);
                     // spec: HOOK-106 -- when the skip was for want of consent (a
                     // non-TTY run), name the cause and print the exact,
                     // copy-pasteable command to re-run it unattended, instead of
@@ -442,6 +476,7 @@ fn run_source_hooks(
                     }
                 }
                 crate::hook::HookAct::Abort => {
+                    crate::hook_log::aborted(&source_name, site, event_name, h.label(), &h.run);
                     // spec: HOOK-100 -- a required hook's abort is a non-zero exit.
                     if registry_dirty {
                         let _ = registry.save(paths);
@@ -823,6 +858,7 @@ fn run_item_lifecycle_hooks(
 fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
+    let history = load_history(paths);
 
     let matching: Vec<&Source> = registry
         .sources
@@ -870,11 +906,17 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                     h.run,
                     status.as_deref().unwrap_or("(not recorded)")
                 );
+                // spec: HOOK-168
+                let last = last_result(&history, &source.name, None, event_str, &h.run);
+                if let Some(r) = last {
+                    println!("      {}", last_result_text(r, &h.run));
+                }
                 hooks_json.push(SourceHookJson {
                     event: event_str,
                     required: !h.optional,
                     command: h.run.clone(),
                     status,
+                    last: last.cloned(),
                 });
             }
         }
@@ -908,10 +950,18 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                         let kind_str = if h.optional { "optional" } else { "required" };
                         let event_str = h.event.as_str();
                         println!("    [{event_str}] {kind_str}  {:?}", h.run);
+                        // spec: HOOK-168
+                        let key = installed.display_key();
+                        let last =
+                            last_result(&history, &source.name, Some(&key), event_str, &h.run);
+                        if let Some(r) = last {
+                            println!("        {}", last_result_text(r, &h.run));
+                        }
                         item_hooks_json.push(ItemHookJson {
                             event: event_str,
                             required: !h.optional,
                             command: h.run.clone(),
+                            last: last.cloned(),
                         });
                     }
                     items_json.push(ItemHooksJson {
@@ -961,6 +1011,7 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
     }
 
     let registry = Registry::load(paths)?;
+    let history = load_history(paths);
 
     let mut items_json: Vec<ItemHooksJson> = Vec::new();
 
@@ -993,10 +1044,17 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
                 let kind_str = if h.optional { "optional" } else { "required" };
                 let event_str = h.event.as_str();
                 println!("  [{event_str}] {kind_str}  {:?}", h.run);
+                // spec: HOOK-168
+                let key = installed.display_key();
+                let last = last_result(&history, &installed.source, Some(&key), event_str, &h.run);
+                if let Some(r) = last {
+                    println!("      {}", last_result_text(r, &h.run));
+                }
                 hooks_json.push(ItemHookJson {
                     event: event_str,
                     required: !h.optional,
                     command: h.run.clone(),
+                    last: last.cloned(),
                 });
             }
         }
@@ -1019,6 +1077,363 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
         })?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Hook history (HOOK-167)
+// ---------------------------------------------------------------------------
+
+/// `mind hooks history --json`'s result document (CLI-253).
+#[derive(Serialize, Debug)]
+struct HooksHistoryResult {
+    schema: u8,
+    action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    records: Vec<HistoryRecordJson>,
+}
+
+/// One `hooks history --json` record: the HOOK-160 object, plus the saved
+/// output under `--show` (HOOK-169).
+#[derive(Serialize, Debug)]
+struct HistoryRecordJson {
+    #[serde(flatten)]
+    record: HookRecord,
+    /// The log's text; `null` when the record names a log that is gone.
+    /// Absent without `--show` or when no log was saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<Option<String>>,
+}
+
+/// What `mind hooks history` was asked for (CLI-253, CLI-254, HOOK-169).
+#[derive(Debug, Default)]
+pub struct HistoryQuery {
+    pub target: Option<String>,
+    pub failed: bool,
+    pub outcomes: Vec<Outcome>,
+    pub events: Vec<String>,
+    pub since: Option<String>,
+    pub limit: Option<usize>,
+    pub show: bool,
+}
+
+impl HistoryQuery {
+    /// Whether anything narrows the history beyond its own contents.
+    fn filters(&self) -> bool {
+        self.target.is_some()
+            || self.failed
+            || !self.outcomes.is_empty()
+            || !self.events.is_empty()
+            || self.since.is_some()
+            // `--limit 0` empties a non-empty history, so it counts too.
+            || self.limit == Some(0)
+    }
+}
+
+/// `mind hooks history [target] [filters] [--limit N] [--show]` -- show recent
+/// hook results from the history file, oldest first (HOOK-167).
+// spec: HOOK-167 HOOK-169 CLI-253 CLI-254
+pub fn history(paths: &Paths, q: &HistoryQuery) -> Result<()> {
+    let path = crate::hook_log::history_file(&paths.mind_home);
+    let all = crate::hook_log::read_history(&path).map_err(|e| MindError::io(&path, e))?;
+    let filter = q
+        .target
+        .as_deref()
+        .map(|t| history_target(t, &all))
+        .transpose()?;
+    let since = q.since.as_deref().map(since_cutoff).transpose()?;
+    // `--failed` is shorthand for `--outcome failed`; given both, either matches.
+    let mut outcomes = q.outcomes.clone();
+    if q.failed {
+        outcomes.push(Outcome::Failed);
+    }
+    let mut records: Vec<HookRecord> = all
+        .into_iter()
+        .filter(|r| outcomes.is_empty() || outcomes.contains(&r.outcome))
+        .filter(|r| q.events.is_empty() || q.events.contains(&r.event))
+        .filter(|r| since.as_deref().is_none_or(|s| r.at.as_str() >= s))
+        .filter(|r| filter.as_ref().is_none_or(|f| record_matches(r, f)))
+        .collect();
+    if let Some(n) = q.limit {
+        let drop = records.len().saturating_sub(n);
+        records.drain(..drop);
+    }
+
+    let cap = crate::config::Config::load(paths)
+        .ok()
+        .and_then(|c| c.hook_history)
+        .unwrap_or(crate::hook_log::DEFAULT_HISTORY);
+    // spec: HOOK-164 -- say the history is off even when an older file still
+    // holds records, so they are not read as current. Under `--json` the note
+    // goes to stderr, outside the document.
+    if cap == 0 {
+        crate::render::note(
+            "note: hook history is off (hook-history = 0 in config.toml); \
+             nothing new is recorded",
+        );
+    }
+
+    if crate::render::ctx().json {
+        return emit_json(&HooksHistoryResult {
+            schema: 1,
+            action: "hooks-history",
+            target: q.target.clone(),
+            records: records
+                .into_iter()
+                .map(|r| HistoryRecordJson {
+                    output: (q.show && r.log.is_some()).then(|| read_log(&r)),
+                    record: r,
+                })
+                .collect(),
+        });
+    }
+
+    if records.is_empty() {
+        if cap > 0 && q.filters() {
+            println!("no recorded hook results match");
+        } else if cap > 0 {
+            println!("no hook results recorded");
+        }
+        return Ok(());
+    }
+    for r in &records {
+        println!("{}", history_line(r));
+        let Some(log) = &r.log else {
+            continue;
+        };
+        if !q.show {
+            println!("    log: {log}");
+            continue;
+        }
+        // spec: HOOK-169 -- the log itself, verbatim (it is already tagged
+        // and headed), or a note that it is gone.
+        match std::fs::File::open(log) {
+            Ok(file) => {
+                println!("    log: {log}");
+                print_log(file);
+            }
+            Err(_) => println!("    log: {log} (no longer on disk)"),
+        }
+    }
+    Ok(())
+}
+
+/// The text of `r`'s saved log, sanitized line by line (DSC-95: it is the
+/// hook's own output), or `None` when it cannot be read.
+fn read_log(r: &HookRecord) -> Option<String> {
+    let file = std::fs::File::open(r.log.as_deref()?).ok()?;
+    let mut text = String::new();
+    for_each_log_line(file, |l| {
+        text.push_str(l);
+        text.push('\n');
+        true
+    });
+    Some(text)
+}
+
+/// The longest line [`for_each_log_line`] reads at once: a log's own lines are
+/// at most 64 KiB plus a tag (HOOK-165), so only a file that is not a hook log
+/// is ever cut here.
+const SHOW_LINE_MAX: u64 = 128 * 1024;
+
+/// Call `f` with each line of a saved log, sanitized (DSC-95) one line at a
+/// time: `strip_ansi` folds a newline into a space, so the file is split
+/// first, and a large log is never held in memory whole (HOOK-169). A read
+/// error ends the lines where it happened.
+fn for_each_log_line(file: std::fs::File, mut f: impl FnMut(&str) -> bool) {
+    use std::io::{BufRead, Read};
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader
+            .by_ref()
+            .take(SHOW_LINE_MAX)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if !f(&strip_ansi(&String::from_utf8_lossy(&line))) {
+            break;
+        }
+    }
+}
+
+/// Print a saved log under `--show` (HOOK-169), streamed.
+fn print_log(file: std::fs::File) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    for_each_log_line(file, |l| writeln!(out, "{l}").is_ok());
+}
+
+/// The earliest `at` a `--since` value keeps (CLI-254), as an RFC 3339 prefix
+/// that compares as text against the records' `at`: a duration counts back
+/// from now; a date or time is taken as UTC.
+fn since_cutoff(value: &str) -> Result<String> {
+    let v = value.trim();
+    if let Ok(secs) = crate::auto_update::parse_duration(v) {
+        let now = crate::auto_update::now();
+        return Ok(crate::hook_log::rfc3339(now.saturating_sub(secs)));
+    }
+    let bad = || MindError::BadHistorySince {
+        value: value.to_string(),
+    };
+    // YYYY-MM-DD, then optionally THH:MM, :SS, and a trailing Z.
+    let body = v.strip_suffix('Z').unwrap_or(v);
+    let shape_ok = |s: &str, pattern: &str| {
+        s.len() == pattern.len()
+            && s.bytes().zip(pattern.bytes()).all(|(c, p)| match p {
+                b'9' => c.is_ascii_digit(),
+                _ => c == p,
+            })
+    };
+    let ok = ["9999-99-99", "9999-99-99T99:99", "9999-99-99T99:99:99"]
+        .iter()
+        .any(|p| shape_ok(body, p));
+    if !ok {
+        return Err(bad());
+    }
+    // The fields in range too, so a typo is refused rather than silently
+    // matching nothing (or everything). Offsets per the patterns above.
+    let field = |at: usize| body.get(at..at + 2).and_then(|s| s.parse::<u32>().ok());
+    let in_range = |at: usize, lo: u32, hi: u32| field(at).is_none_or(|n| (lo..=hi).contains(&n));
+    if !(in_range(5, 1, 12)
+        && in_range(8, 1, 31)
+        && in_range(11, 0, 23)
+        && in_range(14, 0, 59)
+        && in_range(17, 0, 59))
+    {
+        return Err(bad());
+    }
+    Ok(body.to_string())
+}
+
+/// One `hooks history` text line: when, outcome, event, target, label, and
+/// status, plus the verb that ran it. An item hook's label is its event
+/// (HOOK-160), already in the line, so only a source hook's label is shown.
+fn history_line(r: &HookRecord) -> String {
+    let (target, label) = match &r.item {
+        Some(item) => (format!("{}#{item}", r.source), String::new()),
+        None => (r.source.clone(), format!(" '{}'", r.label)),
+    };
+    let status = if r.outcome.ran() {
+        format!(" ({})", r.status_text())
+    } else {
+        String::new()
+    };
+    let commit = r
+        .commit
+        .as_deref()
+        .map(|c| format!(" at {}", short_commit(c)))
+        .unwrap_or_default();
+    // The outcome column fits the longest outcome, `interrupted`.
+    format!(
+        "{}  {:<11} {:<9} {target}{label}{status}{commit}  [{}]",
+        r.at,
+        r.outcome.as_str(),
+        r.event,
+        r.verb
+    )
+}
+
+fn short_commit(c: &str) -> &str {
+    c.get(..12).unwrap_or(c)
+}
+
+/// Read a `hooks history` target the way [`resolve_hook_target`] reads a
+/// `hooks run`/`hooks list` one, against the recorded identities instead of
+/// the registry (CLI-253): a `source:` prefix forces the source reading, and
+/// a target equal to a recorded source identity is that source even when it
+/// carries `#` (an item-link instance, LNK-4). Anything else falls back to
+/// the `#`-split heuristic.
+// spec: CLI-253 HOOK-105
+fn history_target(target: &str, records: &[HookRecord]) -> Result<HookTarget> {
+    let trimmed = target.trim();
+    if let Some(rest) = trimmed.strip_prefix("source:") {
+        return Ok(HookTarget::Source(rest.trim().to_string()));
+    }
+    if records.iter().any(|r| r.source == trimmed) {
+        return Ok(HookTarget::Source(trimmed.to_string()));
+    }
+    parse_hook_target(trimmed)
+}
+
+/// Whether a history record belongs to a `hooks history` target: a source
+/// filter matches the record's source (an item hook of a matched source
+/// included); an item ref matches only that item's hooks.
+fn record_matches(r: &HookRecord, target: &HookTarget) -> bool {
+    match target {
+        HookTarget::Source(selector) => source_matches_glob(&r.source, selector),
+        HookTarget::Item(item_ref) => {
+            let Some(item) = r.item.as_deref() else {
+                return false;
+            };
+            let Some((kind, name)) = item.split_once(':') else {
+                return false;
+            };
+            item_ref
+                .source
+                .as_deref()
+                .is_none_or(|s| source_matches_glob(&r.source, s))
+                && item_ref.kind.is_none_or(|k| k.as_str() == kind)
+                && name_matches(name, &item_ref.name)
+        }
+    }
+}
+
+fn name_matches(name: &str, pattern: &str) -> bool {
+    if crate::resolve::is_glob(pattern) {
+        glob::Pattern::new(pattern).is_ok_and(|p| p.matches(name))
+    } else {
+        name == pattern
+    }
+}
+
+/// The newest history record for one hook, for `hooks list` (HOOK-168):
+/// matched on source, item, event, and command, where the command is the one
+/// that ran or one it replaced (a consumer's override, HOOK-56).
+fn last_result<'a>(
+    history: &'a [HookRecord],
+    source: &str,
+    item: Option<&str>,
+    event: &str,
+    command: &str,
+) -> Option<&'a HookRecord> {
+    let source = strip_ansi(source);
+    let command = strip_ansi(command);
+    history.iter().rev().find(|r| {
+        r.source == source
+            && r.item.as_deref() == item
+            && r.event == event
+            && (r.command == command || r.replaced.contains(&command))
+    })
+}
+
+/// The `hooks list` text for a hook's last result (HOOK-168), naming the
+/// command that ran when it was an override of `command`.
+fn last_result_text(r: &HookRecord, command: &str) -> String {
+    let mut s = format!("last: {} ", r.outcome.as_str());
+    if r.outcome.ran() {
+        s.push_str(&format!("({}) ", r.status_text()));
+    }
+    s.push_str(&r.at);
+    if r.command != strip_ansi(command) {
+        s.push_str(&format!(", ran in its place: {}", r.command));
+    }
+    if let Some(log) = &r.log {
+        s.push_str(&format!(", log: {log}"));
+    }
+    s
+}
+
+/// The history for `hooks list`, empty when it cannot be read.
+fn load_history(paths: &Paths) -> Vec<HookRecord> {
+    crate::hook_log::read_history(&crate::hook_log::history_file(&paths.mind_home))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,6 +1671,70 @@ fn install_hook_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `--since` date or time is refused when a field is out of range, not
+    /// only when its shape is wrong.
+    // spec: CLI-254
+    #[test]
+    fn since_refuses_out_of_range_fields() {
+        for good in [
+            "2026-10-28",
+            "2026-10-28T14:00",
+            "2026-10-28T23:59:59Z",
+            "2026-01-01T00:00:00",
+        ] {
+            assert!(since_cutoff(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "2026-13-01",
+            "2026-00-10",
+            "2026-10-32",
+            "2026-10-00",
+            "2026-10-28T24:00",
+            "2026-10-28T14:60",
+            "2026-10-28T14:00:60",
+            "2026-10-28T14",
+        ] {
+            assert!(since_cutoff(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// Every outcome, `interrupted` included, pads to the same width, so the
+    /// event column lines up across `hooks history` lines.
+    // spec: HOOK-167
+    #[test]
+    fn history_lines_align_for_every_outcome() {
+        let rec = |outcome| HookRecord {
+            at: "2026-10-28T14:03:09Z".into(),
+            run: "r".into(),
+            verb: "meld".into(),
+            event: "install".into(),
+            label: "setup".into(),
+            source: "local/a/b".into(),
+            item: None,
+            command: "true".into(),
+            replaced: Vec::new(),
+            commit: None,
+            outcome,
+            exit_code: None,
+            signal: None,
+            duration_ms: None,
+            error: None,
+            log: None,
+        };
+        let columns: Vec<usize> = [
+            Outcome::Ok,
+            Outcome::Failed,
+            Outcome::Skipped,
+            Outcome::Declined,
+            Outcome::Aborted,
+            Outcome::Interrupted,
+        ]
+        .into_iter()
+        .map(|o| history_line(&rec(o)).find("install").unwrap())
+        .collect();
+        assert!(columns.windows(2).all(|w| w[0] == w[1]), "{columns:?}");
+    }
 
     /// The HOOK-107 predicate, one axis at a time. Each of the three clauses
     /// has to be able to veto on its own, or the error fires on a run that

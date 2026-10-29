@@ -75,7 +75,9 @@ Each action invokes the same verb the CLI exposes, against the same registry,
 manifest, and store, with one exception: upgrade does not fetch first (see
 below). Every mutating action confirms before applying; destructive actions
 (`forget`, `unmeld --forget`) require an explicit confirmation. Results and
-errors are shown inline.
+errors are shown inline. When an action stops on a hook failure or interruption,
+the error is followed by a pointer to `mind hooks history --limit 1 --show`,
+since the hook's output went to a terminal the TUI has since redrawn.
 
 - **Install / learn**: install the selected Available item. On a higher node it
   installs in bulk: a source installs every available item from it, a kind bucket
@@ -138,6 +140,10 @@ through the normal confirm-and-execute path.
   <name>`. When profiles are enabled, **Install enabled profiles** comes first:
   it installs the enabled profiles' members that are not installed, running
   `mind learn <source> --profile <name>` for each.
+- The newest [hook result](install-hooks.md) recorded for what the dialog
+  describes, when there is one: a source's own hooks on a source, an installed
+  item's hooks on that item, e.g. `last hook: failed install 'setup' (exit 2,
+  840ms) 2026-10-28T10:00:00Z`.
 
 In the dialog, `j` / `k` move the highlight, `Enter` or `y` runs the highlighted
 action, and `Esc`, `q`, or `n` dismisses without acting. On a group header, kind

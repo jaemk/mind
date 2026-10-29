@@ -45,7 +45,9 @@ non-TTY context (CI, scripts) the hook is skipped and a note is printed;
 `--accept-hooks` runs it unattended (`--accept-hooks=install` accepts only
 install hooks; see [Scripts and CI](scripting.md#hooks)). Overriding a source's
 declared install hook with `--install-hook` is announced in the prompt, which
-shows both the declared and the overriding command.
+shows both the declared and the overriding command. The override is kept: a
+later `upgrade` or `hooks run` runs it in place of the source's declared
+install and update hooks.
 
 The disclosure also shows a version-control browse URL pinned to the disclosed
 commit alongside the on-disk clone path, so you can read the exact code that will
@@ -165,7 +167,75 @@ skips the hooks, and a required hook's failure or abort is a non-zero exit.
 installed items -- each hook's event, required/optional flag, and command, and for
 a recorded source install or update hook whether it is pending and the commit
 it last ran at -- without running any. It is the read-only companion to
-`hooks run`.
+`hooks run`. Under each hook it also shows the hook's last result from the
+hook history, when there is one.
+
+## Hook results and logs
+
+Every hook `mind` considers gets a result: `ok`, `failed` (with its exit code
+or signal), `skipped` (no terminal to ask on), `declined`, `aborted`, or
+`interrupted` (see below). The closing frame line shows how a hook that ran
+exited:
+
+```
+====== (hook: setup) ======
+...
+====== (end hook: setup, exit 0, 2.1s) ======
+```
+
+Under `--json` the results are the document's `hooks` array, and a failed run
+puts them on the error envelope; see [Scripts and CI](scripting.md#hooks). A
+run that stops on a failed hook exits 3.
+
+`mind` keeps the newest 100 results in `~/.mind/hooks/history.jsonl`, skipped
+and declined hooks included. `mind hooks history` shows them:
+
+```
+mind hooks history                        # every recorded result, oldest first
+mind hooks history owner/repo --failed    # one source's failures
+mind hooks history 'owner/repo#skill:scan' --limit 5
+mind hooks history --event update --outcome skipped,declined --since 7d
+mind hooks history owner/repo --failed --limit 1 --show   # with its saved output
+```
+
+`--since` takes a duration (`30m`, `2h`, `7d`) or a UTC date or time
+(`2026-10-28`, `2026-10-28T14:00`). `--show` prints each result's saved log
+after it. Set `hook-history` in `config.toml` to keep more or fewer results;
+`0` turns the history off.
+
+`hooks list` shows each hook's last result under it. When you melded with
+`--install-hook`, the declared hook's line shows the result of the command that
+ran in its place.
+
+To keep each hook's output as well, pass `--hook-log` (or set `hook-log = true`
+in `config.toml`). The output still shows as it runs and is also saved to a log
+file, which the result names (`hooks history` prints it as `log:`). Each line
+is tagged `out | ` or `err | `, and the file is readable only by you. A bare `--hook-log` writes under
+`~/.mind/hooks/logs` and deletes a log when its result drops off the history.
+`--hook-log=DIR` (or `hook-log = "DIR"`) writes to `DIR` and never deletes
+anything there, unless `DIR` is inside `~/.mind/hooks/logs`. A relative `DIR`
+in `config.toml` is relative to `~/.mind`; on the command line, to the
+working directory. `--no-hook-log` turns logging off for one run when the
+config turns it on.
+
+To keep only the output of hooks that went wrong, pass `--hook-log-keep failed`
+(or set `hook-log-keep = "failed"`): a hook that exits 0 has its log deleted
+as soon as it finishes. The flag turns logging on by itself; the config key
+applies only when logging is on.
+
+Note that a logged hook's output goes through a pipe rather than straight to
+the terminal, so a tool that colors its output or draws progress bars only on a
+terminal stops doing so, and a background process the hook starts without
+redirecting its output loses that pipe when `mind` exits. That is why logging
+is off by default. Note also that with `hook-history = 0` no result is kept to
+drop off, so a logging run deletes the logs in `~/.mind/hooks/logs` older than
+30 days instead.
+
+A Ctrl-C while a hook runs reaches the hook as usual. `mind` waits for the hook
+to exit, records it as `interrupted`, and then stops with exit 130, even if
+the hook caught the signal and finished. A second Ctrl-C while the hook still
+runs ends `mind` at once, without a record, and leaves the hook to exit on its
+own.
 
 ## Profile variables
 

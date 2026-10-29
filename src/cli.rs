@@ -211,6 +211,54 @@ pub struct Cli {
     )]
     pub max_metadata_size: Option<String>,
 
+    /// Save each hook's output to a log file, while still showing it.
+    ///
+    /// Bare, logs go under `~/.mind/hooks/logs` and are deleted when their
+    /// entry leaves the hook history (`mind hooks history`). With a
+    /// directory (`--hook-log=DIR`, a leading `~` expanded), logs go there
+    /// and are never deleted, unless DIR is inside `~/.mind/hooks/logs`.
+    /// A logged hook's output is piped rather than written straight to the
+    /// terminal, so a tool that colors its output or draws progress bars
+    /// only on a terminal will not. The `hook-log` config key makes this
+    /// the default.
+    // spec: CLI-252 HOOK-165
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIR",
+        num_args = 0..=1,
+        require_equals = true,
+        help_heading = "Global options"
+    )]
+    pub hook_log: Option<Option<std::path::PathBuf>>,
+
+    /// Save no hook output logs for this run, whatever the `hook-log`
+    /// config key says.
+    // spec: CLI-256
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["hook_log", "hook_log_keep"],
+        help_heading = "Global options"
+    )]
+    pub no_hook_log: bool,
+
+    /// Which hook logs to keep: `all`, or `failed` to delete a successful
+    /// hook's log as soon as it exits.
+    ///
+    /// Turns logging on for this run when neither `--hook-log` nor the
+    /// `hook-log` config key did. The `hook-log-keep` config key sets the
+    /// default.
+    // spec: HOOK-170
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        value_name = "WHICH",
+        help_heading = "Global options"
+    )]
+    pub hook_log_keep: Option<crate::hook_log::LogKeep>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -805,7 +853,17 @@ EXAMPLES:
     /// Subcommands:
     ///   `hooks run <target>`  -- run hooks with the same disclosure+consent model
     ///   `hooks list <target>` -- list declared hooks without running any
+    ///   `hooks history [target]` -- show recent hook results
+    ///
+    /// `<target>` is a source filter (`repo`, `owner/repo`, a glob like
+    /// `'owner/*'`) or an item ref `<source>#<item>`.
     // spec: CLI-194 CLI-195 CLI-196
+    #[command(after_help = "\
+EXAMPLES:
+    mind hooks list owner/repo
+    mind hooks run owner/repo
+    mind hooks run 'owner/repo#skill:scan' --event build
+    mind hooks history owner/repo --failed")]
     Hooks {
         #[command(subcommand)]
         action: HooksCmd,
@@ -1320,6 +1378,15 @@ pub enum HooksCmd {
     /// Every hook goes through the same disclosure and consent prompt as an
     /// automatic run; it is never more silently than meld/learn would run it.
     // spec: CLI-194 CLI-195
+    #[command(after_help = "\
+EXAMPLES:
+    mind hooks run owner/repo                    # pending install hooks
+    mind hooks run owner/repo --rerun            # every install hook again
+    mind hooks run 'owner/*' --event update      # update hooks, every matching source
+    mind hooks run owner/repo --event uninstall
+    mind hooks run 'owner/repo#skill:scan'       # one item's install hooks
+    mind hooks run 'owner/repo#tool:cli' --event build
+    mind hooks run owner/repo --accept-hooks=install --hook-log")]
     Run {
         /// The hook target: a source filter (e.g. `repo`, `owner/repo`, `'*'`)
         /// or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
@@ -1359,9 +1426,77 @@ pub enum HooksCmd {
     /// source's installed items.
     ///
     /// For an item ref `<source>#<item>`, shows only that item's hooks.
+    ///
+    /// Under each hook it also shows the hook's last result from the hook
+    /// history (`mind hooks history`), when there is one.
     // spec: CLI-196
+    #[command(after_help = "\
+EXAMPLES:
+    mind hooks list owner/repo
+    mind hooks list 'owner/*'
+    mind hooks list 'owner/repo#skill:scan'
+    mind hooks list owner/repo --json")]
     List {
         /// The hook target: a source filter or `<source>#<item>` item ref.
         target: String,
+    },
+
+    /// Show recent hook results: what ran, how it exited, and where its
+    /// output was saved.
+    ///
+    /// Reads `~/.mind/hooks/history.jsonl`, which keeps the newest
+    /// `hook-history` results (default 100; `0` turns it off), oldest first.
+    /// Every hook mind considers is recorded, including ones skipped or
+    /// declined. Output is saved only for runs with `--hook-log` (or the
+    /// `hook-log` config key).
+    // spec: CLI-253 HOOK-167
+    #[command(after_help = "\
+EXAMPLES:
+    mind hooks history
+    mind hooks history owner/repo --failed
+    mind hooks history 'owner/*' --limit 10
+    mind hooks history 'owner/repo#skill:scan' --limit 5
+    mind hooks history 'source:host/owner/repo#skills/x'
+    mind hooks history --event update --outcome skipped,declined --since 7d
+    mind hooks history owner/repo --failed --limit 1 --show
+    mind hooks history --json")]
+    History {
+        /// Only results for this source filter (e.g. `repo`, `owner/repo`,
+        /// `'*'`) or item ref `<source>#<item>`.
+        target: Option<String>,
+
+        /// Only hooks that failed (the same as `--outcome failed`).
+        #[arg(long)]
+        failed: bool,
+
+        /// Only hooks with these outcomes, comma-separated.
+        // spec: CLI-254
+        #[arg(long, value_enum, value_delimiter = ',', value_name = "OUTCOMES")]
+        outcome: Vec<crate::hook_log::Outcome>,
+
+        /// Only hooks for these events, comma-separated.
+        // spec: CLI-254
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "EVENTS",
+            value_parser = ["install", "update", "uninstall", "build"]
+        )]
+        event: Vec<String>,
+
+        /// Only results from this recent: a duration (`30m`, `2h`, `7d`) or a
+        /// UTC date or time (`2026-10-28`, `2026-10-28T14:00`).
+        // spec: CLI-254
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Show at most this many results (the newest).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+
+        /// Print each shown result's saved output after it.
+        // spec: HOOK-169
+        #[arg(long)]
+        show: bool,
     },
 }

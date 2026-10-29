@@ -128,6 +128,17 @@ fn assert_stdout_is_one_json_document(stdout: &str) -> serde_json::Value {
     })
 }
 
+/// The one document on stdout, minus its `hooks` member (HOOK-161), as text.
+/// That member names each hook's COMMAND, which is source text by design; a
+/// test checking that the hook's OUTPUT stayed off stdout looks at the rest.
+fn stdout_without_hook_records(stdout: &str) -> String {
+    let mut v = assert_stdout_is_one_json_document(stdout);
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("hooks");
+    }
+    v.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // PASSING: verbs whose `--json` stdout is exactly one document even when an
 // advisory note fires along the way (CLI-217 already covers these paths).
@@ -553,7 +564,7 @@ fn a_hooks_own_output_cannot_reach_json_stdout() {
     ]);
     assert!(r.success, "hooks run: {}\n{}", r.stdout, r.stderr);
     assert!(
-        !r.stdout.contains("forged"),
+        !stdout_without_hook_records(&r.stdout).contains("forged"),
         "a hook's stdout must never reach --json stdout: {:?}",
         r.stdout
     );
@@ -1142,8 +1153,9 @@ fn a_streaming_hook_cannot_reach_the_json_document_on_stdout() {
     let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
     assert!(doc.get("action").is_some(), "the meld result: {}", r.stdout);
+    let rest = stdout_without_hook_records(&r.stdout);
     assert!(
-        !r.stdout.contains("NOISE-ON-STDOUT") && !r.stdout.contains("====== (hook:"),
+        !rest.contains("NOISE-ON-STDOUT") && !r.stdout.contains("====== (hook:"),
         "neither the hook output nor its frame may reach stdout: {}",
         r.stdout
     );
@@ -1197,7 +1209,7 @@ fn a_hooks_write_to_the_saved_stdout_fd_cannot_reach_json_stdout() {
          mind's own result document with a forged one: {v}"
     );
     assert!(
-        !r.stdout.contains("forged"),
+        !stdout_without_hook_records(&r.stdout).contains("forged"),
         "the hook's forged document must never reach stdout, whether through \
          an inherited fd 1 (HOOK-32's original guarantee) or an inherited \
          saved-stdout fd (M1-a): {:?}",
