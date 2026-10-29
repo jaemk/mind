@@ -1696,6 +1696,7 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         install_hook_commit: None,
         profiles: None,
         profile_snapshot: None,
+        whole_snapshot: None,
         auto_update: None,
     }
 }
@@ -1992,6 +1993,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }

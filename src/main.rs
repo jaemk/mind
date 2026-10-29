@@ -856,13 +856,21 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Sync {
             source,
             upgrade,
+            skip_new,
+            ignore_new,
             accept,
-        } => commands::sync_with_selector(paths, source.as_deref(), upgrade, yes, accept.accept()),
+        } => {
+            // spec: LIFE-55
+            commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
+            commands::sync_with_selector(paths, source.as_deref(), upgrade, yes, accept.accept())
+        }
         Command::Upgrade {
             item,
             source,
             no_sync,
             allow_breaking,
+            skip_new,
+            ignore_new,
             accept,
         } => {
             let accept = accept.accept();
@@ -872,6 +880,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             }
             // spec: VER-63
             commands::set_allow_breaking(allow_breaking);
+            // spec: LIFE-55
+            commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if let Some(source) = source {
                 // spec: CLI-244 - scope the sync and the pass to one source.

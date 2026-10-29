@@ -10,8 +10,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--accept-hooks[=<events>]]` (alias: `remove`/`rm`) | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
 | `learn <item> [--accept-hooks[=<events>]]` (alias: `install`) | install |
 | `forget <item> [--accept-hooks[=<events>]]` (aliases: `unlearn`, `uninstall`) | uninstall |
-| `sync [source]` (alias: `update`) | refresh sources (all, or one matching `[source]`) |
-| `upgrade [--yes] [--no-sync] [item]` | upgrade installed; syncs first by default |
+| `sync [source] [--upgrade [--skip-new \| --ignore-new]]` (alias: `update`) | refresh sources (all, or one matching `[source]`) |
+| `upgrade [--yes] [--no-sync] [--skip-new \| --ignore-new] [item]` | upgrade installed and install items new to sources installed whole (LIFE-54); syncs first by default |
 | `recall [item] [--sources] [--kind K] [--source S] [--json]` (aliases: `status`, `list`) | status: sources with their items (install state marked); `--sources` narrows to sources |
 | `review [<target>] [-N\|--namespace <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` (alias: `doctor`) | diagnose |

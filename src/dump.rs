@@ -575,6 +575,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }

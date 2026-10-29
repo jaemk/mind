@@ -6,9 +6,11 @@
 //!
 //! Change detection: the source-set and manifest are compared across polls,
 //! and the freshly built snapshot is compared by value against the last
-//! applied one so an unchanged tick skips the rebuild (TUI-15). The catalog
-//! itself IS re-scanned every load, which is what lets `load_inner` size the
-//! hash memo to the current catalog before any staleness check reads it.
+//! applied one so an unchanged tick skips the rebuild (TUI-15). A source's
+//! catalog is re-scanned only when its registry record changes, or on every
+//! load for a linked source (TUI-85, [`SCAN_CACHE`]); the item list is still
+//! complete on every load, which is what lets `load_inner` size the hash memo
+//! to the current catalog before any staleness check reads it.
 
 use std::path::PathBuf;
 
@@ -31,7 +33,7 @@ use crate::source::Registry;
 /// minted fresh on every load, so it always compared unequal and the gate never
 /// fired -- every tick rebuilt the tree even when nothing had changed.
 // spec: TUI-15
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub installed: Vec<SnapshotInstalled>,
     pub available: Vec<SnapshotAvailable>,
@@ -352,6 +354,111 @@ fn memoized_hash(path: &std::path::Path, ignore: &crate::ignore::IgnoreSet) -> O
     Some(hash)
 }
 
+/// The catalog-derived part of the snapshot for one source: its scanned items,
+/// each item's sanitized direct dependency keys (same index), and its
+/// `available` rows. Dependency edges never leave a source (DEP-2), so this is
+/// complete on its own.
+struct SourceScan {
+    items: Vec<catalog::CatalogItem>,
+    deps: Vec<Vec<String>>,
+    available: Vec<SnapshotAvailable>,
+}
+
+/// Per-source [`SourceScan`]s kept across polls, so a tick re-scans only what
+/// may have changed (TUI-15). Keyed on the source's serialized registry record,
+/// which carries the recorded commit and every discovery setting: a `sync` that
+/// moved the commit, a namespace change, or a re-meld changes the key and so
+/// re-scans. A linked source (CLI-27) is read live from the user's working tree,
+/// which can change without touching its record, so it is never cached.
+///
+/// One slot per process, tagged with the `mind_home` it was built for, so a
+/// load against a different home (tests run many in one process) starts empty
+/// rather than serving another home's catalog.
+struct ScanCache {
+    mind_home: PathBuf,
+    by_record: std::collections::HashMap<String, std::sync::Arc<SourceScan>>,
+}
+
+static SCAN_CACHE: std::sync::Mutex<Option<ScanCache>> = std::sync::Mutex::new(None);
+
+fn build_source_scan(items: Vec<catalog::CatalogItem>) -> SourceScan {
+    let dep_index = crate::deps::DepIndex::new(&items);
+    // spec: TUI-50 TUI-60 - dep keys are catalog-derived `kind:name` keys,
+    // sanitized at the model boundary like every sibling field.
+    let deps: Vec<Vec<String>> = (0..items.len())
+        .map(|node| sanitize_dep_keys(dep_index.direct_keys(node, &read_item_text)))
+        .collect();
+    // De-dup vs installed happens in tree.rs.
+    let available = items
+        .iter()
+        .zip(&deps)
+        .map(|(it, deps)| SnapshotAvailable {
+            // See the identical `key` note on `SnapshotInstalled`.
+            key: it.key().into(),
+            // spec: TUI-75
+            display_key: it.display_key(),
+            name: strip_ansi(&it.effective_name()),
+            source: strip_ansi(&it.source),
+            kind: it.kind,
+            // spec: WF-51
+            description: it.display_description().as_deref().map(strip_ansi),
+            path: it.path.clone(),
+            deps: deps.clone(),
+        })
+        .collect();
+    SourceScan {
+        items,
+        deps,
+        available,
+    }
+}
+
+/// Scan every melded source, reusing a cached [`SourceScan`] for each
+/// clone-backed source whose registry record is unchanged since the last load.
+// spec: TUI-15 TUI-85
+fn scan_catalog(paths: &Paths, registry: &Registry) -> Result<Vec<std::sync::Arc<SourceScan>>> {
+    scan_catalog_with(
+        &mut SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner()),
+        paths,
+        registry,
+    )
+}
+
+/// [`scan_catalog`] against an explicit cache slot, so tests can drive one
+/// that concurrently running tests do not share.
+fn scan_catalog_with(
+    slot: &mut Option<ScanCache>,
+    paths: &Paths,
+    registry: &Registry,
+) -> Result<Vec<std::sync::Arc<SourceScan>>> {
+    let mut prev = match slot.take() {
+        Some(c) if c.mind_home == paths.mind_home => c.by_record,
+        _ => Default::default(),
+    };
+    let mut next = std::collections::HashMap::new();
+    let mut scans = Vec::with_capacity(registry.sources.len());
+    for source in &registry.sources {
+        let record = (!source.is_linked())
+            .then(|| serde_json::to_string(source).ok())
+            .flatten();
+        let cached = record.as_ref().and_then(|r| prev.remove(r));
+        let scan = match cached {
+            Some(scan) => scan,
+            None => std::sync::Arc::new(build_source_scan(catalog::scan_one(paths, source)?)),
+        };
+        if let Some(r) = record {
+            next.insert(r, scan.clone());
+        }
+        scans.push(scan);
+    }
+    // Records no longer in the registry are dropped with `prev`.
+    *slot = Some(ScanCache {
+        mind_home: paths.mind_home.clone(),
+        by_record: next,
+    });
+    Ok(scans)
+}
+
 /// Load the initial snapshot under a blocking shared lock (called once at
 /// startup). Returns an error if the lock cannot be acquired.
 // spec: TUI-25
@@ -410,7 +517,9 @@ fn read_item_text(item: &catalog::CatalogItem) -> String {
 fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
-    let catalog_items = catalog::scan(paths, &registry)?;
+    let scans = scan_catalog(paths, &registry)?;
+    let catalog_items: Vec<&catalog::CatalogItem> =
+        scans.iter().flat_map(|s| s.items.iter()).collect();
 
     // spec: TUI-72 -- size the memo to this catalog and drop entries whose path
     // has left it, before it is consulted below.
@@ -418,10 +527,20 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         catalog_items.iter().map(|c| c.path.clone()).collect();
     fit_hash_memo(&live_paths, catalog_items.len());
 
-    // L10: one sibling index for both passes below. Each walks every item, so
-    // rebuilding it per row (what `deps::direct_dependency_keys` does) made a
-    // poll tick quadratic in the catalog size.
-    let dep_index = crate::deps::DepIndex::new(&catalog_items);
+    // Each catalog item and its dep keys by stable identity (source, kind,
+    // bare name), for matching manifest entries. The first match wins, as the
+    // linear search this replaces did.
+    let mut by_identity: std::collections::HashMap<
+        (&str, ItemKind, &str),
+        (&catalog::CatalogItem, &Vec<String>),
+    > = std::collections::HashMap::with_capacity(catalog_items.len());
+    for scan in &scans {
+        for (ci, deps) in scan.items.iter().zip(&scan.deps) {
+            by_identity
+                .entry((ci.source.as_str(), ci.kind, ci.name.as_str()))
+                .or_insert((ci, deps));
+        }
+    }
 
     // spec: TUI-60 - source names are source-controlled and must be sanitized.
     let source_names: Vec<String> = registry
@@ -443,18 +562,11 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let mut installed: Vec<SnapshotInstalled> = Vec::with_capacity(manifest.items.len());
     for it in manifest.items.values() {
         // Find the matching catalog item to get direct deps + drift.
-        // Keep the position, not just the reference: `DepIndex` keys on it.
-        let matched_node = catalog_items
-            .iter()
-            .position(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name);
-        let matched = matched_node.map(|n| &catalog_items[n]);
-        // spec: TUI-60 - dep keys are catalog-derived (a `kind:name` built
-        // from source-controlled item names) like every sibling field on
-        // this struct, so they get the same strip_ansi treatment at the
-        // model boundary (`sanitize_dep_keys`).
-        let deps: Vec<String> = matched_node
-            .map(|n| sanitize_dep_keys(dep_index.direct_keys(n, &read_item_text)))
-            .unwrap_or_default();
+        let entry = by_identity.get(&(it.source.as_str(), it.kind, it.bare_name.as_str()));
+        let matched = entry.map(|(ci, _)| *ci);
+        // spec: TUI-60 - dep keys were sanitized when the source was scanned
+        // (`build_source_scan`).
+        let deps: Vec<String> = entry.map(|(_, d)| (*d).clone()).unwrap_or_default();
         // spec: TUI-74 IGN-10 - compiled once per item per load pass (L7),
         // not inside the per-tick fast path the memo exists to keep cheap.
         // The raw (uncompiled) patterns are taken straight from `ci.ignore`
@@ -507,30 +619,10 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         });
     }
 
-    // Build available list (all catalog items; de-dup vs installed happens in tree.rs).
-    // spec: TUI-50 - compute direct dep keys for each available item.
-    // spec: TUI-60 - strip_ansi on all source-derived display strings, deps
-    // included (they are catalog-derived `kind:name` keys, same as `installed`
-    // above; `sanitize_dep_keys`).
-    let available: Vec<SnapshotAvailable> = catalog_items
+    // Available list: all catalog items, built per source in `build_source_scan`.
+    let available: Vec<SnapshotAvailable> = scans
         .iter()
-        .enumerate()
-        .map(|(node, it)| {
-            let deps = sanitize_dep_keys(dep_index.direct_keys(node, &read_item_text));
-            SnapshotAvailable {
-                // See the identical `key` note on `SnapshotInstalled` above.
-                key: it.key().into(),
-                // spec: TUI-75
-                display_key: it.display_key(),
-                name: strip_ansi(&it.effective_name()),
-                source: strip_ansi(&it.source),
-                kind: it.kind,
-                // spec: WF-51
-                description: it.display_description().as_deref().map(strip_ansi),
-                path: it.path.clone(),
-                deps,
-            }
-        })
+        .flat_map(|s| s.available.iter().cloned())
         .collect();
 
     // Unmanaged lobe items (UNM-6): kind-dir entries in a configured agent home
@@ -569,7 +661,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // spec: TUI-53
     let source_namespaces: std::collections::HashMap<String, Option<String>> = {
         let mut m = std::collections::HashMap::new();
-        for item in &catalog_items {
+        for item in catalog_items.iter() {
             m.entry(item.source.clone())
                 .or_insert_with(|| item.prefix.clone());
         }
@@ -638,6 +730,17 @@ mod tests {
     /// Write `files` (relative path, content) into a fresh git repo under
     /// `base`, commit it, and meld it into `paths`. Returns the repo dir.
     fn meld_fixture(paths: &Paths, base: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
+        meld_fixture_pinned(paths, base, files, crate::commands::PinRequest::None)
+    }
+
+    /// [`meld_fixture`] with a pin. `PinRequest::None` leaves the local source
+    /// linked (CLI-27); `Freeze(None)` clones it.
+    fn meld_fixture_pinned(
+        paths: &Paths,
+        base: &std::path::Path,
+        files: &[(&str, &str)],
+        pin: crate::commands::PinRequest,
+    ) -> PathBuf {
         use std::process::Command;
 
         let src = base.join("fixture-source");
@@ -666,13 +769,85 @@ mod tests {
             vec![],
             vec![],
             false,
-            crate::commands::PinRequest::None,
+            pin,
             None,
             crate::hook::Accept::default(),
             None,
         )
         .expect("meld");
         src
+    }
+
+    fn skill_names(scans: &[std::sync::Arc<SourceScan>]) -> Vec<String> {
+        let mut names: Vec<String> = scans
+            .iter()
+            .flat_map(|s| s.items.iter().map(|i| i.name.clone()))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_cloned_source_is_rescanned_only_when_its_record_changes() {
+        // spec: TUI-85 TUI-15
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        meld_fixture_pinned(
+            &paths,
+            &base,
+            &[("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n")],
+            crate::commands::PinRequest::Freeze(None),
+        );
+        let mut registry = Registry::load(&paths).unwrap();
+        assert!(!registry.sources[0].is_linked(), "fixture must be a clone");
+        let mut slot = None;
+        let first = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        assert_eq!(skill_names(&first), ["a"]);
+
+        // A skill appearing in the clone without a registry change is not
+        // picked up: the cached scan is served as-is.
+        let clone = registry.sources[0].clone_dir(&paths);
+        std::fs::create_dir_all(clone.join("skills/b")).unwrap();
+        std::fs::write(clone.join("skills/b/SKILL.md"), "# b\n").unwrap();
+        let second = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first[0], &second[0]));
+        assert_eq!(skill_names(&second), ["a"]);
+
+        // A changed record (what a sync that moved the commit writes) re-scans.
+        registry.sources[0].commit = Some("0".repeat(40));
+        let third = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        assert_eq!(skill_names(&third), ["a", "b"]);
+
+        // A different home never reuses another home's scans: it scans its own
+        // (empty) sources tree, which here fails, instead of serving `third`.
+        let (other, other_base) = temp_paths();
+        let fourth = scan_catalog_with(&mut slot, &other, &registry);
+        assert!(!fourth.is_ok_and(|s| std::sync::Arc::ptr_eq(&s[0], &third[0])));
+        cleanup(&base);
+        cleanup(&other_base);
+    }
+
+    #[test]
+    fn a_linked_source_is_rescanned_on_every_load() {
+        // spec: TUI-85
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = meld_fixture(
+            &paths,
+            &base,
+            &[("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n")],
+        );
+        let registry = Registry::load(&paths).unwrap();
+        assert!(registry.sources[0].is_linked(), "fixture must be linked");
+        let mut slot = None;
+        let first = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        assert_eq!(skill_names(&first), ["a"]);
+
+        std::fs::create_dir_all(src.join("skills/b")).unwrap();
+        std::fs::write(src.join("skills/b/SKILL.md"), "# b\n").unwrap();
+        let second = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        assert_eq!(skill_names(&second), ["a", "b"]);
+        cleanup(&base);
     }
 
     fn cleanup(base: &std::path::Path) {

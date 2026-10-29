@@ -157,6 +157,39 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   checks still run before any item in the batch is applied (LIFE-46), so a
   detected collision leaves nothing changed either way.
 
+### Sources installed whole
+
+- `LIFE-53` A source that is not profile-tracked (PROF-19), at least one of
+  whose items is installed, is *whole-tracked* once every item in its catalog
+  is installed: its registry entry records the bare `kind:name` keys of that
+  catalog (`whole_snapshot`). This is checked after each `learn` or `meld`
+  install (so the CLI-23 install-all offer, `learn '<source>#*'`, `learn '*'`,
+  and `learn <source> --all` all record it) and at the start of `sync` and
+  `upgrade`, before either fetches, so a source installed whole before this
+  existed is tracked by its next `sync` or `upgrade`. A source that is
+  profile-tracked is tracked by its profiles (PROF-21) instead.
+- `LIFE-54` `upgrade` compares each whole-tracked source's catalog with its
+  snapshot in the same passes that track profiles (PROF-21: plain `upgrade`,
+  `upgrade --source`, `sync --upgrade`, `curate`; not `upgrade <item>` or the
+  TUI's confirmed-key apply). A catalog item missing from the snapshot is new:
+  the report lists it under `new items in sources installed whole`, and
+  applying the upgrade installs it under `upgrade`'s gate through the `learn`
+  path, dependency closure included. An installed new item joins the snapshot;
+  one that is declined or fails stays out and is offered again. A new item that
+  is already installed joins the snapshot without being offered, and a snapshot
+  key no longer in the catalog is dropped. An item the consumer `forget`s stays
+  in the snapshot, so it is not offered again.
+- `LIFE-55` `upgrade --skip-new` leaves every new item (LIFE-54) and every
+  profile addition (PROF-21) out of the pass; the next `upgrade` offers them
+  again. `upgrade --ignore-new` records them in their snapshot without
+  installing them, so later passes do not offer them; `learn` still installs
+  one. Each prints a note: the count skipped, or each ignored key with the
+  `mind learn <key>` that installs it. The two flags conflict. `sync --upgrade`
+  takes both with the same meaning; on `sync` each requires `--upgrade`.
+- `LIFE-56` Under `--json`, the `upgrade` result carries `new_items` (the new
+  items it proposed) and `ignored_new_items` (those `--ignore-new` recorded),
+  each entry an object with `key` and `source`; both are omitted when empty.
+
 ## Non-interactive confirmation (`--json`)
 
 - `LIFE-45` `--json` is always treated as a non-interactive session for a

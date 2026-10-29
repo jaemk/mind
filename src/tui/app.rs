@@ -366,6 +366,10 @@ pub struct App {
     // --- misc ---
     pub size: (u16, u16),
     pub mutating: bool,
+    /// Bumped each time a snapshot other than a poll result is applied (an
+    /// action's own reload), so a poll begun before it is dropped (TUI-86).
+    // spec: TUI-86
+    pub snapshot_epoch: u64,
     pub quit: bool,
     pub search_focused: bool,
     /// True after one Ctrl-C: a second consecutive Ctrl-C force-exits from any
@@ -437,6 +441,7 @@ impl App {
             namespace_input_source: None,
             size: (80, 24),
             mutating: false,
+            snapshot_epoch: 0,
             quit: false,
             search_focused: false,
             ctrl_c_armed: false,
@@ -448,8 +453,13 @@ impl App {
     /// Apply a data snapshot, rebuilding the tree. Preserves selection and
     /// expansion state across refreshes (TUI-15). Also refreshes the lobes
     /// list for the lobes modal (TUI-23).
-    // spec: TUI-15
+    // spec: TUI-15 TUI-86
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.snapshot_epoch += 1;
+        self.store_snapshot(snapshot);
+    }
+
+    fn store_snapshot(&mut self, snapshot: Snapshot) {
         // Any successful snapshot-applying refresh ends a mutation: clearing the
         // flag here is what re-arms the once-a-second poll after a successful
         // learn/forget/sync/upgrade/meld/lobe action (TUI-15). The mid-action
@@ -466,7 +476,9 @@ impl App {
         self.rebuild_tree();
     }
 
-    /// Apply a snapshot only if the data changed (used for poll ticks).
+    /// Apply a snapshot only if the data changed (used for poll ticks). A poll
+    /// result does not bump `snapshot_epoch`: only an out-of-band reload
+    /// invalidates polls already in flight (TUI-86).
     ///
     /// The comparison is by VALUE: a poll that observes identical state is a
     /// no-op, so the tree is not rebuilt and the redraw shows the same frame.
@@ -475,7 +487,7 @@ impl App {
     // spec: TUI-15
     pub fn apply_snapshot_if_changed(&mut self, snapshot: Snapshot) {
         if self.last_snapshot.as_ref() != Some(&snapshot) {
-            self.apply_snapshot(snapshot);
+            self.store_snapshot(snapshot);
         }
     }
 
@@ -2264,6 +2276,20 @@ mod tests {
             visible_after, visible_before,
             "tree must NOT be rebuilt when the snapshot is unchanged"
         );
+    }
+
+    #[test]
+    fn only_an_out_of_band_snapshot_bumps_the_epoch() {
+        // spec: TUI-86 -- an action's reload invalidates polls in flight; a
+        // poll result itself does not, or each poll would discard the next.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let epoch = app.snapshot_epoch;
+        app.apply_snapshot_if_changed(Snapshot::default());
+        assert_eq!(app.snapshot_epoch, epoch, "a poll result keeps the epoch");
+        assert_eq!(app.last_snapshot, Some(Snapshot::default()));
+        app.apply_snapshot(make_snapshot());
+        assert_eq!(app.snapshot_epoch, epoch + 1, "an action's reload bumps it");
     }
 
     #[test]
