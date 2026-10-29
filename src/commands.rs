@@ -8017,11 +8017,13 @@ fn note_unproposed_new_items(skipped: usize, ignored: &[NewItem]) {
         ));
     }
     for i in ignored {
+        // Source-qualified, so it cannot be ambiguous with a same-named item
+        // in another melded source.
         crate::render::note(format!(
             "note: ignored new item {} from {} (--ignore-new); run `mind learn {}` to install it",
             i.key,
             i.source,
-            crate::error::shell_quote(&i.key)
+            crate::error::shell_quote(&format!("{}#{}", i.source, i.key))
         ));
     }
 }

@@ -186,7 +186,8 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   again. `upgrade --ignore-new` records them in their snapshot without
   installing them, so later passes do not offer them; `learn` still installs
   one. Each prints a note: the count skipped, or each ignored key with the
-  `mind learn <key>` that installs it. The two flags conflict. `sync --upgrade`
+  source-qualified `mind learn '<source>#<key>'` that installs it. The two
+  flags conflict. `sync --upgrade`
   takes both with the same meaning; on `sync` each requires `--upgrade`.
 - `LIFE-56` Under `--json`, the `upgrade` result carries `new_items` (the new
   items it proposed) and `ignored_new_items` (those `--ignore-new` recorded),

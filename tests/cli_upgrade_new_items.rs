@@ -366,12 +366,41 @@ fn ignore_new_records_new_items_without_installing_them() {
         "{}",
         r.all()
     );
-    assert!(r.all().contains("mind learn 'skill:deploy'"), "{}", r.all());
+    assert!(r.all().contains("#skill:deploy'`"), "{}", r.all());
     assert!(!sb.installed().contains(&"skill:deploy".to_string()));
     sb.ok(&["upgrade", "--yes"]);
     assert!(!sb.installed().contains(&"skill:deploy".to_string()));
     sb.ok(&["learn", "deploy", "--yes"]);
     assert!(sb.installed().contains(&"skill:deploy".to_string()));
+}
+
+#[test]
+fn the_ignore_note_names_a_command_that_installs_the_item() {
+    // spec: LIFE-55 -- the suggested ref is source-qualified, so it resolves
+    // under a prefix and beside a same-named item in another source.
+    let sb = Sandbox::with_toml("[source]\nprefix = \"jk\"\n");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.add_skill("deploy");
+    let r = sb.ok(&["upgrade", "--yes", "--ignore-new"]);
+    let note = r
+        .all()
+        .lines()
+        .find(|l| l.contains("--ignore-new"))
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("no ignore note: {}", r.all()));
+    // `... run `mind learn '<ref>'` to install it`
+    let quoted = note
+        .split("`mind learn ")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no learn command in: {note}"));
+    let item_ref = quoted.trim_matches('\'');
+    sb.ok(&["learn", item_ref, "--yes"]);
+    assert!(
+        sb.installed().contains(&"skill:jk:deploy".to_string()),
+        "{:?}",
+        sb.installed()
+    );
 }
 
 #[test]
