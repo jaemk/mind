@@ -667,6 +667,11 @@ fn apply(
                         true,
                     )
                 {
+                    // spec: HOOK-172 -- a member's hook failing is not a bad
+                    // selection: it stops the run.
+                    if e.is_hook_stop() {
+                        return Err(e);
+                    }
                     warn_skip(source, "could not install the entry's profiles", &e);
                     skipped.push(SkippedEntry::new(
                         source.clone(),
@@ -747,6 +752,9 @@ fn install_declared(
                     false,
                 ) {
                     Ok(()) => Ok(()),
+                    // spec: HOOK-172 -- a member's hook failing is not a bad
+                    // selection: it stops the run.
+                    Err(e) if e.is_hook_stop() => Err(e),
                     Err(e) => {
                         warn_skip(source, "could not install the entry's profiles", &e);
                         skipped.push(SkippedEntry::new(

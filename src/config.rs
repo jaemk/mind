@@ -183,6 +183,70 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_metadata_size: Option<String>,
+
+    /// How many hook results `~/.mind/hooks/history.jsonl` keeps (HOOK-163);
+    /// `0` turns the history off. Absent means
+    /// [`crate::hook_log::DEFAULT_HISTORY`].
+    // spec: HOOK-164
+    #[serde(
+        rename = "hook-history",
+        alias = "hook_history",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hook_history: Option<usize>,
+
+    /// Save each hook's output to a log file (HOOK-165): `true` for
+    /// `~/.mind/hooks/logs`, a path (relative to `~/.mind`) for a directory of
+    /// your own, `false` (or absent) for no logs. The `--hook-log` flag outranks it.
+    // spec: HOOK-165
+    #[serde(
+        rename = "hook-log",
+        alias = "hook_log",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hook_log: Option<HookLogSetting>,
+
+    /// Which hook logs to keep (HOOK-170): `all` (the default) or `failed`.
+    /// Applies only when logging is on; the `--hook-log-keep` flag outranks it.
+    // spec: HOOK-170
+    #[serde(
+        rename = "hook-log-keep",
+        alias = "hook_log_keep",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hook_log_keep: Option<crate::hook_log::LogKeep>,
+}
+
+/// The `hook-log` config value (HOOK-165): on/off, or a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum HookLogSetting {
+    Enabled(bool),
+    Dir(String),
+}
+
+// By hand rather than `untagged`, so a wrong type names what the key takes
+// instead of serde's "did not match any variant".
+impl<'de> Deserialize<'de> for HookLogSetting {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = HookLogSetting;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("true, false, or a directory path")
+            }
+            fn visit_bool<E: de::Error>(self, b: bool) -> std::result::Result<Self::Value, E> {
+                Ok(HookLogSetting::Enabled(b))
+            }
+            fn visit_str<E: de::Error>(self, s: &str) -> std::result::Result<Self::Value, E> {
+                Ok(HookLogSetting::Dir(s.to_string()))
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 /// The environment variable that sets the metadata cap (DSC-104), between the
@@ -636,6 +700,22 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `hook-log` takes a bool or a path; anything else is an error that
+    /// names what it takes.
+    #[test]
+    fn hook_log_takes_a_bool_or_a_path() {
+        // spec: HOOK-165
+        let cfg: Config = toml::from_str("hook-log = true\n").unwrap();
+        assert_eq!(cfg.hook_log, Some(HookLogSetting::Enabled(true)));
+        let cfg: Config = toml::from_str("hook-log = \"logs\"\n").unwrap();
+        assert_eq!(cfg.hook_log, Some(HookLogSetting::Dir("logs".into())));
+        let err = toml::from_str::<Config>("hook-log = 1\n").unwrap_err();
+        assert!(
+            err.to_string().contains("true, false, or a directory path"),
+            "{err}"
+        );
     }
 
     /// The canonical `absorb-to` (kebab-case) key is accepted in config.toml.

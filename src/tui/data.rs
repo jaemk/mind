@@ -57,6 +57,10 @@ pub struct Snapshot {
     /// source with no `[profiles]` (or an unreadable table) has no entry.
     // spec: TUI-78
     pub source_profiles: std::collections::HashMap<String, SourceProfiles>,
+    /// The hook history (HOOK-163), oldest first, for each dialog's last hook
+    /// result (TUI-83). Empty when there is none or it cannot be read.
+    // spec: TUI-83
+    pub hook_results: Vec<crate::hook_log::HookRecord>,
 }
 
 /// One source's profiles for the details dialog (TUI-78).
@@ -604,6 +608,11 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         lobes,
         source_namespaces,
         source_profiles,
+        // spec: TUI-83
+        hook_results: crate::hook_log::read_history(&crate::hook_log::history_file(
+            &paths.mind_home,
+        ))
+        .unwrap_or_default(),
     })
 }
 

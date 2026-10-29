@@ -878,6 +878,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -904,6 +905,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         };
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());

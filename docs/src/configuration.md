@@ -9,6 +9,9 @@ lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
 ssh = true
 absorb-to = "~/dev/my-agent-library"
 max-metadata-size = "32MiB"
+hook-history = 100
+hook-log = false
+hook-log-keep = "all"
 ```
 
 | key | meaning | see |
@@ -17,6 +20,9 @@ max-metadata-size = "32MiB"
 | `ssh` | clone the `owner/repo` shorthand over SSH | [SSH cloning](#ssh-cloning) |
 | `absorb-to` | default destination for `mind absorb` | [Adopt items you placed by hand](unmanaged.md#where-it-goes) |
 | `max-metadata-size` | cap on each metadata file read from a source | [Metadata size cap](#metadata-size-cap) |
+| `hook-history` | how many hook results to keep (default 100; `0` for none) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
+| `hook-log` | save hook output: `true` for `~/.mind/hooks/logs`, or a directory (relative to `~/.mind`) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
+| `hook-log-keep` | which logs to keep when logging is on: `all` (default) or `failed` | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 
 The legacy spelling `absorb_to` is still read.
 
@@ -85,7 +91,10 @@ every other kind an over-cap file fails the scan of its source.
 ```
 ~/.mind/
   config.toml                   persistent settings (lobes, ssh, absorb-to,
-                                max-metadata-size)
+                                max-metadata-size, hook-history, hook-log,
+                                hook-log-keep)
+  hooks/history.jsonl           the newest hook results (`mind hooks history`)
+  hooks/logs/<run>/             saved hook output (`--hook-log`)
   sources.json                  source registry (melded repos)
   manifest.json                 installed-item manifest and file registry
   sources/<host>/<owner>/<repo> clone of each melded repo

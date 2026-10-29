@@ -571,7 +571,13 @@ pub fn apply_install_override(
 /// what stops a failing uninstall hook from being reported as an install one.
 ///
 /// `env` carries the profile variables the child runs with (HOOK-140).
-// spec: CLI-217 HOOK-30 HOOK-140
+///
+/// Every call files one [`crate::hook_log::HookRecord`] (HOOK-160): `ok` on a
+/// zero exit, `failed` otherwise, with the exit code or signal and the run
+/// time. The closing frame line carries the same status (HOOK-162). When
+/// output logging is on (HOOK-165) the streams are piped instead of inherited
+/// and copied to both the terminal and the hook's log file; see [`run_teed`].
+// spec: CLI-217 HOOK-30 HOOK-140 HOOK-160 HOOK-162 HOOK-165
 pub fn run_hook(
     command: &str,
     clone_dir: &Path,
@@ -579,9 +585,15 @@ pub fn run_hook(
     event: &'static str,
     label: &str,
     env: &HookEnv,
+    site: crate::hook_log::Site,
 ) -> Result<()> {
+    use crate::hook_log::Outcome;
+
     let label = crate::sanitize::strip_ansi(label);
     let command_clean = crate::sanitize::strip_ansi(command);
+    let mut record = crate::hook_log::base(identity, site, event, &label, command, Outcome::Ok);
+    let log = crate::hook_log::open_log(identity, site, event, &label, command);
+    record.log = log.as_ref().map(|l| l.path.display().to_string());
 
     // Flush mind's own buffered output first so it does not interleave with
     // the streamed hook output below.
@@ -592,23 +604,46 @@ pub fn run_hook(
     println!("====== (hook: {label}) ======");
     let _ = std::io::stdout().flush();
 
-    let status = Command::new("sh")
-        .arg("-c")
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
         .arg(command)
         .envs(env.vars())
         .current_dir(clone_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| {
+        .stdin(Stdio::null());
+    // spec: HOOK-171 -- a Ctrl-C reaches the hook (same process group) and
+    // `mind`; catching it here lets `mind` outlive the hook to record it.
+    let sigint = interrupt::catch();
+    let spawned = match log {
+        Some(log) => run_teed(&mut cmd, log, started),
+        None => cmd
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map(|s| (s, started.elapsed())),
+    };
+    let interrupted = sigint.taken();
+    drop(sigint);
+    let (status, ran_for) = match spawned {
+        Ok(done) => done,
+        Err(e) => {
             // The spawn never ran, so the frame opened above is left dangling
             // unless we close it here too (L2): HOOK-30 describes the frame as
             // a pair, and the opener must still print before the spawn is
             // attempted (so the header is visible while mind decides whether
             // the spawn will even succeed).
             println!("====== (end hook: {label}) ======");
-            MindError::HookFailed {
+            // The log was opened before the spawn; end it like any other
+            // (HOOK-165), with why there is no exit status.
+            if let Some(path) = &record.log
+                && let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path)
+            {
+                let _ = writeln!(f, "# not started: {e}");
+            }
+            record.outcome = Outcome::Failed;
+            record.error = Some(e.to_string());
+            crate::hook_log::file(record);
+            return Err(MindError::HookFailed {
                 event,
                 label: label.clone(),
                 identity: identity.to_string(),
@@ -618,11 +653,43 @@ pub fn run_hook(
                 // Spawn failed, so nothing was streamed: the error carries the
                 // reason itself rather than pointing at output that never existed.
                 streamed: false,
-            }
-        })?;
+            });
+        }
+    };
 
-    println!("====== (end hook: {label}) ======");
+    record.duration_ms = Some(ran_for.as_millis().min(u128::from(u64::MAX)) as u64);
+    record.exit_code = status.code();
+    record.signal = exit_signal(&status);
+    if interrupted {
+        record.outcome = Outcome::Interrupted;
+    } else if !status.success() {
+        record.outcome = Outcome::Failed;
+    }
+    // spec: HOOK-170 -- a successful hook's log goes when only failures are kept.
+    if record.outcome == Outcome::Ok
+        && crate::hook_log::keeps_failed_only()
+        && let Some(path) = record.log.take()
+    {
+        crate::hook_log::discard_log(Path::new(&path));
+    }
+    println!(
+        "====== (end hook: {label}, {}) ======",
+        record.status_text()
+    );
+    if let Some(path) = &record.log {
+        crate::render::note(format!("note: hook output saved to {path}"));
+    }
+    crate::hook_log::file(record);
 
+    if interrupted {
+        // spec: HOOK-171 -- stop the verb, whatever the hook's exit: the user
+        // asked `mind` to stop, not only the hook.
+        return Err(MindError::HookInterrupted {
+            event,
+            label,
+            identity: identity.to_string(),
+        });
+    }
     if status.success() {
         Ok(())
     } else {
@@ -642,6 +709,225 @@ pub fn run_hook(
             streamed: true,
         })
     }
+}
+
+/// How long the output copiers may keep draining after the hook exits. A hook
+/// that starts a background process can leave that process holding the pipes
+/// open; past this grace period `mind` stops waiting and moves on, and the
+/// copiers keep writing whatever still arrives until the pipe closes or `mind`
+/// exits.
+const TEE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run `cmd` with its stdout and stderr piped, copying each as it arrives to
+/// `mind`'s own stdout/stderr (so output still streams live) and to `log`
+/// (HOOK-165). Log lines are tagged `out | ` / `err | ` and written in arrival
+/// order; the two streams' relative order is as close as two pipes allow, not
+/// exact. The log ends with the exit status. Returns the status and the time
+/// from `started` to the hook's exit.
+///
+/// A piped hook no longer sees a terminal, so a tool that changes its output
+/// for one (color, progress bars) behaves as it would in a pipe. A background
+/// process the hook leaves writing to those pipes loses its reader when `mind`
+/// exits, and a later write fails (`SIGPIPE`/`EPIPE`) where it would have
+/// reached the terminal. That is why logging is opt-in.
+fn run_teed(
+    cmd: &mut Command,
+    log: crate::hook_log::Log,
+    started: std::time::Instant,
+) -> std::io::Result<(std::process::ExitStatus, std::time::Duration)> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let file = Arc::new(Mutex::new(log.file));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
+    let spawn_copier = |mut src: Box<dyn Read + Send>, tag: &'static str, to_stderr: bool| {
+        let file = Arc::clone(&file);
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut line: Vec<u8> = Vec::new();
+            let write_line = |line: &[u8]| {
+                let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = f.write_all(tag.as_bytes());
+                let _ = f.write_all(line);
+                let _ = f.write_all(b"\n");
+            };
+            loop {
+                let n = match src.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                let chunk = &buf[..n];
+                if to_stderr {
+                    let mut e = std::io::stderr().lock();
+                    let _ = e.write_all(chunk);
+                    let _ = e.flush();
+                } else {
+                    let mut o = std::io::stdout().lock();
+                    let _ = o.write_all(chunk);
+                    let _ = o.flush();
+                }
+                split_log_lines(&mut line, chunk, &write_line);
+            }
+            if !line.is_empty() {
+                write_line(&line);
+            }
+            let _ = done.send(());
+        })
+    };
+
+    let mut copiers = 0;
+    if let Some(out) = child.stdout.take() {
+        spawn_copier(Box::new(out), "out | ", false);
+        copiers += 1;
+    }
+    if let Some(err) = child.stderr.take() {
+        spawn_copier(Box::new(err), "err | ", true);
+        copiers += 1;
+    }
+    drop(done_tx);
+
+    let status = child.wait()?;
+    // The run time ends at the hook's exit, not after the drain below.
+    let ran_for = started.elapsed();
+    let deadline = std::time::Instant::now() + TEE_GRACE;
+    for _ in 0..copiers {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if done_rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+
+    let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
+    let end = match (status.code(), exit_signal(&status)) {
+        (Some(code), _) => format!("exit {code}"),
+        (None, Some(sig)) => format!("signal {sig}"),
+        (None, None) => "exited".to_string(),
+    };
+    let _ = writeln!(f, "# {end}");
+    Ok((status, ran_for))
+}
+
+/// The longest log line [`run_teed`] holds before writing it out (HOOK-165).
+/// Output with no newline (a `\r` progress bar, binary data) would otherwise
+/// grow the pending line without bound; past this it is written as a line of
+/// its own and the rest continues on the next, tagged again.
+const LOG_LINE_MAX: usize = 64 * 1024;
+
+/// Append `chunk` to the pending `line`, calling `emit` with each complete
+/// line (without its `\n`) and with each [`LOG_LINE_MAX`]-byte piece of an
+/// overlong one. Whatever follows the last newline stays in `line`.
+// spec: HOOK-165
+fn split_log_lines(line: &mut Vec<u8>, chunk: &[u8], mut emit: impl FnMut(&[u8])) {
+    for &b in chunk {
+        if b == b'\n' {
+            emit(line);
+            line.clear();
+        } else {
+            line.push(b);
+            if line.len() >= LOG_LINE_MAX {
+                emit(line);
+                line.clear();
+            }
+        }
+    }
+}
+
+/// Catching Ctrl-C (SIGINT) for the length of one hook (HOOK-171).
+///
+/// The terminal sends SIGINT to the whole foreground process group, so the
+/// hook gets it as usual and `mind`, instead of dying with it, notes it and
+/// waits for the hook to exit. A caught signal's handler is reset to the
+/// default across `exec`, so the hook still sees the default disposition. When
+/// SIGINT is already ignored (a background job started with `&` by a
+/// non-interactive shell), nothing is installed: the hook inherits the ignore,
+/// as it always did. A second Ctrl-C while the hook still runs (one that traps
+/// or ignores SIGINT) ends `mind` at once, as the default disposition would.
+mod interrupt {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static HIT: AtomicBool = AtomicBool::new(false);
+
+    /// Restores the previous SIGINT disposition when dropped.
+    pub struct Guard {
+        #[cfg(unix)]
+        old: Option<libc::sigaction>,
+    }
+
+    #[cfg(unix)]
+    extern "C" fn on_sigint(_: libc::c_int) {
+        if HIT.swap(true, Ordering::SeqCst) {
+            // spec: HOOK-171 -- the second Ctrl-C: die of it. `signal` and
+            // `raise` are async-signal-safe; the raised SIGINT is blocked until
+            // this handler returns, then delivered with the default action.
+            // SAFETY: resets SIGINT to its default and re-raises it.
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::raise(libc::SIGINT);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn catch() -> Guard {
+        HIT.store(false, Ordering::SeqCst);
+        Guard {}
+    }
+
+    #[cfg(unix)]
+    pub fn catch() -> Guard {
+        HIT.store(false, Ordering::SeqCst);
+        // SAFETY: plain sigaction calls on zeroed structs; the handler only
+        // stores to an atomic, which is async-signal-safe.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) != 0
+                || old.sa_sigaction == libc::SIG_IGN
+            {
+                return Guard { old: None };
+            }
+            let mut new: libc::sigaction = std::mem::zeroed();
+            new.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut new.sa_mask);
+            new.sa_flags = libc::SA_RESTART;
+            if libc::sigaction(libc::SIGINT, &new, std::ptr::null_mut()) != 0 {
+                return Guard { old: None };
+            }
+            Guard { old: Some(old) }
+        }
+    }
+
+    impl Guard {
+        /// Whether a SIGINT arrived since [`catch`].
+        pub fn taken(&self) -> bool {
+            HIT.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            if let Some(old) = &self.old {
+                // SAFETY: restores the disposition saved by `catch`.
+                unsafe {
+                    libc::sigaction(libc::SIGINT, old, std::ptr::null_mut());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 #[cfg(test)]
@@ -1592,6 +1878,7 @@ mod tests {
             "install",
             evil_label,
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         let err = result.expect_err("a non-zero exit must produce HookFailed");
         let msg = err.to_string();
@@ -1655,6 +1942,7 @@ mod tests {
             "install",
             "spawn-fail",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         match result {
             Err(MindError::HookFailed {
@@ -1693,6 +1981,7 @@ mod tests {
             "install",
             "test-label",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert!(
@@ -1715,7 +2004,16 @@ mod tests {
             profiles: vec!["full".into(), "default".into(), "full".into()],
             item_profiles: Vec::new(),
         };
-        run_hook(&command, dir.path(), "local/a/b", "install", "env", &env).unwrap();
+        run_hook(
+            &command,
+            dir.path(),
+            "local/a/b",
+            "install",
+            "env",
+            &env,
+            crate::hook_log::Site::default(),
+        )
+        .unwrap();
         let got = std::fs::read_to_string(&out).unwrap();
         // Sorted and deduped; the empty item list is still set (not unset).
         assert_eq!(got, "default,full||set");
@@ -1759,6 +2057,7 @@ mod tests {
             "install",
             "test-label",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         match result {
             Err(
@@ -1826,6 +2125,7 @@ mod tests {
             "install",
             "test-label",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         match result {
             Err(
@@ -1867,6 +2167,7 @@ mod tests {
             "install",
             "test-label",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         match result {
             Err(ref e @ MindError::HookFailed { streamed, .. }) => {
@@ -1881,6 +2182,25 @@ mod tests {
         }
     }
 
+    // spec: HOOK-165
+    #[test]
+    fn log_lines_split_on_newlines_and_at_the_length_cap() {
+        let mut lines: Vec<Vec<u8>> = Vec::new();
+        let mut line = Vec::new();
+        split_log_lines(&mut line, b"a\nb", |l| lines.push(l.to_vec()));
+        split_log_lines(&mut line, b"c\n\nd", |l| lines.push(l.to_vec()));
+        assert_eq!(lines, vec![b"a".to_vec(), b"bc".to_vec(), Vec::new()]);
+        assert_eq!(line, b"d", "the partial line waits for more");
+
+        // Output with no newline is written in capped pieces, not held.
+        let mut lines: Vec<usize> = Vec::new();
+        let mut line = Vec::new();
+        let long = vec![b'x'; LOG_LINE_MAX * 2 + 5];
+        split_log_lines(&mut line, &long, |l| lines.push(l.len()));
+        assert_eq!(lines, vec![LOG_LINE_MAX, LOG_LINE_MAX]);
+        assert_eq!(line.len(), 5);
+    }
+
     // spec: HOOK-30
     #[test]
     fn run_hook_identity_and_command_propagate_to_error() {
@@ -1892,6 +2212,7 @@ mod tests {
             "install",
             "my-hook",
             &HookEnv::default(),
+            crate::hook_log::Site::default(),
         );
         match result {
             Err(MindError::HookFailed {

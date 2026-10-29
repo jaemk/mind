@@ -15231,7 +15231,10 @@ fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
     // `println!` nor a child process that inherits stdout can reach it; the one
     // document is written by `main` at the end.
     // spec: CLI-217 HOOK-23
-    let sb = sandbox_with_declared_hook("agents", "echo hook-said-this");
+    // The command prints text that does not appear in the command itself:
+    // the result document's `hooks` member names the command (HOOK-161), so
+    // only the output is a marker for the output.
+    let sb = sandbox_with_declared_hook("agents", "printf 'hook-said-%s' this");
     let r = sb.mind(&[
         "meld",
         &sb.source_spec(),
@@ -17462,7 +17465,7 @@ fn install_hook_stdout_streams_to_mind_stdout() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("====== (end hook: build) ======"),
+        r.stdout.contains("====== (end hook: build, exit 0, "),
         "the closing divider must separate the hook output from what follows: {}",
         r.stdout
     );
@@ -17504,7 +17507,7 @@ fn install_hook_stderr_goes_to_mind_stderr_not_stdout() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("====== (end hook: warn) ======"),
+        r.stdout.contains("====== (end hook: warn, exit 0, "),
         "the closing divider must separate the hook output from what follows: {}",
         r.stdout
     );

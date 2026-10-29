@@ -1299,6 +1299,34 @@ pub enum MindError {
     #[error("hook '{label}' was aborted by user; not running remaining hooks")]
     HookAborted { label: String },
 
+    /// HOOK-171: `mind` was interrupted (Ctrl-C) while a hook ran. The hook
+    /// got the same signal; `mind` recorded it and stops here.
+    // spec: HOOK-171
+    #[error(
+        "{} for source '{identity}' was interrupted; stopping",
+        if event == label {
+            format!("{event} hook")
+        } else {
+            format!("{event} hook '{label}'")
+        }
+    )]
+    HookInterrupted {
+        /// The hook's lifecycle event, as for `HookFailed`.
+        event: &'static str,
+        /// The hook's frame heading, as for `HookFailed`.
+        label: String,
+        identity: String,
+    },
+
+    /// CLI-254: a `hooks history --since` value that is neither a duration
+    /// (`30m`, `2h`, `7d`) nor a UTC date or time (`2026-10-28`,
+    /// `2026-10-28T14:00`, `2026-10-28T14:00:00Z`).
+    // spec: CLI-254
+    #[error(
+        "invalid --since '{value}': expected a duration like 30m, 2h, or 7d, or a UTC date or time like 2026-10-28 or 2026-10-28T14:00"
+    )]
+    BadHistorySince { value: String },
+
     /// STO-56: the base directory for a project-scoped lobe does not exist.
     /// Returned by `resolve_lobe` when an explicit `base` is given but the
     /// directory is absent, so mind refuses to fabricate a path into a
@@ -1776,6 +1804,32 @@ impl MindError {
         }
     }
 
+    /// The process exit code for this error (CLI-175, CLI-255): 3 for a hook
+    /// that failed, 130 for a hook interrupted by Ctrl-C (the shell convention
+    /// for SIGINT), and 1 for everything else.
+    // spec: CLI-175 CLI-255
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            MindError::HookFailed { .. } => 3,
+            MindError::HookInterrupted { .. } => 130,
+            _ => 1,
+        }
+    }
+
+    /// Whether this error is a hook stopping the run (HOOK-30, HOOK-21,
+    /// HOOK-171): a failure, an abort, or a Ctrl-C. A loop that skips a
+    /// failing entry and carries on must pass these through instead, so the
+    /// run stops with the hook's error and exit code (CLI-255).
+    // spec: HOOK-172
+    pub fn is_hook_stop(&self) -> bool {
+        matches!(
+            self,
+            MindError::HookFailed { .. }
+                | MindError::HookAborted { .. }
+                | MindError::HookInterrupted { .. }
+        )
+    }
+
     /// A stable kebab-case slug that identifies this error variant. Used as the
     /// `kind` field in the JSON error envelope emitted under `--json` (CLI-181).
     /// These slugs are API: they must not change once assigned.
@@ -1875,6 +1929,8 @@ impl MindError {
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::HookAborted { .. } => "hook-aborted",
+            MindError::HookInterrupted { .. } => "hook-interrupted",
+            MindError::BadHistorySince { .. } => "bad-history-since",
             MindError::LobeBaseMissing { .. } => "lobe-base-missing",
             MindError::UnsafeClonePath { .. } => "unsafe-clone-path",
             MindError::AmbiguousHookTarget { .. } => "ambiguous-hook-target",
@@ -3059,6 +3115,20 @@ mod tests {
         assert_eq!(
             MindError::HookAborted { label: "h".into() }.kind(),
             "hook-aborted"
+        );
+        // spec: HOOK-171 CLI-254
+        assert_eq!(
+            MindError::HookInterrupted {
+                event: "install",
+                label: "setup".into(),
+                identity: "s".into(),
+            }
+            .kind(),
+            "hook-interrupted"
+        );
+        assert_eq!(
+            MindError::BadHistorySince { value: "x".into() }.kind(),
+            "bad-history-since"
         );
         // spec: LNK-14 -- the malformed-item-link error carries a stable slug.
         assert_eq!(

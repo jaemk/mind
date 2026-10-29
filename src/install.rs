@@ -778,6 +778,12 @@ fn run_build_hook(
     hook_env: &crate::hook::HookEnv,
 ) -> Result<()> {
     // spec: HOOK-72 HOOK-74
+    let key = item.key();
+    let site = crate::hook_log::Site {
+        item: Some(key.as_str()),
+        commit: Some(commit),
+        replaced: &[],
+    };
     let run = if accepted {
         true
     } else if !crate::hook::is_tty() {
@@ -808,13 +814,25 @@ fn run_build_hook(
         // (main.rs's `json_stdout`), so it cannot reach the result document.
         // spec: CLI-217
         println!("running build hook for {}", item.display_key());
-        crate::hook::run_hook(build, staging, &item.source, "build", "build", hook_env)?;
-    } else if crate::hook::is_tty() && !accepted {
-        // spec: CLI-217
-        crate::render::note(format!(
-            "note: skipped build hook for {}; its tooling is not built",
-            item.display_key()
-        ));
+        crate::hook::run_hook(
+            build,
+            staging,
+            &item.source,
+            "build",
+            "build",
+            hook_env,
+            site,
+        )?;
+    } else {
+        if crate::hook::is_tty() && !accepted {
+            // spec: CLI-217
+            crate::render::note(format!(
+                "note: skipped build hook for {}; its tooling is not built",
+                item.display_key()
+            ));
+        }
+        // spec: HOOK-160
+        crate::hook_log::not_run(&item.source, site, "build", "build", build);
     }
     Ok(())
 }
@@ -905,17 +923,28 @@ fn run_item_hook(
             crate::hook::OptionalChoice::Run
         )
     };
+    // The frame and the record are headed with the event, as the frame always
+    // was for an item hook (`HookFailed.label`).
+    let site = crate::hook_log::Site {
+        item: Some(display_key),
+        commit: Some(commit),
+        replaced: &[],
+    };
     if run {
         // Same as the build-hook line above: a progress line on stdout in text
         // mode, unreachable from `--json` stdout by the process-wide redirect.
         // spec: CLI-217
         println!("running {event} hook for {display_key}");
-        crate::hook::run_hook(cmd, &cwd, source, event, event, hook_env)?;
-    } else if crate::hook::is_tty() && !accepted {
-        // spec: CLI-217
-        crate::render::note(format!(
-            "note: skipped {event} hook for {display_key}; {effect}"
-        ));
+        crate::hook::run_hook(cmd, &cwd, source, event, event, hook_env, site)?;
+    } else {
+        if crate::hook::is_tty() && !accepted {
+            // spec: CLI-217
+            crate::render::note(format!(
+                "note: skipped {event} hook for {display_key}; {effect}"
+            ));
+        }
+        // spec: HOOK-160
+        crate::hook_log::not_run(source, site, event, event, cmd);
     }
     Ok(run)
 }

@@ -195,6 +195,20 @@ pub fn parse_meld_line(line: &str) -> std::result::Result<crate::cli::MeldArgs, 
     Ok(parsed.args)
 }
 
+/// The status-bar text for a failed action (TUI-84): the error, plus, when a
+/// hook failed or was interrupted, where its result and output are kept, since
+/// the hook's own output went past on a terminal the TUI has since redrawn.
+// spec: TUI-84
+pub fn action_error_text(error: &crate::error::MindError) -> String {
+    match error {
+        crate::error::MindError::HookFailed { .. }
+        | crate::error::MindError::HookInterrupted { .. } => {
+            format!("{error}\nsee `mind hooks history --limit 1 --show` for the hook's result")
+        }
+        _ => format!("{error}"),
+    }
+}
+
 /// A details-and-actions dialog, opened with Enter on a source or item (TUI-26).
 /// It describes the focused node and offers the actions valid for it; choosing
 /// one runs it through the normal confirm-and-execute path (TUI-24).
@@ -1328,6 +1342,15 @@ impl App {
                         .unwrap_or(detail.len());
                     detail.insert(at, line);
                 }
+                // spec: TUI-83 -- the item's newest hook result, in the same
+                // place (ahead of the description block).
+                if let Some(line) = self.last_hook_line(&it.source, Some(&it.display_key)) {
+                    let at = detail
+                        .iter()
+                        .position(String::is_empty)
+                        .unwrap_or(detail.len());
+                    detail.insert(at, line);
+                }
                 Some(Dialog {
                     title: it.name.clone(),
                     detail,
@@ -1410,6 +1433,10 @@ impl App {
                 })
                 .collect();
             detail.push(format!("profiles:  {}", listed.join(", ")));
+        }
+        // spec: TUI-83 -- the source's newest source-hook result.
+        if let Some(line) = self.last_hook_line(name, None) {
+            detail.push(line);
         }
 
         // Build the actions list. When no items are installed, offer "Set namespace"
@@ -1527,6 +1554,37 @@ impl App {
             actions,
             selected: 0,
         }
+    }
+
+    /// A dialog's last-hook line (TUI-83): the newest history record for the
+    /// source's own hooks (`item` None) or for one installed item (`item` its
+    /// display key), as `hooks history` would show it. `None` when the history
+    /// holds no such record.
+    // spec: TUI-83
+    fn last_hook_line(&self, source: &str, item: Option<&str>) -> Option<String> {
+        let source = crate::sanitize::strip_ansi(source);
+        let r = self
+            .last_snapshot
+            .as_ref()?
+            .hook_results
+            .iter()
+            .rev()
+            .find(|r| r.source == source && r.item.as_deref() == item)?;
+        let label = match r.item {
+            Some(_) => String::new(),
+            None => format!(" '{}'", r.label),
+        };
+        let status = if r.outcome.ran() {
+            format!(" ({})", r.status_text())
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "last hook: {} {}{label}{status} {}",
+            r.outcome.as_str(),
+            r.event,
+            r.at
+        ))
     }
 
     /// The item dialog's profiles line (TUI-78, PROF-29): the profiles an
@@ -1712,11 +1770,11 @@ impl App {
     // spec: TUI-80
     pub fn offer_force_retry(&mut self, kind: ActionKind, error: &crate::error::MindError) {
         let crate::error::MindError::LinkOccupied { path } = error else {
-            self.set_error(format!("{error}"));
+            self.set_error(action_error_text(error));
             return;
         };
         if !kind.can_force() {
-            self.set_error(format!("{error}"));
+            self.set_error(action_error_text(error));
             return;
         }
         let shown = crate::sanitize::strip_ansi(path);
@@ -1838,6 +1896,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -3742,6 +3801,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: ns,
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -3866,6 +3926,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: ns,
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         });
 
         let src_idx = app
@@ -4735,6 +4796,103 @@ mod tests {
         )));
     }
 
+    // --- TUI-83 / TUI-84: hook results ---
+
+    fn hook_record(
+        item: Option<&str>,
+        label: &str,
+        outcome: crate::hook_log::Outcome,
+        at: &str,
+    ) -> crate::hook_log::HookRecord {
+        crate::hook_log::HookRecord {
+            at: at.to_string(),
+            run: "r".into(),
+            verb: "meld".into(),
+            event: "install".into(),
+            label: label.into(),
+            source: "local/agents".into(),
+            item: item.map(str::to_string),
+            command: "make".into(),
+            replaced: Vec::new(),
+            commit: None,
+            outcome,
+            exit_code: Some(2),
+            signal: None,
+            duration_ms: Some(840),
+            error: None,
+            log: None,
+        }
+    }
+
+    #[test]
+    fn dialogs_show_the_newest_hook_result_for_what_they_describe() {
+        // spec: TUI-83
+        use crate::hook_log::Outcome;
+        let mut snap = make_snapshot();
+        snap.hook_results = vec![
+            hook_record(None, "setup", Outcome::Ok, "2026-10-27T10:00:00Z"),
+            hook_record(None, "setup", Outcome::Failed, "2026-10-28T10:00:00Z"),
+            hook_record(
+                Some("skill:review"),
+                "install",
+                Outcome::Failed,
+                "2026-10-28T11:00:00Z",
+            ),
+        ];
+        let app = open_source_dialog(snap.clone());
+        let d = app.dialog.as_ref().unwrap();
+        assert!(
+            d.detail
+                .iter()
+                .any(|l| l
+                    == "last hook: failed install 'setup' (exit 2, 840ms) 2026-10-28T10:00:00Z"),
+            "the source's own newest hook, not the item's: {:?}",
+            d.detail
+        );
+
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snap);
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().unwrap();
+        assert!(
+            d.detail
+                .iter()
+                .any(|l| l == "last hook: failed install (exit 2, 840ms) 2026-10-28T11:00:00Z"),
+            "the item's own hook, no repeated label: {:?}",
+            d.detail
+        );
+    }
+
+    #[test]
+    fn dialogs_without_hook_history_show_no_hook_line() {
+        // spec: TUI-83
+        let app = open_source_dialog(make_snapshot());
+        let d = app.dialog.as_ref().unwrap();
+        assert!(!d.detail.iter().any(|l| l.starts_with("last hook:")));
+    }
+
+    #[test]
+    fn a_hook_error_points_at_the_hook_history() {
+        // spec: TUI-84
+        let failed = crate::error::MindError::HookFailed {
+            event: "install",
+            label: "setup".into(),
+            identity: "local/agents".into(),
+            command: "make".into(),
+            status: None,
+            reason: String::new(),
+            streamed: true,
+        };
+        let text = action_error_text(&failed);
+        assert!(
+            text.ends_with("\nsee `mind hooks history --limit 1 --show` for the hook's result"),
+            "{text}"
+        );
+        let other = crate::error::MindError::GitNotFound;
+        assert!(!action_error_text(&other).contains("hooks history"));
+    }
+
     #[test]
     fn source_dialog_without_profiles_is_unchanged() {
         // spec: TUI-78 - a source with no profiles adds no line and no action.
@@ -5123,6 +5281,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -5147,6 +5306,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -5528,6 +5688,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -5697,6 +5858,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
@@ -5789,6 +5951,7 @@ mod tests {
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
+            hook_results: Vec::new(),
         }
     }
 
