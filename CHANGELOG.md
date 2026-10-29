@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-10-29
+
+### Added
+
+- `upgrade` and `sync --upgrade` install items new to a source that was
+  installed whole, in the same batch and behind the same prompt as the other
+  upgrades. Existing whole installs are recorded at the next `sync` or
+  `upgrade`.
+- `--skip-new` leaves new items for the next upgrade, and `--ignore-new`
+  records them as seen so they are not offered again; both also cover items a
+  profile adds. The ignore note names the `mind learn` command that installs
+  one.
+- `upgrade --json` reports `new_items` and `ignored_new_items`.
+
+### Changed
+
+- A source with every item forgotten is no longer treated as installed whole.
+
+### Fixed
+
+- The `probe` TUI no longer stalls on large or linked catalogs: each source's
+  scan is cached between refreshes, the refresh runs off the input thread, and
+  sources off screen are re-read every 10s instead of every tick.
+- The `probe` TUI stopped refreshing after a declined forced retry.
+
 ## [0.38.0] - 2026-10-28
 
 ### Added
@@ -2151,7 +2176,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.38.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.39.0...HEAD
+[0.39.0]: https://github.com/jaemk/mind/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/jaemk/mind/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/jaemk/mind/compare/v0.36.1...v0.37.0
 [0.36.1]: https://github.com/jaemk/mind/compare/v0.36.0...v0.36.1
