@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-10-29
+
+### Fixed
+
+- The `probe` TUI was slow to start, and froze on each collapse or expand,
+  when items had long or shared dependency chains: it built every item's
+  dependency subtree to full depth, listing an installed item's dependencies
+  twice, which grows exponentially and could exhaust memory. It now builds a
+  subtree only when its row is expanded.
+
 ## [0.39.0] - 2026-10-29
 
 ### Added
@@ -2176,7 +2186,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.39.1...HEAD
+[0.39.1]: https://github.com/jaemk/mind/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/jaemk/mind/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/jaemk/mind/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/jaemk/mind/compare/v0.36.1...v0.37.0
