@@ -178,7 +178,9 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   one that is declined or fails stays out and is offered again. A new item that
   is already installed joins the snapshot without being offered, and a snapshot
   key no longer in the catalog is dropped. An item the consumer `forget`s stays
-  in the snapshot, so it is not offered again.
+  in the snapshot, so it is not offered again. A whole-tracked source with none
+  of its items installed (every one forgotten) is no longer whole-tracked: the
+  pass drops its snapshot and offers it nothing.
 - `LIFE-55` `upgrade --skip-new` leaves every new item (LIFE-54) and every
   profile addition (PROF-21) out of the pass; the next `upgrade` offers them
   again. `upgrade --ignore-new` records them in their snapshot without

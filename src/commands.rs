@@ -7794,7 +7794,8 @@ fn record_whole_sources(paths: &Paths, catalog: Option<&[CatalogItem]>) -> Resul
         let items: Vec<&CatalogItem> = match catalog {
             Some(c) => c.iter().filter(|c| c.source == source.name).collect(),
             None => {
-                let Ok(v) = catalog::scan_one(paths, source) else {
+                // Quiet: the verb's own scan reports a source that fails.
+                let Ok(v) = catalog::scan_one_strict(paths, source) else {
                     continue;
                 };
                 scanned = v;
@@ -7874,6 +7875,12 @@ fn track_whole_for_upgrade(
         let Some(snapshot) = source.whole_snapshot.clone() else {
             continue;
         };
+        // Every item forgotten: the consumer no longer installs this source.
+        if !installed.iter().any(|(s, _, _)| *s == name.as_str()) {
+            source.whole_snapshot = None;
+            changed = true;
+            continue;
+        }
         let items: Vec<&CatalogItem> = catalog.iter().filter(|c| c.source == *name).collect();
         let current: HashSet<String> = items.iter().map(|c| bare_key(c)).collect();
         let mut next: BTreeSet<String> = snapshot

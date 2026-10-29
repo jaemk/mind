@@ -254,6 +254,42 @@ fn upgrade_leaves_a_cherry_picked_source_alone() {
 }
 
 #[test]
+fn checking_for_a_whole_install_does_not_repeat_the_gone_source_warning() {
+    // spec: LIFE-53 CLI-213 -- the whole-install check skips a source it cannot
+    // scan quietly; the verb's own scan is the one that warns.
+    let sb = Sandbox::new();
+    sb.ok(&["meld", &sb.spec(), "--register-only"]);
+    sb.ok(&["learn", "review", "--yes"]);
+    std::fs::remove_dir_all(&sb.source).unwrap();
+    for args in [
+        &["recall"][..],
+        &["upgrade", "--no-sync", "--yes"],
+        &["sync"],
+    ] {
+        let r = sb.mind(args);
+        assert!(
+            r.stderr.matches("is gone").count() <= 1,
+            "mind {args:?} warned more than once:\n{}",
+            r.stderr
+        );
+    }
+}
+
+#[test]
+fn a_source_with_every_item_forgotten_is_no_longer_tracked() {
+    // spec: LIFE-54
+    let sb = Sandbox::new();
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    for key in ALL_THREE {
+        sb.ok(&["forget", key, "--yes"]);
+    }
+    sb.add_skill("deploy");
+    sb.ok(&["upgrade", "--yes"]);
+    assert!(sb.installed().is_empty(), "{:?}", sb.installed());
+    assert_eq!(sb.whole_snapshot(), None);
+}
+
+#[test]
 fn a_forgotten_item_is_not_offered_again() {
     // spec: LIFE-54
     let sb = Sandbox::new();

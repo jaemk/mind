@@ -348,12 +348,19 @@ pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     Ok(items)
 }
 
+/// One source's catalog, every failure an error and nothing printed: for a
+/// caller that skips a source it cannot scan without speaking for it.
+pub fn scan_one_strict(paths: &Paths, source: &Source) -> Result<Vec<CatalogItem>> {
+    let mut items = Vec::new();
+    scan_source(paths, source, &mut items)?;
+    Ok(items)
+}
+
 /// [`scan`] for a single source. A linked source whose working tree is gone
 /// yields no items and a warning rather than an error, as in the full scan.
 pub fn scan_one(paths: &Paths, source: &Source) -> Result<Vec<CatalogItem>> {
-    let mut items = Vec::new();
-    match scan_source(paths, source, &mut items) {
-        Ok(()) => Ok(items),
+    match scan_one_strict(paths, source) {
+        Ok(items) => Ok(items),
         // spec: CLI-212 CLI-213
         Err(e @ MindError::LinkedSourceGone { .. }) => {
             // spec: DSC-102 -- muted while the TUI owns the terminal.
