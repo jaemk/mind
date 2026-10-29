@@ -7860,6 +7860,11 @@ fn track_whole_for_upgrade(
         return Ok(tracking);
     }
     let manifest = Manifest::load(paths)?;
+    let installed: HashSet<(&str, ItemKind, &str)> = manifest
+        .items
+        .values()
+        .map(|m| (m.source.as_str(), m.kind, m.bare_name.as_str()))
+        .collect();
     let mut registry = Registry::load(paths)?;
     let mut changed = false;
     for name in sources {
@@ -7883,10 +7888,7 @@ fn track_whole_for_upgrade(
             if next.contains(&bare) {
                 continue;
             }
-            let is_installed = manifest
-                .items
-                .values()
-                .any(|m| m.source == c.source && m.kind == c.kind && m.bare_name == c.name);
+            let is_installed = installed.contains(&(c.source.as_str(), c.kind, c.name.as_str()));
             let item = NewItem {
                 key: c.display_key(),
                 source: safe_source.clone(),
@@ -8004,7 +8006,7 @@ fn print_whole_additions(tracking: &WholeTracking) {
 fn note_unproposed_new_items(skipped: usize, ignored: &[NewItem]) {
     if skipped > 0 {
         crate::render::note(format!(
-            "note: skipped {skipped} new item(s) (--skip-new); the next `mind upgrade` offers them again"
+            "note: skipped {skipped} new item(s) (--skip-new); the next upgrade offers them again"
         ));
     }
     for i in ignored {

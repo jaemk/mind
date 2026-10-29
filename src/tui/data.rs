@@ -7,8 +7,9 @@
 //! Change detection: the source-set and manifest are compared across polls,
 //! and the freshly built snapshot is compared by value against the last
 //! applied one so an unchanged tick skips the rebuild (TUI-15). A source's
-//! catalog is re-scanned only when its registry record changes, or on every
-//! load for a linked source (TUI-85, [`SCAN_CACHE`]); the item list is still
+//! catalog is re-scanned only when its registry record changes, or for a
+//! linked source on the on-screen schedule (TUI-85, TUI-87, [`SCAN_CACHE`]);
+//! the item list is still
 //! complete on every load, which is what lets `load_inner` size the hash memo
 //! to the current catalog before any staleness check reads it.
 
@@ -484,9 +485,22 @@ fn scan_catalog_with(
             .filter(|c| !source.is_linked() || !refresh.due(&source.name, c.at, now));
         let cached = match cached {
             Some(c) => c,
-            None => CachedScan {
-                scan: std::sync::Arc::new(build_source_scan(catalog::scan_one(paths, source)?)),
-                at: now,
+            None => match catalog::scan_one(paths, source) {
+                Ok(items) => CachedScan {
+                    scan: std::sync::Arc::new(build_source_scan(items)),
+                    at: now,
+                },
+                Err(e) => {
+                    // Keep every other source's scan: one broken source must
+                    // not make each later tick re-scan the rest.
+                    next.extend(prev);
+                    *slot = Some(ScanCache {
+                        mind_home: paths.mind_home.clone(),
+                        by_record: next,
+                        stale,
+                    });
+                    return Err(e);
+                }
             },
         };
         scans.push(cached.scan.clone());
@@ -983,6 +997,38 @@ mod tests {
         assert!(!fourth.is_ok_and(|s| std::sync::Arc::ptr_eq(&s[0], &third[0])));
         cleanup(&base);
         cleanup(&other_base);
+    }
+
+    #[test]
+    fn a_source_that_fails_to_scan_keeps_the_others_cached() {
+        // spec: TUI-85
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        meld_fixture_pinned(
+            &paths,
+            &base,
+            &[("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n")],
+            crate::commands::PinRequest::Freeze(None),
+        );
+        let registry = Registry::load(&paths).unwrap();
+        let mut slot = None;
+        let first = scan_all(&mut slot, &paths, &registry).unwrap();
+
+        // A second, cloned source whose clone is missing fails the load.
+        let mut broken = Registry::load(&paths).unwrap();
+        let mut missing = broken.sources[0].clone();
+        missing.name = format!("{}-missing", missing.name);
+        missing.repo = format!("{}-missing", missing.repo);
+        assert!(!missing.clone_dir(&paths).exists());
+        broken.sources.push(missing);
+        assert!(scan_all(&mut slot, &paths, &broken).is_err());
+
+        let again = scan_all(&mut slot, &paths, &registry).unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first[0], &again[0]),
+            "the healthy source's scan must survive the failed load"
+        );
+        cleanup(&base);
     }
 
     #[test]

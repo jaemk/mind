@@ -1822,6 +1822,11 @@ impl App {
     /// (TUI-80). Anything else, or an already-forced retry, is a plain error.
     // spec: TUI-80
     pub fn offer_force_retry(&mut self, kind: ActionKind, error: &crate::error::MindError) {
+        // The action has finished, so the poll resumes (TUI-15) whether or not
+        // a retry is offered: `set_error` clears this too, but the retry path
+        // below does not reach it, and a declined retry would otherwise leave
+        // the poll off for the rest of the session.
+        self.mutating = false;
         let crate::error::MindError::LinkOccupied { path } = error else {
             self.set_error(action_error_text(error));
             return;
@@ -5158,7 +5163,14 @@ mod tests {
             source: "s".to_string(),
         };
         let mut app = App::new(String::new(), None, None);
+        // spec: TUI-15 -- the failed action set `mutating`; the retry offer
+        // must clear it, or declining leaves the poll off for good.
+        app.mutating = true;
         app.offer_force_retry(learn.clone(), &occupied);
+        assert!(
+            !app.is_mutating(),
+            "the poll resumes behind the retry offer"
+        );
         assert!(app.modal_visible);
         assert!(app.error.is_none());
         let pending = app.pending_action.as_ref().unwrap();
