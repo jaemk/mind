@@ -220,6 +220,7 @@ and verified.
 | `upgrade` installs items new to a source installed whole; `--skip-new` defers them, `--ignore-new` records them as seen | done | LIFE-53, LIFE-54, LIFE-55, LIFE-56 |
 | TUI poll re-scans a source's catalog only when its registry record changes (linked sources every tick) | done | TUI-85 |
 | TUI poll runs on a background thread, off the input thread | done | TUI-86 |
+| TUI poll reads on-screen sources every tick, off-screen ones every 10s | done | TUI-87 |
 | Source-derived item descriptions (frontmatter and `[[items]]` overrides) are sanitized (ANSI/control/bidi stripped) at catalog capture, not per display site | done | DSC-94 |
 | TUI: installed rows carry a `stale` flag with a drift marker and an explicit per-item upgrade-confirm list | done | TUI-63 |
 | TUI: `?` opens a keymap help overlay; hint line names `/`, `h`/`l`, paging, and `?` | done | TUI-64 |

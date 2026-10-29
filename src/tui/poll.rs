@@ -9,10 +9,14 @@
 //! began. The UI bumps its epoch whenever it applies a snapshot of its own (an
 //! action's result), so a load that read the state from before that action is
 //! recognised and dropped instead of reverting the tree.
+//!
+//! The UI also publishes the sources it has on screen. A load reads those
+//! fresh and reuses the others' live parts until they age out (TUI-87).
 
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -25,10 +29,14 @@ pub struct Polled {
     pub snapshot: Snapshot,
 }
 
+/// The sources the UI has on screen, read fresh by each load (TUI-87).
+type OnScreen = Arc<Mutex<HashSet<String>>>;
+
 /// Handle to the running poll thread. Dropping it stops the thread and waits
 /// for any in-flight load, so nothing outlives the TUI's hold on the terminal.
 pub struct Poller {
     epoch: Arc<AtomicU64>,
+    on_screen: OnScreen,
     stop: Option<mpsc::Sender<()>>,
     rx: mpsc::Receiver<Polled>,
     handle: Option<JoinHandle<()>>,
@@ -37,20 +45,23 @@ pub struct Poller {
 impl Poller {
     /// Start polling every `interval`. The first load runs one interval in,
     /// since the caller has just loaded the initial snapshot itself.
-    // spec: TUI-86
+    // spec: TUI-86 TUI-87
     pub fn start(paths: &Paths, interval: Duration) -> Self {
         Self::start_with(interval, {
             let paths = paths.clone();
-            move || data::try_poll(&paths)
+            move |on_screen| data::try_poll_focused(&paths, on_screen)
         })
     }
 
-    /// [`Poller::start`] with the load supplied, so tests can drive it.
+    /// [`Poller::start`] with the load supplied, so tests can drive it. The
+    /// load is given the sources last published by [`Poller::set_on_screen`].
     fn start_with<F>(interval: Duration, mut load: F) -> Self
     where
-        F: FnMut() -> Option<Snapshot> + Send + 'static,
+        F: FnMut(&HashSet<String>) -> Option<Snapshot> + Send + 'static,
     {
         let epoch = Arc::new(AtomicU64::new(0));
+        let on_screen: OnScreen = Arc::default();
+        let shown = on_screen.clone();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         // One slot: while the UI is busy (an action runs, or the TUI is
         // suspended for one) loads that find it full are dropped rather than
@@ -61,8 +72,11 @@ impl Poller {
             // Wakes on the interval; a stop message or a dropped sender ends it.
             while let Err(mpsc::RecvTimeoutError::Timeout) = stop_rx.recv_timeout(interval) {
                 let epoch = shared.load(Ordering::Acquire);
+                let on_screen = shown.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 // try_poll skips (None) while a writer holds the lock (TUI-25).
-                let Some(snapshot) = load() else { continue };
+                let Some(snapshot) = load(&on_screen) else {
+                    continue;
+                };
                 if let Err(mpsc::TrySendError::Disconnected(_)) =
                     tx.try_send(Polled { epoch, snapshot })
                 {
@@ -72,6 +86,7 @@ impl Poller {
         });
         Self {
             epoch,
+            on_screen,
             stop: Some(stop_tx),
             rx,
             handle: Some(handle),
@@ -81,6 +96,12 @@ impl Poller {
     /// Publish the UI's current epoch, read by the next load to begin.
     pub fn set_epoch(&self, epoch: u64) {
         self.epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Publish the sources with a row on screen, read by the next load to
+    /// begin (TUI-87).
+    pub fn set_on_screen(&self, sources: HashSet<String>) {
+        *self.on_screen.lock().unwrap_or_else(|e| e.into_inner()) = sources;
     }
 
     /// The newest snapshot taken under `epoch`, if any arrived. Older ones and
@@ -133,7 +154,7 @@ mod tests {
     fn a_slow_load_does_not_block_the_caller() {
         // spec: TUI-86 -- the load runs off the calling thread, so asking for
         // the latest snapshot returns at once while a load is still running.
-        let p = Poller::start_with(Duration::from_millis(1), || {
+        let p = Poller::start_with(Duration::from_millis(1), |_| {
             std::thread::sleep(Duration::from_millis(500));
             Some(snapshot("slow"))
         });
@@ -148,7 +169,7 @@ mod tests {
         // spec: TUI-86 -- a load begun before the UI applied an action's own
         // snapshot (and bumped its epoch) must not revert the tree.
         let (go_tx, go_rx) = mpsc::channel::<()>();
-        let p = Poller::start_with(Duration::from_millis(1), move || {
+        let p = Poller::start_with(Duration::from_millis(1), move |_| {
             go_rx.recv().ok()?;
             Some(snapshot("stale"))
         });
@@ -166,12 +187,39 @@ mod tests {
     }
 
     #[test]
+    fn each_load_is_given_the_sources_on_screen() {
+        // spec: TUI-87
+        let p = Poller::start_with(Duration::from_millis(1), |on_screen| {
+            let mut names: Vec<String> = on_screen.iter().cloned().collect();
+            names.sort();
+            Some(Snapshot {
+                source_names: names,
+                ..Default::default()
+            })
+        });
+        p.set_on_screen(HashSet::from(["b".to_string(), "a".to_string()]));
+        let start = Instant::now();
+        let mut got = None;
+        while start.elapsed() < Duration::from_secs(5) {
+            got = p.latest(0).filter(|s| !s.source_names.is_empty());
+            if got.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            got.map(|s| s.source_names),
+            Some(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
     fn a_skipped_load_sends_nothing_and_dropping_stops_the_thread() {
         // spec: TUI-86 TUI-25 -- a load skipped under a writer's lock (None)
         // delivers nothing; dropping the poller ends the thread.
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
-        let p = Poller::start_with(Duration::from_millis(1), move || {
+        let p = Poller::start_with(Duration::from_millis(1), move |_| {
             seen.fetch_add(1, Ordering::SeqCst);
             None
         });

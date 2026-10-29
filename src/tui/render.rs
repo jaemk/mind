@@ -312,6 +312,8 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
     let rows = area.height.saturating_sub(2) as usize;
     let offset = scroll_offset(app.scroll.get(), app.selected, app.visible.len(), rows);
     app.scroll.set(offset);
+    // spec: TUI-87
+    app.view_rows.set(rows);
 
     let mut state = ListState::default();
     state.select(Some(app.selected));

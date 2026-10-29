@@ -364,19 +364,63 @@ struct SourceScan {
     available: Vec<SnapshotAvailable>,
 }
 
+/// How long a poll may reuse a linked source's scan, or an installed item's
+/// stale flag, when the source is not on screen (TUI-87).
+pub const OFF_SCREEN_REFRESH: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a load must read fresh (TUI-87).
+#[derive(Debug, Clone, Copy)]
+pub enum Refresh<'a> {
+    /// Everything: the initial load and an action's reload.
+    All,
+    /// A poll: the named (sanitized) sources, the ones on screen, are read
+    /// fresh; any other source's live parts are reused until they are
+    /// [`OFF_SCREEN_REFRESH`] old.
+    Focused(&'a std::collections::HashSet<String>),
+}
+
+impl Refresh<'_> {
+    /// Whether a live result for `source` (a raw registry name) last computed
+    /// at `at` must be recomputed now.
+    fn due(&self, source: &str, at: std::time::Instant, now: std::time::Instant) -> bool {
+        match self {
+            Refresh::All => true,
+            Refresh::Focused(names) => {
+                names.contains(strip_ansi(source).as_str())
+                    || now.saturating_duration_since(at) >= OFF_SCREEN_REFRESH
+            }
+        }
+    }
+}
+
+/// A cached [`SourceScan`] and when it was taken.
+struct CachedScan {
+    scan: std::sync::Arc<SourceScan>,
+    at: std::time::Instant,
+}
+
+/// What an installed item's stale flag was computed from: its manifest
+/// identity and recorded hash and name, and the catalog path and effective
+/// name it was compared against. Any change recomputes it.
+type StaleKey = (String, String, String, PathBuf, String);
+
 /// Per-source [`SourceScan`]s kept across polls, so a tick re-scans only what
 /// may have changed (TUI-15). Keyed on the source's serialized registry record,
 /// which carries the recorded commit and every discovery setting: a `sync` that
 /// moved the commit, a namespace change, or a re-meld changes the key and so
 /// re-scans. A linked source (CLI-27) is read live from the user's working tree,
-/// which can change without touching its record, so it is never cached.
+/// which can change without touching its record, so its scan is reused only
+/// while it is off screen and younger than [`OFF_SCREEN_REFRESH`] (TUI-87).
+///
+/// `stale` holds each installed item's TUI-63 flag on the same schedule.
 ///
 /// One slot per process, tagged with the `mind_home` it was built for, so a
 /// load against a different home (tests run many in one process) starts empty
 /// rather than serving another home's catalog.
 struct ScanCache {
     mind_home: PathBuf,
-    by_record: std::collections::HashMap<String, std::sync::Arc<SourceScan>>,
+    by_record: std::collections::HashMap<String, CachedScan>,
+    stale: std::collections::HashMap<StaleKey, (bool, std::time::Instant)>,
 }
 
 static SCAN_CACHE: std::sync::Mutex<Option<ScanCache>> = std::sync::Mutex::new(None);
@@ -413,48 +457,48 @@ fn build_source_scan(items: Vec<catalog::CatalogItem>) -> SourceScan {
     }
 }
 
-/// Scan every melded source, reusing a cached [`SourceScan`] for each
-/// clone-backed source whose registry record is unchanged since the last load.
-// spec: TUI-15 TUI-85
-fn scan_catalog(paths: &Paths, registry: &Registry) -> Result<Vec<std::sync::Arc<SourceScan>>> {
-    scan_catalog_with(
-        &mut SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner()),
-        paths,
-        registry,
-    )
-}
-
-/// [`scan_catalog`] against an explicit cache slot, so tests can drive one
-/// that concurrently running tests do not share.
+/// Scan every melded source against an explicit cache slot (tests drive one
+/// that concurrently running tests do not share), reusing a cached
+/// [`SourceScan`] for each clone-backed source whose registry record is
+/// unchanged, and for a linked source that `refresh` does not make due. The
+/// slot is left holding a cache for `paths`, with the previous stale flags.
+// spec: TUI-15 TUI-85 TUI-87
 fn scan_catalog_with(
     slot: &mut Option<ScanCache>,
     paths: &Paths,
     registry: &Registry,
+    refresh: Refresh<'_>,
+    now: std::time::Instant,
 ) -> Result<Vec<std::sync::Arc<SourceScan>>> {
-    let mut prev = match slot.take() {
-        Some(c) if c.mind_home == paths.mind_home => c.by_record,
+    let (mut prev, stale) = match slot.take() {
+        Some(c) if c.mind_home == paths.mind_home => (c.by_record, c.stale),
         _ => Default::default(),
     };
     let mut next = std::collections::HashMap::new();
     let mut scans = Vec::with_capacity(registry.sources.len());
     for source in &registry.sources {
-        let record = (!source.is_linked())
-            .then(|| serde_json::to_string(source).ok())
-            .flatten();
-        let cached = record.as_ref().and_then(|r| prev.remove(r));
-        let scan = match cached {
-            Some(scan) => scan,
-            None => std::sync::Arc::new(build_source_scan(catalog::scan_one(paths, source)?)),
+        let record = serde_json::to_string(source).ok();
+        let cached = record
+            .as_ref()
+            .and_then(|r| prev.remove(r))
+            .filter(|c| !source.is_linked() || !refresh.due(&source.name, c.at, now));
+        let cached = match cached {
+            Some(c) => c,
+            None => CachedScan {
+                scan: std::sync::Arc::new(build_source_scan(catalog::scan_one(paths, source)?)),
+                at: now,
+            },
         };
+        scans.push(cached.scan.clone());
         if let Some(r) = record {
-            next.insert(r, scan.clone());
+            next.insert(r, cached);
         }
-        scans.push(scan);
     }
     // Records no longer in the registry are dropped with `prev`.
     *slot = Some(ScanCache {
         mind_home: paths.mind_home.clone(),
         by_record: next,
+        stale,
     });
     Ok(scans)
 }
@@ -465,17 +509,32 @@ fn scan_catalog_with(
 pub fn load(paths: &Paths) -> Result<Snapshot> {
     let lock = lock::open(paths)?;
     let _guard = lock.read()?;
-    load_inner(paths)
+    load_inner(paths, Refresh::All)
 }
 
 /// Try to load a refreshed snapshot under a NON-BLOCKING shared lock.
 /// Returns `None` if the lock is held exclusively (e.g. a mutation is in
-/// progress). The TUI poll tick calls this and silently skips if blocked.
+/// progress). Reads everything fresh; the poll thread uses
+/// [`try_poll_focused`].
 // spec: TUI-15 TUI-25
 pub fn try_poll(paths: &Paths) -> Option<Snapshot> {
+    try_poll_with(paths, Refresh::All)
+}
+
+/// [`try_poll`] for the poll tick: only the sources in `on_screen` are read
+/// fresh (TUI-87).
+// spec: TUI-15 TUI-25 TUI-87
+pub fn try_poll_focused(
+    paths: &Paths,
+    on_screen: &std::collections::HashSet<String>,
+) -> Option<Snapshot> {
+    try_poll_with(paths, Refresh::Focused(on_screen))
+}
+
+fn try_poll_with(paths: &Paths, refresh: Refresh<'_>) -> Option<Snapshot> {
     let lock = lock::open(paths).ok()?;
     let _guard = lock.try_read()?;
-    load_inner(paths).ok()
+    load_inner(paths, refresh).ok()
 }
 
 /// Sanitize a set of dependency keys (`kind:name`) through the same TUI-60
@@ -512,12 +571,44 @@ fn read_item_text(item: &catalog::CatalogItem) -> String {
     buf
 }
 
+/// Previous and next stale flags, as [`ScanCache::stale`] holds them.
+type StaleFlags<'a> = (
+    &'a mut std::collections::HashMap<StaleKey, (bool, std::time::Instant)>,
+    &'a mut std::collections::HashMap<StaleKey, (bool, std::time::Instant)>,
+);
+
+/// An installed item's stale flag: the previous one while `refresh` does not
+/// make `source` due, else `compute()`. Either way it is carried into `next`.
+// spec: TUI-87
+fn tiered_stale(
+    (prev, next): StaleFlags<'_>,
+    key: StaleKey,
+    refresh: Refresh<'_>,
+    source: &str,
+    now: std::time::Instant,
+    compute: impl FnOnce() -> bool,
+) -> bool {
+    let (stale, at) = match prev.remove(&key) {
+        Some((stale, at)) if !refresh.due(source, at, now) => (stale, at),
+        _ => (compute(), now),
+    };
+    next.insert(key, (stale, at));
+    stale
+}
+
 /// Load registry, manifest, and catalog without acquiring the lock (the
 /// caller must already hold an appropriate guard).
-fn load_inner(paths: &Paths) -> Result<Snapshot> {
+fn load_inner(paths: &Paths, refresh: Refresh<'_>) -> Result<Snapshot> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
-    let scans = scan_catalog(paths, &registry)?;
+    let now = std::time::Instant::now();
+    let mut slot = SCAN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let scans = scan_catalog_with(&mut slot, paths, &registry, refresh, now)?;
+    let cache = slot.as_mut().expect("scan_catalog_with fills the slot");
+    // Stale flags not carried into `next_stale` (items no longer installed or
+    // no longer matching their key) are dropped with `prev_stale`.
+    let mut prev_stale = std::mem::take(&mut cache.stale);
+    let mut next_stale = std::collections::HashMap::with_capacity(manifest.items.len());
     let catalog_items: Vec<&catalog::CatalogItem> =
         scans.iter().flat_map(|s| s.items.iter()).collect();
 
@@ -573,14 +664,25 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         // below for the snapshot field, so this is the only compile.
         let ignore_set = matched.and_then(|ci| ci.ignore_set().ok());
         let stale = matched.is_some_and(|ci| {
-            // Memoized on the cheap stat fingerprint: the poll tick would
-            // otherwise re-read every installed item's content every second.
-            let cur = ignore_set
-                .as_ref()
-                .and_then(|ig| memoized_hash(&ci.path, ig));
-            let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
-            let rename_drift = ci.effective_name() != it.name;
-            hash_drift || rename_drift
+            let effective = ci.effective_name();
+            let key: StaleKey = (
+                it.key().into(),
+                it.hash.clone(),
+                it.name.clone(),
+                ci.path.clone(),
+                effective.clone(),
+            );
+            let flags = (&mut prev_stale, &mut next_stale);
+            tiered_stale(flags, key, refresh, &ci.source, now, || {
+                // Memoized on the cheap stat fingerprint: the poll tick would
+                // otherwise re-read every installed item's content every second.
+                let cur = ignore_set
+                    .as_ref()
+                    .and_then(|ig| memoized_hash(&ci.path, ig));
+                let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
+                let rename_drift = effective != it.name;
+                hash_drift || rename_drift
+            })
         });
         installed.push(SnapshotInstalled {
             // `key` is identity, not display: it drives TUI action dispatch
@@ -618,6 +720,8 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             explicit: it.explicit,
         });
     }
+    cache.stale = next_stale;
+    drop(slot);
 
     // Available list: all catalog items, built per source in `build_source_scan`.
     let available: Vec<SnapshotAvailable> = scans
@@ -714,6 +818,51 @@ mod tests {
     use crate::hash::hash_path;
     use crate::paths::Paths;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Instant;
+
+    #[test]
+    fn an_off_screen_stale_flag_is_reused_until_the_slow_interval() {
+        // spec: TUI-87
+        let key: StaleKey = (
+            "skill:a".into(),
+            "h".into(),
+            "a".into(),
+            PathBuf::from("/x"),
+            "a".into(),
+        );
+        let (mut prev, mut next) = Default::default();
+        let t0 = Instant::now();
+        let none = std::collections::HashSet::new();
+        let off = Refresh::Focused(&none);
+        let shown = std::collections::HashSet::from(["src".to_string()]);
+        let on = Refresh::Focused(&shown);
+        let mut run = |refresh, now, value: bool| {
+            let prev_map: &mut std::collections::HashMap<_, _> = &mut prev;
+            let next_map: &mut std::collections::HashMap<_, _> = &mut next;
+            let got = tiered_stale(
+                (prev_map, next_map),
+                key.clone(),
+                refresh,
+                "src",
+                now,
+                || value,
+            );
+            std::mem::swap(prev_map, next_map);
+            next_map.clear();
+            got
+        };
+        assert!(!run(off, t0, false), "no previous flag: computed");
+        let soon = t0 + std::time::Duration::from_secs(1);
+        assert!(!run(off, soon, true), "off screen: reused");
+        assert!(run(on, soon, true), "on screen: recomputed");
+        let later = soon + OFF_SCREEN_REFRESH;
+        assert!(run(off, soon, false), "off screen: reused again");
+        assert!(
+            !run(off, later, false),
+            "off screen, interval passed: recomputed"
+        );
+        assert!(run(Refresh::All, later, true), "a full load recomputes");
+    }
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -778,6 +927,15 @@ mod tests {
         src
     }
 
+    /// A full load's scan pass ([`Refresh::All`]) against `slot`.
+    fn scan_all(
+        slot: &mut Option<ScanCache>,
+        paths: &Paths,
+        registry: &Registry,
+    ) -> Result<Vec<std::sync::Arc<SourceScan>>> {
+        scan_catalog_with(slot, paths, registry, Refresh::All, Instant::now())
+    }
+
     fn skill_names(scans: &[std::sync::Arc<SourceScan>]) -> Vec<String> {
         let mut names: Vec<String> = scans
             .iter()
@@ -801,7 +959,7 @@ mod tests {
         let mut registry = Registry::load(&paths).unwrap();
         assert!(!registry.sources[0].is_linked(), "fixture must be a clone");
         let mut slot = None;
-        let first = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        let first = scan_all(&mut slot, &paths, &registry).unwrap();
         assert_eq!(skill_names(&first), ["a"]);
 
         // A skill appearing in the clone without a registry change is not
@@ -809,26 +967,26 @@ mod tests {
         let clone = registry.sources[0].clone_dir(&paths);
         std::fs::create_dir_all(clone.join("skills/b")).unwrap();
         std::fs::write(clone.join("skills/b/SKILL.md"), "# b\n").unwrap();
-        let second = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        let second = scan_all(&mut slot, &paths, &registry).unwrap();
         assert!(std::sync::Arc::ptr_eq(&first[0], &second[0]));
         assert_eq!(skill_names(&second), ["a"]);
 
         // A changed record (what a sync that moved the commit writes) re-scans.
         registry.sources[0].commit = Some("0".repeat(40));
-        let third = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        let third = scan_all(&mut slot, &paths, &registry).unwrap();
         assert_eq!(skill_names(&third), ["a", "b"]);
 
         // A different home never reuses another home's scans: it scans its own
         // (empty) sources tree, which here fails, instead of serving `third`.
         let (other, other_base) = temp_paths();
-        let fourth = scan_catalog_with(&mut slot, &other, &registry);
+        let fourth = scan_all(&mut slot, &other, &registry);
         assert!(!fourth.is_ok_and(|s| std::sync::Arc::ptr_eq(&s[0], &third[0])));
         cleanup(&base);
         cleanup(&other_base);
     }
 
     #[test]
-    fn a_linked_source_is_rescanned_on_every_load() {
+    fn a_linked_source_is_rescanned_on_every_full_load() {
         // spec: TUI-85
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
@@ -840,13 +998,63 @@ mod tests {
         let registry = Registry::load(&paths).unwrap();
         assert!(registry.sources[0].is_linked(), "fixture must be linked");
         let mut slot = None;
-        let first = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        let first = scan_all(&mut slot, &paths, &registry).unwrap();
         assert_eq!(skill_names(&first), ["a"]);
 
         std::fs::create_dir_all(src.join("skills/b")).unwrap();
         std::fs::write(src.join("skills/b/SKILL.md"), "# b\n").unwrap();
-        let second = scan_catalog_with(&mut slot, &paths, &registry).unwrap();
+        let second = scan_all(&mut slot, &paths, &registry).unwrap();
         assert_eq!(skill_names(&second), ["a", "b"]);
+        cleanup(&base);
+    }
+
+    #[test]
+    fn a_linked_source_off_screen_is_rescanned_on_the_slow_interval() {
+        // spec: TUI-87
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = meld_fixture(
+            &paths,
+            &base,
+            &[("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n")],
+        );
+        let registry = Registry::load(&paths).unwrap();
+        let name = registry.sources[0].name.clone();
+        let add = |n: &str| {
+            std::fs::create_dir_all(src.join("skills").join(n)).unwrap();
+            std::fs::write(src.join("skills").join(n).join("SKILL.md"), "# x\n").unwrap();
+        };
+        let t0 = Instant::now();
+        let mut slot = None;
+        scan_catalog_with(&mut slot, &paths, &registry, Refresh::All, t0).unwrap();
+        add("b");
+
+        // Off screen and younger than the interval: the scan is reused.
+        let none = std::collections::HashSet::new();
+        let off = Refresh::Focused(&none);
+        let early = t0 + OFF_SCREEN_REFRESH - std::time::Duration::from_millis(1);
+        let s = scan_catalog_with(&mut slot, &paths, &registry, off, early).unwrap();
+        assert_eq!(skill_names(&s), ["a"]);
+
+        // On screen: re-scanned at once.
+        let shown = std::collections::HashSet::from([name]);
+        let on = Refresh::Focused(&shown);
+        let s = scan_catalog_with(&mut slot, &paths, &registry, on, early).unwrap();
+        assert_eq!(skill_names(&s), ["a", "b"]);
+
+        // Off screen again: due once the interval has passed since the last
+        // scan, not since the first.
+        add("c");
+        let s =
+            scan_catalog_with(&mut slot, &paths, &registry, off, t0 + OFF_SCREEN_REFRESH).unwrap();
+        assert_eq!(
+            skill_names(&s),
+            ["a", "b"],
+            "the on-screen scan restarted the clock"
+        );
+        let late = early + OFF_SCREEN_REFRESH;
+        let s = scan_catalog_with(&mut slot, &paths, &registry, off, late).unwrap();
+        assert_eq!(skill_names(&s), ["a", "b", "c"]);
         cleanup(&base);
     }
 

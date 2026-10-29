@@ -135,6 +135,8 @@ fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
         // A key may have applied an action's snapshot; polls begun before it
         // carry the old epoch and are dropped.
         poller.set_epoch(app.snapshot_epoch);
+        // spec: TUI-87 -- the next load reads these sources fresh.
+        poller.set_on_screen(app.sources_on_screen());
         // TUI-15: skip a refresh while an action is mid-flight.
         if let Some(snapshot) = poller.latest(app.snapshot_epoch)
             && !app.is_mutating()
