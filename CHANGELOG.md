@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-28
+
 ### Added
 
 - Hook results: every hook mind considers is reported with its outcome (`ok`,
@@ -2149,7 +2151,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/jaemk/mind/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/jaemk/mind/compare/v0.36.1...v0.37.0
 [0.36.1]: https://github.com/jaemk/mind/compare/v0.36.0...v0.36.1
 [0.36.0]: https://github.com/jaemk/mind/compare/v0.35.1...v0.36.0
