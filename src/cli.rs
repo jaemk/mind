@@ -584,6 +584,19 @@ EXAMPLES:
         #[arg(long)]
         upgrade: bool,
 
+        /// With `--upgrade`: do not install items new to a source installed
+        /// whole, or newly in an enabled profile, in this run. They are
+        /// offered again on the next upgrade pass.
+        // spec: LIFE-55
+        #[arg(long, requires = "upgrade", conflicts_with = "ignore_new")]
+        skip_new: bool,
+
+        /// With `--upgrade`: record items new to a source installed whole, or
+        /// newly in an enabled profile, as seen without installing them.
+        // spec: LIFE-55
+        #[arg(long, requires = "upgrade")]
+        ignore_new: bool,
+
         // spec: CLI-250 -- applies to the `--upgrade` pass, so every spelling
         // requires `--upgrade` (the `mut_arg`s on the variant).
         #[command(flatten)]
@@ -636,6 +649,20 @@ EXAMPLES:
         // spec: VER-63
         #[arg(long)]
         allow_breaking: bool,
+
+        /// Do not install items new to a source installed whole, or newly in
+        /// an enabled profile, in this run. They are offered again on the next
+        /// `upgrade`.
+        // spec: LIFE-55
+        #[arg(long, conflicts_with = "ignore_new")]
+        skip_new: bool,
+
+        /// Record items new to a source installed whole, or newly in an
+        /// enabled profile, as seen without installing them, so later upgrades
+        /// do not offer them. `mind learn <item>` still installs one.
+        // spec: LIFE-55
+        #[arg(long)]
+        ignore_new: bool,
 
         // spec: CLI-250
         #[command(flatten)]

@@ -165,7 +165,7 @@ the user named.
   snapshot is pending: the upgrade report lists it as an addition naming its
   profile, and applying the upgrade installs it under `upgrade`'s gate. An
   addition the consumer declines stays out of the snapshot and is offered again
-  next time.
+  next time. `--skip-new` and `--ignore-new` apply to additions (LIFE-55).
 - `PROF-22` An item in the snapshot that is no longer in the expansion is
   reported once as having left its profile and removed from the snapshot. It is
   never uninstalled by `upgrade`; the report names `mind forget <key>`

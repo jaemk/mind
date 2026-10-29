@@ -64,7 +64,7 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   without a manual reload. A refresh preserves the current selection, expansion,
   and search state, and is skipped while a mutating action holds the lock. Catalog
   contents are re-scanned when the melded source set changes or after a sync, not
-  on every tick.
+  on every tick (TUI-85).
 - `TUI-16` The list keeps the highlighted row within the middle
   two-thirds of the visible area: as the selection moves, the view scrolls to
   maintain a margin of about one-sixth of the visible height above and below the
@@ -270,6 +270,26 @@ manifest, and store.
   HOOK-171), the status bar shows the error and, on the next line, a pointer
   to `mind hooks history --limit 1 --show` for the hook's result: the hook's
   output went to a terminal the TUI has since redrawn over.
+- `TUI-85` The poll (TUI-15) keeps each source's catalog scan, with its items'
+  dependency keys (TUI-50), between ticks, keyed on the source's registry
+  record. A source is re-scanned when that record changes (a meld, a `sync` that
+  moves the recorded commit, a namespace change) and not otherwise. A linked
+  source (CLI-27) is re-scanned on every full load and on the TUI-87 schedule,
+  since its working tree can change without its record.
+- `TUI-86` The poll (TUI-15) runs on a background thread, never on the thread
+  that reads input, so a slow load (a large or linked catalog) does not delay
+  keys or redraws. A polled snapshot is shown within a fraction of a second of
+  arriving. A poll that began before an action's own reload was applied is
+  discarded rather than shown, so it cannot revert the tree to the pre-action
+  state. Polls taken while the TUI is busy with an action are not queued.
+- `TUI-87` A poll reads fresh only the sources on screen: those with a row in
+  the visible part of the tree (a source, a kind bucket, an item, or a
+  dependency row under one of that source's items) plus the selected row's
+  source. For any other source it reuses the linked-source scan (TUI-85) and
+  each installed item's TUI-63 stale flag until they are 10 seconds old. The
+  initial load and the reload after an action read everything fresh. A change
+  to an off-screen source therefore appears within about 10 seconds, and
+  within a tick of the source scrolling into view.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.
@@ -288,7 +308,7 @@ manifest, and store.
   how the stale flag itself is kept cheap to recompute on every poll tick is
   TUI-72.
 - `TUI-72` Because the poll (TUI-15) recomputes the TUI-63 stale flag for every
-  installed item about once a second, its content hash is memoized on the pair
+  on-screen installed item about once a second (TUI-87), its content hash is memoized on the pair
   (item path, cheap stat fingerprint), the fingerprint coming from
   `hash::stat_fingerprint_ignoring`: the same tree walk [`hash_path`] uses, but
   reading each entry's `mtime`, `size`, and -- under `cfg(unix)` -- `ctime` and

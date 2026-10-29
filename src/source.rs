@@ -393,6 +393,11 @@ pub struct Source {
     /// and reports a key that left the expansion (PROF-22).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_snapshot: Option<Vec<String>>,
+    /// The bare `kind:name` keys of a source installed whole, as last seen
+    /// (LIFE-53). `Some` marks it whole-tracked: `upgrade` installs a catalog
+    /// item missing from it (LIFE-54). Ignored while profile-tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole_snapshot: Option<Vec<String>>,
     /// The consumer's auto-update grant (AUP-8). `None` is never granted;
     /// `Some(Off)` is revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1232,6 +1237,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         install_hook_commit: None,
         profiles: None,
         profile_snapshot: None,
+        whole_snapshot: None,
         auto_update: None,
     })
 }

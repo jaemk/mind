@@ -313,6 +313,9 @@ pub struct App {
     /// the render pass, which knows the actual viewport height.
     // spec: TUI-16
     pub scroll: std::cell::Cell<usize>,
+    /// Tree rows the last draw had room for, so the poll knows which rows are
+    /// on screen (TUI-87). Updated by the render pass alongside `scroll`.
+    pub view_rows: std::cell::Cell<usize>,
 
     // --- status ---
     pub status: Option<String>,
@@ -366,6 +369,10 @@ pub struct App {
     // --- misc ---
     pub size: (u16, u16),
     pub mutating: bool,
+    /// Bumped each time a snapshot other than a poll result is applied (an
+    /// action's own reload), so a poll begun before it is dropped (TUI-86).
+    // spec: TUI-86
+    pub snapshot_epoch: u64,
     pub quit: bool,
     pub search_focused: bool,
     /// True after one Ctrl-C: a second consecutive Ctrl-C force-exits from any
@@ -419,6 +426,7 @@ impl App {
             modal_visible: false,
             dialog: None,
             scroll: std::cell::Cell::new(0),
+            view_rows: std::cell::Cell::new(0),
             status: None,
             error: None,
             spec_input_active: false,
@@ -437,6 +445,7 @@ impl App {
             namespace_input_source: None,
             size: (80, 24),
             mutating: false,
+            snapshot_epoch: 0,
             quit: false,
             search_focused: false,
             ctrl_c_armed: false,
@@ -448,8 +457,13 @@ impl App {
     /// Apply a data snapshot, rebuilding the tree. Preserves selection and
     /// expansion state across refreshes (TUI-15). Also refreshes the lobes
     /// list for the lobes modal (TUI-23).
-    // spec: TUI-15
+    // spec: TUI-15 TUI-86
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        self.snapshot_epoch += 1;
+        self.store_snapshot(snapshot);
+    }
+
+    fn store_snapshot(&mut self, snapshot: Snapshot) {
         // Any successful snapshot-applying refresh ends a mutation: clearing the
         // flag here is what re-arms the once-a-second poll after a successful
         // learn/forget/sync/upgrade/meld/lobe action (TUI-15). The mid-action
@@ -466,7 +480,46 @@ impl App {
         self.rebuild_tree();
     }
 
-    /// Apply a snapshot only if the data changed (used for poll ticks).
+    /// The melded sources with a row in the last drawn viewport, plus the
+    /// selected row's source (TUI-87). A dependency row belongs to the source
+    /// of the item it sits under (DEP-2 keeps edges within a source).
+    // spec: TUI-87
+    pub fn sources_on_screen(&self) -> std::collections::HashSet<String> {
+        fn source_of(node: &TreeNode) -> Option<&str> {
+            match node {
+                TreeNode::Source(s) => Some(&s.name),
+                TreeNode::KindBucket { source, .. } => Some(source),
+                TreeNode::InstalledItem(i) => Some(&i.source),
+                TreeNode::AvailableItem(a) => Some(&a.source),
+                _ => None,
+            }
+        }
+        // A dependency row takes the source of the nearest row above it that
+        // has one.
+        let owner = |idx: usize| {
+            self.visible[..=idx]
+                .iter()
+                .rev()
+                .find_map(|n| match n.node {
+                    TreeNode::DepChild(_) => None,
+                    ref other => Some(source_of(other)),
+                })?
+        };
+        let start = self.scroll.get().min(self.visible.len());
+        let end = (start + self.view_rows.get()).min(self.visible.len());
+        let mut out: std::collections::HashSet<String> =
+            (start..end).filter_map(owner).map(str::to_string).collect();
+        if self.selected < self.visible.len()
+            && let Some(s) = owner(self.selected)
+        {
+            out.insert(s.to_string());
+        }
+        out
+    }
+
+    /// Apply a snapshot only if the data changed (used for poll ticks). A poll
+    /// result does not bump `snapshot_epoch`: only an out-of-band reload
+    /// invalidates polls already in flight (TUI-86).
     ///
     /// The comparison is by VALUE: a poll that observes identical state is a
     /// no-op, so the tree is not rebuilt and the redraw shows the same frame.
@@ -475,7 +528,7 @@ impl App {
     // spec: TUI-15
     pub fn apply_snapshot_if_changed(&mut self, snapshot: Snapshot) {
         if self.last_snapshot.as_ref() != Some(&snapshot) {
-            self.apply_snapshot(snapshot);
+            self.store_snapshot(snapshot);
         }
     }
 
@@ -1769,6 +1822,11 @@ impl App {
     /// (TUI-80). Anything else, or an already-forced retry, is a plain error.
     // spec: TUI-80
     pub fn offer_force_retry(&mut self, kind: ActionKind, error: &crate::error::MindError) {
+        // The action has finished, so the poll resumes (TUI-15) whether or not
+        // a retry is offered: `set_error` clears this too, but the retry path
+        // below does not reach it, and a declined retry would otherwise leave
+        // the poll off for the rest of the session.
+        self.mutating = false;
         let crate::error::MindError::LinkOccupied { path } = error else {
             self.set_error(action_error_text(error));
             return;
@@ -2264,6 +2322,84 @@ mod tests {
             visible_after, visible_before,
             "tree must NOT be rebuilt when the snapshot is unchanged"
         );
+    }
+
+    #[test]
+    fn sources_on_screen_are_the_viewport_rows_and_the_selection() {
+        // spec: TUI-87
+        let row = |node: TreeNode| FlatNode {
+            id: String::new(),
+            label: String::new(),
+            depth: 1,
+            expandable: false,
+            expanded: false,
+            node,
+        };
+        let source = |name: &str| {
+            row(TreeNode::Source(crate::tui::tree::SourceInfo {
+                name: name.into(),
+                installed: false,
+            }))
+        };
+        let bucket = |name: &str| {
+            row(TreeNode::KindBucket {
+                source: name.into(),
+                kind: ItemKind::Skill,
+            })
+        };
+        let dep = || {
+            row(TreeNode::DepChild(crate::tui::tree::DepChildInfo {
+                key: "agent:x".into(),
+                name: "x".into(),
+                is_cycle: false,
+            }))
+        };
+        let mut app = App::new(String::new(), None, None);
+        app.visible = vec![
+            row(TreeNode::AvailableGroup),
+            source("a"),
+            bucket("b"),
+            dep(),
+            source("c"),
+            source("d"),
+        ];
+        let names = |app: &App| {
+            let mut v: Vec<String> = app.sources_on_screen().into_iter().collect();
+            v.sort();
+            v
+        };
+        // Rows 2..4 are on screen: `b`, and the dep row under it.
+        app.scroll.set(2);
+        app.view_rows.set(2);
+        app.selected = 2;
+        assert_eq!(names(&app), ["b"]);
+        // A dep row scrolled to the top still names its owner's source.
+        app.scroll.set(3);
+        app.view_rows.set(2);
+        app.selected = 3;
+        assert_eq!(names(&app), ["b", "c"]);
+        // The selection counts even off the viewport.
+        app.selected = 5;
+        assert_eq!(names(&app), ["b", "c", "d"]);
+        // A group header names no source.
+        app.scroll.set(0);
+        app.view_rows.set(1);
+        app.selected = 0;
+        assert!(names(&app).is_empty());
+    }
+
+    #[test]
+    fn only_an_out_of_band_snapshot_bumps_the_epoch() {
+        // spec: TUI-86 -- an action's reload invalidates polls in flight; a
+        // poll result itself does not, or each poll would discard the next.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let epoch = app.snapshot_epoch;
+        app.apply_snapshot_if_changed(Snapshot::default());
+        assert_eq!(app.snapshot_epoch, epoch, "a poll result keeps the epoch");
+        assert_eq!(app.last_snapshot, Some(Snapshot::default()));
+        app.apply_snapshot(make_snapshot());
+        assert_eq!(app.snapshot_epoch, epoch + 1, "an action's reload bumps it");
     }
 
     #[test]
@@ -5027,7 +5163,14 @@ mod tests {
             source: "s".to_string(),
         };
         let mut app = App::new(String::new(), None, None);
+        // spec: TUI-15 -- the failed action set `mutating`; the retry offer
+        // must clear it, or declining leaves the poll off for good.
+        app.mutating = true;
         app.offer_force_retry(learn.clone(), &occupied);
+        assert!(
+            !app.is_mutating(),
+            "the poll resumes behind the retry offer"
+        );
         assert!(app.modal_visible);
         assert!(app.error.is_none());
         let pending = app.pending_action.as_ref().unwrap();

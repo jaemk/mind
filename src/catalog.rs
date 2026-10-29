@@ -343,17 +343,32 @@ pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
 pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     let mut items = Vec::new();
     for source in &registry.sources {
-        if let Err(e) = scan_source(paths, source, &mut items) {
-            // spec: CLI-212 CLI-213
-            if matches!(e, MindError::LinkedSourceGone { .. }) {
-                // spec: DSC-102 -- muted while the TUI owns the terminal.
-                crate::render::scan_warn(format!("warning: {e}"));
-                continue;
-            }
-            return Err(e);
-        }
+        items.extend(scan_one(paths, source)?);
     }
     Ok(items)
+}
+
+/// One source's catalog, every failure an error and nothing printed: for a
+/// caller that skips a source it cannot scan without speaking for it.
+pub fn scan_one_strict(paths: &Paths, source: &Source) -> Result<Vec<CatalogItem>> {
+    let mut items = Vec::new();
+    scan_source(paths, source, &mut items)?;
+    Ok(items)
+}
+
+/// [`scan`] for a single source. A linked source whose working tree is gone
+/// yields no items and a warning rather than an error, as in the full scan.
+pub fn scan_one(paths: &Paths, source: &Source) -> Result<Vec<CatalogItem>> {
+    match scan_one_strict(paths, source) {
+        Ok(items) => Ok(items),
+        // spec: CLI-212 CLI-213
+        Err(e @ MindError::LinkedSourceGone { .. }) => {
+            // spec: DSC-102 -- muted while the TUI owns the terminal.
+            crate::render::scan_warn(format!("warning: {e}"));
+            Ok(Vec::new())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Source names already warned about a reserved-word prefix in this process
@@ -2853,6 +2868,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }
@@ -5427,6 +5443,7 @@ mod plugin_tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }
@@ -6756,6 +6773,7 @@ mod lifecycle_tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }

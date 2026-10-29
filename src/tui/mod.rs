@@ -9,6 +9,7 @@
 //! - `app`     - pure App state model; no I/O
 //! - `tree`    - build & flatten the Installed/Available tree
 //! - `data`    - load/poll under shared lock
+//! - `poll`    - the background thread that runs the refresh poll
 //! - `render`  - ratatui draw functions
 //! - `event`   - crossterm input -> Intent mapping
 //! - `action`  - execute a confirmed Intent under exclusive lock
@@ -18,6 +19,7 @@
 pub mod app;
 pub mod data;
 pub mod event;
+pub mod poll;
 pub mod preview;
 pub mod term;
 pub mod tree;
@@ -90,23 +92,35 @@ impl Drop for ScanQuiet {
 }
 
 fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
-    // We run a synchronous loop using crossterm's poll+read API.
-    // Poll with a ~1s timeout; on each tick, refresh state if appropriate.
+    // Input is read here; the refresh poll runs on its own thread (TUI-86) and
+    // its snapshots are picked up between input waits.
     use crossterm::event::{self, Event as CEvent};
     use std::time::{Duration, Instant};
 
-    let tick_rate = Duration::from_millis(1000);
-    let mut last_tick = Instant::now();
+    // spec: TUI-15 TUI-86
+    let poller = poll::Poller::start(paths, Duration::from_millis(1000));
+    // How long one input wait may block, which bounds how late a polled
+    // snapshot is shown.
+    let input_wait = Duration::from_millis(100);
+    // Redraw at least this often even when nothing happened.
+    let idle_redraw = Duration::from_millis(1000);
+    let mut last_draw = Instant::now();
+    let mut dirty = true;
 
     loop {
-        // Poll for an event with at most the remainder of the tick interval.
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or(Duration::ZERO);
+        if dirty || last_draw.elapsed() >= idle_redraw {
+            render::draw(app)?;
+            last_draw = Instant::now();
+            dirty = false;
+        }
+        if app.should_quit() {
+            break;
+        }
 
-        if event::poll(timeout).unwrap_or(false)
+        if event::poll(input_wait).unwrap_or(false)
             && let Ok(evt) = event::read()
         {
+            dirty = true;
             match evt {
                 CEvent::Key(k) => {
                     handle_key(paths, app, k);
@@ -118,23 +132,17 @@ fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
             }
         }
 
-        // Tick: attempt a non-blocking refresh.
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-            // TUI-15: poll under a brief non-blocking shared lock; skip if
-            // the app is holding a mutation lock.
-            if !app.is_mutating()
-                && let Some(snapshot) = data::try_poll(paths)
-            {
-                app.apply_snapshot_if_changed(snapshot);
-            }
-        }
-
-        // Draw after every event/tick.
-        render::draw(app)?;
-
-        if app.should_quit() {
-            break;
+        // A key may have applied an action's snapshot; polls begun before it
+        // carry the old epoch and are dropped.
+        poller.set_epoch(app.snapshot_epoch);
+        // spec: TUI-87 -- the next load reads these sources fresh.
+        poller.set_on_screen(app.sources_on_screen());
+        // TUI-15: skip a refresh while an action is mid-flight.
+        if let Some(snapshot) = poller.latest(app.snapshot_epoch)
+            && !app.is_mutating()
+        {
+            app.apply_snapshot_if_changed(snapshot);
+            dirty = true;
         }
     }
 

@@ -706,6 +706,53 @@ pub fn set_allow_breaking(on: bool) {
     ALLOW_BREAKING.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// What an upgrade pass does with an item new to a whole-tracked source
+/// (LIFE-54) or newly in an enabled profile (PROF-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NewItems {
+    /// Propose it under the upgrade gate (the default).
+    #[default]
+    Install,
+    /// `--skip-new`: leave it out of this run; it is offered again next time.
+    Skip,
+    /// `--ignore-new`: record it as seen without installing it.
+    Ignore,
+}
+
+impl NewItems {
+    /// The mode for the `--skip-new` / `--ignore-new` pair (clap rejects both).
+    pub fn from_flags(skip: bool, ignore: bool) -> Self {
+        if skip {
+            NewItems::Skip
+        } else if ignore {
+            NewItems::Ignore
+        } else {
+            NewItems::Install
+        }
+    }
+}
+
+/// `--skip-new` / `--ignore-new` on `upgrade` and `sync --upgrade` (LIFE-55),
+/// set once by `main` like [`ALLOW_BREAKING`]. 0 = install, 1 = skip, 2 = ignore.
+static NEW_ITEMS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_new_items(mode: NewItems) {
+    let v = match mode {
+        NewItems::Install => 0,
+        NewItems::Skip => 1,
+        NewItems::Ignore => 2,
+    };
+    NEW_ITEMS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn new_items() -> NewItems {
+    match NEW_ITEMS.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => NewItems::Skip,
+        2 => NewItems::Ignore,
+        _ => NewItems::Install,
+    }
+}
+
 /// The release an installed item's commit came from (VER-60): its source's
 /// resolved version, when the source is version-pinned and still at that
 /// commit.
@@ -5371,6 +5418,9 @@ fn learn_selected(
     // warnings read the store copies and the full installed set. Reported even
     // when the batch failed part-way: the items that did install are on disk.
     warn_workflows(paths, &manifest, &installed_keys);
+    // spec: LIFE-53 -- a source this install completed is now installed whole.
+    let recorded = record_whole_sources(paths, Some(&items));
+    let failure = failure.or(recorded.err());
     match failure {
         Some(e) => Err(e),
         None => {
@@ -5495,6 +5545,9 @@ fn learn_collecting_selected(
     // stderr, which is where this flow's other advisories go under `--json`
     // (CLI-217).
     warn_workflows(paths, &manifest, &installed_keys);
+    // spec: LIFE-53
+    let recorded = record_whole_sources(paths, Some(&items));
+    let failure = failure.or(recorded.err());
     match failure {
         Some(e) => Err(e),
         None => Ok(installed_keys),
@@ -7483,6 +7536,10 @@ struct ProfileTracking {
     /// Closure items the additions pull in beyond the members themselves.
     extra_closure: usize,
     departures: Vec<ProfileDeparture>,
+    /// Fresh additions recorded as seen without installing (`--ignore-new`).
+    ignored: Vec<NewItem>,
+    /// Fresh additions left out of this run (`--skip-new`).
+    skipped: usize,
 }
 
 impl ProfileTracking {
@@ -7519,11 +7576,15 @@ fn installed_by_bare_key<'a>(
 /// the caller to install under its gate, and stay out of the snapshot until
 /// they do (PROF-21). A member the consumer forgot is still in the snapshot,
 /// so it is not an addition (PROF-23).
-// spec: PROF-5 PROF-21 PROF-22 PROF-23 PROF-24
+///
+/// `mode` (LIFE-55) decides what happens to the fresh additions: returned for
+/// the gate, left out (`Skip`), or snapshotted without installing (`Ignore`).
+// spec: PROF-5 PROF-21 PROF-22 PROF-23 PROF-24 LIFE-55
 fn track_profiles_for_upgrade(
     paths: &Paths,
     sources: &[String],
     catalog: &[CatalogItem],
+    mode: NewItems,
 ) -> Result<ProfileTracking> {
     let mut tracking = ProfileTracking::default();
     for name in sources {
@@ -7659,6 +7720,26 @@ fn track_profiles_for_upgrade(
         if fresh.is_empty() {
             continue;
         }
+        match mode {
+            NewItems::Install => {}
+            NewItems::Skip => {
+                tracking.skipped += fresh.len();
+                continue;
+            }
+            NewItems::Ignore => {
+                let keys: Vec<String> = fresh.iter().filter_map(|m| m.bare_key.clone()).collect();
+                let mut registry = Registry::load(paths)?;
+                if let Some(s) = registry.sources.iter_mut().find(|s| s.name == *name) {
+                    crate::profile::record_applied(s, &[], &keys);
+                    registry.save(paths)?;
+                }
+                tracking.ignored.extend(fresh.iter().map(|m| NewItem {
+                    key: strip_ansi(&m.target.key),
+                    source: safe_source.clone(),
+                }));
+                continue;
+            }
+        }
         for m in &fresh {
             tracking.additions.push(ProfileAddition {
                 key: strip_ansi(&m.target.key),
@@ -7680,6 +7761,271 @@ fn track_profiles_for_upgrade(
         ));
     }
     Ok(tracking)
+}
+
+/// A catalog item's bare `kind:name` key, the form the profile and whole
+/// snapshots record.
+fn bare_key(item: &CatalogItem) -> String {
+    format!("{}:{}", item.kind.as_str(), item.name)
+}
+
+/// Mark whole-tracked (LIFE-53) every source that is not yet tracked (by
+/// profile or whole) and whose catalog items are all installed, recording
+/// their bare keys. `catalog` is the full catalog when the caller has one;
+/// `None` scans each candidate source, skipping one that fails to scan.
+// spec: LIFE-53
+fn record_whole_sources(paths: &Paths, catalog: Option<&[CatalogItem]>) -> Result<()> {
+    let manifest = Manifest::load(paths)?;
+    let installed: HashSet<(&str, ItemKind, &str)> = manifest
+        .items
+        .values()
+        .map(|m| (m.source.as_str(), m.kind, m.bare_name.as_str()))
+        .collect();
+    let mut registry = Registry::load(paths)?;
+    let mut changed = false;
+    for source in &mut registry.sources {
+        if source.is_profile_tracked()
+            || source.whole_snapshot.is_some()
+            || !installed.iter().any(|(s, _, _)| *s == source.name)
+        {
+            continue;
+        }
+        let scanned: Vec<CatalogItem>;
+        let items: Vec<&CatalogItem> = match catalog {
+            Some(c) => c.iter().filter(|c| c.source == source.name).collect(),
+            None => {
+                // Quiet: the verb's own scan reports a source that fails.
+                let Ok(v) = catalog::scan_one_strict(paths, source) else {
+                    continue;
+                };
+                scanned = v;
+                scanned.iter().collect()
+            }
+        };
+        if items.is_empty()
+            || !items
+                .iter()
+                .all(|c| installed.contains(&(c.source.as_str(), c.kind, c.name.as_str())))
+        {
+            continue;
+        }
+        let keys: BTreeSet<String> = items.iter().map(|c| bare_key(c)).collect();
+        source.whole_snapshot = Some(keys.into_iter().collect());
+        changed = true;
+    }
+    if changed {
+        registry.save(paths)?;
+    }
+    Ok(())
+}
+
+/// One item new to a whole-tracked source (LIFE-54), as the upgrade report
+/// and the `--json` result's `new_items` / `ignored_new_items` carry it.
+#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
+struct NewItem {
+    /// The effective `kind:name` key the item installs under.
+    key: String,
+    source: String,
+}
+
+/// What the upgrade pass's whole-source tracking found (LIFE-54, LIFE-55).
+#[derive(Default)]
+struct WholeTracking {
+    /// Per source: the fresh additions still to install under the gate.
+    targets: Vec<(String, Vec<LearnTarget>)>,
+    additions: Vec<NewItem>,
+    /// Recorded as seen without installing (`--ignore-new`).
+    ignored: Vec<NewItem>,
+    /// Left out of this run (`--skip-new`).
+    skipped: usize,
+}
+
+/// The upgrade pass's whole-source tracking (LIFE-54, LIFE-55), run for each
+/// whole-tracked source in `sources` before the gate.
+///
+/// A catalog key not in the snapshot is new. One already installed (learned by
+/// hand) joins the snapshot now; the rest are returned to install under the
+/// gate, recorded as seen (`Ignore`), or left alone (`Skip`). A snapshot key no
+/// longer in the catalog is dropped. Snapshot changes are persisted now,
+/// whatever the gate later decides; a fresh addition joins the snapshot only
+/// once it installs.
+// spec: LIFE-54 LIFE-55
+fn track_whole_for_upgrade(
+    paths: &Paths,
+    sources: &[String],
+    catalog: &[CatalogItem],
+    mode: NewItems,
+) -> Result<WholeTracking> {
+    let mut tracking = WholeTracking::default();
+    if sources.is_empty() {
+        return Ok(tracking);
+    }
+    let manifest = Manifest::load(paths)?;
+    let installed: HashSet<(&str, ItemKind, &str)> = manifest
+        .items
+        .values()
+        .map(|m| (m.source.as_str(), m.kind, m.bare_name.as_str()))
+        .collect();
+    let mut registry = Registry::load(paths)?;
+    let mut changed = false;
+    for name in sources {
+        let Some(source) = registry.sources.iter_mut().find(|s| s.name == *name) else {
+            continue;
+        };
+        let Some(snapshot) = source.whole_snapshot.clone() else {
+            continue;
+        };
+        // Every item forgotten: the consumer no longer installs this source.
+        if !installed.iter().any(|(s, _, _)| *s == name.as_str()) {
+            source.whole_snapshot = None;
+            changed = true;
+            continue;
+        }
+        let items: Vec<&CatalogItem> = catalog.iter().filter(|c| c.source == *name).collect();
+        let current: HashSet<String> = items.iter().map(|c| bare_key(c)).collect();
+        let mut next: BTreeSet<String> = snapshot
+            .iter()
+            .filter(|k| current.contains(*k))
+            .cloned()
+            .collect();
+        let safe_source = strip_ansi(name);
+        let mut fresh: Vec<LearnTarget> = Vec::new();
+        for c in items {
+            let bare = bare_key(c);
+            if next.contains(&bare) {
+                continue;
+            }
+            let is_installed = installed.contains(&(c.source.as_str(), c.kind, c.name.as_str()));
+            let item = NewItem {
+                key: c.display_key(),
+                source: safe_source.clone(),
+            };
+            match (is_installed, mode) {
+                (true, _) => {
+                    next.insert(bare);
+                }
+                (false, NewItems::Install) => {
+                    fresh.push(LearnTarget {
+                        source: name.clone(),
+                        key: c.key().as_str().to_string(),
+                    });
+                    tracking.additions.push(item);
+                }
+                (false, NewItems::Ignore) => {
+                    next.insert(bare);
+                    tracking.ignored.push(item);
+                }
+                (false, NewItems::Skip) => tracking.skipped += 1,
+            }
+        }
+        let next: Vec<String> = next.into_iter().collect();
+        if next != snapshot {
+            source.whole_snapshot = Some(next);
+            changed = true;
+        }
+        if !fresh.is_empty() {
+            tracking.targets.push((name.clone(), fresh));
+        }
+    }
+    if changed {
+        registry.save(paths)?;
+    }
+    Ok(tracking)
+}
+
+/// Install the whole-tracked additions (LIFE-54) through the learn path, so
+/// their dependency closure comes with them, and add each one that installed
+/// to its source's snapshot. A failure part-way still records what installed.
+fn apply_whole_additions(
+    paths: &Paths,
+    tracking: &WholeTracking,
+    flow: InstallFlow,
+    collect: bool,
+) -> Result<Vec<String>> {
+    let mut installed_keys = Vec::new();
+    let mut failure = None;
+    for (source_name, targets) in &tracking.targets {
+        let before: HashSet<String> = Manifest::load(paths)?.items.keys().cloned().collect();
+        let result = if collect {
+            learn_collecting_selected(paths, Selection::ExactMany(targets), flow).map(drop)
+        } else {
+            learn_selected(paths, Selection::ExactMany(targets), false, flow)
+        };
+        let manifest = Manifest::load(paths)?;
+        installed_keys.extend(
+            manifest
+                .items
+                .keys()
+                .filter(|k| !before.contains(*k))
+                .cloned(),
+        );
+        let landed: Vec<String> = targets
+            .iter()
+            .filter_map(|t| manifest.items.get(&t.key))
+            .map(|m| format!("{}:{}", m.kind.as_str(), m.bare_name))
+            .collect();
+        let mut registry = Registry::load(paths)?;
+        if let Some(source) = registry.sources.iter_mut().find(|s| s.name == *source_name) {
+            let mut snap: BTreeSet<String> = source
+                .whole_snapshot
+                .take()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            snap.extend(landed);
+            source.whole_snapshot = Some(snap.into_iter().collect());
+            registry.save(paths)?;
+        }
+        if let Err(e) = result {
+            failure = Some(e);
+            break;
+        }
+    }
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(installed_keys),
+    }
+}
+
+/// The new-items sections of the upgrade report (LIFE-54, LIFE-55).
+fn print_whole_additions(tracking: &WholeTracking) {
+    let out = crate::render::ctx();
+    if !tracking.additions.is_empty() {
+        let n = tracking.additions.len();
+        println!(
+            "{n} new {} in sources installed whole:\n",
+            if n == 1 { "item" } else { "items" }
+        );
+        for a in &tracking.additions {
+            println!(
+                "  {} {} {}",
+                out.warn(),
+                a.key,
+                out.dim(&format!("[{}]", a.source))
+            );
+        }
+        println!();
+    }
+}
+
+/// The notes for new items an upgrade did not propose (LIFE-55): skipped ones
+/// come back next time, ignored ones do not.
+fn note_unproposed_new_items(skipped: usize, ignored: &[NewItem]) {
+    if skipped > 0 {
+        crate::render::note(format!(
+            "note: skipped {skipped} new item(s) (--skip-new); the next upgrade offers them again"
+        ));
+    }
+    for i in ignored {
+        // Source-qualified, so it cannot be ambiguous with a same-named item
+        // in another melded source.
+        crate::render::note(format!(
+            "note: ignored new item {} from {} (--ignore-new); run `mind learn {}` to install it",
+            i.key,
+            i.source,
+            crate::error::shell_quote(&format!("{}#{}", i.source, i.key))
+        ));
+    }
 }
 
 /// The profile-additions section of the upgrade report (PROF-21).
@@ -9915,6 +10261,8 @@ pub fn sync_with_selector(
     let policy = Policy::load()?;
     // CLI-19: auto-meld honors the user's SSH preference too.
     let prefer_ssh = Config::load(paths)?.ssh;
+    // spec: LIFE-53 -- before the fetch, as `upgrade` does.
+    record_whole_sources(paths, None)?;
     let mut registry = Registry::load(paths)?;
     let mut sync_skipped: Vec<SkippedEntry> = Vec::new();
     // spec: POL-34 -- provisioning failures are soft; collect them here so the
@@ -10824,6 +11172,9 @@ fn upgrade_inner_scoped(
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
+    // spec: LIFE-53 -- before the fetch below can bring in new items, mark the
+    // sources whose items are all installed, so those items read as new.
+    record_whole_sources(paths, None)?;
     let mut registry = Registry::load(paths)?;
 
     let (source_scope, source_filter_desc): (Option<HashSet<String>>, Option<&str>) =
@@ -11021,10 +11372,41 @@ fn upgrade_inner_scoped(
     } else {
         Vec::new()
     };
-    let tracking = track_profiles_for_upgrade(paths, &profile_sources, &catalog)?;
+    let mode = new_items();
+    let tracking = track_profiles_for_upgrade(paths, &profile_sources, &catalog, mode)?;
+    // spec: LIFE-54 -- the same scoping for sources installed whole; a
+    // profile-tracked source is tracked by its profiles instead.
+    let whole_sources: Vec<String> = if filter.is_none() && key_scope.is_none() {
+        registry
+            .sources
+            .iter()
+            .filter(|s| {
+                s.whole_snapshot.is_some()
+                    && !s.is_profile_tracked()
+                    && source_scope.as_ref().is_none_or(|sc| sc.contains(&s.name))
+                    && !unscannable.contains(&s.name)
+                    && policy
+                        .as_ref()
+                        .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
+            })
+            .map(|s| s.name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let whole = track_whole_for_upgrade(paths, &whole_sources, &catalog, mode)?;
+    let ignored: Vec<NewItem> = tracking
+        .ignored
+        .iter()
+        .chain(&whole.ignored)
+        .cloned()
+        .collect();
+    if !out.json {
+        note_unproposed_new_items(tracking.skipped + whole.skipped, &ignored);
+    }
     // Tracking may have persisted snapshot/tag changes; read them back so the
     // pass below (and its manifest save) starts from them.
-    let manifest = if profile_sources.is_empty() {
+    let manifest = if profile_sources.is_empty() && whole_sources.is_empty() {
         manifest
     } else {
         registry = Registry::load(paths)?;
@@ -11120,12 +11502,15 @@ fn upgrade_inner_scoped(
     let with_profiles = |mut r: MutationResult| {
         r.profile_additions = tracking.additions.clone();
         r.profile_departures = tracking.departures.clone();
+        // spec: LIFE-56
+        r.new_items = whole.additions.clone();
+        r.ignored_new_items = ignored.clone();
         r.sources = version_rows.clone();
         r.breaking = breaking_moves.clone();
         r
     };
 
-    if pending.is_empty() && !tracking.has_additions() {
+    if pending.is_empty() && !tracking.has_additions() && whole.targets.is_empty() {
         // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
         // items it would have contributed were never compared. Report the
         // sources that could not be checked instead of the plain up-to-date line.
@@ -11155,6 +11540,7 @@ fn upgrade_inner_scoped(
 
     if !out.json {
         print_upgrade_report(&registry, &pending, &tracking);
+        print_whole_additions(&whole);
     }
 
     // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
@@ -11413,6 +11799,16 @@ fn upgrade_inner_scoped(
             accept,
         };
         let keys = apply_profile_plan(paths, source_name, plan, flow, out.json)?;
+        applied.extend(keys.iter().map(|k| strip_ansi(k)));
+    }
+    // spec: LIFE-54 -- the same for items new to a source installed whole.
+    if !whole.targets.is_empty() {
+        let flow = InstallFlow {
+            yes: true,
+            clobber: Clobber::Prompt,
+            accept,
+        };
+        let keys = apply_whole_additions(paths, &whole, flow, out.json)?;
         applied.extend(keys.iter().map(|k| strip_ansi(k)));
     }
     if out.json {
@@ -14202,6 +14598,14 @@ struct MutationResult {
     /// (PROF-22).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     profile_departures: Vec<ProfileDeparture>,
+    /// Items new to a source installed whole that `upgrade` proposed
+    /// (LIFE-54, LIFE-56).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    new_items: Vec<NewItem>,
+    /// New items `upgrade --ignore-new` recorded as seen without installing
+    /// (LIFE-55, LIFE-56).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ignored_new_items: Vec<NewItem>,
     /// Items `forget <source> --profile` kept because another installed item
     /// depends on them (PROF-25, DEP-60), each naming its dependents.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -14232,6 +14636,8 @@ impl MutationResult {
             profiles: None,
             profile_additions: Vec::new(),
             profile_departures: Vec::new(),
+            new_items: Vec::new(),
+            ignored_new_items: Vec::new(),
             kept: Vec::new(),
             sources: Vec::new(),
             breaking: Vec::new(),
@@ -15746,6 +16152,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }
@@ -18052,6 +18459,7 @@ mod tests {
             install_hook_commit: None,
             profiles: None,
             profile_snapshot: None,
+            whole_snapshot: None,
             auto_update: None,
         }
     }
