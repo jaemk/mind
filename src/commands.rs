@@ -6070,12 +6070,12 @@ pub fn is_item_link_spec(repo: &str) -> bool {
     parse_spec_quiet(repo).is_ok_and(|s| s.item_path.is_some())
 }
 
-/// The PROF-13 profile picker: on an interactive meld with no profile flag
-/// and no `--yes`, of a source declaring a `default` and at least one other
-/// profile, ask which profiles to enable, `default` preselected. An empty
-/// answer keeps `selection`; otherwise the answer is the enabled set, exactly
-/// as `--no-default-profile --profile <answer>` would give it (list `default`
-/// to keep it). Every other case returns `selection` unchanged (PROF-12).
+/// The PROF-13 profile picker: on an interactive meld with no profile flag,
+/// no `--learn`, and no `--yes`, of a source declaring profiles but no
+/// `default`, ask which profiles to enable. The answer is the enabled set,
+/// exactly as `--profile <answer>` would give it; an empty answer returns
+/// `None`, keeping the CLI-23 install-all offer. A source that declares
+/// `default` is never asked (PROF-12).
 ///
 /// `table` is the source's `[profiles]`, read from the fresh clone: `meld`
 /// asks before the source's install hooks run, so they see the answer
@@ -6083,21 +6083,17 @@ pub fn is_item_link_spec(repo: &str) -> bool {
 fn pick_profiles_from(
     source_name: &str,
     table: Option<&crate::profile::ProfileTable>,
-    selection: crate::profile::Selection,
-    flags_given: bool,
-    yes: bool,
-) -> Result<crate::profile::Selection> {
+    skip: bool,
+) -> Result<Option<crate::profile::Selection>> {
     // spec: PROF-13
-    if flags_given || yes || json_mode() || !crate::hook::is_tty() {
-        return Ok(selection);
+    if skip || json_mode() || !crate::hook::is_tty() {
+        return Ok(None);
     }
-    let Some(table) = table else {
-        return Ok(selection);
+    let Some(table) = table.filter(|t| !t.is_empty()) else {
+        return Ok(None);
     };
-    if !table.contains_key(crate::profile::DEFAULT)
-        || !table.keys().any(|k| k != crate::profile::DEFAULT)
-    {
-        return Ok(selection);
+    if table.contains_key(crate::profile::DEFAULT) {
+        return Ok(None);
     }
     let declared: Vec<&str> = table.keys().map(String::as_str).collect();
     println!(
@@ -6105,17 +6101,18 @@ fn pick_profiles_from(
         strip_ansi(source_name),
         declared.join(", ")
     );
-    let answer = prompt_line("enable which profiles? (comma-separated; Enter keeps: default): ")?;
+    let answer =
+        prompt_line("enable which profiles? (comma-separated; Enter offers every item): ")?;
     let answer = answer.trim();
     if answer.is_empty() {
-        return Ok(selection);
+        return Ok(None);
     }
     let named = crate::profile::parse_cli_names(&[answer.to_string()])?;
-    Ok(crate::profile::Selection {
+    Ok(Some(crate::profile::Selection {
         include_default: false,
         named,
         all: false,
-    })
+    }))
 }
 
 /// Resolve a profile install for `req` (PROF-5, PROF-6, PROF-15): the enabled
@@ -7090,11 +7087,13 @@ pub(crate) enum MeldProfiles<'a> {
     /// auto-meld, a marketplace entry, a sync re-walk).
     None,
     /// The consumer's own meld: the flags, plus the PROF-13 picker when they
-    /// are absent. `picked` receives the selection when the meld routes
-    /// through profiles (PROF-9, PROF-12), so the caller does not ask twice.
+    /// are absent and the source declares no `default`. `picked` receives the
+    /// selection when the meld routes through profiles (PROF-9, PROF-12,
+    /// PROF-13), so the caller does not ask twice.
     Consumer {
         selection: crate::profile::Selection,
         flags_given: bool,
+        learning: bool,
         yes: bool,
         picked: Option<crate::profile::Selection>,
     },
@@ -7115,24 +7114,18 @@ impl MeldProfiles<'_> {
             MeldProfiles::Consumer {
                 selection,
                 flags_given,
+                learning,
                 yes,
                 picked,
             } => {
                 let routes =
                     *flags_given || table.is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
-                if routes {
-                    let sel = pick_profiles_from(
-                        source_name,
-                        table,
-                        selection.clone(),
-                        *flags_given,
-                        *yes,
-                    )?;
-                    *picked = Some(sel.clone());
-                    Some(sel)
+                *picked = if routes {
+                    Some(selection.clone())
                 } else {
-                    None
-                }
+                    pick_profiles_from(source_name, table, *learning || *yes)?
+                };
+                picked.clone()
             }
             MeldProfiles::Curated(entry) => curated_route_selection(table, entry),
         };
@@ -15066,6 +15059,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             MeldProfiles::Consumer {
                 selection: profile_selection.clone(),
                 flags_given: !profile_flags.is_empty(),
+                learning: !learn_patterns.is_empty(),
                 yes,
                 picked: None,
             }
@@ -15089,22 +15083,20 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         //
         // CLI-156: in json mode the entire meld+install outcome is folded
         // into ONE JSON object emitted here. Human output is unchanged.
-        // spec: PROF-9 PROF-12 -- a profile flag, or a source that
-        // declares `default`, routes the install offer through
-        // profiles; otherwise the CLI-23/CLI-236 paths run unchanged
-        // (PROF-7).
-        let use_profiles =
-            !register_only && meld_uses_profiles(paths, &source_ident, !profile_flags.is_empty())?;
+        // spec: PROF-9 PROF-12 PROF-13 -- a profile flag, a source that
+        // declares `default`, or a picker answer routes the install offer
+        // through profiles; otherwise the CLI-23/CLI-236 paths run
+        // unchanged (PROF-7). `meld` asked the picker before the source's
+        // install hooks ran (HOOK-142).
+        let picked = match meld_profiles {
+            MeldProfiles::Consumer { picked, .. } => picked,
+            _ => None,
+        };
+        let use_profiles = !register_only
+            && (picked.is_some()
+                || meld_uses_profiles(paths, &source_ident, !profile_flags.is_empty())?);
         if use_profiles {
-            // spec: PROF-13 -- an interactive meld with no profile flag
-            // asks which profiles to enable first; `meld` asked before the
-            // source's install hooks ran (HOOK-142).
-            let selection = match meld_profiles {
-                MeldProfiles::Consumer {
-                    picked: Some(sel), ..
-                } => sel,
-                _ => profile_selection,
-            };
+            let selection = picked.unwrap_or(profile_selection);
             let req = ProfileInstall {
                 source_name: &source_ident,
                 selection: &selection,

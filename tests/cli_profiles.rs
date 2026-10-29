@@ -600,30 +600,71 @@ fn tty_meld_prompts_once_and_records_only_on_yes() {
     assert_eq!(sb.recorded_profiles(), Some(svec(&["basic", "default"])));
 }
 
-#[test]
-fn interactive_meld_asks_which_profiles_with_default_preselected() {
-    // spec: PROF-13 -- an empty answer keeps default; a named answer is the
-    // enabled set, as the flags would give it.
-    let sb = Sandbox::new("src");
-    let r = sb.mind_env(&["meld", &sb.spec()], &[("MIND_TTY", "1")], Some("\ny\n"));
-    assert!(r.success, "{} {}", r.stdout, r.stderr);
-    assert!(r.stdout.contains("enable which profiles?"), "{}", r.stdout);
-    assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
+/// [`PROFILES`] without its `default` key.
+const NO_DEFAULT_PROFILES: &str = "[profiles]\n\
+basic = [\"skill:review\", \"rule:style\"]\n\
+full = [\"basic\", \"agent:*\", \"skill:deploy\"]\n";
 
-    let sb = Sandbox::new("src");
+#[test]
+fn interactive_meld_asks_which_profiles_only_without_a_default() {
+    // spec: PROF-13 -- a source with no `default` is asked: a named answer is
+    // the enabled set, as `--profile` would give it; an empty answer keeps
+    // the install-all offer.
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
     let r = sb.mind_env(
         &["meld", &sb.spec()],
         &[("MIND_TTY", "1")],
         Some("full\ny\n"),
     );
     assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("enable which profiles?"), "{}", r.stdout);
     assert_eq!(sb.recorded_profiles(), Some(svec(&["full"])));
     assert!(sb.installed().contains(&"agent:planner".to_string()));
+    assert!(!sb.installed().contains(&"skill:test".to_string()));
 
-    // A flag skips the picker.
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
+    let r = sb.mind_env(&["meld", &sb.spec()], &[("MIND_TTY", "1")], Some("\ny\n"));
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("enable which profiles?"), "{}", r.stdout);
+    assert_eq!(sb.recorded_profiles(), None);
+    assert!(sb.installed().contains(&"skill:test".to_string()));
+
+    // An undeclared name is an error, not a re-prompt.
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
+    let r = sb.mind_env(&["meld", &sb.spec()], &[("MIND_TTY", "1")], Some("nope\n"));
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    assert!(sb.installed().is_empty());
+
+    // A malformed name is an error too, and a later meld still works.
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
+    let r = sb.mind_env(
+        &["meld", &sb.spec()],
+        &[("MIND_TTY", "1")],
+        Some("Bad Name\n"),
+    );
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(sb.installed().contains(&"skill:test".to_string()));
+
+    // A source with a `default` goes straight to the install preview.
     let sb = Sandbox::new("src");
+    let r = sb.mind_env(&["meld", &sb.spec()], &[("MIND_TTY", "1")], Some("y\n"));
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("enable which profiles?"), "{}", r.stdout);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
+
+    // A flag or `--learn` skips the picker.
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
     let r = sb.mind_env(
         &["meld", &sb.spec(), "--profile", "basic"],
+        &[("MIND_TTY", "1")],
+        Some("y\n"),
+    );
+    assert!(!r.stdout.contains("enable which profiles?"), "{}", r.stdout);
+    let sb = Sandbox::with_toml("src", NO_DEFAULT_PROFILES);
+    let r = sb.mind_env(
+        &["meld", &sb.spec(), "--learn", "skill:test"],
         &[("MIND_TTY", "1")],
         Some("y\n"),
     );
@@ -1198,8 +1239,13 @@ fn learn_all_conflicts_with_profile_flags() {
 /// review, deploy, and helper skills' install/uninstall hooks each append
 /// `<who> <event> $MIND_PROFILES|$MIND_ITEM_PROFILES` to `$HOOK_LOG`.
 fn hooked(name: &str) -> Sandbox {
+    hooked_with(name, PROFILES)
+}
+
+/// [`hooked`] with `profiles` as its `[profiles]` table.
+fn hooked_with(name: &str, profiles: &str) -> Sandbox {
     let toml = format!(
-        "{PROFILES}\n[[hooks]]\nrun = \"sh ./log.sh source install\"\nevent = \"install\"\n\n\
+        "{profiles}\n[[hooks]]\nrun = \"sh ./log.sh source install\"\nevent = \"install\"\n\n\
          [[hooks]]\nrun = \"sh ./log.sh source uninstall\"\nevent = \"uninstall\"\n"
     );
     let sb = Sandbox::with_toml(name, &toml);
@@ -1300,7 +1346,7 @@ fn hook_vars_are_always_set_and_override_inherited_values() {
 fn source_hooks_see_the_picker_answer() {
     // spec: HOOK-142 -- the PROF-13 picker is asked before the source's
     // install hooks run, so they see its answer.
-    let sb = hooked("src");
+    let sb = hooked_with("src", NO_DEFAULT_PROFILES);
     let r = sb.mind_hooked(
         &["meld", &sb.spec()],
         &[("MIND_TTY", "1")],

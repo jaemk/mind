@@ -68,10 +68,10 @@ mind meld owner/repo --all-profiles          # every profile
 error that lists the profiles the source declares, and leaves the source melded
 with nothing installed.
 
-On a terminal, the first meld of a source that declares `default` and at least
-one other profile asks which profiles to enable, with `default` preselected.
-Press Enter to keep it, or type the names you want instead (`full` alone
-enables only `full`). `mind recall --sources` shows which profiles
+A source that declares `default` installs it without asking. On a terminal, the
+first meld of a source that declares profiles but no `default` asks which
+profiles to enable: type the names you want, or press Enter to be offered every
+item. `mind recall --sources` shows which profiles
 are enabled for each source; the [terminal UI](tui.md#details-dialog) shows
 them in the source's details dialog, with Enable and Disable actions.
 

@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A plain interactive `meld` of a source that declares a `default` profile no
+  longer asks which profiles to enable; it goes straight to the install preview.
+  A source that declares profiles but no `default` now asks instead, and an
+  empty answer keeps the offer to install every item.
+
 ## [0.39.1] - 2026-10-29
 
 ### Fixed

@@ -66,7 +66,7 @@ mind forget owner/repo --profile full       # disable it again
 - `PROF-7` The `default` key names the profile that is enabled when the consumer
   names none and does not opt out (PROF-10). Its value follows PROF-3. A source
   whose `[profiles]` has no `default` keeps the CLI-23 install-all offer, and its
-  profiles are opt-in only.
+  profiles are opt-in only (a flag, or the PROF-13 picker).
 - `PROF-8` Profiles are read from the root `mind.toml` only. A scoped item
   `mind.toml` (HOOK-131) declaring `[profiles]` is a `MindToml` error, and a
   plugin or marketplace manifest declares none. An item-link instance
@@ -94,14 +94,14 @@ mind forget owner/repo --profile full       # disable it again
   offers the `default` expansion instead of every item. The preview names the
   enabled profiles, lists the other declared profiles, and names `--profile` /
   `--all-profiles`, so the consumer sees what is not being installed.
-- `PROF-13` An interactive first `meld` with no profile flag and no `--yes`, of
-  a source that declares `default` and at least one other profile, asks which
-  profiles to enable before the install preview, with `default` preselected.
-  The answer is the complete list to enable: an empty answer keeps `default`,
-  and typing names replaces the preselection (`full` alone enables only `full`,
-  the same as `--no-default-profile --profile full`). An undeclared name is
-  `ProfileNotFound`, not a re-prompt. A non-interactive `meld` takes `default`
-  as-is (PROF-12).
+- `PROF-13` An interactive first `meld` with no profile flag, no `--learn`, and
+  no `--yes`, of a source that declares profiles but no `default`, asks which
+  profiles to enable before the install preview. Typed names are the enabled
+  set, the same as `--profile <names>`, and the install offer covers their
+  expansion (PROF-9). An empty answer keeps the CLI-23 install-all offer
+  (PROF-7). An undeclared name is `ProfileNotFound`, not a re-prompt. A source
+  that declares `default` is never asked: its plain `meld` goes straight to the
+  PROF-12 preview.
 - `PROF-14` `--profile` values are checked against PROF-2's syntax before the
   clone, so a malformed name (`InvalidProfileName`) does not leave a registered
   source behind. A well-formed name the source does not declare is

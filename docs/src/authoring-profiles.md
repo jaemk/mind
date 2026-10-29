@@ -49,13 +49,12 @@ available to `learn`.
 
 ## The default profile
 
-`default` is what a plain `meld` installs. On a terminal, the first meld of a
-source with `default` and at least one other profile asks which profiles to
-enable, with `default` preselected.
+`default` is what a plain `meld` installs, without asking which profiles to
+enable.
 
-Without a `default`, a plain meld still offers every item and profiles are
-opt-in. Choose deliberately: adding `default` to an existing source changes
-what new consumers get by default.
+Without a `default`, a first meld on a terminal asks which profiles to enable;
+Enter offers every item. Profiles are opt-in. Choose deliberately: adding
+`default` to an existing source changes what new consumers get by default.
 
 ## How changes reach consumers
 
