@@ -163,55 +163,107 @@ pub struct Node {
 /// item, used for DEP-22 cycle detection: a dep that appears in `ancestors` is
 /// shown as a back-edge marker (`(cycle)`) and not expanded again.
 ///
+/// `expanded` limits the build to what can be shown (TUI-88): a dependency row
+/// whose id it lacks gets only its direct dependencies, as leaves. `None` builds
+/// every level.
+///
 /// Returns a Vec of child Nodes representing the dependency subtree view.
-// spec: TUI-50 DEP-22
+// spec: TUI-50 TUI-88 DEP-22
 fn build_dep_children(
     item_key: &str,
     dep_keys: &[String],
     all_deps: &std::collections::HashMap<String, Vec<String>>,
     ancestors: &mut Vec<String>,
+    expanded: Option<&HashSet<String>>,
 ) -> Vec<Node> {
     ancestors.push(item_key.to_string());
     let mut children = Vec::new();
     for dep_key in dep_keys {
         let is_cycle = ancestors.contains(dep_key);
-        let name = dep_key
-            .split_once(':')
-            .map(|(_, n)| n)
-            .unwrap_or(dep_key.as_str())
-            .to_string();
-        let label = if is_cycle {
-            format!("{} (cycle)", dep_key)
-        } else {
-            dep_key.clone()
-        };
-        // The node id encodes the path so sibling items with a shared dep each
-        // get their own independently expandable node in the view.
-        let node_id = format!("dep:{}:{}", item_key, dep_key);
+        let node_id = dep_node_id(item_key, dep_key);
         // Build grandchildren only for non-cycle deps that have their own deps.
-        let grandchildren = if is_cycle {
-            Vec::new()
-        } else {
-            let grandchild_deps: Vec<String> = all_deps.get(dep_key).cloned().unwrap_or_default();
-            if grandchild_deps.is_empty() {
-                Vec::new()
-            } else {
-                build_dep_children(dep_key, &grandchild_deps, all_deps, ancestors)
+        let grandchildren = match all_deps.get(dep_key) {
+            Some(grandchild_deps) if !is_cycle && !grandchild_deps.is_empty() => {
+                if expanded.is_none_or(|e| e.contains(&node_id)) {
+                    build_dep_children(dep_key, grandchild_deps, all_deps, ancestors, expanded)
+                } else {
+                    dep_leaves(dep_key, grandchild_deps, ancestors)
+                }
             }
+            _ => Vec::new(),
         };
-        children.push(Node {
-            id: node_id,
-            label,
-            node: TreeNode::DepChild(DepChildInfo {
-                key: dep_key.clone(),
-                name,
-                is_cycle,
-            }),
-            children: grandchildren,
-        });
+        children.push(dep_node(node_id, dep_key, is_cycle, grandchildren));
     }
     ancestors.pop();
     children
+}
+
+/// An item's dependency children for its tree node: the full subtree when the
+/// node is expanded (or `expanded` is `None`), else its direct dependencies as
+/// leaves, which is enough to show it as expandable (TUI-88).
+// spec: TUI-50 TUI-88
+fn item_dep_children(
+    node_id: &str,
+    item_key: &str,
+    dep_keys: &[String],
+    all_deps: &std::collections::HashMap<String, Vec<String>>,
+    expanded: Option<&HashSet<String>>,
+) -> Vec<Node> {
+    let mut ancestors = Vec::new();
+    if dep_keys.is_empty() {
+        Vec::new()
+    } else if expanded.is_none_or(|e| e.contains(node_id)) {
+        build_dep_children(item_key, dep_keys, all_deps, &mut ancestors, expanded)
+    } else {
+        dep_leaves(item_key, dep_keys, &ancestors)
+    }
+}
+
+/// `item_key`'s direct dependency rows with no children of their own, for a
+/// row that is not expanded (TUI-88).
+fn dep_leaves(item_key: &str, dep_keys: &[String], ancestors: &[String]) -> Vec<Node> {
+    dep_keys
+        .iter()
+        .map(|dep_key| {
+            let is_cycle = dep_key == item_key || ancestors.contains(dep_key);
+            dep_node(
+                dep_node_id(item_key, dep_key),
+                dep_key,
+                is_cycle,
+                Vec::new(),
+            )
+        })
+        .collect()
+}
+
+/// The id of `dep_key`'s row under `item_key`. It encodes the parent so sibling
+/// items with a shared dep each get their own independently expandable node in
+/// the view.
+fn dep_node_id(item_key: &str, dep_key: &str) -> String {
+    format!("dep:{}:{}", item_key, dep_key)
+}
+
+fn dep_node(id: String, dep_key: &str, is_cycle: bool, children: Vec<Node>) -> Node {
+    let name = dep_key
+        .split_once(':')
+        .map(|(_, n)| n)
+        .unwrap_or(dep_key)
+        .to_string();
+    let label = if is_cycle {
+        format!("{} (cycle)", dep_key)
+    } else {
+        dep_key.to_string()
+    };
+    Node {
+        id,
+        label,
+        node: TreeNode::DepChild(DepChildInfo {
+            key: dep_key.to_string(),
+            name,
+            is_cycle,
+        }),
+        children,
+    }
 }
 
 /// Build the full tree from a snapshot, applying kind/source filters and the
@@ -220,7 +272,12 @@ fn build_dep_children(
 /// The search filter is applied at the item level: a source or kind bucket is
 /// included if at least one of its items matches. This mirrors how `probe` works:
 /// the group headers are always visible, but their contents are filtered.
+///
+/// Every dependency subtree is built to its full depth, which is exponential in
+/// the depth of shared dependency chains, so only tests use it; the TUI uses
+/// [`build_tree_expanded`].
 // spec: TUI-10 TUI-11 TUI-12 TUI-13 TUI-14
+#[cfg(test)]
 pub fn build_tree(
     snap: &Snapshot,
     search: &str,
@@ -229,29 +286,74 @@ pub fn build_tree(
     installed_collapsed: bool,
     available_collapsed: bool,
 ) -> Vec<Node> {
+    build_tree_with(
+        snap,
+        search,
+        kind_filter,
+        source_filter,
+        (installed_collapsed, available_collapsed),
+        None,
+    )
+}
+
+/// [`build_tree`], building dependency subtrees only below the nodes in
+/// `expanded` (TUI-88).
+// spec: TUI-10 TUI-11 TUI-12 TUI-13 TUI-14 TUI-88
+pub fn build_tree_expanded(
+    snap: &Snapshot,
+    search: &str,
+    kind_filter: Option<ItemKind>,
+    source_filter: Option<&str>,
+    (installed_collapsed, available_collapsed): (bool, bool),
+    expanded: &HashSet<String>,
+) -> Vec<Node> {
+    build_tree_with(
+        snap,
+        search,
+        kind_filter,
+        source_filter,
+        (installed_collapsed, available_collapsed),
+        Some(expanded),
+    )
+}
+
+fn build_tree_with(
+    snap: &Snapshot,
+    search: &str,
+    kind_filter: Option<ItemKind>,
+    source_filter: Option<&str>,
+    (installed_collapsed, available_collapsed): (bool, bool),
+    expanded: Option<&HashSet<String>>,
+) -> Vec<Node> {
     // Build a combined dep-key map from all installed and available items so
     // dep children can recursively expand regardless of which group they live in.
-    // spec: TUI-50
+    // An installed item is in both lists; its deps are taken once (TUI-88).
+    // spec: TUI-50 TUI-88
     let mut all_deps: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for it in &snap.installed {
-        all_deps
-            .entry(it.key.clone())
-            .or_default()
-            .extend(it.deps.iter().cloned());
-    }
-    for it in &snap.available {
-        all_deps
-            .entry(it.key.clone())
-            .or_default()
-            .extend(it.deps.iter().cloned());
+    let installed_deps = snap.installed.iter().map(|it| (&it.key, &it.deps));
+    let available_deps = snap.available.iter().map(|it| (&it.key, &it.deps));
+    for (key, deps) in installed_deps.chain(available_deps) {
+        let merged = all_deps.entry(key.clone()).or_default();
+        for dep in deps {
+            if !merged.contains(dep) {
+                merged.push(dep.clone());
+            }
+        }
     }
 
     let mut roots = Vec::new();
 
     // --- Installed group ---
     // spec: TUI-10 TUI-12
-    let installed_node = build_installed_group(snap, search, kind_filter, source_filter, &all_deps);
+    let installed_node = build_installed_group(
+        snap,
+        search,
+        kind_filter,
+        source_filter,
+        &all_deps,
+        expanded,
+    );
     let installed_count = count_items(&installed_node.children);
     let installed_label = if installed_collapsed {
         "Installed (collapsed)".to_string()
@@ -271,7 +373,14 @@ pub fn build_tree(
 
     // --- Available group ---
     // spec: TUI-10 TUI-13
-    let available_node = build_available_group(snap, search, kind_filter, source_filter, &all_deps);
+    let available_node = build_available_group(
+        snap,
+        search,
+        kind_filter,
+        source_filter,
+        &all_deps,
+        expanded,
+    );
     let available_count = count_items(&available_node.children);
     let available_label = if available_collapsed {
         "Available (collapsed)".to_string()
@@ -328,6 +437,7 @@ fn build_installed_group(
     kind_filter: Option<ItemKind>,
     source_filter: Option<&str>,
     all_deps: &std::collections::HashMap<String, Vec<String>>,
+    expanded: Option<&HashSet<String>>,
 ) -> Node {
     // Group installed items by source -> kind.
     let mut by_source: std::collections::BTreeMap<
@@ -363,15 +473,12 @@ fn build_installed_group(
                 .iter()
                 .map(|it| {
                     // Build dep children for TUI-50 (cycle-safe via ancestors path).
-                    // spec: TUI-50
-                    let dep_children = if it.deps.is_empty() {
-                        Vec::new()
-                    } else {
-                        let mut ancestors = Vec::new();
-                        build_dep_children(&it.key, &it.deps, all_deps, &mut ancestors)
-                    };
+                    // spec: TUI-50 TUI-88
+                    let id = format!("installed:{}:{}", src_name, it.key);
+                    let dep_children =
+                        item_dep_children(&id, &it.key, &it.deps, all_deps, expanded);
                     Node {
-                        id: format!("installed:{}:{}", src_name, it.key),
+                        id,
                         label: format!(
                             "{} [{}]{}",
                             it.name,
@@ -485,6 +592,7 @@ fn build_available_group(
     kind_filter: Option<ItemKind>,
     source_filter: Option<&str>,
     all_deps: &std::collections::HashMap<String, Vec<String>>,
+    expanded: Option<&HashSet<String>>,
 ) -> Node {
     // Installed item keys (for de-dup).
     let installed_keys: HashSet<String> = snap.installed.iter().map(|i| i.key.clone()).collect();
@@ -528,15 +636,12 @@ fn build_available_group(
                 .iter()
                 .map(|it| {
                     // Build dep children for TUI-50.
-                    // spec: TUI-50
-                    let dep_children = if it.deps.is_empty() {
-                        Vec::new()
-                    } else {
-                        let mut ancestors = Vec::new();
-                        build_dep_children(&it.key, &it.deps, all_deps, &mut ancestors)
-                    };
+                    // spec: TUI-50 TUI-88
+                    let id = format!("available:{}:{}", src_name, it.key);
+                    let dep_children =
+                        item_dep_children(&id, &it.key, &it.deps, all_deps, expanded);
                     Node {
-                        id: format!("available:{}:{}", src_name, it.key),
+                        id,
                         label: format!(
                             "{}{}",
                             it.name,
@@ -2723,6 +2828,141 @@ mod tests {
                 |n| matches!(&n.node, TreeNode::KindBucket { kind, .. } if *kind == ItemKind::Rule)
             ),
             "the collapsed bucket header must remain visible"
+        );
+    }
+
+    /// A snapshot of skills `c0 .. c{n-1}` where each `c{i}` depends on every
+    /// earlier one that is at most two steps back, so the number of dependency
+    /// paths from the last skill grows like Fibonacci. Each is installed and also
+    /// listed as available, as the real snapshot does.
+    fn chain_snapshot(n: usize) -> Snapshot {
+        let deps = |i: usize| -> Vec<String> {
+            (i.saturating_sub(2)..i)
+                .map(|j| format!("skill:c{j}"))
+                .collect()
+        };
+        let installed = (0..n)
+            .map(|i| SnapshotInstalled {
+                deps: deps(i),
+                ..make_installed(
+                    &format!("skill:c{i}"),
+                    &format!("c{i}"),
+                    "src/a",
+                    ItemKind::Skill,
+                )
+            })
+            .collect();
+        let available = (0..n)
+            .map(|i| SnapshotAvailable {
+                deps: deps(i),
+                ..make_available(
+                    &format!("skill:c{i}"),
+                    &format!("c{i}"),
+                    "src/a",
+                    ItemKind::Skill,
+                )
+            })
+            .collect();
+        snap_with(installed, available)
+    }
+
+    fn count_nodes(nodes: &[Node]) -> usize {
+        nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
+    }
+
+    fn rows(flat: &[FlatNode]) -> Vec<(String, String, usize, bool, bool)> {
+        flat.iter()
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    n.label.clone(),
+                    n.depth,
+                    n.expandable,
+                    n.expanded,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_shared_dependency_chain_builds_only_what_is_expanded() {
+        // spec: TUI-88 -- with nothing expanded, each item carries only its
+        // direct deps, so the tree is linear in the item count. The full build
+        // of the same snapshot has millions of paths.
+        let snap = chain_snapshot(40);
+        let nodes = build_tree_expanded(&snap, "", None, None, (false, false), &HashSet::new());
+        let total = count_nodes(&nodes);
+        assert!(
+            total < 200,
+            "40 items and their direct deps, got {total} nodes"
+        );
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let last = flat
+            .iter()
+            .find(|n| n.id == "installed:src/a:skill:c39")
+            .expect("the last item is shown");
+        assert!(
+            last.expandable,
+            "a collapsed item with deps stays expandable"
+        );
+    }
+
+    #[test]
+    fn the_expanded_rows_match_a_full_build() {
+        // spec: TUI-88 TUI-50 -- building only below expanded nodes shows
+        // exactly the rows the full build shows, at every expansion depth.
+        let snap = chain_snapshot(8);
+        let full = build_tree(&snap, "", None, None, false, false);
+        let mut expanded = HashSet::new();
+        // Walk down the chain from the last installed item: c7 -> c6 -> c5.
+        for id in [
+            "installed:src/a:skill:c7",
+            "dep:skill:c7:skill:c6",
+            "dep:skill:c6:skill:c5",
+            // A cycle-free shared dep also reachable on another path.
+            "dep:skill:c5:skill:c3",
+        ] {
+            expanded.insert(id.to_string());
+            let lazy = build_tree_expanded(&snap, "", None, None, (false, false), &expanded);
+            assert_eq!(
+                rows(&flatten_tree(&lazy, &expanded, &HashSet::new())),
+                rows(&flatten_tree(&full, &expanded, &HashSet::new())),
+                "rows differ with {expanded:?} expanded"
+            );
+        }
+    }
+
+    #[test]
+    fn an_item_in_both_lists_lists_its_deps_once() {
+        // spec: TUI-88 -- the installed and available entries of one item must
+        // not each contribute its deps, which doubled every level of the tree.
+        let snap = chain_snapshot(3);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let mut expanded = HashSet::new();
+        expanded.insert("installed:src/a:skill:c2".to_string());
+        let flat = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let deps: Vec<&str> = flat
+            .iter()
+            .filter(|n| n.id.starts_with("dep:skill:c2:"))
+            .map(|n| n.label.as_str())
+            .collect();
+        assert_eq!(deps, vec!["skill:c0", "skill:c1"]);
+    }
+
+    #[test]
+    fn a_collapsed_self_dependency_is_marked_as_a_cycle() {
+        // spec: TUI-88 DEP-22 -- the direct-dep leaves of a collapsed row mark a
+        // back-edge to the row itself, as the full build does.
+        let mut item = make_installed("skill:loop", "loop", "src/a", ItemKind::Skill);
+        item.deps = vec!["skill:loop".to_string()];
+        let snap = snap_with(vec![item], vec![]);
+        let lazy = build_tree_expanded(&snap, "", None, None, (false, false), &HashSet::new());
+        let full = build_tree(&snap, "", None, None, false, false);
+        let mut expanded = HashSet::new();
+        expanded.insert("installed:src/a:skill:loop".to_string());
+        assert_eq!(
+            rows(&flatten_tree(&lazy, &expanded, &HashSet::new())),
+            rows(&flatten_tree(&full, &expanded, &HashSet::new())),
         );
     }
 }

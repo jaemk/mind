@@ -290,6 +290,12 @@ manifest, and store.
   initial load and the reload after an action read everything fresh. A change
   to an off-screen source therefore appears within about 10 seconds, and
   within a tick of the source scrolling into view.
+- `TUI-88` The tree builds a dependency subtree (TUI-50) only below an expanded
+  node: a collapsed item or dependency row carries its direct dependencies, so it
+  shows as expandable, and nothing deeper. Building the tree therefore costs what
+  is expanded, not every path through the dependency graph, which for long or
+  shared dependency chains grows exponentially. An item's dependencies are listed
+  once even when the item appears in both the installed and the available lists.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.

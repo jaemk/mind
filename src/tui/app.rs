@@ -542,13 +542,14 @@ impl App {
         // Remember what was selected by ID so we can restore after rebuild.
         let selected_id = self.visible.get(self.selected).map(|n| n.id.clone());
 
-        let nodes = crate::tui::tree::build_tree(
+        // spec: TUI-88 -- dependency subtrees are built only where expanded.
+        let nodes = crate::tui::tree::build_tree_expanded(
             snap,
             &self.search,
             self.kind_filter,
             self.source_filter.as_deref(),
-            self.installed_collapsed,
-            self.available_collapsed,
+            (self.installed_collapsed, self.available_collapsed),
+            &self.expanded,
         );
         self.visible = flatten_tree(&nodes, &self.expanded, &self.collapsed);
 
