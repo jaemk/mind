@@ -532,7 +532,10 @@ fn a_relative_or_owned_hook_log_dir_is_resolved() {
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let log = PathBuf::from(doc["hooks"][0]["log"].as_str().unwrap());
     assert!(log.is_absolute(), "{log:?}");
-    assert!(log.starts_with(sb.base.join("rel-logs")), "{log:?}");
+    // The working directory comes back resolved (macOS's /var is
+    // /private/var), so compare against the resolved base.
+    let base = sb.base.canonicalize().unwrap();
+    assert!(log.starts_with(base.join("rel-logs")), "{log:?}");
 
     let inside = sb.mind_home.join("hooks").join("logs").join("mine");
     let flag = format!("--hook-log={}", inside.display());
