@@ -150,39 +150,60 @@ mod tests {
         None
     }
 
+    /// A load that reports each start on `started` and then waits for a
+    /// release on `go` (none once `go`'s sender is dropped), so a test steps
+    /// the poll thread without sleeping on timing.
+    fn gated_load(
+        started: mpsc::Sender<()>,
+        go: mpsc::Receiver<()>,
+        name: &'static str,
+    ) -> impl FnMut(&HashSet<String>) -> Option<Snapshot> + Send + 'static {
+        move |_| {
+            let _ = started.send(());
+            go.recv().ok()?;
+            Some(snapshot(name))
+        }
+    }
+
     #[test]
     fn a_slow_load_does_not_block_the_caller() {
         // spec: TUI-86 -- the load runs off the calling thread, so asking for
         // the latest snapshot returns at once while a load is still running.
-        let p = Poller::start_with(Duration::from_millis(1), |_| {
-            std::thread::sleep(Duration::from_millis(500));
-            Some(snapshot("slow"))
-        });
-        let start = Instant::now();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let p = Poller::start_with(
+            Duration::from_millis(1),
+            gated_load(started_tx, go_rx, "slow"),
+        );
+        started_rx.recv().unwrap();
+        // The load is blocked mid-flight; a blocking `latest` would hang here.
         assert!(p.latest(0).is_none());
-        assert!(start.elapsed() < Duration::from_millis(100));
+        go_tx.send(()).unwrap();
         assert_eq!(wait_latest(&p, 0), Some(snapshot("slow")));
+        // Unblock the next load so dropping the poller can join it.
+        drop(go_tx);
     }
 
     #[test]
     fn a_snapshot_from_an_earlier_epoch_is_dropped() {
         // spec: TUI-86 -- a load begun before the UI applied an action's own
         // snapshot (and bumped its epoch) must not revert the tree.
-        let (go_tx, go_rx) = mpsc::channel::<()>();
-        let p = Poller::start_with(Duration::from_millis(1), move |_| {
-            go_rx.recv().ok()?;
-            Some(snapshot("stale"))
-        });
-        // Let the first load start under epoch 0, then bump before it lands.
-        std::thread::sleep(Duration::from_millis(50));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        let p = Poller::start_with(
+            Duration::from_millis(1),
+            gated_load(started_tx, go_rx, "stale"),
+        );
+        // The first load has read epoch 0; bump before it lands.
+        started_rx.recv().unwrap();
         p.set_epoch(1);
         go_tx.send(()).unwrap();
-        std::thread::sleep(Duration::from_millis(50));
+        // Once the next load starts, the first one has been sent.
+        started_rx.recv().unwrap();
         assert!(p.latest(1).is_none(), "an epoch-0 load must be dropped");
-        // The next load starts under epoch 1 and is kept.
+        // The load now running began under epoch 1 and is kept.
         go_tx.send(()).unwrap();
         assert_eq!(wait_latest(&p, 1), Some(snapshot("stale")));
-        // Unblock the next load so dropping the poller can join it.
         drop(go_tx);
     }
 
@@ -219,15 +240,20 @@ mod tests {
         // delivers nothing; dropping the poller ends the thread.
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
+        let (started_tx, started_rx) = mpsc::channel();
         let p = Poller::start_with(Duration::from_millis(1), move |_| {
             seen.fetch_add(1, Ordering::SeqCst);
+            let _ = started_tx.send(());
             None
         });
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(p.latest(0).is_none());
+        // Two loads have finished once the third starts.
+        for _ in 0..3 {
+            started_rx.recv().unwrap();
+        }
+        assert!(p.latest(0).is_none(), "a skipped load sends nothing");
+        // Drop joins the thread, so the count is final once it returns.
         drop(p);
         let after = calls.load(Ordering::SeqCst);
-        assert!(after > 0, "the load ran");
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(calls.load(Ordering::SeqCst), after, "no load after drop");
     }
