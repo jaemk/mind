@@ -27,6 +27,7 @@ struct Run {
     stdout: String,
     stderr: String,
     success: bool,
+    code: Option<i32>,
 }
 
 impl Env {
@@ -54,6 +55,7 @@ impl Env {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             success: out.status.success(),
+            code: out.status.code(),
         }
     }
 
@@ -760,4 +762,62 @@ fn default_profile_false_with_install_true_and_no_profiles_installs_nothing() {
     let again = env.mind(&["curate", "--check"]);
     assert!(again.success, "{} {}", again.stdout, again.stderr);
     assert!(again.stdout.contains("up to date"), "{}", again.stdout);
+}
+
+/// A library like `lib`, but skill `a` declares an install hook that fails.
+fn lib_with_failing_hook(env: &Env) -> Repo {
+    let lib = lib(env);
+    lib.write_and_commit(
+        "skills/a/SKILL.md",
+        "---\ndescription: a\ninstall: exit 7\n---\n# a\n",
+    );
+    lib
+}
+
+/// Assert a curate run stopped on the hook (exit 3, `hook-failed`) rather
+/// than skipping the entry as `profile_selection_invalid`.
+fn assert_hook_stop(run: &Run) {
+    assert_eq!(run.code, Some(3), "{} {}", run.stdout, run.stderr);
+    let doc = json(run);
+    assert_eq!(doc["error"]["kind"], "hook-failed", "{doc}");
+    assert!(
+        !run.stdout.contains("profile_selection_invalid"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_failed_member_hook_at_registration_stops_the_curate() {
+    // spec: HOOK-172 PROF-26
+    let env = Env::new();
+    let lib = lib_with_failing_hook(&env);
+    // List the entry after the curator is melded, so `curate` registers it
+    // (CUR-3) and installs its profiles in the same step.
+    let curator = env.repo("curator");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", profiles = [\"basic\"] }}",
+        lib.spec()
+    )]);
+    let run = env.mind(&["curate", "--yes", "--json", "--accept-hooks"]);
+    assert_hook_stop(&run);
+}
+
+#[test]
+fn a_failed_member_hook_on_a_registered_entry_stops_the_curate() {
+    // spec: HOOK-172 PROF-27
+    let env = Env::new();
+    let lib = lib_with_failing_hook(&env);
+    let curator = curator_with(&env, &lib, "");
+    let first = env.mind(&["curate", "--yes"]);
+    assert!(first.success, "{} {}", first.stdout, first.stderr);
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", profiles = [\"basic\"] }}",
+        lib.spec()
+    )]);
+    let run = env.mind(&["curate", "--yes", "--json", "--accept-hooks"]);
+    assert_hook_stop(&run);
 }
