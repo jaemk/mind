@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-29
+
+### Changed
+
+- A plain interactive `meld` of a source that declares a `default` profile no
+  longer asks which profiles to enable; it goes straight to the install preview.
+  A source that declares profiles but no `default` now asks instead, and an
+  empty answer keeps the offer to install every item.
+
 ## [0.39.1] - 2026-10-29
 
 ### Fixed
@@ -2186,7 +2195,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.39.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/jaemk/mind/compare/v0.39.1...v0.40.0
 [0.39.1]: https://github.com/jaemk/mind/compare/v0.39.0...v0.39.1
 [0.39.0]: https://github.com/jaemk/mind/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/jaemk/mind/compare/v0.37.0...v0.38.0

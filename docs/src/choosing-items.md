@@ -68,12 +68,12 @@ mind meld owner/repo --all-profiles          # every profile
 error that lists the profiles the source declares, and leaves the source melded
 with nothing installed.
 
-On a terminal, the first meld of a source that declares `default` and at least
-one other profile asks which profiles to enable, with `default` preselected.
-Press Enter to keep it, or type the names you want instead (`full` alone
-enables only `full`). `mind recall --sources` shows which profiles
-are enabled for each source; the [terminal UI](tui.md#details-dialog) shows
-them in the source's details dialog, with Enable and Disable actions.
+A source that declares `default` goes straight to the offer for it, without
+asking which profiles to enable. On a terminal, the first meld of a source that
+declares profiles but no `default` asks: type the names you want, or press Enter
+to be offered every item. `mind recall --sources` shows which profiles are
+enabled for each source; the [terminal UI](tui.md#details-dialog) shows them in
+the source's details dialog, with Enable and Disable actions.
 
 ### Change profiles later
 
@@ -99,7 +99,7 @@ leaves it installed; `forget` it if you no longer want it. An item you
 ### What profiles do not cover
 
 - A source with no `default` profile keeps the install-everything offer on a
-  plain `meld`; its profiles are opt-in.
+  plain `meld` unless you pick profiles at the prompt; its profiles are opt-in.
 - `--all-profiles` enables every profile but does not install items that are
   in no profile. `learn owner/repo --all` installs the whole source.
 - `--learn` and `--profile` compose: the meld offers the union.

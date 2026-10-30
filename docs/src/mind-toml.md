@@ -271,8 +271,9 @@ all     = ["*"]
   can list `agent:*` before it ships an agent.
 - **`default`** names the profile enabled when the consumer names none and does
   not opt out. A plain `meld` then offers the `default` expansion instead of
-  every item. If `[profiles]` has no `default`, `meld` still offers to install
-  everything and the profiles are opt-in only.
+  every item, without asking which profiles to enable. If `[profiles]` has no
+  `default`, the profiles are opt-in: an interactive `meld` asks which to
+  enable, and an empty answer (or no terminal) offers to install everything.
 - **Root file only.** Profiles are read from the repo's root `mind.toml`. A
   scoped item `mind.toml` that declares `[profiles]` is an error.
 - **Not authoritative.** `[profiles]` is metadata like `[source]`: it does not
