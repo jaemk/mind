@@ -64,11 +64,6 @@ aarch64 | arm64) arch_part="aarch64" ;;
 esac
 target="${arch_part}-${os_part}"
 
-# macOS x86_64 has no prebuilt binary (only Apple Silicon is published).
-if [ "$os" = "Darwin" ] && [ "$arch_part" = "x86_64" ]; then
-	err "no prebuilt binary for Intel macOS; must build from source"
-fi
-
 # Resolve the version: explicit MIND_VERSION, else the latest release tag.
 version="${MIND_VERSION:-}"
 if [ -z "$version" ]; then

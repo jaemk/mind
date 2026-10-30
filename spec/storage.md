@@ -502,6 +502,12 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   exposed as an additional `target_triple` key; the existing `action`, `target`
   (the version), and `outcome` keys are unchanged -- `--json` consumers depend
   on those names, so a new field is added rather than any key renamed.
+- `STO-83` Each release publishes a macOS artifact for both architectures:
+  `aarch64-apple-darwin` and `x86_64-apple-darwin`. `evolve`'s `target_triple`
+  and `resources/install.sh` resolve Intel macOS to `x86_64-apple-darwin`, and
+  the Homebrew formula carries an `on_intel` macOS leg. A release cut before
+  this leg existed has no Intel macOS asset, so the always-current install.sh
+  fails with a download error against it.
 - `STO-71` `resources/install.sh`'s Linux artifact resolution prefers the musl
   release leg (statically linked, so it runs on any glibc, STO-65's rationale)
   and falls back to the gnu leg exactly once if the musl asset download fails.

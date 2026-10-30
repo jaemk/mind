@@ -7,14 +7,14 @@ your `PATH`. The methods below fetch the `mind` binary itself; they do not insta
 git. Without git, `meld` and `sync` fail with a clear "git executable not found"
 error.
 
-## Install script (Linux and Apple Silicon macOS)
+## Install script (Linux and macOS)
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
 ```
 
-Downloads the release binary for your platform (x86_64 or aarch64 Linux, or
-aarch64 macOS) and installs it to `~/.local/bin`. On Linux it fetches the
+Downloads the release binary for your platform (x86_64 or aarch64 Linux or
+macOS) and installs it to `~/.local/bin`. On Linux it fetches the
 `musl` build, which is statically linked and runs on any glibc version (Ubuntu
 22.04, Debian 12, RHEL 9, Amazon Linux 2, and newer). The script verifies the
 download against the published `SHA256SUMS` asset before extracting. Override
@@ -27,7 +27,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mi
 
 If `~/.local/bin` is not on your `PATH`, the script prints the line to add.
 
-## Homebrew (Apple Silicon macOS and Linux)
+## Homebrew (macOS and Linux)
 
 ```
 brew tap jaemk/mind https://github.com/jaemk/mind
@@ -36,9 +36,8 @@ brew install mind
 ```
 
 The repo is not named `homebrew-mind`, so the tap needs its clone URL. Homebrew
-bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
-aarch64, glibc-linked). Intel macOS is not covered by the tap; use
-`cargo install --locked mind-cli` instead (see below).
+bottles are provided for macOS (arm64 and x86_64) and Linux (x86_64 and
+aarch64, glibc-linked).
 
 ## cargo install (Linux and macOS)
 
@@ -46,9 +45,8 @@ aarch64, glibc-linked). Intel macOS is not covered by the tap; use
 cargo install --locked mind-cli
 ```
 
-Builds from source using the Rust toolchain. This is the recommended path for
-Intel macOS and any other Linux or macOS host not covered by the install script
-or Homebrew tap. Requires Rust 1.98 or later (`rustup` is the standard way to
+Builds from source using the Rust toolchain. This is the path for any Linux or
+macOS host not covered by the install script or Homebrew tap. Requires Rust 1.98 or later (`rustup` is the standard way to
 install it).
 
 Use `--locked`. Without it `cargo install` re-resolves dependencies instead of
