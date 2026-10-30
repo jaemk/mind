@@ -44,7 +44,8 @@ and verified.
 | `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
 | Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
-| `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
+| `curl \| sh` install script (Linux/macOS) | done | `resources/install.sh` |
+| Intel macOS release artifact (`x86_64-apple-darwin`) for install.sh, `evolve`, and Homebrew | done | STO-83 |
 | `forget` glob selection | done | CLI-41 |
 | `upgrade` glob selection (mirrors `forget`; namespace/kind/source in one pass) | done | CLI-65 |
 | `unmeld` uninstalls source items by default; `--unlink-only` keeps them | done | CLI-21, CLI-22 |

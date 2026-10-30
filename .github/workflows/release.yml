@@ -143,6 +143,11 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-14
+          # Intel macOS, cross-compiled on the Apple Silicon runner: the Xcode
+          # toolchain builds both architectures, so this leg does not depend
+          # on an Intel runner image.
+          - target: x86_64-apple-darwin
+            os: macos-14
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: x86_64-unknown-linux-gnu

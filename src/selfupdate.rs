@@ -43,8 +43,8 @@ pub enum Decision {
 }
 
 /// Map an OS/arch pair to its release target triple, rejecting platforms with no
-/// published artifact. Mirrors install.sh, which rejects Intel macOS (only Apple
-/// Silicon is published) and any other OS/arch combination.
+/// published artifact. Mirrors install.sh, which maps the same pairs and rejects
+/// any other OS/arch combination.
 pub fn target_triple(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
         // Linux resolves to the statically linked musl artifact, matching
@@ -54,6 +54,8 @@ pub fn target_triple(os: &str, arch: &str) -> Result<&'static str> {
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        // spec: STO-83
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         _ => Err(MindError::UnsupportedPlatform {
             os: os.to_string(),
             arch: arch.to_string(),
@@ -2103,6 +2105,7 @@ mod tests {
     }
 
     #[test]
+    // spec: STO-83
     fn target_triple_maps_supported_platforms() {
         assert_eq!(
             target_triple("linux", "x86_64").unwrap(),
@@ -2116,21 +2119,24 @@ mod tests {
             target_triple("macos", "aarch64").unwrap(),
             "aarch64-apple-darwin"
         );
+        assert_eq!(
+            target_triple("macos", "x86_64").unwrap(),
+            "x86_64-apple-darwin"
+        );
     }
 
     #[test]
     // spec: CLI-142 -- a platform with no published artifact is an error and
     // nothing is changed.
-    fn target_triple_rejects_intel_macos_and_unknown_arch() {
-        // Intel macOS has no published artifact (mirrors install.sh).
-        match target_triple("macos", "x86_64") {
+    fn target_triple_rejects_unknown_platforms() {
+        match target_triple("macos", "riscv64") {
             Err(MindError::UnsupportedPlatform { os, arch }) => {
                 assert_eq!(os, "macos");
-                assert_eq!(arch, "x86_64");
+                assert_eq!(arch, "riscv64");
             }
             other => panic!("expected UnsupportedPlatform, got {other:?}"),
         }
-        // An unknown architecture is also rejected.
+        // An unknown architecture is also rejected on Linux.
         assert!(matches!(
             target_triple("linux", "riscv64"),
             Err(MindError::UnsupportedPlatform { .. })

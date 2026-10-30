@@ -142,6 +142,7 @@ A run can be waiting on the `release` environment's approval gate before
 2. `ci`, `ci-macos`, `audit` (parallel): `make ci` on Linux and macOS and a
    RustSec scan of the merged commit, gating everything downstream.
 3. `build` (matrix): builds `--release --locked` for `aarch64-apple-darwin`,
+   `x86_64-apple-darwin` (cross-compiled on the Apple Silicon runner),
    `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and the musl legs
    `aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl` (static, used
    by `install.sh`), attesting build provenance for each tarball.
@@ -154,7 +155,7 @@ A run can be waiting on the `release` environment's approval gate before
 Then verify what was published:
 
 ```bash
-gh release view v<version>              # five .tar.gz assets plus SHA256SUMS
+gh release view v<version>              # six .tar.gz assets plus SHA256SUMS
 cargo info mind-cli                     # crates.io has the new version
 git pull                                # pick up the bot's formula + dev commit
 ```

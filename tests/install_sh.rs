@@ -228,8 +228,7 @@ fn run_install_sh(bin_dir: &Path, install_dir: &Path) -> std::process::Output {
         .expect("spawn sh resources/install.sh")
 }
 
-/// A fake `uname` reporting Darwin/arm64 (Apple Silicon), the one macOS
-/// combination install.sh publishes a binary for.
+/// A fake `uname` reporting Darwin/arm64 (Apple Silicon).
 fn write_fake_uname_darwin_arm64(bin_dir: &Path) {
     write_exec(
         &bin_dir.join("uname"),
@@ -1050,9 +1049,10 @@ fn install_sh_rejects_an_unsupported_os_and_arch_before_any_request() {
 }
 
 #[test]
-fn install_sh_refuses_intel_macos_before_any_request() {
-    // No Intel macOS binary is published, so the script refuses rather than
-    // requesting an asset that can never exist.
+// spec: STO-83
+fn install_sh_requests_the_intel_macos_asset() {
+    // Intel macOS resolves to the `x86_64-apple-darwin` leg. The fake curl
+    // serves no asset, so the run fails after the one request.
     let fx = Fixture::new("intel-mac", "9.9.9");
     write_exec(
         &fx.bin_dir.join("uname"),
@@ -1060,18 +1060,16 @@ fn install_sh_refuses_intel_macos_before_any_request() {
     );
     write_fake_gh_always_fails(&fx.bin_dir);
     write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    std::fs::write(fx.dir.join("sums"), "").unwrap();
 
     let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
-    assert!(!out.status.success(), "Intel macOS must be refused");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    let log = fx.requested();
+    let asset_requests: Vec<&str> = log.lines().filter(|l| l.contains(".tar.gz")).collect();
+    assert_eq!(asset_requests.len(), 1, "{log:?}");
     assert!(
-        stderr.contains("no prebuilt binary for Intel macOS"),
-        "the refusal must name the reason: {stderr}"
-    );
-    assert_eq!(
-        fx.requested(),
-        "",
-        "the refusal must happen before any request"
+        asset_requests[0].contains(&fx.asset_name("x86_64-apple-darwin")),
+        "{log:?}"
     );
 }
 
@@ -1264,7 +1262,7 @@ fn parse_case_assignment(body: &str) -> Option<(String, String)> {
 }
 
 /// Parse the reachable `os_part`/`arch_part` case arms out of install.sh's
-/// own text, cross it with the explicit Intel-macOS rejection and any
+/// own text, cross it with any
 /// `target="${arch_part}-<suffix>"` assignment beyond the initial formula
 /// (a fallback/retry target, e.g. the C30/P1 gnu retry), and return every
 /// target triple install.sh can end up requesting from GitHub. Pure text
@@ -1307,12 +1305,6 @@ fn install_sh_reachable_targets(script: &str) -> BTreeSet<String> {
             targets.insert(format!("{arch}-{os}"));
         }
     }
-    // install.sh explicitly refuses Intel macOS (no prebuilt binary is
-    // published): that combination is never actually requested.
-    if script.contains("\"$os\" = \"Darwin\"") && script.contains("\"$arch_part\" = \"x86_64\"") {
-        targets.remove("x86_64-apple-darwin");
-    }
-
     // Any further `target="${arch_part}-<suffix>"` assignment beyond the
     // initial formula (`target="${arch_part}-${os_part}"`) is a fallback/
     // retry target, reachable for every known arch_part.
@@ -1380,6 +1372,7 @@ fn install_sh_reachable_targets_are_all_published_by_the_release_matrix() {
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
         "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
     ]
     .into_iter()
     .map(String::from)

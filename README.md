@@ -36,7 +36,7 @@ Full documentation: https://jaemk.github.io/mind/
 `mind` shells out to `git` to clone and sync sources, so `git` must be on your
 `PATH`. The methods below install the `mind` binary itself, not git.
 
-Linux and Apple Silicon macOS (install script):
+Linux and macOS (install script):
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
@@ -45,7 +45,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mi
 The script verifies the download against the published `SHA256SUMS` asset before
 extracting.
 
-Homebrew (Apple Silicon macOS and Linux):
+Homebrew (macOS and Linux):
 
 ```
 brew tap jaemk/mind https://github.com/jaemk/mind
@@ -53,9 +53,7 @@ brew trust jaemk/mind
 brew install mind
 ```
 
-Bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
-aarch64). Intel macOS is not covered; use `cargo install --locked mind-cli`
-instead.
+Bottles are provided for macOS and Linux, each on x86_64 and aarch64.
 
 Linux and macOS with the Rust toolchain:
 
