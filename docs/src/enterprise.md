@@ -9,10 +9,12 @@ against the machine's certificate store. `install.sh` still uses `curl` or
 `wget`, since it runs before `mind` exists. Where the three differ, each section
 below says so.
 
-`mind` sets or strips nothing from the environment (in TUI mode it sets
-`GIT_TERMINAL_PROMPT=0` and wraps `GIT_SSH_COMMAND` to suppress interactive git
-prompts; immaterial for non-interactive CLI use), and there is no telemetry or
-phone-home. This page lists the egress endpoints a firewall allowlist needs and
+`mind` sets or strips nothing from the environment except to turn off git's
+own prompts. In the TUI, in a parallel `sync`/`upgrade` fetch, in an
+auto-update run, and while the progress spinner may draw, a clone, fetch, or
+`ls-remote` runs with `GIT_TERMINAL_PROMPT=0` and a `GIT_SSH_COMMAND` built
+from the ssh command git would have used (`core.sshCommand`, `GIT_SSH`) plus
+its prompt-off flag. There is no telemetry or phone-home. This page lists the egress endpoints a firewall allowlist needs and
 the knobs for proxies, custom CAs, private repos, IT-managed binaries, and
 air-gapped installs.
 

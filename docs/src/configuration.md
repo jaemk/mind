@@ -49,6 +49,11 @@ To authenticate with an SSH key instead of an https username/password, meld the
 `owner/repo` shorthand clones over SSH. An https remote still prompts (or uses a
 credential helper) as git normally does.
 
+While the progress spinner is on, a clone or fetch first runs with prompts off.
+When it needs a passphrase, a host-key confirmation, or credentials, it runs
+again with the spinner cleared and prompts on, so the prompt appears after the
+first attempt fails. `--no-progress` makes git prompt on the first attempt.
+
 ## Metadata size cap
 
 Every metadata file `mind` reads from a source is size-capped: a `mind.toml`, an

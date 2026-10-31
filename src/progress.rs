@@ -634,6 +634,27 @@ mod tests {
         );
     }
 
+    // spec: PRG-3
+    #[test]
+    fn the_delay_runs_from_the_outermost_step_and_restarts_after_a_break() {
+        let delay = Duration::from_millis(50);
+        let (p, buf) = progress(delay, false, 80);
+        let outer = p.step("outer");
+        std::thread::sleep(delay * 2);
+        p.tick();
+        let inner = p.step("inner");
+        assert!(
+            buf.text().ends_with("inner"),
+            "a step nested in a drawn one shows at once: {:?}",
+            buf.text()
+        );
+        drop(inner);
+        drop(outer);
+        let after = buf.text();
+        drop(p.step("next"));
+        assert_eq!(buf.text(), after, "a new step starts the clock again");
+    }
+
     // spec: PRG-1
     #[test]
     fn nested_step_shows_innermost_then_restores_outer() {

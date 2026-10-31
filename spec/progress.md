@@ -12,9 +12,12 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   Steps nest: the newest live step's label is drawn, and the enclosing step's
   label returns when it ends. Progress never writes to stdout, and a verb's
   stdout is byte for byte the same with progress on or off.
-- `PRG-3` With progress on by detection (PRG-2), a step draws only once it has
-  run 200ms, so a fast step never flickers onto the screen. With
-  `MIND_PROGRESS=always`, every step draws as soon as it starts.
+- `PRG-3` With progress on by detection (PRG-2), nothing draws until steps
+  have been live for 200ms without a break, so a fast step never flickers onto
+  the screen. The clock starts with the outermost live step: a step nested in
+  one already drawn shows at once, and a step that starts after the last one
+  ended starts the clock again. With `MIND_PROGRESS=always`, every step draws
+  as soon as it starts.
 - `PRG-7` A label is sanitized (`strip_ansi`, DSC-95) before it is drawn, since
   it can carry a source-controlled name or URL, and cut to the terminal width
   (`COLUMNS` when set, else the width of the terminal stderr is on, else 80)
@@ -26,7 +29,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
 ## When it is on
 
 - `PRG-2` Progress is off under `--json`, under the global `--no-progress`
-  flag, and with `MIND_PROGRESS=never`. `MIND_PROGRESS=always` turns it on
+  flag, and with `MIND_PROGRESS=never` (the value read in any case and
+  trimmed, as for `always`). `MIND_PROGRESS=always` turns it on
   even when stderr is not a terminal, `TERM` is `dumb`, or `CI` is set.
   Otherwise (`MIND_PROGRESS` unset, empty, or any other value) it is on when
   stderr is a terminal, `TERM` is not `dumb`, and `CI` is unset, empty, `0`,
@@ -67,7 +71,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   source refresh, every confirmation and free-form prompt, the hook consent
   prompts, and a hook's whole run. No spinner is drawn while a hook runs; its
   framed output is its progress.
-- `PRG-6` While progress is on, a git call runs with prompts off
+- `PRG-6` While a spinner may draw (progress is on and the spinner is
+  neither hidden, PRG-9, nor suspended, PRG-5), a git call runs with prompts off
   (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`, no connect timeout), so a
   credential, passphrase, or host-key prompt cannot be drawn over. A failure
   that stands in for such a prompt (CLI-248's suppressed-prompt failure) is
@@ -86,8 +91,9 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   and not `auto`, else the program's name): OpenSSH gets `-o BatchMode=yes`,
   plink and putty get `-batch`, and any other program (TortoisePlink, which
   git already runs with `-batch`, a wrapper script, the `simple` variant) is
-  left as configured, with only git's own prompts turned off (in the TUI,
-  TUI-45 detaches such a call from the terminal instead).
+  left as configured, with only git's own prompts turned off. Such a program
+  can still prompt from the CLI, and its prompt is not kept off the spinner
+  line; in the TUI, TUI-45 detaches the call from the terminal instead.
 - `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
   erased before `mind` exits by the signal, so the shell prompt does not
   follow spinner text. When SIGINT is ignored (a background job) it stays

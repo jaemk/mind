@@ -203,7 +203,8 @@ manifest, and store.
   This mirrors the CLI's DEP-60 warning, adapted to the TUI's confirm-then-act
   flow (TUI-24) rather than a stdin prompt.
 - `TUI-45` While the TUI holds the terminal, every `git` child runs
-  non-interactively (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper),
+  non-interactively (`GIT_TERMINAL_PROMPT=0` and PRG-6's prompt-free ssh
+  command, with a 10s `ConnectTimeout` for OpenSSH),
   so an auth-required remote -- a private SSH repo whose key needs a passphrase, or
   an unknown host key -- fails fast with an error surfaced inline (TUI-24) instead
   of hanging the UI on a hidden prompt the user cannot see or answer. The suspended
