@@ -1447,21 +1447,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_detached_git_child_has_no_controlling_terminal() {
-        // A new session has no controlling terminal: its session id is its
-        // own pid, never this process's session.
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "ps -o sid= -p $$; echo $$"]);
+        // `setsid` makes the child lead a new session, with no controlling
+        // terminal, and a new process group whose id is its own pid. The
+        // group is read with `getpgid`, which works the same on Linux and
+        // macOS (`ps -o sid=` does not).
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
         detach_from_terminal(&mut cmd);
-        let out = cmd.output().unwrap();
-        assert!(out.status.success());
-        let text = String::from_utf8(out.stdout).unwrap();
-        let ids: Vec<i32> = text
-            .split_whitespace()
-            .map(|w| w.parse().unwrap())
-            .collect();
-        let (sid, pid) = (ids[0], ids[1]);
-        assert_eq!(sid, pid, "the child leads its own session");
-        assert_ne!(sid, unsafe { libc::getsid(0) });
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: plain queries of a live child and of this process.
+        let (group, ours) = unsafe { (libc::getpgid(pid), libc::getpgid(0)) };
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(group, pid, "the child leads its own process group");
+        assert_ne!(group, ours);
     }
 
     #[test]
