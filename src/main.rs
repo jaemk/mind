@@ -23,6 +23,7 @@ mod paths;
 mod plugin_manifest;
 mod policy;
 mod profile;
+mod progress;
 mod render;
 mod resolve;
 mod review;
@@ -476,6 +477,8 @@ fn run(cli: Cli) -> Result<()> {
         cli.ascii,
         cli.verbose,
     ));
+    // spec: PRG-2
+    crate::progress::init(cli.json, cli.no_progress, cli.ascii);
 
     // spec: CLI-217 -- reserve stdout BEFORE anything can print to it, so the
     // guarantee does not depend on where in the verb the first line is written.

@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A progress spinner on stderr names the slow step in flight: a clone or
+  fetch, a `sync`/`upgrade` source refresh (counted when sources are fetched
+  in parallel), an item install, and the catalog scan. It shows only when
+  stderr is a terminal and clears when the step ends; `--no-progress` or
+  `MIND_PROGRESS=never` turns it off. While it is on, git runs with prompts
+  off and retries a credential or passphrase prompt interactively.
+
 ## [0.41.0] - 2026-10-29
 
 ### Added

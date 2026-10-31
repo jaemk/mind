@@ -189,6 +189,16 @@ pub struct Cli {
     #[arg(short = 'v', long, global = true, help_heading = "Global options")]
     pub verbose: bool,
 
+    /// Draw no progress spinner on stderr.
+    ///
+    /// By default a slow step (a clone, a fetch, a source refresh) shows a
+    /// one-line spinner on stderr when stderr is a terminal. `MIND_PROGRESS`
+    /// set to `never` does the same as this flag; `always` draws it even
+    /// off a terminal.
+    // spec: PRG-2
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub no_progress: bool,
+
     /// Ceiling on every metadata file `mind` reads from a source: a `mind.toml`,
     /// an item's frontmatter, a plugin or marketplace manifest, a workflow's
     /// `meta` (default 8MiB).

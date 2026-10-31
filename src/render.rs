@@ -39,11 +39,14 @@ pub(crate) fn print_json_envelope<T: Serialize>(items: &[T]) -> Result<()> {
 // spec: CLI-217
 pub fn note(msg: impl AsRef<str>) {
     let msg = msg.as_ref();
-    if ctx().json {
-        eprintln!("{msg}");
-    } else {
-        println!("{msg}");
-    }
+    // spec: PRG-5
+    crate::progress::suspend(|| {
+        if ctx().json {
+            eprintln!("{msg}");
+        } else {
+            println!("{msg}");
+        }
+    });
 }
 
 /// [`note`] with the context's warn marker (`!`) prefixed: the same routing
@@ -85,7 +88,8 @@ pub fn scan_warn(msg: impl AsRef<str>) {
     if scan_quiet() {
         return;
     }
-    eprintln!("{}", msg.as_ref());
+    // spec: PRG-5
+    crate::progress::suspend(|| eprintln!("{}", msg.as_ref()));
 }
 
 /// Install the process-wide output context. Call once, early in `main`, after
@@ -402,7 +406,7 @@ pub fn wrap_tokens<S: AsRef<str>>(
 ///
 /// Checks `LC_ALL`, `LC_CTYPE`, `LANG` in that order (first set wins).
 /// Returns `false` when none is set (conservative ASCII default).
-fn detect_utf8_locale() -> bool {
+pub(crate) fn detect_utf8_locale() -> bool {
     for var in &["LC_ALL", "LC_CTYPE", "LANG"] {
         if let Ok(val) = std::env::var(var)
             && !val.is_empty()

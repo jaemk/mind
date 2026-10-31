@@ -203,9 +203,15 @@ fn noninteractive_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
     ]
 }
 
+/// Whether this thread's `git` children run non-interactive (the process-wide
+/// or the per-thread mode).
+fn noninteractive_here() -> bool {
+    NONINTERACTIVE.load(Ordering::Relaxed) || THREAD_NONINTERACTIVE.with(|c| c.get())
+}
+
 /// Apply the non-interactive environment to a `git` child when the mode is on.
 fn apply_noninteractive_env(cmd: &mut Command) {
-    if !NONINTERACTIVE.load(Ordering::Relaxed) && !THREAD_NONINTERACTIVE.with(|c| c.get()) {
+    if !noninteractive_here() {
         return;
     }
     let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
@@ -214,14 +220,67 @@ fn apply_noninteractive_env(cmd: &mut Command) {
     }
 }
 
-/// Run `git <args>` in `cwd`, returning trimmed stdout on success.
+/// The env pairs for a `git` child run while a spinner may be drawn (PRG-6):
+/// the non-interactive pairs without the short `ConnectTimeout`, since the
+/// attempt is retried with prompts on rather than failed, and a slow host
+/// should not turn into a timeout.
+// spec: PRG-6
+fn batch_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
+    [
+        ("GIT_TERMINAL_PROMPT", "0".to_string()),
+        ("GIT_SSH_COMMAND", format!("{base_ssh} -o BatchMode=yes")),
+    ]
+}
+
+/// Run `attempt`, first with prompts off when `batch` is set; a failure that
+/// stands in for a prompt git was not allowed to show is retried once with
+/// prompts on and the spinner cleared (PRG-6).
+// spec: PRG-6
+fn with_prompt_retry<T>(batch: bool, mut attempt: impl FnMut(bool) -> Result<T>) -> Result<T> {
+    match attempt(batch) {
+        Err(e) if batch && is_suppressed_prompt_failure(&e) => {
+            crate::progress::suspend(|| attempt(false))
+        }
+        r => r,
+    }
+}
+
+/// The spinner label for a `git` subcommand that talks to the remote, or
+/// `None` for a local one (PRG-4).
+// spec: PRG-4
+fn network_label(url: &str, args: &[&str]) -> Option<String> {
+    let verb = match args.first().copied()? {
+        "clone" => "cloning",
+        "fetch" => "fetching",
+        "ls-remote" => "listing tags of",
+        _ => return None,
+    };
+    Some(format!("{verb} {url}"))
+}
+
+/// Run `git <args>` in `cwd`, returning trimmed stdout on success. A call
+/// that reaches the remote shows a progress step (PRG-4), and while progress
+/// is on it runs with prompts off first (PRG-6).
 fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
+    let _step = network_label(url, args).map(|label| crate::progress::step_if_idle(|| label));
+    let batch = crate::progress::enabled() && !noninteractive_here();
+    with_prompt_retry(batch, |batch| exec(url, cwd, args, batch))
+}
+
+/// One `git <args>` run; `batch` applies [`batch_env_pairs`].
+fn exec(url: &str, cwd: Option<&Path>, args: &[&str], batch: bool) -> Result<String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
     cmd.args(args);
     apply_noninteractive_env(&mut cmd);
+    if batch {
+        let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
+        for (k, v) in batch_env_pairs(&base) {
+            cmd.env(k, v);
+        }
+    }
 
     let output = match cmd.output() {
         Ok(o) => o,
@@ -966,6 +1025,77 @@ mod tests {
         assert!(!thread_flag(), "override must end with the closure");
         let other = with_noninteractive(|| std::thread::spawn(thread_flag).join().unwrap());
         assert!(!other, "override must not leak to another thread");
+    }
+
+    // spec: PRG-6
+    #[test]
+    fn batch_env_disables_prompts_without_a_connect_timeout() {
+        let pairs = batch_env_pairs("ssh -i /my/key");
+        assert_eq!(pairs[0], ("GIT_TERMINAL_PROMPT", "0".to_string()));
+        assert_eq!(pairs[1].0, "GIT_SSH_COMMAND");
+        assert_eq!(pairs[1].1, "ssh -i /my/key -o BatchMode=yes");
+    }
+
+    // spec: PRG-6
+    #[test]
+    fn prompt_retry_reruns_a_suppressed_prompt_with_prompts_on() {
+        let mut calls = Vec::new();
+        let r = with_prompt_retry(true, |batch| {
+            calls.push(batch);
+            if batch {
+                Err(git_err(
+                    "fatal: could not read Username for 'https://x': terminal prompts disabled",
+                ))
+            } else {
+                Ok("done")
+            }
+        });
+        assert_eq!(r.unwrap(), "done");
+        assert_eq!(calls, [true, false]);
+    }
+
+    // spec: PRG-6
+    #[test]
+    fn prompt_retry_leaves_other_failures_and_non_batch_runs_alone() {
+        let mut calls = Vec::new();
+        let r: Result<()> = with_prompt_retry(true, |batch| {
+            calls.push(batch);
+            Err(git_err("fatal: repository 'x' not found"))
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            calls,
+            [true],
+            "a failure that is not a prompt is not retried"
+        );
+
+        let mut calls = Vec::new();
+        let r: Result<()> = with_prompt_retry(false, |batch| {
+            calls.push(batch);
+            Err(git_err("fatal: Authentication failed"))
+        });
+        assert!(r.is_err());
+        assert_eq!(calls, [false], "a run that already prompted is not retried");
+    }
+
+    // spec: PRG-4
+    #[test]
+    fn network_subcommands_get_a_label_local_ones_do_not() {
+        let url = "https://example.com/o/r";
+        assert_eq!(
+            network_label(url, &["clone", "--", url, "/d"]).as_deref(),
+            Some("cloning https://example.com/o/r")
+        );
+        assert_eq!(
+            network_label(url, &["fetch", "origin"]).as_deref(),
+            Some("fetching https://example.com/o/r")
+        );
+        assert_eq!(
+            network_label(url, &["ls-remote", "--tags", "--", url]).as_deref(),
+            Some("listing tags of https://example.com/o/r")
+        );
+        assert_eq!(network_label(url, &["rev-parse", "HEAD"]), None);
+        assert_eq!(network_label(url, &[]), None);
     }
 
     #[test]
