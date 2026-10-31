@@ -10,10 +10,23 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A progress spinner on stderr names the slow step in flight: a clone or
   fetch, a `sync`/`upgrade` source refresh (counted when sources are fetched
-  in parallel), an item install, and the catalog scan. It shows only when
-  stderr is a terminal and clears when the step ends; `--no-progress` or
-  `MIND_PROGRESS=never` turns it off. While it is on, git runs with prompts
-  off and retries a credential or passphrase prompt interactively.
+  in parallel), an item install, the catalog scan, and `evolve`'s release
+  lookup and download. It shows only when stderr is a terminal and clears
+  when the step ends; `--no-progress` or `MIND_PROGRESS=never` turns it off.
+  While it is on, git runs with prompts off and retries a credential or
+  passphrase prompt interactively.
+
+### Changed
+
+- `evolve` shows the progress spinner during its download instead of the
+  byte-count download bar.
+
+### Fixed
+
+- A parallel `sync`/`upgrade` fetch and the `probe` TUI's git calls ignored
+  `core.sshCommand` and `GIT_SSH`: the prompt-free ssh command was built from
+  `GIT_SSH_COMMAND` or plain `ssh`, which overrides both. It now starts from
+  the command git itself would run.
 
 ## [0.41.0] - 2026-10-29
 

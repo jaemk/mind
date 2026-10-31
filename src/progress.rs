@@ -240,8 +240,10 @@ impl Progress {
         if !due || g.held > 0 || self.is_hidden() {
             return;
         }
-        let line = self.compose(label, g.frame);
-        let _ = write!(g.out, "{CLEAR}{line}");
+        // One write, so the SIGINT handler's clear (PRG-10) cannot land
+        // between the clear and the line.
+        let line = format!("{CLEAR}{}", self.compose(label, g.frame));
+        let _ = g.out.write_all(line.as_bytes());
         let _ = g.out.flush();
         g.drawn = true;
         self.on_screen.store(true, Ordering::SeqCst);

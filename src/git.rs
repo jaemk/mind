@@ -209,13 +209,57 @@ fn noninteractive_here() -> bool {
     NONINTERACTIVE.load(Ordering::Relaxed) || THREAD_NONINTERACTIVE.with(|c| c.get())
 }
 
-/// Apply the non-interactive environment to a `git` child when the mode is on.
-fn apply_noninteractive_env(cmd: &mut Command) {
+/// The ssh command a `git` child in `cwd` would run, which the
+/// non-interactive and batch wrappers extend. Setting `GIT_SSH_COMMAND`
+/// overrides `core.sshCommand` and `GIT_SSH`, so the wrapper has to start from
+/// whichever of them git would have used, or a configured key or proxy is
+/// silently dropped.
+fn base_ssh_command(cwd: Option<&Path>) -> String {
+    let var = |k| std::env::var(k).ok();
+    resolve_ssh_base(
+        var("GIT_SSH_COMMAND"),
+        || config_ssh_command(cwd),
+        var("GIT_SSH"),
+    )
+}
+
+/// git's own order (`connect.c`): `GIT_SSH_COMMAND`, then `core.sshCommand`,
+/// then the `GIT_SSH` program, then `ssh`. An empty value counts as unset.
+/// `GIT_SSH` names a program, not a shell command, so it is quoted.
+fn resolve_ssh_base(
+    env_command: Option<String>,
+    config_command: impl FnOnce() -> Option<String>,
+    git_ssh: Option<String>,
+) -> String {
+    let set = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    set(env_command)
+        .or_else(|| set(config_command()))
+        .or_else(|| set(git_ssh).map(|p| format!("'{}'", p.replace('\'', r"'\''"))))
+        .unwrap_or_else(|| "ssh".to_string())
+}
+
+/// `core.sshCommand` as a `git` child in `cwd` sees it. With no `cwd` (a
+/// clone) it is read outside any repository, so only the system and global
+/// config count, as for the clone itself.
+fn config_ssh_command(cwd: Option<&Path>) -> Option<String> {
+    let dir = cwd.map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let out = Command::new("git")
+        .args(["config", "--get", "core.sshCommand"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Apply the non-interactive environment to a `git` child in `cwd` when the
+/// mode is on.
+fn apply_noninteractive_env(cmd: &mut Command, cwd: Option<&Path>) {
     if !noninteractive_here() {
         return;
     }
-    let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
-    for (k, v) in noninteractive_env_pairs(&base) {
+    for (k, v) in noninteractive_env_pairs(&base_ssh_command(cwd)) {
         cmd.env(k, v);
     }
 }
@@ -262,22 +306,28 @@ fn network_label(url: &str, args: &[&str]) -> Option<String> {
 /// that reaches the remote shows a progress step (PRG-4), and while progress
 /// is on it runs with prompts off first (PRG-6).
 fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
-    let _step = network_label(url, args).map(|label| crate::progress::step_if_idle(|| label));
-    let batch = crate::progress::enabled() && !noninteractive_here();
-    with_prompt_retry(batch, |batch| exec(url, cwd, args, batch))
+    let label = network_label(url, args);
+    // A local subcommand never prompts, so only a remote one gets the
+    // prompt-free env.
+    let remote = label.is_some();
+    let batch = remote && crate::progress::enabled() && !noninteractive_here();
+    let _step = label.map(|label| crate::progress::step_if_idle(|| label));
+    with_prompt_retry(batch, |batch| exec(url, cwd, args, remote, batch))
 }
 
-/// One `git <args>` run; `batch` applies [`batch_env_pairs`].
-fn exec(url: &str, cwd: Option<&Path>, args: &[&str], batch: bool) -> Result<String> {
+/// One `git <args>` run. A `remote` one gets the non-interactive env when
+/// that mode is on; `batch` applies [`batch_env_pairs`].
+fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool) -> Result<String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
     cmd.args(args);
-    apply_noninteractive_env(&mut cmd);
+    if remote {
+        apply_noninteractive_env(&mut cmd, cwd);
+    }
     if batch {
-        let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
-        for (k, v) in batch_env_pairs(&base) {
+        for (k, v) in batch_env_pairs(&base_ssh_command(cwd)) {
             cmd.env(k, v);
         }
     }
@@ -1007,6 +1057,56 @@ mod tests {
         );
     }
 
+    // spec: PRG-6 TUI-45
+    #[test]
+    fn the_ssh_base_follows_gits_own_precedence() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            resolve_ssh_base(s("ssh -v"), || s("ssh -i cfg"), s("/bin/plink")),
+            "ssh -v",
+            "GIT_SSH_COMMAND wins"
+        );
+        assert_eq!(
+            resolve_ssh_base(None, || s("ssh -i cfg"), s("/bin/plink")),
+            "ssh -i cfg",
+            "core.sshCommand beats GIT_SSH"
+        );
+        assert_eq!(
+            resolve_ssh_base(s(" "), || None, s("/opt/my ssh/it's")),
+            r"'/opt/my ssh/it'\''s'",
+            "an empty command is unset; GIT_SSH is a program, quoted"
+        );
+        assert_eq!(resolve_ssh_base(None, || s(""), None), "ssh");
+    }
+
+    // spec: PRG-6 TUI-45
+    #[test]
+    fn config_ssh_command_reads_the_repos_core_ssh_command() {
+        let base = std::env::temp_dir().join(format!(
+            "mind-git-sshcmd-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&base)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "core.sshCommand", "ssh -i /work/key"]);
+        assert_eq!(
+            config_ssh_command(Some(&base)).as_deref(),
+            Some("ssh -i /work/key")
+        );
+        cleanup(&base);
+    }
+
     #[test]
     fn with_noninteractive_applies_the_env_on_this_thread_only() {
         // spec: CLI-248 - a parallel fetch worker's git children never prompt;
@@ -1016,7 +1116,7 @@ mod tests {
                 .any(|(k, v)| k == "GIT_TERMINAL_PROMPT" && v == Some("0".as_ref()))
         };
         let mut inside = Command::new("git");
-        with_noninteractive(|| apply_noninteractive_env(&mut inside));
+        with_noninteractive(|| apply_noninteractive_env(&mut inside, None));
         assert!(prompt_off(&inside), "worker git must not prompt");
 
         // The negative cases read the per-thread flag directly: another test

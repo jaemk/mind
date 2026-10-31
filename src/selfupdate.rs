@@ -361,7 +361,11 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     let explicit = version.is_some();
     let target_version = match version.as_deref() {
         Some(v) => validated_target(v)?,
-        None => validated_target(&latest_version(&updater(target, None, lookup_timeout())?)?)?,
+        None => {
+            // spec: PRG-4
+            let _step = crate::progress::step(LOOKUP_STEP);
+            validated_target(&latest_version(&updater(target, None, lookup_timeout())?)?)?
+        }
     };
 
     let d = decision(current, &target_version, explicit);
@@ -604,7 +608,6 @@ fn updater(
     tag: Option<&str>,
     timeout: std::time::Duration,
 ) -> Result<github::Update> {
-    let out = crate::render::ctx();
     let mut builder = github::Update::configure();
     builder
         .repo_owner(REPO_OWNER)
@@ -619,9 +622,9 @@ fn updater(
         .timeout(timeout)
         .no_confirm(true)
         .show_output(false)
-        // The progress bar writes to the terminal, so it is off under --json,
-        // whose output has to stay machine-readable (CLI-153).
-        .show_download_progress(!out.json)
+        // spec: PRG-4 -- the download is a progress step like every other
+        // network step, so the crate's own download bar stays off.
+        .show_download_progress(false)
         .check_install_path_writable(true)
         // spec: STO-47
         .checksum_from_asset(SHA256SUMS_ASSET)
@@ -689,20 +692,28 @@ fn latest_version(upd: &github::Update) -> Result<String> {
 /// which aborts with nothing extracted and nothing replaced.
 fn attestation_gate(archive: &Path) -> std::result::Result<(), self_update::Error> {
     let out = crate::render::ctx();
-    match attestation_step("gh", archive) {
+    // spec: PRG-4
+    let outcome = {
+        let _step = crate::progress::step(VERIFY_STEP);
+        attestation_step("gh", archive)
+    };
+    match outcome {
         None => Ok(()),
         Some(AttestationOutcome::Verified) => {
             if !out.json {
-                println!("{} build provenance verified", out.ok());
+                // spec: PRG-5 -- the download step is still live.
+                crate::progress::suspend(|| println!("{} build provenance verified", out.ok()));
             }
             Ok(())
         }
         Some(AttestationOutcome::ToolingError(reason)) => {
             if !out.json {
-                println!(
-                    "{} build provenance could not be verified ({reason}); continuing",
-                    out.warn()
-                );
+                crate::progress::suspend(|| {
+                    println!(
+                        "{} build provenance could not be verified ({reason}); continuing",
+                        out.warn()
+                    )
+                });
             }
             Ok(())
         }
@@ -734,13 +745,29 @@ fn download_and_swap(
         println!("{line}");
     }
 
-    upd.update().map_err(map_update_error)?;
+    {
+        // spec: PRG-4 -- the checksum fetch, download, provenance check, and
+        // swap; the crate prints nothing itself (`show_output(false)`).
+        let _step = crate::progress::step(download_step(target_version));
+        upd.update().map_err(map_update_error)?;
+    }
 
     if out.json {
         return print_evolve_json(target_version, "updated", target_triple);
     }
     println!("{} updated mind {current} -> {target_version}", out.ok());
     Ok(())
+}
+
+/// The progress step over the latest-release lookup (PRG-4).
+const LOOKUP_STEP: &str = "checking for the latest mind release";
+
+/// The progress step over the archive's provenance check (PRG-4).
+const VERIFY_STEP: &str = "verifying build provenance";
+
+/// The progress step over the download and swap (PRG-4).
+fn download_step(target_version: &str) -> String {
+    format!("downloading mind {target_version}")
 }
 
 /// The "downloading mind <version>" line, or `None` under `--json`.
@@ -2489,6 +2516,25 @@ mod tests {
             upd.target(),
             "x86_64-unknown-linux-musl",
             "the resolved triple selects the release asset (STO-65)"
+        );
+    }
+
+    // spec: PRG-4
+    #[test]
+    fn evolve_steps_are_labeled_and_the_crate_draws_no_bar_of_its_own() {
+        use self_update::UpdateConfig;
+        assert_eq!(LOOKUP_STEP, "checking for the latest mind release");
+        assert_eq!(VERIFY_STEP, "verifying build provenance");
+        assert_eq!(download_step("1.2.3"), "downloading mind 1.2.3");
+        let upd = updater(
+            "x86_64-unknown-linux-musl",
+            Some("1.2.3"),
+            download_timeout(),
+        )
+        .expect("building the updater must not require the network");
+        assert!(
+            !upd.show_download_progress(),
+            "the download is a progress step, not the crate's bar"
         );
     }
 

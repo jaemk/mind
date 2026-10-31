@@ -47,7 +47,13 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   - an item install's staging copy, hash, and reference expansion, labeled
     `installing <kind>:<name>`;
   - the whole-registry catalog scan, labeled `scanning melded sources`, when
-    not already under another step.
+    not already under another step;
+  - `evolve`'s latest-release lookup, labeled
+    `checking for the latest mind release`, and its download (checksum,
+    archive, extraction, and swap), labeled `downloading mind <version>`,
+    with the provenance check inside it labeled
+    `verifying build provenance`. The `self_update` crate's own download bar
+    is off, so the download shows the same spinner as every other step.
 
 ## Sharing the terminal
 
@@ -66,7 +72,13 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   non-interactive (the TUI, a parallel fetch worker, auto-update) is not
   retried. A git call made while the spinner is suspended (PRG-5), such as
   CLI-248's serial retry of a parallel fetch that needed a prompt, runs with
-  prompts allowed from the start.
+  prompts allowed from the start. Only a call that reaches the remote
+  (PRG-4's `clone`, `fetch`, `ls-remote`) gets the prompt-free env. The
+  `BatchMode` ssh command, here and in the non-interactive mode (TUI-45,
+  CLI-248), extends the one git itself would run: `GIT_SSH_COMMAND`, else
+  `core.sshCommand` as the call's repository sees it, else the `GIT_SSH`
+  program, else `ssh`. Setting `GIT_SSH_COMMAND` overrides the other two, so
+  starting from it alone would drop a configured key or proxy.
 - `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
   erased before `mind` exits by the signal, so the shell prompt does not
   follow spinner text. When SIGINT is ignored (a background job) it stays
