@@ -74,11 +74,16 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   CLI-248's serial retry of a parallel fetch that needed a prompt, runs with
   prompts allowed from the start. Only a call that reaches the remote
   (PRG-4's `clone`, `fetch`, `ls-remote`) gets the prompt-free env. The
-  `BatchMode` ssh command, here and in the non-interactive mode (TUI-45,
+  prompt-free ssh command, here and in the non-interactive mode (TUI-45,
   CLI-248), extends the one git itself would run: `GIT_SSH_COMMAND`, else
   `core.sshCommand` as the call's repository sees it, else the `GIT_SSH`
   program, else `ssh`. Setting `GIT_SSH_COMMAND` overrides the other two, so
-  starting from it alone would drop a configured key or proxy.
+  starting from it alone would drop a configured key or proxy. The flag it
+  gets follows git's ssh variant (`GIT_SSH_VARIANT` or `ssh.variant` when set
+  and not `auto`, else the program's name): OpenSSH gets `-o BatchMode=yes`,
+  plink and putty get `-batch`, and any other program (TortoisePlink, which
+  git already runs with `-batch`, a wrapper script, the `simple` variant) is
+  left as configured, with only git's own prompts turned off.
 - `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
   erased before `mind` exits by the signal, so the shell prompt does not
   follow spinner text. When SIGINT is ignored (a background job) it stays

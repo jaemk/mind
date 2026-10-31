@@ -189,18 +189,69 @@ pub fn is_suppressed_prompt_failure(err: &MindError) -> bool {
 }
 
 /// The env pairs that make a `git` child non-interactive. `GIT_TERMINAL_PROMPT=0`
-/// stops git's own credential prompts; wrapping the ssh command in `BatchMode=yes`
-/// stops ssh's passphrase and host-key prompts (`base_ssh` preserves a user's
-/// custom ssh invocation). A short `ConnectTimeout` avoids a long network hang.
+/// stops git's own credential prompts; the prompt-free ssh command (see
+/// [`prompt_free_ssh`]) stops ssh's passphrase and host-key prompts, and a
+/// short `ConnectTimeout` avoids a long network hang.
 // spec: TUI-45
-fn noninteractive_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
-    [
-        ("GIT_TERMINAL_PROMPT", "0".to_string()),
-        (
-            "GIT_SSH_COMMAND",
-            format!("{base_ssh} -o BatchMode=yes -o ConnectTimeout=10"),
-        ),
-    ]
+fn noninteractive_env_pairs(ssh: &SshSetup) -> Vec<(&'static str, String)> {
+    prompt_free_env(ssh, "-o BatchMode=yes -o ConnectTimeout=10")
+}
+
+/// `GIT_TERMINAL_PROMPT=0`, plus `GIT_SSH_COMMAND` when `ssh` has a
+/// prompt-free form; OpenSSH gets `openssh_opts`.
+fn prompt_free_env(ssh: &SshSetup, openssh_opts: &str) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![("GIT_TERMINAL_PROMPT", "0".to_string())];
+    if let Some(command) = prompt_free_ssh(ssh, openssh_opts) {
+        pairs.push(("GIT_SSH_COMMAND", command));
+    }
+    pairs
+}
+
+/// The ssh command and variant a `git` child would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SshSetup {
+    /// A shell command, as `GIT_SSH_COMMAND` takes it.
+    command: String,
+    /// `GIT_SSH_VARIANT` or `ssh.variant`, when set.
+    variant: Option<String>,
+}
+
+/// `ssh`'s command with prompts off, or `None` to leave it as configured.
+/// The variant is git's own: an explicit one other than `auto` wins, else the
+/// command's program name. OpenSSH takes `openssh_opts`, plink and putty take
+/// `-batch`. TortoisePlink already gets `-batch` from git, and any other
+/// program (a wrapper script, `simple`) may not accept either flag, so it is
+/// left alone rather than broken.
+// spec: PRG-6 TUI-45
+fn prompt_free_ssh(ssh: &SshSetup, openssh_opts: &str) -> Option<String> {
+    let variant = match ssh.variant.as_deref().map(str::trim) {
+        Some(v) if !v.is_empty() && !v.eq_ignore_ascii_case("auto") => v.to_ascii_lowercase(),
+        _ => program_name(&ssh.command),
+    };
+    let extra = match variant.as_str() {
+        "ssh" => openssh_opts,
+        "plink" | "putty" => "-batch",
+        _ => return None,
+    };
+    Some(format!("{} {extra}", ssh.command))
+}
+
+/// The lowercase base name, `.exe` dropped, of a shell command's first word
+/// (single- or double-quoted, or bare).
+fn program_name(command: &str) -> String {
+    let command = command.trim_start();
+    let word = match command.chars().next() {
+        Some(q @ ('\'' | '"')) => command[1..].split(q).next().unwrap_or(""),
+        _ => command.split_whitespace().next().unwrap_or(""),
+    };
+    let base = word
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    base.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(base)
 }
 
 /// Whether this thread's `git` children run non-interactive (the process-wide
@@ -209,18 +260,26 @@ fn noninteractive_here() -> bool {
     NONINTERACTIVE.load(Ordering::Relaxed) || THREAD_NONINTERACTIVE.with(|c| c.get())
 }
 
-/// The ssh command a `git` child in `cwd` would run, which the
-/// non-interactive and batch wrappers extend. Setting `GIT_SSH_COMMAND`
-/// overrides `core.sshCommand` and `GIT_SSH`, so the wrapper has to start from
-/// whichever of them git would have used, or a configured key or proxy is
-/// silently dropped.
-fn base_ssh_command(cwd: Option<&Path>) -> String {
-    let var = |k| std::env::var(k).ok();
-    resolve_ssh_base(
-        var("GIT_SSH_COMMAND"),
-        || config_ssh_command(cwd),
-        var("GIT_SSH"),
-    )
+/// The ssh setup a `git` child in `cwd` would use, which the non-interactive
+/// and batch wrappers extend. Setting `GIT_SSH_COMMAND` overrides
+/// `core.sshCommand` and `GIT_SSH`, so the wrapper has to start from whichever
+/// of them git would have used, or a configured key or proxy is silently
+/// dropped.
+fn ssh_setup(cwd: Option<&Path>) -> SshSetup {
+    let var = |k| {
+        std::env::var(k)
+            .ok()
+            .filter(|v: &String| !v.trim().is_empty())
+    };
+    let config = config_ssh(cwd);
+    SshSetup {
+        command: resolve_ssh_base(
+            var("GIT_SSH_COMMAND"),
+            || config.command.clone(),
+            var("GIT_SSH"),
+        ),
+        variant: var("GIT_SSH_VARIANT").or(config.variant),
+    }
 }
 
 /// git's own order (`connect.c`): `GIT_SSH_COMMAND`, then `core.sshCommand`,
@@ -238,19 +297,46 @@ fn resolve_ssh_base(
         .unwrap_or_else(|| "ssh".to_string())
 }
 
-/// `core.sshCommand` as a `git` child in `cwd` sees it. With no `cwd` (a
-/// clone) it is read outside any repository, so only the system and global
-/// config count, as for the clone itself.
-fn config_ssh_command(cwd: Option<&Path>) -> Option<String> {
+/// `core.sshCommand` and `ssh.variant` as git config holds them.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConfigSsh {
+    command: Option<String>,
+    variant: Option<String>,
+}
+
+/// [`ConfigSsh`] as a `git` child in `cwd` sees it, in one `git config`
+/// call. With no `cwd` (a clone) it is read outside any repository, so only
+/// the system and global config count, as for the clone itself.
+fn config_ssh(cwd: Option<&Path>) -> ConfigSsh {
     let dir = cwd.map_or_else(std::env::temp_dir, Path::to_path_buf);
-    let out = Command::new("git")
-        .args(["config", "--get", "core.sshCommand"])
+    let Ok(out) = Command::new("git")
+        .args([
+            "config",
+            "--get-regexp",
+            r"^(core\.sshcommand|ssh\.variant)$",
+        ])
         .current_dir(dir)
         .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    else {
+        return ConfigSsh::default();
+    };
+    parse_config_ssh(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `git config --get-regexp` lines (`<key> <value>`, the key
+/// lowercased). A later line wins, as the last value does for git.
+fn parse_config_ssh(text: &str) -> ConfigSsh {
+    let mut found = ConfigSsh::default();
+    for line in text.lines() {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+        match key {
+            "core.sshcommand" => found.command = value,
+            "ssh.variant" => found.variant = value,
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Apply the non-interactive environment to a `git` child in `cwd` when the
@@ -259,7 +345,7 @@ fn apply_noninteractive_env(cmd: &mut Command, cwd: Option<&Path>) {
     if !noninteractive_here() {
         return;
     }
-    for (k, v) in noninteractive_env_pairs(&base_ssh_command(cwd)) {
+    for (k, v) in noninteractive_env_pairs(&ssh_setup(cwd)) {
         cmd.env(k, v);
     }
 }
@@ -269,11 +355,8 @@ fn apply_noninteractive_env(cmd: &mut Command, cwd: Option<&Path>) {
 /// attempt is retried with prompts on rather than failed, and a slow host
 /// should not turn into a timeout.
 // spec: PRG-6
-fn batch_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
-    [
-        ("GIT_TERMINAL_PROMPT", "0".to_string()),
-        ("GIT_SSH_COMMAND", format!("{base_ssh} -o BatchMode=yes")),
-    ]
+fn batch_env_pairs(ssh: &SshSetup) -> Vec<(&'static str, String)> {
+    prompt_free_env(ssh, "-o BatchMode=yes")
 }
 
 /// Run `attempt`, first with prompts off when `batch` is set; a failure that
@@ -327,7 +410,7 @@ fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool)
         apply_noninteractive_env(&mut cmd, cwd);
     }
     if batch {
-        for (k, v) in batch_env_pairs(&base_ssh_command(cwd)) {
+        for (k, v) in batch_env_pairs(&ssh_setup(cwd)) {
             cmd.env(k, v);
         }
     }
@@ -1035,7 +1118,7 @@ mod tests {
         // spec: TUI-45 - the non-interactive env makes git fail fast instead of
         // prompting: git's own prompts are off and ssh runs in BatchMode (no
         // passphrase/host-key prompt). A custom base ssh command is preserved.
-        let pairs = noninteractive_env_pairs("ssh");
+        let pairs = noninteractive_env_pairs(&openssh("ssh"));
         let map: std::collections::HashMap<_, _> = pairs.iter().cloned().collect();
         assert_eq!(
             map.get("GIT_TERMINAL_PROMPT").map(String::as_str),
@@ -1049,7 +1132,7 @@ mod tests {
         assert!(ssh.starts_with("ssh "), "base ssh command preserved: {ssh}");
 
         // A user's custom ssh command is kept as the base.
-        let custom = noninteractive_env_pairs("ssh -i /my/key");
+        let custom = noninteractive_env_pairs(&openssh("ssh -i /my/key"));
         let ssh2 = &custom[1].1;
         assert!(
             ssh2.starts_with("ssh -i /my/key ") && ssh2.contains("BatchMode=yes"),
@@ -1079,9 +1162,89 @@ mod tests {
         assert_eq!(resolve_ssh_base(None, || s(""), None), "ssh");
     }
 
+    /// An ssh setup with no explicit variant.
+    fn openssh(command: &str) -> SshSetup {
+        SshSetup {
+            command: command.to_string(),
+            variant: None,
+        }
+    }
+
     // spec: PRG-6 TUI-45
     #[test]
-    fn config_ssh_command_reads_the_repos_core_ssh_command() {
+    fn prompts_go_off_only_in_a_form_the_ssh_program_accepts() {
+        let opts = "-o BatchMode=yes";
+        let with = |command: &str, variant: Option<&str>| {
+            prompt_free_ssh(
+                &SshSetup {
+                    command: command.to_string(),
+                    variant: variant.map(str::to_string),
+                },
+                opts,
+            )
+        };
+        assert_eq!(
+            with("/usr/bin/ssh -i k", None).as_deref(),
+            Some("/usr/bin/ssh -i k -o BatchMode=yes")
+        );
+        assert_eq!(
+            with(r#""C:\Program Files\PuTTY\PLINK.EXE""#, None).as_deref(),
+            Some(r#""C:\Program Files\PuTTY\PLINK.EXE" -batch"#),
+            "plink takes -batch, not -o"
+        );
+        assert_eq!(
+            with("'/opt/putty' -v", None).as_deref(),
+            Some("'/opt/putty' -v -batch")
+        );
+        assert_eq!(
+            with("tortoiseplink", None),
+            None,
+            "git already passes -batch"
+        );
+        assert_eq!(
+            with("~/bin/my-ssh-wrapper", None),
+            None,
+            "an unknown program is left as configured"
+        );
+        assert_eq!(
+            with("~/bin/my-ssh-wrapper", Some("ssh")).as_deref(),
+            Some("~/bin/my-ssh-wrapper -o BatchMode=yes"),
+            "an explicit variant wins"
+        );
+        assert_eq!(
+            with("ssh", Some("simple")),
+            None,
+            "ssh.variant=simple takes no options"
+        );
+        assert_eq!(
+            with("ssh", Some("auto")).as_deref(),
+            Some("ssh -o BatchMode=yes")
+        );
+
+        // With no prompt-free form, the env still stops git's own prompts and
+        // leaves the ssh command alone.
+        let pairs = batch_env_pairs(&openssh("~/bin/my-ssh-wrapper"));
+        assert_eq!(pairs, [("GIT_TERMINAL_PROMPT", "0".to_string())]);
+    }
+
+    // spec: PRG-6 TUI-45
+    #[test]
+    fn config_ssh_parses_the_last_value_of_each_key() {
+        assert_eq!(
+            parse_config_ssh(
+                "core.sshcommand ssh -i /a\nssh.variant plink\ncore.sshcommand ssh -i /b\n"
+            ),
+            ConfigSsh {
+                command: Some("ssh -i /b".to_string()),
+                variant: Some("plink".to_string()),
+            }
+        );
+        assert_eq!(parse_config_ssh(""), ConfigSsh::default());
+    }
+
+    // spec: PRG-6 TUI-45
+    #[test]
+    fn config_ssh_reads_the_repos_core_ssh_command() {
         let base = std::env::temp_dir().join(format!(
             "mind-git-sshcmd-{}-{}",
             std::process::id(),
@@ -1100,9 +1263,13 @@ mod tests {
         };
         git(&["init", "-q"]);
         git(&["config", "core.sshCommand", "ssh -i /work/key"]);
+        git(&["config", "ssh.variant", "ssh"]);
         assert_eq!(
-            config_ssh_command(Some(&base)).as_deref(),
-            Some("ssh -i /work/key")
+            config_ssh(Some(&base)),
+            ConfigSsh {
+                command: Some("ssh -i /work/key".to_string()),
+                variant: Some("ssh".to_string()),
+            }
         );
         cleanup(&base);
     }
@@ -1130,10 +1297,17 @@ mod tests {
     // spec: PRG-6
     #[test]
     fn batch_env_disables_prompts_without_a_connect_timeout() {
-        let pairs = batch_env_pairs("ssh -i /my/key");
-        assert_eq!(pairs[0], ("GIT_TERMINAL_PROMPT", "0".to_string()));
-        assert_eq!(pairs[1].0, "GIT_SSH_COMMAND");
-        assert_eq!(pairs[1].1, "ssh -i /my/key -o BatchMode=yes");
+        let pairs = batch_env_pairs(&openssh("ssh -i /my/key"));
+        assert_eq!(
+            pairs,
+            [
+                ("GIT_TERMINAL_PROMPT", "0".to_string()),
+                (
+                    "GIT_SSH_COMMAND",
+                    "ssh -i /my/key -o BatchMode=yes".to_string()
+                ),
+            ]
+        );
     }
 
     // spec: PRG-6
