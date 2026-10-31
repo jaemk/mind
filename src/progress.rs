@@ -109,8 +109,10 @@ struct Inner {
 pub(crate) struct Progress {
     cfg: Config,
     hidden: AtomicBool,
-    /// [`Inner::drawn`], readable without the lock (the SIGINT handler).
+    /// [`Inner::drawn`], readable without the lock (the signal handler).
     on_screen: AtomicBool,
+    /// Set for good once the process is going down ([`Progress::stop`]).
+    stopped: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -120,6 +122,7 @@ impl Progress {
             cfg,
             hidden: AtomicBool::new(false),
             on_screen: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 steps: Vec::new(),
                 next_id: 0,
@@ -217,6 +220,15 @@ impl Progress {
         self.hidden.load(Ordering::Relaxed)
     }
 
+    /// Never draw again, and say whether a line was left on screen for the
+    /// caller to erase. Takes no lock, so a signal handler or a panic hook can
+    /// call it, even one that fired while this thread held the lock (PRG-10).
+    // spec: PRG-10
+    fn stop(&self) -> bool {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.on_screen.swap(false, Ordering::SeqCst)
+    }
+
     /// Whether a spinner may draw now: not hidden and not suspended. A git
     /// call made when it may not (under [`Progress::suspend`]) can prompt
     /// directly (PRG-6).
@@ -237,7 +249,7 @@ impl Progress {
             return;
         };
         let due = g.since.is_some_and(|t| t.elapsed() >= self.cfg.delay);
-        if !due || g.held > 0 || self.is_hidden() {
+        if !due || g.held > 0 || self.is_hidden() || self.stopped.load(Ordering::SeqCst) {
             return;
         }
         // One write, so the SIGINT handler's clear (PRG-10) cannot land
@@ -388,6 +400,15 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
         .is_ok()
     {
         clear_on_interrupt();
+        // spec: PRG-10 -- a panic message starts on a clean line, and no
+        // spinner draws after it while the stack unwinds.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if GLOBAL.get().is_some_and(Progress::stop) {
+                eprint!("{CLEAR}");
+            }
+            prev(info);
+        }));
         std::thread::spawn(|| {
             loop {
                 std::thread::sleep(TICK);
@@ -399,44 +420,46 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
     }
 }
 
-/// Erase a drawn spinner line on Ctrl-C, then die of the signal as the
-/// default disposition would (PRG-10). Not installed when SIGINT is ignored
-/// (a background job), so that ignore is kept. A hook's own SIGINT handling
-/// (HOOK-171) saves and restores this one around the hook.
+/// Erase a drawn spinner line on Ctrl-C (SIGINT) or SIGTERM, then die of the
+/// signal as the default disposition would (PRG-10). Not installed for a
+/// signal that is ignored (SIGINT in a background job), so that ignore is
+/// kept. A hook's own SIGINT handling (HOOK-171) saves and restores this one
+/// around the hook.
 // spec: PRG-10
 #[cfg(unix)]
 fn clear_on_interrupt() {
-    extern "C" fn on_sigint(_: libc::c_int) {
-        // `OnceLock::get` is an atomic load, and `write`, `signal`, and
-        // `raise` are async-signal-safe. The raised SIGINT is blocked until
-        // this handler returns, then delivered with the default action.
-        if let Some(p) = GLOBAL.get()
-            && p.on_screen.load(Ordering::SeqCst)
-        {
+    extern "C" fn on_signal(sig: libc::c_int) {
+        // `OnceLock::get` and `stop` are atomic operations, and `write`,
+        // `signal`, and `raise` are async-signal-safe. The raised signal is
+        // blocked until this handler returns, then delivered with the
+        // default action.
+        if GLOBAL.get().is_some_and(Progress::stop) {
             // SAFETY: writes a static byte string to the stderr fd.
             unsafe {
                 libc::write(libc::STDERR_FILENO, CLEAR.as_ptr().cast(), CLEAR.len());
             }
         }
-        // SAFETY: resets SIGINT to its default and re-raises it.
+        // SAFETY: resets the signal to its default and re-raises it.
         unsafe {
-            libc::signal(libc::SIGINT, libc::SIG_DFL);
-            libc::raise(libc::SIGINT);
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
         }
     }
-    // SAFETY: plain sigaction calls on zeroed structs.
-    unsafe {
-        let mut old: libc::sigaction = std::mem::zeroed();
-        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) != 0
-            || old.sa_sigaction == libc::SIG_IGN
-        {
-            return;
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: plain sigaction calls on zeroed structs.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(sig, std::ptr::null(), &mut old) != 0
+                || old.sa_sigaction == libc::SIG_IGN
+            {
+                continue;
+            }
+            let mut new: libc::sigaction = std::mem::zeroed();
+            new.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut new.sa_mask);
+            new.sa_flags = libc::SA_RESTART;
+            libc::sigaction(sig, &new, std::ptr::null_mut());
         }
-        let mut new: libc::sigaction = std::mem::zeroed();
-        new.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        libc::sigemptyset(&mut new.sa_mask);
-        new.sa_flags = libc::SA_RESTART;
-        libc::sigaction(libc::SIGINT, &new, std::ptr::null_mut());
     }
 }
 
@@ -730,6 +753,25 @@ mod tests {
         assert!(p.on_screen.load(Ordering::SeqCst), "redrawn after suspend");
         drop(s);
         assert!(!p.on_screen.load(Ordering::SeqCst));
+    }
+
+    // spec: PRG-10
+    #[test]
+    fn stop_reports_a_drawn_line_once_and_ends_drawing() {
+        let (p, buf) = progress(Duration::ZERO, false, 80);
+        let s = p.step("working");
+        assert!(p.stop(), "a drawn line is reported for erasing");
+        assert!(!p.stop(), "and only once");
+        let at_stop = buf.text();
+        p.tick();
+        s.set("next");
+        p.set_hidden(false);
+        p.tick();
+        assert_eq!(buf.text(), at_stop, "nothing draws after a stop");
+        drop(s);
+
+        let (idle, _) = progress(Duration::ZERO, false, 80);
+        assert!(!idle.stop(), "nothing on screen, nothing to erase");
     }
 
     // spec: PRG-9

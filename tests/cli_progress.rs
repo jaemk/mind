@@ -263,6 +263,20 @@ fn real_git() -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn ctrl_c_erases_a_drawn_spinner_line() {
+    erases_the_line_on(libc::SIGINT);
+}
+
+// spec: PRG-10
+#[cfg(unix)]
+#[test]
+fn sigterm_erases_a_drawn_spinner_line() {
+    erases_the_line_on(libc::SIGTERM);
+}
+
+/// Send `sig` to a `mind` whose clone step is drawn, and check it dies of
+/// the signal with the line erased.
+#[cfg(unix)]
+fn erases_the_line_on(sig: libc::c_int) {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
 
@@ -306,14 +320,10 @@ fn ctrl_c_erases_a_drawn_spinner_line() {
     }
     // SAFETY: signals the child this test spawned.
     unsafe {
-        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+        libc::kill(child.id() as libc::pid_t, sig);
     }
     let status = child.wait().unwrap();
-    assert_eq!(
-        status.signal(),
-        Some(libc::SIGINT),
-        "mind dies of the signal"
-    );
+    assert_eq!(status.signal(), Some(sig), "mind dies of the signal");
     let err = std::fs::read_to_string(&err_path).unwrap();
     assert!(err.ends_with(CLEAR), "the spinner line is erased: {err:?}");
 }

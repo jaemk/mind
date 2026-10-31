@@ -94,7 +94,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   left as configured, with only git's own prompts turned off. Such a program
   can still prompt from the CLI, and its prompt is not kept off the spinner
   line; in the TUI, TUI-45 detaches the call from the terminal instead.
-- `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
-  erased before `mind` exits by the signal, so the shell prompt does not
-  follow spinner text. When SIGINT is ignored (a background job) it stays
-  ignored.
+- `PRG-10` On Ctrl-C (SIGINT) or SIGTERM while a spinner line is drawn, the
+  line is erased before `mind` exits by the signal, so the shell prompt does
+  not follow spinner text. A signal that is ignored (SIGINT in a background
+  job) stays ignored. On a panic, the line is erased before the panic message
+  is printed. After a signal or a panic, no spinner draws again.
