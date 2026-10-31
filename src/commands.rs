@@ -1180,12 +1180,16 @@ fn refresh_sources(
     for (i, r) in done {
         slots[i] = Some(r);
     }
+    drop(step);
     slots
         .into_iter()
         .zip(sources)
         .map(|(slot, source)| match slot {
+            // spec: PRG-6 -- the retry is the prompting run, so it goes with
+            // the spinner suspended and git prompts at once rather than
+            // failing a batch attempt first.
             Some(Err(e)) if git::is_suppressed_prompt_failure(&e) && !git::is_noninteractive() => {
-                refresh_source(paths, source)
+                crate::progress::suspend(|| refresh_source(paths, source))
             }
             Some(r) => r,
             // Every index below `sources.len()` is claimed by exactly one worker.

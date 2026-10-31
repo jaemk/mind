@@ -109,6 +109,8 @@ struct Inner {
 pub(crate) struct Progress {
     cfg: Config,
     hidden: AtomicBool,
+    /// [`Inner::drawn`], readable without the lock (the SIGINT handler).
+    on_screen: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -117,6 +119,7 @@ impl Progress {
         Self {
             cfg,
             hidden: AtomicBool::new(false),
+            on_screen: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 steps: Vec::new(),
                 next_id: 0,
@@ -172,7 +175,7 @@ impl Progress {
         g.steps.retain(|(i, _)| *i != id);
         if g.steps.is_empty() {
             g.since = None;
-            Self::clear(&mut g);
+            self.clear(&mut g);
         } else if g.drawn {
             self.draw_if_ready(&mut g);
         }
@@ -194,7 +197,7 @@ impl Progress {
         {
             let mut g = self.lock();
             g.held += 1;
-            Self::clear(&mut g);
+            self.clear(&mut g);
         }
         let _resume = Resume(self);
         f()
@@ -206,12 +209,20 @@ impl Progress {
     pub(crate) fn set_hidden(&self, hidden: bool) {
         self.hidden.store(hidden, Ordering::Relaxed);
         if hidden {
-            Self::clear(&mut self.lock());
+            self.clear(&mut self.lock());
         }
     }
 
     fn is_hidden(&self) -> bool {
         self.hidden.load(Ordering::Relaxed)
+    }
+
+    /// Whether a spinner may draw now: not hidden and not suspended. A git
+    /// call made when it may not (under [`Progress::suspend`]) can prompt
+    /// directly (PRG-6).
+    // spec: PRG-6
+    fn may_draw(&self) -> bool {
+        !self.is_hidden() && self.lock().held == 0
     }
 
     /// Advance the animation one frame and redraw, if a step is showing.
@@ -233,13 +244,15 @@ impl Progress {
         let _ = write!(g.out, "{CLEAR}{line}");
         let _ = g.out.flush();
         g.drawn = true;
+        self.on_screen.store(true, Ordering::SeqCst);
     }
 
-    fn clear(g: &mut Inner) {
+    fn clear(&self, g: &mut Inner) {
         if g.drawn {
             let _ = write!(g.out, "{CLEAR}");
             let _ = g.out.flush();
             g.drawn = false;
+            self.on_screen.store(false, Ordering::SeqCst);
         }
     }
 
@@ -357,6 +370,7 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
         .set(Progress::new(cfg, Box::new(std::io::stderr())))
         .is_ok()
     {
+        clear_on_interrupt();
         std::thread::spawn(|| {
             loop {
                 std::thread::sleep(TICK);
@@ -368,10 +382,54 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
     }
 }
 
-/// Whether a spinner may draw in this process now: progress is on and not
-/// hidden.
+/// Erase a drawn spinner line on Ctrl-C, then die of the signal as the
+/// default disposition would (PRG-10). Not installed when SIGINT is ignored
+/// (a background job), so that ignore is kept. A hook's own SIGINT handling
+/// (HOOK-171) saves and restores this one around the hook.
+// spec: PRG-10
+#[cfg(unix)]
+fn clear_on_interrupt() {
+    extern "C" fn on_sigint(_: libc::c_int) {
+        // `OnceLock::get` is an atomic load, and `write`, `signal`, and
+        // `raise` are async-signal-safe. The raised SIGINT is blocked until
+        // this handler returns, then delivered with the default action.
+        if let Some(p) = GLOBAL.get()
+            && p.on_screen.load(Ordering::SeqCst)
+        {
+            // SAFETY: writes a static byte string to the stderr fd.
+            unsafe {
+                libc::write(libc::STDERR_FILENO, CLEAR.as_ptr().cast(), CLEAR.len());
+            }
+        }
+        // SAFETY: resets SIGINT to its default and re-raises it.
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::raise(libc::SIGINT);
+        }
+    }
+    // SAFETY: plain sigaction calls on zeroed structs.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) != 0
+            || old.sa_sigaction == libc::SIG_IGN
+        {
+            return;
+        }
+        let mut new: libc::sigaction = std::mem::zeroed();
+        new.sa_sigaction = on_sigint as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::sigemptyset(&mut new.sa_mask);
+        new.sa_flags = libc::SA_RESTART;
+        libc::sigaction(libc::SIGINT, &new, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+fn clear_on_interrupt() {}
+
+/// Whether a spinner may draw in this process now: progress is on, not
+/// hidden, and not suspended.
 pub fn enabled() -> bool {
-    GLOBAL.get().is_some_and(|p| !p.is_hidden())
+    GLOBAL.get().is_some_and(Progress::may_draw)
 }
 
 /// Start a step labeled `label` (sanitized, PRG-7). A no-op when progress is
@@ -611,6 +669,29 @@ mod tests {
             p.tick();
         });
         assert_eq!(buf.text(), "");
+    }
+
+    // spec: PRG-6
+    #[test]
+    fn may_not_draw_while_suspended_or_hidden() {
+        let (p, _buf) = progress(Duration::ZERO, false, 80);
+        assert!(p.may_draw());
+        assert!(!p.suspend(|| p.may_draw()), "suspended: git may prompt");
+        assert!(p.may_draw());
+        p.set_hidden(true);
+        assert!(!p.may_draw());
+    }
+
+    // spec: PRG-10
+    #[test]
+    fn on_screen_follows_the_drawn_line() {
+        let (p, _buf) = progress(Duration::ZERO, false, 80);
+        let s = p.step("x");
+        assert!(p.on_screen.load(Ordering::SeqCst));
+        p.suspend(|| assert!(!p.on_screen.load(Ordering::SeqCst)));
+        assert!(p.on_screen.load(Ordering::SeqCst), "redrawn after suspend");
+        drop(s);
+        assert!(!p.on_screen.load(Ordering::SeqCst));
     }
 
     // spec: PRG-9

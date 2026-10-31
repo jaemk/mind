@@ -250,6 +250,74 @@ fn parallel_sync_counts_finished_sources() {
     );
 }
 
+/// The first `git` on `PATH`.
+#[cfg(unix)]
+fn real_git() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join("git"))
+        .find(|p| p.is_file())
+        .expect("git on PATH")
+}
+
+// spec: PRG-10
+#[cfg(unix)]
+#[test]
+fn ctrl_c_erases_a_drawn_spinner_line() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    let sb = Sandbox::new();
+    let repo = sb.repo("src", None);
+    // A git whose clone hangs, so the clone step is drawn when the signal
+    // lands; every other subcommand is the real git.
+    let bin = sb.base.join("bin");
+    let stub = bin.join("git");
+    write(
+        &stub,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = clone ]; then exec sleep 5; fi\nexec '{}' \"$@\"\n",
+            real_git().display()
+        ),
+    );
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+
+    let err_path = sb.base.join("stderr.out");
+    let mut child = sb
+        .cmd(Some("always"), &["meld", &repo, "--pin", "HEAD", "--yes"])
+        .env("PATH", path)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&err_path).unwrap())
+        .spawn()
+        .expect("run mind");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !labels(&std::fs::read_to_string(&err_path).unwrap())
+        .iter()
+        .any(|l| l.starts_with("cloning "))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clone step never drew"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // SAFETY: signals the child this test spawned.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+    let status = child.wait().unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGINT),
+        "mind dies of the signal"
+    );
+    let err = std::fs::read_to_string(&err_path).unwrap();
+    assert!(err.ends_with(CLEAR), "the spinner line is erased: {err:?}");
+}
+
 // spec: PRG-5
 #[test]
 fn nothing_else_lands_on_a_drawn_spinner_line() {

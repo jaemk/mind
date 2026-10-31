@@ -64,4 +64,10 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   that stands in for such a prompt (CLI-248's suppressed-prompt failure) is
   retried once with prompts allowed and the spinner cleared. A call already
   non-interactive (the TUI, a parallel fetch worker, auto-update) is not
-  retried.
+  retried. A git call made while the spinner is suspended (PRG-5), such as
+  CLI-248's serial retry of a parallel fetch that needed a prompt, runs with
+  prompts allowed from the start.
+- `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
+  erased before `mind` exits by the signal, so the shell prompt does not
+  follow spinner text. When SIGINT is ignored (a background job) it stays
+  ignored.
