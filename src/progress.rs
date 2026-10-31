@@ -329,18 +329,34 @@ fn truncate_to_width(s: &str, max: usize) -> String {
 }
 
 /// The width the spinner line fits in: `COLUMNS` when set to a number, else
-/// the terminal's, else 80.
+/// the width of the terminal on stderr, else 80.
 fn stderr_width() -> usize {
     std::env::var("COLUMNS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .or_else(|| {
-            crossterm::terminal::size()
-                .ok()
-                .map(|(c, _)| usize::from(c))
-        })
+        .or_else(|| columns_of(std::io::stderr()))
         .unwrap_or(80)
         .max(20)
+}
+
+/// The column count of the terminal `fd` is on, or `None` off a terminal.
+/// It asks `fd` itself, the terminal the spinner draws on, rather than
+/// `/dev/tty`, and never falls back to running `tput` on a redraw.
+// spec: PRG-7
+#[cfg(unix)]
+fn columns_of(fd: impl std::os::fd::AsFd) -> Option<usize> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: TIOCGWINSZ only fills the zeroed `winsize` it is given.
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::ioctl(fd.as_fd().as_raw_fd(), libc::TIOCGWINSZ, &mut ws) };
+    (rc == 0 && ws.ws_col > 0).then(|| usize::from(ws.ws_col))
+}
+
+#[cfg(not(unix))]
+fn columns_of(_: std::io::Stderr) -> Option<usize> {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(c, _)| usize::from(c))
 }
 
 static GLOBAL: OnceLock<Progress> = OnceLock::new();
@@ -364,8 +380,7 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
         delay,
         unicode: !ascii && crate::render::detect_utf8_locale(),
         color: !ascii && stderr_tty && std::env::var_os("NO_COLOR").is_none(),
-        // Off a terminal (`always`) the size lookup can fall back to running
-        // `tput`; resolve it once rather than on every tick.
+        // Off a terminal (`always`) the width cannot change; resolve it once.
         width: (!stderr_tty).then(stderr_width),
     };
     if GLOBAL
@@ -734,6 +749,41 @@ mod tests {
         p.tick();
         drop(s);
         assert!(buf.text().contains("/ x"), "ticks advance the ASCII frame");
+    }
+
+    // spec: PRG-7
+    #[cfg(unix)]
+    #[test]
+    fn the_width_is_read_from_the_terminal_the_fd_is_on() {
+        use std::os::fd::FromRawFd;
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        ws.ws_col = 123;
+        ws.ws_row = 40;
+        let (mut leader, mut follower) = (-1, -1);
+        // SAFETY: openpty fills the two fds; each is owned by a File below.
+        let rc = unsafe {
+            libc::openpty(
+                &mut leader,
+                &mut follower,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                // A `*mut` serves both signatures: macOS takes `*mut`,
+                // Linux `*const`.
+                &raw mut ws,
+            )
+        };
+        assert_eq!(rc, 0, "openpty");
+        let (leader, follower) = unsafe {
+            (
+                std::fs::File::from_raw_fd(leader),
+                std::fs::File::from_raw_fd(follower),
+            )
+        };
+        assert_eq!(columns_of(&follower), Some(123));
+        drop(leader);
+
+        let file = std::fs::File::open("Cargo.toml").unwrap();
+        assert_eq!(columns_of(&file), None, "not a terminal");
     }
 
     #[test]

@@ -17,8 +17,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   `MIND_PROGRESS=always`, every step draws as soon as it starts.
 - `PRG-7` A label is sanitized (`strip_ansi`, DSC-95) before it is drawn, since
   it can carry a source-controlled name or URL, and cut to the terminal width
-  (`COLUMNS` when set, else the terminal's, else 80) with a trailing `...`, so
-  the line never wraps.
+  (`COLUMNS` when set, else the width of the terminal stderr is on, else 80)
+  with a trailing `...`, so the line never wraps.
 - `PRG-8` The spinner frames are Braille dots on a UTF-8 locale and `|/-\`
   under `--ascii` or a non-UTF-8 locale. The frame is colored only when stderr
   is a terminal and neither `NO_COLOR` nor `--ascii` is set.
