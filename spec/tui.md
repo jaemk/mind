@@ -210,7 +210,12 @@ manifest, and store.
   interactive meld (TUI-44) restores interactive git for its duration, so that same
   passphrase or host-key prompt works on the normal terminal. This is why a typed
   spec (TUI-30) can meld a private SSH source while a background preview, sync, or
-  upgrade of one fails fast rather than freezing.
+  upgrade of one fails fast rather than freezing. When the configured ssh
+  program has no prompt-free form (PRG-6: a wrapper script, TortoisePlink, the
+  `simple` variant), the `git` child instead runs in a new session with no
+  controlling terminal and a null stdin, so a prompt from that program fails at
+  once. A parallel fetch worker (CLI-248) is not detached, so Ctrl-C still
+  reaches its children.
 - `TUI-53` The source details dialog (TUI-26) shows the namespace the
   source will install under (its effective prefix: the consumer `--namespace` alias,
   else `[source].prefix`, else none; NS-1). When none of the source's items are

@@ -10,8 +10,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A progress spinner on stderr names the slow step in flight: a clone or
   fetch, a `sync`/`upgrade` source refresh (counted when sources are fetched
-  in parallel), an item install, the catalog scan, and `evolve`'s release
-  lookup and download. It shows only when stderr is a terminal and clears
+  in parallel), an item install, the catalog scan, a wait on another `mind`
+  command's lock, and `evolve`'s release lookup and download. It shows only when stderr is a terminal and clears
   when the step ends; `--no-progress` or `MIND_PROGRESS=never` turns it off.
   While it is on, git runs with prompts off and retries a credential or
   passphrase prompt interactively.
@@ -26,7 +26,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A parallel `sync`/`upgrade` fetch and the `probe` TUI's git calls ignored
   `core.sshCommand` and `GIT_SSH`: the prompt-free ssh command was built from
   `GIT_SSH_COMMAND` or plain `ssh`, which overrides both. It now starts from
-  the command git itself would run.
+  the command git itself would run. An ssh program with no prompt-off flag
+  (a wrapper script, TortoisePlink) runs detached from the terminal under the
+  TUI, so a passphrase or host-key prompt fails fast instead of hanging it.
 
 ## [0.41.0] - 2026-10-29
 

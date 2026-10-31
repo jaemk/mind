@@ -340,13 +340,46 @@ fn parse_config_ssh(text: &str) -> ConfigSsh {
 }
 
 /// Apply the non-interactive environment to a `git` child in `cwd` when the
-/// mode is on.
+/// mode is on. In the process-wide mode (the TUI), an ssh program with no
+/// prompt-free form loses its controlling terminal instead, so a prompt it
+/// would draw fails at once rather than hang the UI.
 fn apply_noninteractive_env(cmd: &mut Command, cwd: Option<&Path>) {
     if !noninteractive_here() {
         return;
     }
-    for (k, v) in noninteractive_env_pairs(&ssh_setup(cwd)) {
+    let ssh = ssh_setup(cwd);
+    for (k, v) in noninteractive_env_pairs(&ssh) {
         cmd.env(k, v);
+    }
+    if must_detach(&ssh, is_noninteractive()) {
+        detach_from_terminal(cmd);
+    }
+}
+
+/// Whether a non-interactive `git` child must lose its terminal: only in the
+/// process-wide mode, and only when `ssh` has no prompt-free form. A parallel
+/// fetch worker keeps it, so Ctrl-C still reaches its children.
+// spec: TUI-45
+fn must_detach(ssh: &SshSetup, process_wide: bool) -> bool {
+    process_wide && prompt_free_ssh(ssh, "").is_none()
+}
+
+/// Run `cmd` in a new session with no controlling terminal, so nothing it
+/// spawns can open `/dev/tty` to prompt (TUI-45). Its stdin is null.
+// spec: TUI-45
+fn detach_from_terminal(cmd: &mut Command) {
+    cmd.stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: `setsid` is async-signal-safe and touches no Rust state; it
+        // only detaches the child from the parent's session and terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
     }
 }
 
@@ -1395,6 +1428,40 @@ mod tests {
             "fatal: unable to access 'https://x/': Could not resolve host: x"
         )));
         assert!(!is_suppressed_prompt_failure(&MindError::GitNotFound));
+    }
+
+    // spec: TUI-45
+    #[test]
+    fn only_the_tui_detaches_and_only_an_ssh_it_cannot_quiet() {
+        let wrapper = openssh("~/bin/my-ssh-wrapper");
+        assert!(must_detach(&wrapper, true));
+        assert!(!must_detach(&wrapper, false), "a fetch worker keeps Ctrl-C");
+        assert!(
+            !must_detach(&openssh("ssh -i k"), true),
+            "BatchMode is enough"
+        );
+        assert!(!must_detach(&openssh("plink"), true), "-batch is enough");
+    }
+
+    // spec: TUI-45
+    #[cfg(unix)]
+    #[test]
+    fn a_detached_git_child_has_no_controlling_terminal() {
+        // A new session has no controlling terminal: its session id is its
+        // own pid, never this process's session.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "ps -o sid= -p $$; echo $$"]);
+        detach_from_terminal(&mut cmd);
+        let out = cmd.output().unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8(out.stdout).unwrap();
+        let ids: Vec<i32> = text
+            .split_whitespace()
+            .map(|w| w.parse().unwrap())
+            .collect();
+        let (sid, pid) = (ids[0], ids[1]);
+        assert_eq!(sid, pid, "the child leads its own session");
+        assert_ne!(sid, unsafe { libc::getsid(0) });
     }
 
     #[test]

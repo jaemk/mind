@@ -48,6 +48,9 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
     `installing <kind>:<name>`;
   - the whole-registry catalog scan, labeled `scanning melded sources`, when
     not already under another step;
+  - waiting on another `mind` process's state lock (STO-40), labeled
+    `waiting for another mind command to finish`, only when the lock is
+    already held;
   - `evolve`'s latest-release lookup, labeled
     `checking for the latest mind release`, and its download (checksum,
     archive, extraction, and swap), labeled `downloading mind <version>`,
@@ -83,7 +86,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
   and not `auto`, else the program's name): OpenSSH gets `-o BatchMode=yes`,
   plink and putty get `-batch`, and any other program (TortoisePlink, which
   git already runs with `-batch`, a wrapper script, the `simple` variant) is
-  left as configured, with only git's own prompts turned off.
+  left as configured, with only git's own prompts turned off (in the TUI,
+  TUI-45 detaches such a call from the terminal instead).
 - `PRG-10` On Ctrl-C (SIGINT) while a spinner line is drawn, the line is
   erased before `mind` exits by the signal, so the shell prompt does not
   follow spinner text. When SIGINT is ignored (a background job) it stays

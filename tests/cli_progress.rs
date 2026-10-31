@@ -318,6 +318,45 @@ fn ctrl_c_erases_a_drawn_spinner_line() {
     assert!(err.ends_with(CLEAR), "the spinner line is erased: {err:?}");
 }
 
+// spec: PRG-4
+#[test]
+fn a_command_blocked_on_the_lock_says_it_is_waiting() {
+    const WAITING: &str = "waiting for another mind command to finish";
+    let sb = Sandbox::new();
+    let mut held = fd_lock::RwLock::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sb.mind_home.join(".lock"))
+            .unwrap(),
+    );
+    let guard = held.write().unwrap();
+
+    let err_path = sb.base.join("stderr.out");
+    let mut child = sb
+        .cmd(Some("always"), &["recall"])
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&err_path).unwrap())
+        .spawn()
+        .expect("run mind");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !labels(&std::fs::read_to_string(&err_path).unwrap()).contains(&WAITING) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wait step never drew"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(guard);
+    assert!(child.wait().unwrap().success());
+
+    // Uncontended, the same command never shows it.
+    let r = sb.run(Some("always"), &["recall"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(!labels(&r.stderr).contains(&WAITING), "{:?}", r.stderr);
+}
+
 // spec: PRG-5
 #[test]
 fn nothing_else_lands_on_a_drawn_spinner_line() {
