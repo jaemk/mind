@@ -124,6 +124,9 @@ pub fn install(
     }
 
     // 1. Stage and validate the new copy. Live install is untouched until step 2.
+    // spec: PRG-4 -- the copy, hash, and expansion print nothing; the step
+    // ends before the build hook, which writes to the terminal.
+    let staging_step = crate::progress::step(format!("installing {}", item.display_key()));
     remove_path(&staging)?;
     if let Some(parent) = staging.parent() {
         mkdir_p(parent)?;
@@ -143,6 +146,7 @@ pub fn install(
         let _ = remove_path(&staging);
         return Err(e);
     }
+    drop(staging_step);
 
     // 1b. Per-item build hook: build the item's tooling inside staging, before
     //     the swap, so a failed build is rolled back with staging and never

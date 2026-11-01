@@ -341,6 +341,9 @@ pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
 /// fresh clone, via a one-source registry) is unaffected in practice: the
 /// directory it just cloned into cannot itself be gone.
 pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
+    // spec: PRG-4 -- the scan prints only through `render::scan_warn`, which
+    // clears the spinner first.
+    let _step = crate::progress::step_if_idle(|| "scanning melded sources".to_string());
     let mut items = Vec::new();
     for source in &registry.sources {
         items.extend(scan_one(paths, source)?);

@@ -64,10 +64,19 @@ pub fn open(paths: &Paths) -> Result<MindLock> {
     })
 }
 
+/// A progress step while another process holds the lock, so a blocked command
+/// says what it waits on (PRG-4). The probe that set `busy` has already let
+/// go, so a lock freed in between only shows the step briefly.
+// spec: PRG-4
+fn wait_step(busy: bool) -> Option<crate::progress::Step<'static>> {
+    busy.then(|| crate::progress::step("waiting for another mind command to finish"))
+}
+
 impl MindLock {
     /// Acquire the lock exclusively (mutating commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn write(&mut self) -> Result<WriteGuard<'_>> {
+        let _step = wait_step(self.inner.try_write().is_err());
         let guard = self
             .inner
             .write()
@@ -78,6 +87,7 @@ impl MindLock {
     /// Acquire the lock shared (read-only commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn read(&self) -> Result<ReadGuard<'_>> {
+        let _step = wait_step(self.inner.try_read().is_err());
         let guard = self
             .inner
             .read()

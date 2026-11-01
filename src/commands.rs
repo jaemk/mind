@@ -349,12 +349,15 @@ fn resolve_version(
     let tags = git::ls_remote_tags(url)?;
     let res = crate::version::resolve(template, &tags, &range, yanked);
     for (a, b) in &res.ambiguous {
-        eprintln!(
-            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
-            strip_ansi(source_name),
-            strip_ansi(a),
-            strip_ansi(b)
-        );
+        // spec: PRG-5 -- runs inside a counted sync step.
+        crate::progress::suspend(|| {
+            eprintln!(
+                "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+                strip_ansi(source_name),
+                strip_ansi(a),
+                strip_ansi(b)
+            )
+        });
     }
     Ok(res)
 }
@@ -607,12 +610,15 @@ fn default_version_pin(
     // Every release above `chosen` was skipped above.
     res.selected = Some(chosen.clone());
     for (a, b) in &res.ambiguous {
-        eprintln!(
-            "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
-            strip_ansi(&source.name),
-            strip_ansi(a),
-            strip_ansi(b)
-        );
+        // spec: PRG-5
+        crate::progress::suspend(|| {
+            eprintln!(
+                "warning: {}: tags {} and {} name the same version at different commits; skipping that version",
+                strip_ansi(&source.name),
+                strip_ansi(a),
+                strip_ansi(b)
+            )
+        });
     }
     let mut pin = crate::source::VersionPin::unresolved(&range);
     pin.recommended = m.source.recommended_range().map(|r| r.to_string());
@@ -666,22 +672,27 @@ fn release_needs_newer_mind(
     let text = match git::tag_mind_toml(url, dir, &rel.tag, fetch) {
         Ok(text) => text,
         Err(e) => {
-            eprintln!(
-                "warning: {shown}: could not read min-mind-version of {}: {}",
-                rel.version,
-                strip_ansi(&e.to_string())
-            );
+            // spec: PRG-5 -- runs inside a counted sync step.
+            crate::progress::suspend(|| {
+                eprintln!(
+                    "warning: {shown}: could not read min-mind-version of {}: {}",
+                    rel.version,
+                    strip_ansi(&e.to_string())
+                )
+            });
             return None;
         }
     };
     let required = text
         .as_deref()
         .and_then(crate::mindfile::unmet_min_version_in_text)?;
-    eprintln!(
-        "{shown}: skipped {}: needs mind {}",
-        rel.version,
-        strip_ansi(&required)
-    );
+    crate::progress::suspend(|| {
+        eprintln!(
+            "{shown}: skipped {}: needs mind {}",
+            rel.version,
+            strip_ansi(&required)
+        )
+    });
     Some(required)
 }
 
@@ -1014,14 +1025,17 @@ fn sync_clone_to_pin(
             if let Some(recorded) = source.commit.as_deref()
                 && recorded != rel.commit
             {
-                eprintln!(
-                    "warning: {}: release tag {} moved from {} to {}; staying at {} (re-meld with --pin to accept it)",
-                    strip_ansi(&source.name),
-                    strip_ansi(&rel.tag),
-                    short(recorded),
-                    short(&rel.commit),
-                    short(recorded)
-                );
+                // spec: PRG-5 -- runs inside a counted sync step.
+                crate::progress::suspend(|| {
+                    eprintln!(
+                        "warning: {}: release tag {} moved from {} to {}; staying at {} (re-meld with --pin to accept it)",
+                        strip_ansi(&source.name),
+                        strip_ansi(&rel.tag),
+                        short(recorded),
+                        short(&rel.commit),
+                        short(recorded)
+                    )
+                });
             }
         }
         Some(rel) => {
@@ -1123,8 +1137,20 @@ fn refresh_sources(
 ) -> Vec<Result<(String, Pin)>> {
     let workers = sources.len().min(max_parallel_fetches());
     if workers <= 1 {
-        return sources.iter().map(|s| refresh_source(paths, s)).collect();
+        return sources
+            .iter()
+            .map(|s| {
+                // spec: PRG-4
+                let _step = crate::progress::step(format!("syncing {}", s.name));
+                refresh_source(paths, s)
+            })
+            .collect();
     }
+    // spec: PRG-4 -- one counted step for the pool; the workers' git calls
+    // run under it rather than replacing its label.
+    let total = sources.len();
+    let step = crate::progress::step(format!("syncing sources (0/{total})"));
+    let finished = std::sync::atomic::AtomicUsize::new(0);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done: Vec<(usize, Result<(String, Pin)>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
@@ -1138,6 +1164,8 @@ fn refresh_sources(
                                 break mine;
                             };
                             mine.push((i, refresh_source(paths, source)));
+                            let n = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            step.set(format!("syncing sources ({}/{total})", n + 1));
                         }
                     })
                 })
@@ -1152,12 +1180,16 @@ fn refresh_sources(
     for (i, r) in done {
         slots[i] = Some(r);
     }
+    drop(step);
     slots
         .into_iter()
         .zip(sources)
         .map(|(slot, source)| match slot {
+            // spec: PRG-6 -- the retry is the prompting run, so it goes with
+            // the spinner suspended and git prompts at once rather than
+            // failing a batch attempt first.
             Some(Err(e)) if git::is_suppressed_prompt_failure(&e) && !git::is_noninteractive() => {
-                refresh_source(paths, source)
+                crate::progress::suspend(|| refresh_source(paths, source))
             }
             Some(r) => r,
             // Every index below `sources.len()` is claimed by exactly one worker.
@@ -14859,17 +14891,20 @@ fn prompt_line(prompt: &str) -> Result<String> {
     // meld prefix preview, CLI-24) can carry ANSI/control/bidi bytes; sanitize
     // before it reaches the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
-    print!("{prompt}");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    if std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| MindError::io("<stdin>", e))?
-        == 0
-    {
-        return Ok(String::new()); // EOF -> empty (accept the declared prefix)
-    }
-    Ok(line)
+    // spec: PRG-5
+    crate::progress::suspend(|| {
+        print!("{prompt}");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| MindError::io("<stdin>", e))?
+            == 0
+        {
+            return Ok(String::new()); // EOF -> empty (accept the declared prefix)
+        }
+        Ok(line)
+    })
 }
 
 /// Resolve a yes/no reply. An explicit `y`/`yes` or `n`/`no` (any case, trimmed)
@@ -14890,18 +14925,21 @@ fn read_confirm(prompt: &str, hint: &str, default_yes: bool) -> Result<bool> {
     // source-controlled name baked into a prompt string cannot carry ANSI/
     // control/bidi bytes to the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
-    print!("\n{prompt} {hint} ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    let stdin = std::io::stdin();
-    if stdin
-        .read_line(&mut line)
-        .map_err(|e| MindError::io("<stdin>", e))?
-        == 0
-    {
-        return Ok(false); // EOF (no input) -> treat as No
-    }
-    Ok(parse_confirm(&line, default_yes))
+    // spec: PRG-5
+    crate::progress::suspend(|| {
+        print!("\n{prompt} {hint} ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let stdin = std::io::stdin();
+        if stdin
+            .read_line(&mut line)
+            .map_err(|e| MindError::io("<stdin>", e))?
+            == 0
+        {
+            return Ok(false); // EOF (no input) -> treat as No
+        }
+        Ok(parse_confirm(&line, default_yes))
+    })
 }
 
 /// Prompt `[y/N]` on the terminal; default No.

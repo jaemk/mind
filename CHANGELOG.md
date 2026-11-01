@@ -6,6 +6,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-31
+
+### Added
+
+- A progress spinner on stderr names the slow step in flight: a clone or
+  fetch, a `sync`/`upgrade` source refresh (counted when sources are fetched
+  in parallel), an item install, the catalog scan, a wait on another `mind`
+  command's lock, and `evolve`'s release lookup and download. It shows only
+  when stderr is a terminal and clears when the step ends, including on
+  Ctrl-C or SIGTERM; `--no-progress` or `MIND_PROGRESS=never` turns it off.
+  While it is on, git runs with prompts off and retries a credential,
+  passphrase, or host-key prompt interactively.
+
+### Changed
+
+- `evolve` shows the progress spinner during its download instead of the
+  byte-count download bar.
+
+### Fixed
+
+- A parallel `sync`/`upgrade` fetch and the `probe` TUI's git calls ignored
+  `core.sshCommand` and `GIT_SSH`: the prompt-free ssh command was built from
+  `GIT_SSH_COMMAND` or plain `ssh`, which overrides both. It now starts from
+  the command git itself would run. An ssh program with no prompt-off flag
+  (a wrapper script, TortoisePlink) runs detached from the terminal under the
+  TUI, so a passphrase or host-key prompt fails fast instead of hanging it.
+
 ## [0.41.0] - 2026-10-29
 
 ### Added
@@ -2202,7 +2229,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/jaemk/mind/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/jaemk/mind/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/jaemk/mind/compare/v0.39.1...v0.40.0
 [0.39.1]: https://github.com/jaemk/mind/compare/v0.39.0...v0.39.1

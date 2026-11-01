@@ -38,6 +38,7 @@ The legacy spelling `absorb_to` is still read.
 | `MIND_POLICY_FILE` | a managed policy file, used only when none exists at the system path |
 | `MIND_HTTP_TIMEOUT_SECS` | request budget for `mind evolve` (default 15) |
 | `MIND_MAX_PARALLEL_FETCHES` | most sources `sync`/`upgrade` fetch at once (default 8; `1` fetches one at a time) |
+| `MIND_PROGRESS` | `never` hides the stderr progress spinner, `always` draws it even off a terminal or in CI |
 | `GH_TOKEN`, `GITHUB_TOKEN` | token `evolve` sends to `api.github.com` |
 | `NO_COLOR` | plain output |
 
@@ -47,6 +48,11 @@ To authenticate with an SSH key instead of an https username/password, meld the
 `git@host:owner/repo` form, or set `ssh = true` in `~/.mind/config.toml` so the
 `owner/repo` shorthand clones over SSH. An https remote still prompts (or uses a
 credential helper) as git normally does.
+
+While the progress spinner is on, a clone or fetch first runs with prompts off.
+When it needs a passphrase, a host-key confirmation, or credentials, it runs
+again with the spinner cleared and prompts on, so the prompt appears after the
+first attempt fails. `--no-progress` makes git prompt on the first attempt.
 
 ## Metadata size cap
 

@@ -166,11 +166,13 @@ discards the temp clone.
   restores the alternate screen and redraws. After the verb you press `Enter` to
   return. The verbs that suspend are `meld` and `unmeld`.
 - While the TUI holds the terminal, every `git` child runs non-interactively
-  (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper), so an
-  auth-required remote fails fast with an error surfaced inline instead of hanging
-  the UI on a hidden prompt. The suspended interactive meld restores interactive
-  git for its duration, so a passphrase or host-key prompt works on the normal
-  terminal.
+  (`GIT_TERMINAL_PROMPT=0`, and your ssh command with `-o BatchMode=yes`, or
+  `-batch` for plink), so an auth-required remote fails fast with an error
+  surfaced inline instead of hanging the UI on a hidden prompt. An ssh program
+  that takes neither flag (a wrapper script, TortoisePlink) runs detached from
+  the terminal, so its prompt fails the same way. The suspended interactive meld
+  restores interactive git for its duration, so a passphrase or host-key prompt
+  works on the normal terminal.
 
 ## Exit
 

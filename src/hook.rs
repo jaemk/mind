@@ -250,14 +250,17 @@ fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
 /// return the parsed choice (HOOK-20). Delegates the read to `read_choice` so
 /// the read path is independently testable.
 pub fn prompt_choice(disclosure: &str) -> Result<HookChoice> {
-    print!("{disclosure}");
-    println!("  [Y] run the hook   [n] skip it   [a] abort - install nothing");
-    print!("Run this hook? [Y/n/a] (default Y): ");
-    std::io::stdout()
-        .flush()
-        .map_err(|e| MindError::io("<stdout>", e))?;
+    // spec: PRG-5
+    crate::progress::suspend(|| {
+        print!("{disclosure}");
+        println!("  [Y] run the hook   [n] skip it   [a] abort - install nothing");
+        print!("Run this hook? [Y/n/a] (default Y): ");
+        std::io::stdout()
+            .flush()
+            .map_err(|e| MindError::io("<stdout>", e))?;
 
-    read_choice(std::io::stdin().lock())
+        read_choice(std::io::stdin().lock())
+    })
 }
 
 /// The user's response to the two-way optional-hook prompt (HOOK-52).
@@ -292,14 +295,17 @@ fn read_optional_choice<R: BufRead>(mut reader: R) -> Result<OptionalChoice> {
 /// Print the disclosure and the two optional-hook choices, read one line from
 /// stdin, and return the parsed choice (HOOK-52). Mirrors `prompt_choice`.
 pub fn prompt_choice_optional(disclosure: &str) -> Result<OptionalChoice> {
-    print!("{disclosure}");
-    println!("  [Y] run   [n] skip");
-    print!("Run this optional hook? [Y/n] (default Y): ");
-    std::io::stdout()
-        .flush()
-        .map_err(|e| MindError::io("<stdout>", e))?;
+    // spec: PRG-5
+    crate::progress::suspend(|| {
+        print!("{disclosure}");
+        println!("  [Y] run   [n] skip");
+        print!("Run this optional hook? [Y/n] (default Y): ");
+        std::io::stdout()
+            .flush()
+            .map_err(|e| MindError::io("<stdout>", e))?;
 
-    read_optional_choice(std::io::stdin().lock())
+        read_optional_choice(std::io::stdin().lock())
+    })
 }
 
 /// The action chosen for a hook: the decision ladder shared by every source-hook
@@ -577,8 +583,26 @@ pub fn apply_install_override(
 /// time. The closing frame line carries the same status (HOOK-162). When
 /// output logging is on (HOOK-165) the streams are piped instead of inherited
 /// and copied to both the terminal and the hook's log file; see [`run_teed`].
-// spec: CLI-217 HOOK-30 HOOK-140 HOOK-160 HOOK-162 HOOK-165
+///
+/// The hook writes to the terminal, so no progress spinner is drawn while it
+/// runs: its framed output is its progress (PRG-5).
+// spec: CLI-217 HOOK-30 HOOK-140 HOOK-160 HOOK-162 HOOK-165 PRG-5
 pub fn run_hook(
+    command: &str,
+    clone_dir: &Path,
+    identity: &str,
+    event: &'static str,
+    label: &str,
+    env: &HookEnv,
+    site: crate::hook_log::Site,
+) -> Result<()> {
+    crate::progress::suspend(|| {
+        run_hook_framed(command, clone_dir, identity, event, label, env, site)
+    })
+}
+
+/// [`run_hook`] without the progress suspension.
+fn run_hook_framed(
     command: &str,
     clone_dir: &Path,
     identity: &str,

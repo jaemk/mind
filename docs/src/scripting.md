@@ -152,6 +152,12 @@ UTF-8, `NO_COLOR` is unset, and neither `--json` nor `--ascii` is given. Any
 one of those failing gives plain ASCII with no escapes. The ASCII forms carry
 the same information (`+` installed, `-` available, `!` warning, `x` error).
 
+The progress spinner is separate: it goes to stderr, and only when stderr is a
+terminal, `TERM` is not `dumb`, and `CI` is unset (or `0`/`false`). A script
+that runs `mind` under a pseudo-terminal (`script`, `expect`, a pty library)
+outside CI gets the spinner's escapes on stderr; pass `--no-progress` or set
+`MIND_PROGRESS=never` to keep them out. Stdout is the same either way.
+
 Other global flags: `--verbose` (`-v`) adds advisory output such as
 unguarded-reference warnings, and `--max-metadata-size <SIZE>` sets the
 metadata size cap for one run (see

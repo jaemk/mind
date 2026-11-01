@@ -36,6 +36,7 @@ Accepted before or after any verb.
 | `-y`, `--yes` | answer every confirmation |
 | `--ascii` | plain ASCII output, no color or Unicode |
 | `-v`, `--verbose` | extra advisory output, such as unguarded-reference warnings |
+| `--no-progress` | no progress spinner on stderr (shown for slow steps when stderr is a terminal) |
 | `--max-metadata-size <SIZE>` | metadata size cap for this run; see [Configuration](configuration.md#metadata-size-cap) |
 | `--hook-log[=DIR]` | save each hook's output to a log file; see [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `--no-hook-log` | save no hook output logs this run, whatever the `hook-log` config key says |

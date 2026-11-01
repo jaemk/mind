@@ -69,6 +69,8 @@ impl TermGuard {
         // passphrase/host-key prompt would hang the UI). Fail fast instead; the
         // suspended interactive meld (with_suspended) re-enables prompts (TUI-45).
         crate::git::set_noninteractive(true);
+        // spec: PRG-9 -- and no progress spinner draws over the TUI.
+        crate::progress::set_hidden(true);
 
         Ok(TermGuard {
             prev_hook: Some(prev_hook),
@@ -85,6 +87,7 @@ impl Drop for TermGuard {
 
         // Leaving the TUI: restore interactive git for the rest of the process.
         crate::git::set_noninteractive(false);
+        crate::progress::set_hidden(false);
 
         // Reinstall the panic hook that was in effect before `enter()`, so the
         // global hook is left exactly as we found it (M6). Done AFTER restore so
@@ -137,6 +140,7 @@ pub fn with_suspended<R>(f: impl FnOnce() -> R) -> R {
         fn drop(&mut self) {
             // Back under the TUI: git must not prompt on the terminal again.
             crate::git::set_noninteractive(true);
+            crate::progress::set_hidden(true);
             let _ = enable_raw_mode();
             let mut stdout = io::stdout();
             let _ = execute!(stdout, EnterAlternateScreen);
@@ -156,6 +160,8 @@ pub fn with_suspended<R>(f: impl FnOnce() -> R) -> R {
     // On the normal terminal now: let the verb's git prompt for an SSH passphrase
     // or host-key confirmation exactly as the CLI would (TUI-45).
     crate::git::set_noninteractive(false);
+    // spec: PRG-9 -- the suspended verb shows progress as it would from the CLI.
+    crate::progress::set_hidden(false);
     let _resume = ResumeGuard;
     f()
 }

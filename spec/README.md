@@ -312,6 +312,7 @@ and verified.
 | Path tokens (`{{tools:}}`, `{{resources:}}`, `{{path:}}`) are dependency edges, so a partial `learn` installs what they point at | done | DEP-8 |
 | Hooks receive the enabled profiles: `MIND_PROFILES` (the source's enabled set) and `MIND_ITEM_PROFILES` (the profiles an item is installed for) | done | [install-hooks.md](install-hooks.md) (HOOK-140..143) |
 | Release versions: a source declares its semver release tags (`release-tags`); `--pin version=<range>` (any cargo version requirement: `^1.2`, `<2.0`, `>=1.2, <2`, `~1.2`, `=1.2.3`) follows compatible releases, and a breaking release is applied only on a prompt or `--allow-breaking`; a source's default-branch `pin-version` (an exact version reads as its caret) shows as a recommendation next to a breaking release | done | [versions.md](versions.md) (VER-1..142) |
+| Progress spinner on stderr for slow steps (clone, fetch, source refresh, item staging, catalog scan, a wait on another command's lock, `evolve` lookup and download) when stderr is a terminal; `--no-progress` / `MIND_PROGRESS`; notes, prompts, and hooks clear it first; git runs prompt-free under it and retries a suppressed prompt interactively | done | [progress.md](progress.md) (PRG-1..10) |
 | Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
 
 ## Documents
@@ -384,6 +385,9 @@ and verified.
 - [auto-update.md](auto-update.md) - auto-update: a trigger that runs release
   resolution unattended, at the level a source's consumer grants, capped by
   policy.
+- [progress.md](progress.md) - progress: the transient stderr spinner shown
+  while a slow step runs, when it is on, and how it shares the terminal with
+  notes, prompts, hooks, and git.
 
 ## Conventions
 

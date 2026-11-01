@@ -203,14 +203,20 @@ manifest, and store.
   This mirrors the CLI's DEP-60 warning, adapted to the TUI's confirm-then-act
   flow (TUI-24) rather than a stdin prompt.
 - `TUI-45` While the TUI holds the terminal, every `git` child runs
-  non-interactively (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper),
+  non-interactively (`GIT_TERMINAL_PROMPT=0` and PRG-6's prompt-free ssh
+  command, with a 10s `ConnectTimeout` for OpenSSH),
   so an auth-required remote -- a private SSH repo whose key needs a passphrase, or
   an unknown host key -- fails fast with an error surfaced inline (TUI-24) instead
   of hanging the UI on a hidden prompt the user cannot see or answer. The suspended
   interactive meld (TUI-44) restores interactive git for its duration, so that same
   passphrase or host-key prompt works on the normal terminal. This is why a typed
   spec (TUI-30) can meld a private SSH source while a background preview, sync, or
-  upgrade of one fails fast rather than freezing.
+  upgrade of one fails fast rather than freezing. When the configured ssh
+  program has no prompt-free form (PRG-6: a wrapper script, TortoisePlink, the
+  `simple` variant), the `git` child instead runs in a new session with no
+  controlling terminal and a null stdin, so a prompt from that program fails at
+  once. A parallel fetch worker (CLI-248) is not detached, so Ctrl-C still
+  reaches its children.
 - `TUI-53` The source details dialog (TUI-26) shows the namespace the
   source will install under (its effective prefix: the consumer `--namespace` alias,
   else `[source].prefix`, else none; NS-1). When none of the source's items are
