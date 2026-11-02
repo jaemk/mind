@@ -564,6 +564,7 @@ mod tests {
             pin: crate::source::Pin::default(),
             roots: None,
             flat_skills: false,
+            full_history: false,
             add_roots: None,
             item_path: None,
             item_kind: None,

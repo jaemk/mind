@@ -2089,7 +2089,8 @@ fn link_project_defaults_to_cwd() {
 fn introspect_notes_legacy_windsurf_lobe() {
     // spec: HARN-26
     let sb = Sandbox::new();
-    let legacy = sb.base.join("legacy");
+    // A space in the project path: the printed commands must still paste.
+    let legacy = sb.base.join("legacy proj");
     let current = sb.base.join("current");
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::create_dir_all(&current).unwrap();
@@ -2112,7 +2113,7 @@ fn introspect_notes_legacy_windsurf_lobe() {
     );
     assert!(
         human.stdout.contains(&format!(
-            "`mind config lobes remove {lobe}` then `mind link-project {legacy_str}`"
+            "`mind config lobes remove '{lobe}'` then `mind link-project '{legacy_str}'`"
         )),
         "{}",
         human.stdout

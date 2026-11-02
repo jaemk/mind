@@ -131,7 +131,8 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   source at depth 1, so a large repo melds without downloading its history.
   Set `"full"` when a hook or tool needs the history (e.g. it runs `git log`):
   the next `meld` or `sync` deepens the clone, and it stays complete. An older
-  `mind` rejects the key, so set `min-mind-version` alongside.
+  `mind` rejects the key, so set `min-mind-version` alongside. A consumer can
+  ask for the same on any source with `mind meld --full-history`.
 
 ## `[[hooks]]` - lifecycle hooks
 

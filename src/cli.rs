@@ -1165,6 +1165,15 @@ pub struct MeldArgs {
     #[arg(long)]
     pub flat_skills: bool,
 
+    /// Clone the source's complete git history instead of only the checked-out
+    /// commit, for hooks or tools that read it (e.g. `git log`). Persisted on
+    /// the source, so every later sync keeps the history too. On an
+    /// already-melded source it turns the history on and deepens the clone.
+    /// A source can ask for the same with `[source] history = "full"`.
+    // spec: DSC-121
+    #[arg(long)]
+    pub full_history: bool,
+
     /// Supply or override the source's install hook: a shell command run
     /// after checkout to build the tooling its items rely on. Before it runs,
     /// a prompt offers three choices: run it (the default, a bare Enter),

@@ -322,6 +322,12 @@ pub struct Source {
     /// `[source].flat-skills` or the `skills/` container (DSC-74).
     #[serde(default)]
     pub flat_skills: bool,
+    /// Consumer `meld --full-history` (DSC-121): keep the clone's complete git
+    /// history whatever the source's `[source] history` says. Persisted at meld
+    /// and honored by every later sync. False (or absent in older sources.json)
+    /// leaves the clone depth to the source (DSC-118, DSC-120).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_history: bool,
     /// Consumer-supplied additive scan roots from `meld --add-root` (STO-55,
     /// DSC-84): convention-scanned in addition to whatever discovery layer is
     /// authoritative for the source (a plugin manifest, an authoritative
@@ -1226,6 +1232,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         pin: Pin::default(),
         roots: None,
         flat_skills: false,
+        full_history: false,
         add_roots: None,
         item_path: None,
         item_kind: None,

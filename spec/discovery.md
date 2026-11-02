@@ -622,6 +622,15 @@ tree, not the repo's history.
   --unshallow`) and stays complete from then on (DSC-119), including after
   the declaration is dropped. The throwaway clones `review` and the TUI preview
   make stay shallow regardless.
+- `DSC-121` `meld --full-history` is the consumer's equivalent of DSC-120: the
+  named source's clone is deepened to its complete history before any of its
+  hooks run, and the setting is persisted on the source (`full_history` in
+  `sources.json`, omitted when off) so every later `sync`, re-pin, or re-clone
+  deepens it again. It applies to the named source only, not to the sources it
+  curates. On an already-melded source it records the setting and deepens the
+  existing clone, unlike the discovery flags CLI-206 lists. A linked local
+  source is the user's own working tree, which `mind` never fetches into, so
+  the flag does not apply to it (a note says so).
 
 ## Scan roots
 

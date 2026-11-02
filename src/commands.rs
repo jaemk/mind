@@ -61,6 +61,7 @@ pub fn meld(
         item_kind,
         &mut MeldProfiles::None,
         false,
+        false,
     )
 }
 
@@ -82,6 +83,7 @@ pub(crate) fn meld_with_profiles(
     item_kind: Option<ItemKind>,
     profiles: &mut MeldProfiles<'_>,
     accept_newer_mind: bool,
+    full_history: bool,
 ) -> Result<MeldSummary> {
     paths.ensure_layout()?;
     // POL-3: the managed policy is authoritative over user intent. Load it once
@@ -125,6 +127,7 @@ pub(crate) fn meld_with_profiles(
         None,      // a top-level meld has no curator
         profiles,
         accept_newer_mind,
+        full_history, // spec: DSC-121 -- the named source only, not what it curates
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -970,6 +973,26 @@ fn sync_clone_to_pin(
     source: &crate::source::Source,
     dir: &std::path::Path,
 ) -> Result<(String, Pin)> {
+    let synced = sync_clone_to_pin_inner(source, dir)?;
+    honor_full_history(source, dir)?;
+    Ok(synced)
+}
+
+/// Deepen `source`'s clone at `dir` when the consumer melded it with
+/// `--full-history` (DSC-121). A linked local source's "clone" is the user's
+/// own working tree, which `mind` never fetches into.
+// spec: DSC-121
+fn honor_full_history(source: &crate::source::Source, dir: &std::path::Path) -> Result<()> {
+    if source.full_history && !source.is_linked() {
+        git::deepen(&source.url, dir)?;
+    }
+    Ok(())
+}
+
+fn sync_clone_to_pin_inner(
+    source: &crate::source::Source,
+    dir: &std::path::Path,
+) -> Result<(String, Pin)> {
     let pin = source.pin.clone();
     if !dir.join(".git").is_dir() {
         if let Some(parent) = dir.parent() {
@@ -1792,9 +1815,13 @@ fn meld_recursive(
     curated_by: Option<String>,
     profiles: &mut MeldProfiles<'_>,
     accept_newer_mind: bool,
+    full_history: bool,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
+    // spec: DSC-121 -- the consumer's `--full-history`, honored at the clone
+    // below and by every later sync.
+    source.full_history = full_history;
     // spec: DSC-100 -- a `kind` on an entry whose `source` is not an item link
     // is a mismatch, caught before any clone: `kind` only ever describes a
     // file link's item. The CLI's own `--kind` cannot reach here with a
@@ -2227,6 +2254,13 @@ fn meld_recursive(
 
     source.pin = final_pin;
     source.commit = commit;
+    // spec: DSC-121 -- deepen before anything (a hook, DSC-121's motivating
+    // case) runs against the clone. A linked local source is the user's own
+    // working tree: say so rather than silently doing nothing.
+    if source.full_history && source.is_linked() {
+        eprintln!("{}", full_history_linked_note(&source.name));
+    }
+    honor_full_history(&source, &dir)?;
 
     // spec: DSC-116 -- a source that declares a newer `min-mind-version` may
     // not work under this binary. Warn and ask before registering it; with no
@@ -2781,6 +2815,7 @@ fn meld_recursive(
                 Some(super_source_name.clone()),
                 &mut MeldProfiles::Curated(entry), // spec: HOOK-142
                 accept_newer_mind,                 // spec: DSC-116
+                false, // spec: DSC-121 -- --full-history names one source
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -2964,6 +2999,7 @@ fn meld_recursive(
                 Some(super_source_name.clone()),
                 &mut MeldProfiles::None,
                 accept_newer_mind, // spec: DSC-116
+                false,             // spec: DSC-121 -- --full-history names one source
             ) {
                 Ok(n) => {
                     added += n;
@@ -8752,6 +8788,37 @@ pub fn is_melded(paths: &Paths, repo: &str, alias: Option<&str>) -> Result<bool>
     Ok(Registry::load(paths)?.find(&name).is_some())
 }
 
+/// The DSC-121 note for `--full-history` on a linked local source.
+fn full_history_linked_note(name: &str) -> String {
+    format!(
+        "note: {} is your own working tree, so --full-history does not apply",
+        strip_ansi(name)
+    )
+}
+
+/// `meld --full-history` on an already-melded source (DSC-121): record the
+/// setting and deepen the existing clone now, before the re-meld's hook and
+/// install passes run. A linked local source is the user's own working tree,
+/// which `mind` never fetches into, so it is left alone with a note.
+// spec: DSC-121
+fn enable_full_history(paths: &Paths, name: &str) -> Result<()> {
+    let mut registry = Registry::load(paths)?;
+    let Some(source) = registry.sources.iter_mut().find(|s| s.name == name) else {
+        return Ok(());
+    };
+    if source.is_linked() {
+        eprintln!("{}", full_history_linked_note(&source.name));
+        return Ok(());
+    }
+    let dir = clone_dir_checked(paths, source)?;
+    git::deepen(&source.url, &dir)?;
+    if !source.full_history {
+        source.full_history = true;
+        registry.save(paths)?;
+    }
+    Ok(())
+}
+
 /// Re-melding an already-melded source (CLI-12). It does not re-clone or
 /// re-register: it ensures the source's items are installed, installing any that
 /// are missing just as a fresh meld does (CLI-23), and otherwise (or with
@@ -9058,6 +9125,7 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     let old_commit = source.commit.clone();
     let url = source.url.clone();
     let is_local = source.is_local();
+    let full_history = source.full_history;
 
     let (checkout_pin, freeze) = resolve_checkout_pin(pin, old_pin.clone());
 
@@ -9152,6 +9220,12 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
             let _ = std::fs::remove_dir_all(&target);
             return Err(e);
         }
+    }
+    // spec: DSC-121 -- a re-pin may clone afresh (a first pin on a linked
+    // local source), so honor --full-history here too. `target` is always a
+    // sources-tree clone, never the user's working tree.
+    if full_history {
+        git::deepen(&url, &target)?;
     }
     let resolved_commit = git::head_commit(&url, &target)?;
     // spec: CLI-200 -- a freeze always persists the resolved commit as an
@@ -10949,6 +11023,7 @@ pub fn sync_with_selector(
                     None, // provisioned by policy, not by a curator (STO-82)
                     &mut MeldProfiles::None,
                     false, // spec: DSC-116 -- no one to ask; refuse
+                    false, // spec: DSC-121 -- no consumer flag
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -11318,6 +11393,7 @@ pub fn sync_with_selector(
                 Some(todo_curator), // spec: STO-82
                 &mut MeldProfiles::None,
                 false, // spec: DSC-116 -- no one to ask; refuse
+                false, // spec: DSC-121 -- no consumer flag
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -11650,6 +11726,7 @@ pub(crate) fn meld_curated_entry(
         Some(curator.to_string()),         // spec: STO-82
         &mut MeldProfiles::Curated(entry), // spec: HOOK-142
         false,                             // spec: DSC-116 -- no one to ask; refuse
+        false,                             // spec: DSC-121 -- no consumer flag
     )
 }
 
@@ -14102,13 +14179,15 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 notes.push(Issue {
                     kind: "legacy-windsurf-lobe",
                     target: entry.path().to_string(),
+                    // The two commands are meant to be pasted, so each path
+                    // is shell-quoted (a project path may hold spaces).
                     message: format!(
                         "lobe '{}' uses the legacy Windsurf skills dir; Devin reads \
                          '.devin/skills' first. To move: `mind config lobes remove {}` \
                          then `mind link-project {}`",
                         entry.path(),
-                        entry.path(),
-                        project.display()
+                        crate::error::shell_quote(entry.path()),
+                        crate::error::shell_quote(&project.to_string_lossy())
                     ),
                 });
             }
@@ -15942,6 +16021,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         roots,
         add_roots,
         flat_skills,
+        full_history,
         pin,
         follow_branch,
         pin_tag,
@@ -16053,6 +16133,10 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         if item_kind.is_some() {
             ignored_flags.push("--kind");
         }
+        // spec: DSC-121 -- `--full-history` is honored on a re-meld too.
+        if full_history {
+            enable_full_history(paths, &source_ident)?;
+        }
         // spec: CLI-209 -- unlike the discovery flags above, `--pin`
         // IS honored on a re-meld: it re-pins the source instead of
         // being a silent no-op.
@@ -16095,6 +16179,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             item_kind,
             &mut meld_profiles,
             yes, // spec: DSC-116
+            full_history,
         )?;
         // CLI-23: by default, offer to install the melded source's items
         // right away (preview + prompt). `--register-only` stops at registering.
@@ -17160,6 +17245,7 @@ mod tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            full_history: false,
             add_roots: None,
             item_path: Some(item_path.to_string()),
             item_kind: None,
@@ -19460,6 +19546,7 @@ mod tests {
             pin: Pin::DefaultBranch,
             roots: None,
             flat_skills: false,
+            full_history: false,
             add_roots: None,
             item_path: None,
             item_kind: None,

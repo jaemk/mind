@@ -648,7 +648,18 @@ fn declares_full_history(dir: &Path) -> bool {
 /// (DSC-120). Once deepened, later fetches keep it complete (DSC-119).
 // spec: DSC-120
 fn deepen_if_declared(url: &str, dir: &Path) -> Result<()> {
-    if declares_full_history(dir) && is_shallow(url, dir) {
+    if declares_full_history(dir) {
+        deepen(url, dir)?;
+    }
+    Ok(())
+}
+
+/// Deepen the clone at `dir` to its complete history (`fetch --unshallow`); a
+/// no-op on a clone that is already complete. Used for the source's own
+/// declaration (DSC-120) and the consumer's `meld --full-history` (DSC-121).
+// spec: DSC-120 DSC-121
+pub fn deepen(url: &str, dir: &Path) -> Result<()> {
+    if is_shallow(url, dir) {
         run(url, Some(dir), &["fetch", "--unshallow", "origin"])?;
     }
     Ok(())
@@ -1940,6 +1951,52 @@ mod tests {
         let throwaway = base.join("throwaway");
         clone_shallow_at(&url, &throwaway, &Pin::DefaultBranch).unwrap();
         assert!(is_shallow(&url, &throwaway));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn reset_to_commit_restores_a_shallow_clone_after_moving_forward() {
+        // spec: DSC-119 AUP-17 -- auto-update's restore puts a clone back on
+        // the commit it was on before a sync moved it. On a shallow clone the
+        // old commit must still be local after the depth-1 fetch, with no
+        // fetch of its own (the remote here is gone by the time it runs).
+        let base = tmpdir("depth-restore");
+        let (remote, _a, _b, sha_c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert!(is_shallow(&url, &dest));
+        assert_eq!(read_head(&dest), sha_c);
+
+        fs::write(remote.join("file.txt"), "version D").unwrap();
+        git(&remote, &["commit", "-aqm", "commit D"]);
+        let sha_d = read_head(&remote);
+        sync_to_pin(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert_eq!(read_head(&dest), sha_d);
+        assert!(is_shallow(&url, &dest));
+
+        let gone = format!("file://{}", base.join("gone").display());
+        git(&dest, &["remote", "set-url", "origin", &gone]);
+        reset_to_commit(&gone, &dest, &sha_c).expect("old commit is still local");
+        assert_eq!(read_head(&dest), sha_c);
+        assert_eq!(read_file(&dest, "file.txt"), "version C");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn deepen_is_a_no_op_on_a_complete_clone() {
+        // spec: DSC-121 -- deepening twice (a re-meld with --full-history, or
+        // a sync of an already-deepened clone) must not fail on the
+        // `--unshallow on a complete repository` error.
+        let base = tmpdir("depth-deepen-twice");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_shallow_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        deepen(&url, &dest).unwrap();
+        assert!(!is_shallow(&url, &dest));
+        assert!(has_commit(&dest, &sha_a));
+        deepen(&url, &dest).expect("a second deepen is a no-op");
         cleanup(&base);
     }
 

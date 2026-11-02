@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-02
+
 ### Added
 
 - `devin` lobe preset for Devin Desktop (formerly Windsurf): a project lobe at
@@ -15,6 +17,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `~/.config/devin`.
 - `introspect` notes each `.windsurf` lobe, with the commands to move it to
   `.devin`. The note is not counted as an issue; `--json` lists it under `notes`.
+- `[source] history = "full"` in `mind.toml` makes `meld` and `sync` deepen a
+  source's clone to its complete history, for hooks and tools that read it.
+- `meld --full-history` does the same for any source, from the consumer side,
+  and every later `sync` keeps it. On an already-melded source it deepens the
+  existing clone.
 
 ### Changed
 
@@ -23,15 +30,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lobe, which Devin still reads, and existing windsurf lobes keep working.
 - `config lobes detect` no longer offers the `windsurf` preset; the same
   machines are offered `devin`.
-
-## [0.44.0] - 2026-11-02
-
-### Added
-
-- `[source] history = "full"` in `mind.toml` makes `meld` and `sync` deepen a
-  source's clone to its complete history, for hooks and tools that read it.
-
-### Changed
 
 - A source pinned to a commit (`pin-ref`, `--pin <sha>`) clones at depth 1 and
   fetches only that commit, instead of cloning the whole history. A remote that
