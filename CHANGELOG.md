@@ -6,6 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `meld`, `learn`, `upgrade`, and `unmeld` show one plan on a terminal: the
+  items, then every hook the run would offer (with where it runs and, for an
+  item hook, the clone path to inspect), and ask once before anything runs.
+  `[Y/s/r/n]` runs every hook, skips them all, prompts each one, or cancels;
+  `[Y/n/r]` when only hooks need an answer. No source hook runs before the
+  answer, so declining `meld` or `upgrade` runs none.
+- Every yes/no and lettered prompt asks again on an unrecognized reply, and
+  EOF takes the prompt's default instead of declining.
+- Every `unmeld` confirms before removing anything, including a single-item
+  source and `--keep-items`, and the answer defaults to no (`[y/N]`, or
+  `[y/s/r/N]` when uninstall hooks are listed), so Enter and EOF remove
+  nothing. `--yes` skips it; without a terminal `unmeld` now requires `--yes`.
+- Without a terminal, an `upgrade` with items to apply, a `learn` that pulls
+  in dependencies, and `learn <source> --profile` refuse with
+  `ConfirmationRequired` unless `--yes` is given, instead of reading a reply
+  from the pipe.
+
+### Fixed
+
+- The `probe` TUI no longer hangs when a `learn`, `upgrade`, `forget`, or
+  profile install reaches a hook prompt: it suspends and runs the action on the
+  normal terminal instead.
+
 ## [0.42.0] - 2026-10-31
 
 ### Added

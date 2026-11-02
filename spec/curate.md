@@ -109,7 +109,7 @@ A *curator* is a registered source that declares `[discover].sources` in its
 ## Applying
 
 - `CUR-9` With no flags, `curate` prints the whole plan and asks once (`[Y/n]`,
-  EOF counts as No) before applying it, mirroring `upgrade` (CLI-60) rather than
+  a bare Enter or EOF applies, CLI-258) before applying it, mirroring `upgrade` (CLI-60) rather than
   prompting per change. `--yes` applies without asking. `--check` reports and
   applies nothing, and outranks `--yes` when both are given, so a `--check` run
   is always safe to paste. A non-TTY run without `--yes` reports the plan,

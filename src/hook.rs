@@ -4,6 +4,7 @@
 //! is arbitrary code from the source, `mind` discloses it and prompts before
 //! running (see spec/install-hooks.md).
 
+#[cfg(test)]
 use std::io::BufRead;
 use std::io::IsTerminal;
 use std::io::Write as _;
@@ -147,18 +148,21 @@ pub enum HookChoice {
     Abort,
 }
 
-/// Parse a reply to the three-way prompt (HOOK-20): "y"/"Y" or "" (Enter,
-/// the default) => RunAndContinue; "n"/"N" => SkipAndContinue; "a"/"A" =>
-/// Abort. Anything unrecognized defaults to SkipAndContinue so an unclear
-/// reply never runs the hook. Trims whitespace.
-pub fn parse_hook_choice(input: &str) -> HookChoice {
-    match input.trim() {
-        "y" | "Y" | "" => HookChoice::RunAndContinue,
-        "n" | "N" => HookChoice::SkipAndContinue,
-        "a" | "A" => HookChoice::Abort,
-        _ => HookChoice::SkipAndContinue,
-    }
-}
+/// The replies of the three-way prompt (HOOK-20, CLI-257): run, skip, abort.
+const HOOK_CHOICES: [crate::prompt::Choice<HookChoice>; 3] = [
+    crate::prompt::Choice {
+        keys: &["y", "yes"],
+        value: HookChoice::RunAndContinue,
+    },
+    crate::prompt::Choice {
+        keys: &["n", "no"],
+        value: HookChoice::SkipAndContinue,
+    },
+    crate::prompt::Choice {
+        keys: &["a", "abort"],
+        value: HookChoice::Abort,
+    },
+];
 
 /// Set for an unattended `auto-update run` (AUP-15): it never prompts, even
 /// when started from a terminal, so every consent gate takes its no-TTY path.
@@ -234,32 +238,40 @@ pub fn disclosure_text(
     out
 }
 
-/// Read one line from `reader` and return the parsed `HookChoice` (HOOK-20).
-/// EOF (zero bytes read) returns `SkipAndContinue` so that a non-TTY or absent
-/// reply never runs the hook and never aborts (HOOK-22).
+/// The three-way question line (HOOK-20).
+const HOOK_QUESTION: &str = "Run this hook? [Y/n/a] (default Y): ";
+
+/// Read replies from `reader` until one is valid (CLI-257); Enter and EOF run
+/// the hook, the default (HOOK-20, CLI-258). The test seam for the prompt's
+/// reply handling; [`prompt_choice`] asks the same way on the terminal.
+#[cfg(test)]
 fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) => Ok(HookChoice::SkipAndContinue), // EOF => skip, never abort
-        Ok(_) => Ok(parse_hook_choice(&line)),
-        Err(e) => Err(MindError::io("<stdin>", e)),
-    }
+    crate::prompt::ask_from(
+        &mut reader,
+        &mut std::io::sink(),
+        "",
+        &HOOK_CHOICES,
+        HookChoice::RunAndContinue,
+    )
 }
 
-/// Print the disclosure and the three choices, read one line from stdin, and
-/// return the parsed choice (HOOK-20). Delegates the read to `read_choice` so
-/// the read path is independently testable.
+/// Print the disclosure and the three choices, then ask until a valid reply
+/// (HOOK-20, CLI-257). Only reached on a TTY (HOOK-22).
 pub fn prompt_choice(disclosure: &str) -> Result<HookChoice> {
+    // spec: TUI-44
+    crate::prompt::guard("running a hook")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{disclosure}");
         println!("  [Y] run the hook   [n] skip it   [a] abort - install nothing");
-        print!("Run this hook? [Y/n/a] (default Y): ");
-        std::io::stdout()
-            .flush()
-            .map_err(|e| MindError::io("<stdout>", e))?;
-
-        read_choice(std::io::stdin().lock())
+        let stdin = std::io::stdin();
+        crate::prompt::ask_from(
+            &mut stdin.lock(),
+            &mut std::io::stdout(),
+            HOOK_QUESTION,
+            &HOOK_CHOICES,
+            HookChoice::RunAndContinue,
+        )
     })
 }
 
@@ -270,41 +282,47 @@ pub enum OptionalChoice {
     Skip,
 }
 
-/// Parse a reply to the optional-hook prompt (HOOK-52): "y"/"Y" or "" (Enter,
-/// the default) => Run; anything else => Skip. Trims whitespace. An optional
-/// hook is never run on an unclear reply.
-pub fn parse_optional_choice(input: &str) -> OptionalChoice {
-    match input.trim() {
-        "y" | "Y" | "" => OptionalChoice::Run,
-        _ => OptionalChoice::Skip,
-    }
-}
+/// The replies of the two-way prompt (HOOK-52, CLI-257): run or skip.
+const OPTIONAL_CHOICES: [crate::prompt::Choice<OptionalChoice>; 2] = [
+    crate::prompt::Choice {
+        keys: &["y", "yes"],
+        value: OptionalChoice::Run,
+    },
+    crate::prompt::Choice {
+        keys: &["n", "no"],
+        value: OptionalChoice::Skip,
+    },
+];
 
-/// Read one line from `reader` and return the parsed `OptionalChoice` (HOOK-52).
-/// EOF (zero bytes read) returns `Skip` so that a non-TTY or absent reply
-/// never runs the hook (HOOK-22).
+/// [`read_choice`] for the two-way prompt (HOOK-52).
+#[cfg(test)]
 fn read_optional_choice<R: BufRead>(mut reader: R) -> Result<OptionalChoice> {
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) => Ok(OptionalChoice::Skip), // EOF => skip
-        Ok(_) => Ok(parse_optional_choice(&line)),
-        Err(e) => Err(MindError::io("<stdin>", e)),
-    }
+    crate::prompt::ask_from(
+        &mut reader,
+        &mut std::io::sink(),
+        "",
+        &OPTIONAL_CHOICES,
+        OptionalChoice::Run,
+    )
 }
 
-/// Print the disclosure and the two optional-hook choices, read one line from
-/// stdin, and return the parsed choice (HOOK-52). Mirrors `prompt_choice`.
+/// Print the disclosure and the two optional-hook choices, then ask until a
+/// valid reply (HOOK-52, CLI-257). Mirrors `prompt_choice`.
 pub fn prompt_choice_optional(disclosure: &str) -> Result<OptionalChoice> {
+    // spec: TUI-44
+    crate::prompt::guard("running a hook")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{disclosure}");
         println!("  [Y] run   [n] skip");
-        print!("Run this optional hook? [Y/n] (default Y): ");
-        std::io::stdout()
-            .flush()
-            .map_err(|e| MindError::io("<stdout>", e))?;
-
-        read_optional_choice(std::io::stdin().lock())
+        let stdin = std::io::stdin();
+        crate::prompt::ask_from(
+            &mut stdin.lock(),
+            &mut std::io::stdout(),
+            "Run this optional hook? [Y/n] (default Y): ",
+            &OPTIONAL_CHOICES,
+            OptionalChoice::Run,
+        )
     })
 }
 
@@ -321,12 +339,27 @@ pub enum HookAct {
 /// `--accept-hooks` run is unattended (HOOK-23), a non-TTY skips (HOOK-22),
 /// an optional hook prompts two-way (run/skip, HOOK-52), and a required hook
 /// prompts three-way (run/skip/abort, HOOK-20). An optional hook never aborts.
-pub fn decide(disclosure: &str, optional: bool, accepted: bool) -> Result<HookAct> {
+///
+/// `key` is the hook's identity within the run: when a unified plan listed it,
+/// the plan's answer decides it without a prompt (HOOK-181), unless that
+/// answer was to review each hook. An unlisted hook is prompted (HOOK-185).
+pub fn decide(
+    key: &crate::consent::HookKey,
+    disclosure: &str,
+    optional: bool,
+    accepted: bool,
+) -> Result<HookAct> {
     if accepted {
         return Ok(HookAct::Run);
     }
     if !is_tty() {
         return Ok(HookAct::Skip);
+    }
+    // spec: HOOK-181 HOOK-185
+    match crate::consent::answer_for(key) {
+        Some(crate::consent::Answer::RunAll) => return Ok(HookAct::Run),
+        Some(crate::consent::Answer::SkipAll) => return Ok(HookAct::Skip),
+        Some(crate::consent::Answer::Review) | None => {}
     }
     if optional {
         return Ok(match prompt_choice_optional(disclosure)? {
@@ -969,13 +1002,14 @@ mod tests {
     // spec: HOOK-22, HOOK-23
     #[test]
     fn decide_accepted_runs_and_non_tty_skips() {
+        let key = crate::consent::HookKey::source_hook("s", "install", "make");
         // accepted => Run regardless of optionality (no prompt).
-        assert_eq!(decide("d", false, true).unwrap(), HookAct::Run);
-        assert_eq!(decide("d", true, true).unwrap(), HookAct::Run);
+        assert_eq!(decide(&key, "d", false, true).unwrap(), HookAct::Run);
+        assert_eq!(decide(&key, "d", true, true).unwrap(), HookAct::Run);
         // Test runs with no TTY on stdout, so a non-skip decision is Skip, never
         // Abort or Run (HOOK-22: never run silently).
-        assert_eq!(decide("d", false, false).unwrap(), HookAct::Skip);
-        assert_eq!(decide("d", true, false).unwrap(), HookAct::Skip);
+        assert_eq!(decide(&key, "d", false, false).unwrap(), HookAct::Skip);
+        assert_eq!(decide(&key, "d", true, false).unwrap(), HookAct::Skip);
     }
 
     /// `Accept` answers per event: each field gates only its own event, and an
@@ -1059,66 +1093,36 @@ mod tests {
         }
     }
 
-    // ---- parse_hook_choice ----
+    // ---- read_choice ----
 
     // spec: HOOK-20
     #[test]
-    fn parse_hook_choice_run_on_y() {
-        assert_eq!(parse_hook_choice("y"), HookChoice::RunAndContinue);
-        assert_eq!(parse_hook_choice("Y"), HookChoice::RunAndContinue);
+    fn read_choice_accepts_each_reply_in_any_case() {
+        let read = |s: &str| read_choice(std::io::Cursor::new(s.to_string())).unwrap();
+        assert_eq!(read("Y\n"), HookChoice::RunAndContinue);
+        assert_eq!(read(" yes \n"), HookChoice::RunAndContinue);
+        assert_eq!(read("N\n"), HookChoice::SkipAndContinue);
+        assert_eq!(read("\ta\n"), HookChoice::Abort);
     }
 
-    // spec: HOOK-20
-    // Empty input (bare Enter) now RUNS the hook - the key default flip.
+    // spec: HOOK-20 CLI-257
+    // An unrecognized reply neither runs nor skips: it is asked again, and the
+    // next valid reply decides.
     #[test]
-    fn parse_hook_choice_run_on_empty_default() {
-        assert_eq!(parse_hook_choice(""), HookChoice::RunAndContinue);
+    fn read_choice_asks_again_after_an_unrecognized_reply() {
+        let reader = std::io::Cursor::new("garbage\n1\nn\n");
+        let result = read_choice(reader).expect("read_choice should not error");
+        assert_eq!(result, HookChoice::SkipAndContinue);
     }
 
-    // spec: HOOK-20
+    // spec: HOOK-20 CLI-258
+    // EOF takes the default, run. Only a TTY reaches the prompt (HOOK-22), so
+    // EOF here is the user's Ctrl-D.
     #[test]
-    fn parse_hook_choice_skip_on_n() {
-        assert_eq!(parse_hook_choice("n"), HookChoice::SkipAndContinue);
-        assert_eq!(parse_hook_choice("N"), HookChoice::SkipAndContinue);
-    }
-
-    // spec: HOOK-20
-    #[test]
-    fn parse_hook_choice_abort_on_a() {
-        assert_eq!(parse_hook_choice("a"), HookChoice::Abort);
-        assert_eq!(parse_hook_choice("A"), HookChoice::Abort);
-    }
-
-    // spec: HOOK-20
-    #[test]
-    fn parse_hook_choice_garbage_defaults_to_skip() {
-        assert_eq!(parse_hook_choice("garbage"), HookChoice::SkipAndContinue);
-        assert_eq!(parse_hook_choice("1"), HookChoice::SkipAndContinue);
-        assert_eq!(parse_hook_choice("yes"), HookChoice::SkipAndContinue);
-    }
-
-    // spec: HOOK-20
-    #[test]
-    fn parse_hook_choice_trims_whitespace() {
-        assert_eq!(parse_hook_choice(" y "), HookChoice::RunAndContinue);
-        assert_eq!(parse_hook_choice("\ta\n"), HookChoice::Abort);
-        assert_eq!(parse_hook_choice(" n "), HookChoice::SkipAndContinue);
-    }
-
-    // ---- read_choice (tests the stdin read path, not just the parser) ----
-
-    // spec: HOOK-20, HOOK-22
-    // EOF (empty reader) must produce SkipAndContinue: a non-TTY or absent
-    // reply never runs and never aborts.
-    #[test]
-    fn read_choice_eof_returns_skip_and_continue() {
+    fn read_choice_eof_takes_the_default() {
         let reader = std::io::Cursor::new("");
         let result = read_choice(reader).expect("read_choice should not error on EOF");
-        assert_eq!(
-            result,
-            HookChoice::SkipAndContinue,
-            "EOF must yield SkipAndContinue, not run or abort"
-        );
+        assert_eq!(result, HookChoice::RunAndContinue);
     }
 
     // spec: HOOK-20
@@ -1162,45 +1166,19 @@ mod tests {
         assert_eq!(result, HookChoice::Abort);
     }
 
-    // ---- parse_optional_choice ----
-
-    // spec: HOOK-52
-    #[test]
-    fn parse_optional_choice_run_on_y() {
-        assert_eq!(parse_optional_choice("y"), OptionalChoice::Run);
-        assert_eq!(parse_optional_choice("Y"), OptionalChoice::Run);
-    }
-
-    // spec: HOOK-52
-    // Empty input (bare Enter) now RUNS the optional hook - the default flip.
-    #[test]
-    fn parse_optional_choice_run_on_empty_default() {
-        assert_eq!(parse_optional_choice(""), OptionalChoice::Run);
-    }
-
-    // spec: HOOK-52
-    #[test]
-    fn parse_optional_choice_skip_on_n() {
-        assert_eq!(parse_optional_choice("n"), OptionalChoice::Skip);
-    }
-
-    // spec: HOOK-52
-    #[test]
-    fn parse_optional_choice_garbage_defaults_to_skip() {
-        assert_eq!(parse_optional_choice("garbage"), OptionalChoice::Skip);
-        assert_eq!(parse_optional_choice("yes"), OptionalChoice::Skip);
-        assert_eq!(parse_optional_choice("1"), OptionalChoice::Skip);
-    }
-
-    // spec: HOOK-52
-    #[test]
-    fn parse_optional_choice_trims_whitespace() {
-        assert_eq!(parse_optional_choice(" y "), OptionalChoice::Run);
-        assert_eq!(parse_optional_choice("\ty\n"), OptionalChoice::Run);
-        assert_eq!(parse_optional_choice(" n "), OptionalChoice::Skip);
-    }
-
     // ---- read_optional_choice ----
+
+    // spec: HOOK-52 CLI-257
+    #[test]
+    fn read_optional_choice_asks_again_after_an_unrecognized_reply() {
+        let reader = std::io::Cursor::new("garbage\n a \n N \n");
+        let result = read_optional_choice(reader).expect("no error");
+        assert_eq!(
+            result,
+            OptionalChoice::Skip,
+            "`a` is not an optional-hook reply"
+        );
+    }
 
     // spec: HOOK-52
     // "y\n" through the read path must produce Run.
@@ -1220,13 +1198,13 @@ mod tests {
         assert_eq!(result, OptionalChoice::Skip);
     }
 
-    // spec: HOOK-52, HOOK-22
-    // EOF (empty reader) must produce Skip: a non-TTY or absent reply never runs.
+    // spec: HOOK-52 CLI-258
+    // EOF takes the default, run (only a TTY reaches the prompt, HOOK-22).
     #[test]
-    fn read_optional_choice_eof_returns_skip() {
+    fn read_optional_choice_eof_takes_the_default() {
         let reader = std::io::Cursor::new("");
         let result = read_optional_choice(reader).expect("no error on EOF");
-        assert_eq!(result, OptionalChoice::Skip, "EOF must yield Skip, not Run");
+        assert_eq!(result, OptionalChoice::Run);
     }
 
     // spec: HOOK-52

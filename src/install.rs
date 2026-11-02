@@ -788,6 +788,14 @@ fn run_build_hook(
         commit: Some(commit),
         replaced: &[],
     };
+    // spec: HOOK-181 HOOK-185 -- the unified plan's answer, when it listed
+    // this build hook.
+    let planned = crate::consent::answer_for(&crate::consent::HookKey::item_hook(
+        &item.source,
+        &item.display_key(),
+        "build",
+        build,
+    ));
     let run = if accepted {
         true
     } else if !crate::hook::is_tty() {
@@ -797,6 +805,11 @@ fn run_build_hook(
             item.display_key()
         ));
         false
+    } else if let Some(
+        answer @ (crate::consent::Answer::RunAll | crate::consent::Answer::SkipAll),
+    ) = planned
+    {
+        answer == crate::consent::Answer::RunAll
     } else {
         let disclosure = crate::hook::disclosure_text(
             &item.source,
@@ -897,6 +910,14 @@ fn run_item_hook(
         _ => "its cleanup is not run",
     };
     let cwd = hook_cwd(store);
+    // spec: HOOK-181 HOOK-185 -- the unified plan's answer, when it listed
+    // this hook.
+    let planned = crate::consent::answer_for(&crate::consent::HookKey::item_hook(
+        source,
+        display_key,
+        event,
+        cmd,
+    ));
     let run = if accepted {
         true
     } else if !crate::hook::is_tty() {
@@ -905,6 +926,11 @@ fn run_item_hook(
             "note: skipped {event} hook for {display_key} in a non-interactive context; {effect}"
         ));
         false
+    } else if let Some(
+        answer @ (crate::consent::Answer::RunAll | crate::consent::Answer::SkipAll),
+    ) = planned
+    {
+        answer == crate::consent::Answer::RunAll
     } else {
         // spec: HOOK-120, HOOK-51 -- name the hook and its own lifecycle event
         // on dedicated lines, mirroring the source-hook disclosure, rather than

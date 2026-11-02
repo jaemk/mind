@@ -98,11 +98,16 @@ skill:review  [selected]
   agent:dev   [dependency]
     agent:test  [dependency]
 
-Install these 3 items? [y/N]
+install this dependency closure? [y/N]
 ```
 
 Nodes already in the manifest are marked `[installed]` and are not re-installed.
 Cycles are shown as marked back-edges rather than expanded again.
+
+When an item in the closure declares a hook, the hooks are listed under the
+tree and the question becomes the [install plan](install-hooks.md#the-install-plan)'s
+`[Y/s/r/n]`. Without a terminal there is no prompt: the run refuses unless
+`--yes` is given.
 
 `--yes` (or answering `y`) confirms without prompting. Under `--json` there is no
 prompt at all: `--yes` is mandatory whenever the closure adds items beyond the

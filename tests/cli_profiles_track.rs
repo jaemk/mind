@@ -352,13 +352,14 @@ fn declined_addition_stays_out_of_the_snapshot_and_is_offered_again() {
 
 #[test]
 fn non_interactive_upgrade_without_yes_installs_no_addition() {
-    // spec: PROF-21 -- the addition is under upgrade's gate: EOF on stdin is a
-    // decline, so nothing installs and nothing is snapshotted.
+    // spec: PROF-21 CLI-259 -- the addition is under upgrade's gate: without a
+    // TTY the run refuses, so nothing installs and nothing is snapshotted.
     let sb = Sandbox::new("src");
     sb.ok(&["meld", &sb.spec(), "--yes"]);
     sb.commit_toml(PROFILES_PLUS_TEST);
     let r = sb.mind(&["upgrade"]);
-    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("--yes"), "{}", r.stderr);
     assert!(sb.manifest_item("skill:test").is_none());
     assert!(
         !sb.recorded_snapshot()

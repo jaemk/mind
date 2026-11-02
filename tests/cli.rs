@@ -178,6 +178,12 @@ impl Sandbox {
         self.run(args, input, &[])
     }
 
+    /// Run `mind` as if at a terminal (`MIND_TTY=1`, HOOK-109) with `input`
+    /// as the scripted replies: prompts are shown only on a TTY (CLI-259).
+    fn mind_tty(&self, args: &[&str], input: &str) -> Run {
+        self.run(args, Some(input), &[("MIND_TTY", "1")])
+    }
+
     /// Run `mind` with additional environment variables (e.g. MIND_AGENT_HOMES).
     fn mind_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Run {
         self.run(args, None, envs)
@@ -471,7 +477,9 @@ fn remeld_ignored_flags_note_shell_quotes_a_metachar_alias() {
     );
 
     let argv = remedy_argv(&again.stdout);
-    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    // A piped run confirms the removal with `--yes` (CLI-259).
+    args.push("--yes");
     let r = sb.mind(&args);
     assert!(
         r.success,
@@ -537,7 +545,7 @@ fn unmeld_unlink_only_remaining_items_hint_shell_quotes_a_metachar_alias() {
         learn_all.stdout, learn_all.stderr
     );
 
-    let r = sb.mind(&["unmeld", &source_name, "--unlink-only"]);
+    let r = sb.mind(&["unmeld", &source_name, "--unlink-only", "--yes"]);
     assert!(r.success, "unmeld failed: {} {}", r.stdout, r.stderr);
 
     let quoted = shell_quote(&format!("{source_name}#*"));
@@ -1053,7 +1061,7 @@ fn local_source_is_read_from_its_working_tree() {
 
     // unmeld leaves the working tree intact.
     assert!(
-        sb.mind(&["unmeld", "worktree-src", "--unlink-only"])
+        sb.mind(&["unmeld", "worktree-src", "--unlink-only", "--yes"])
             .success
     );
     assert!(
@@ -3748,7 +3756,7 @@ fn upgrade_reports_delta_and_declining_changes_nothing() {
     sb.mind(&["sync"]);
 
     // Dry-run report: shows hash and commit deltas with arrows.
-    let report = sb.mind_with_input(&["upgrade"], Some("n\n"));
+    let report = sb.mind_tty(&["upgrade"], "n\n");
     assert!(report.stdout.contains("skill:review"), "{}", report.stdout);
     assert!(report.stdout.contains("hash"), "{}", report.stdout);
     assert!(report.stdout.contains("->"), "{}", report.stdout);
@@ -3756,15 +3764,30 @@ fn upgrade_reports_delta_and_declining_changes_nothing() {
 
     // Declining must leave the installed commit untouched.
     let before = sb.mind(&["recall", "skill:review"]).stdout;
-    let again = sb.mind_with_input(&["upgrade"], Some("n\n"));
+    let again = sb.mind_tty(&["upgrade"], "n\n");
     assert!(again.stdout.contains("aborted"));
     assert_eq!(before, sb.mind(&["recall", "skill:review"]).stdout);
 }
 
 #[test]
+fn upgrade_without_a_tty_or_yes_refuses() {
+    // spec: CLI-60 CLI-259 -- piped stdin is not consent: the run refuses
+    // instead of reading a reply, and changes nothing.
+    let sb = melded();
+    sb.mind(&["learn", "review"]);
+    sb.edit_source();
+    sb.mind(&["sync"]);
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+    let r = sb.mind_with_input(&["upgrade"], Some("y\n"));
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("--yes"), "{}", r.stderr);
+    assert_eq!(before, sb.mind(&["recall", "skill:review"]).stdout);
+}
+
+#[test]
 fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
-    // spec: CLI-60 - the apply prompt defaults to Yes, so a bare Enter applies the
-    // upgrade. (EOF is still No: see the empty-input branch.)
+    // spec: CLI-60 CLI-258 - the apply prompt defaults to Yes, so a bare Enter
+    // applies the upgrade, and so does EOF.
     let sb = melded();
     sb.mind(&["learn", "review"]);
     let before = sb.mind(&["recall", "skill:review"]).stdout;
@@ -3772,7 +3795,7 @@ fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
     sb.mind(&["sync"]);
 
     // A bare Enter (newline, not EOF) confirms.
-    let applied = sb.mind_with_input(&["upgrade"], Some("\n"));
+    let applied = sb.mind_tty(&["upgrade"], "\n");
     assert!(applied.success, "{}", applied.stderr);
     assert!(
         applied.stdout.contains("upgraded skill:review"),
@@ -3785,16 +3808,16 @@ fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
         "the installed commit should have advanced"
     );
 
-    // EOF (no input at all) still declines.
+    // EOF (no input at all) takes the same default.
     sb.write_and_commit(
         "skills/review/SKILL.md",
         "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nedited again\n",
     );
     sb.mind(&["sync"]);
-    let eof = sb.mind_with_input(&["upgrade"], Some(""));
+    let eof = sb.mind_tty(&["upgrade"], "");
     assert!(
-        eof.stdout.contains("aborted"),
-        "EOF must decline: {}",
+        eof.stdout.contains("upgraded skill:review"),
+        "EOF must apply: {}",
         eof.stdout
     );
 }
@@ -6747,7 +6770,7 @@ fn unmeld_unlink_only_keeps_installed_items() {
     // installed items, listing them with the forget hint.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
-    let r = sb.mind(&["unmeld", "agents", "--unlink-only"]);
+    let r = sb.mind(&["unmeld", "agents", "--unlink-only", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
 
     // Source is gone.
@@ -6775,7 +6798,7 @@ fn unmeld_forgets_items_by_default() {
     // must not delete the linked local working tree (CLI-27).
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
-    let r = sb.mind(&["unmeld", "agents"]);
+    let r = sb.mind(&["unmeld", "agents", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
         std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
@@ -6845,10 +6868,10 @@ fn unmeld_full_name_resolves_basename_collision() {
 
     // Full owner/repo unmelds exactly one; the basename is then unambiguous.
     assert!(
-        a.mind(&["unmeld", &format!("{}/agents", a.base_name())])
+        a.mind(&["unmeld", &format!("{}/agents", a.base_name()), "--yes"])
             .success
     );
-    assert!(a.mind(&["unmeld", "agents"]).success);
+    assert!(a.mind(&["unmeld", "agents", "--yes"]).success);
 }
 
 #[test]
@@ -6865,7 +6888,7 @@ fn unmeld_glob_removes_only_the_matching_source() {
             .success
     );
 
-    let r = a.mind(&["unmeld", "*agents"]);
+    let r = a.mind(&["unmeld", "*agents", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
 
     // Only the agents source (and its item) is gone; foo survives.
@@ -7940,7 +7963,7 @@ fn learn_dependency_prompt_decline_installs_nothing() {
     // the tree and prompts. Answering "n" cancels: nothing is installed, the
     // manifest holds neither item, and no symlinks are created.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("n\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "n\n");
     assert!(r.success, "{}", r.stderr);
     // The dependency tree is shown before the prompt.
     assert!(
@@ -7996,11 +8019,11 @@ fn learn_dependency_json_without_yes_refuses() {
 
 #[test]
 fn learn_dependency_prompt_defaults_to_no_on_eof() {
-    // spec: DEP-31
-    // With no stdin (immediate EOF on the prompt), the `[y/N]` default is No, so
-    // the closure is not installed. The prompt and tree are still shown.
+    // spec: DEP-31 CLI-258 CLI-259
+    // At a terminal, EOF on the prompt takes the `[y/N]` default, No, so the
+    // closure is not installed. The prompt and tree are still shown.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some(""));
+    let r = sb.mind_tty(&["learn", "skill:review"], "");
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stdout.contains("agent:reviewer [dep]"),
@@ -8017,6 +8040,13 @@ fn learn_dependency_prompt_defaults_to_no_on_eof() {
     assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+
+    // Without a terminal the prompt is never shown: the run refuses and points
+    // at --yes, even with a "y" piped in.
+    let piped = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    assert!(!piped.success, "{}", piped.stdout);
+    assert!(piped.stderr.contains("--yes"), "{}", piped.stderr);
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
 }
 
 #[test]
@@ -8025,7 +8055,7 @@ fn learn_dependency_prompt_accept_installs_closure() {
     // Answering "y" to the prompt (without --yes) confirms: the whole closure
     // installs, both the selected skill and its pulled-in dependency.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "y\n");
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stdout.contains("agent:reviewer [dep]"),
@@ -8129,7 +8159,7 @@ fn learn_dependency_already_installed_prompts_but_reinstalls_only_new() {
     let sb = dep_fixture();
     assert!(sb.mind(&["learn", "agent:reviewer", "--yes"]).success);
 
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "y\n");
     assert!(r.success, "{}", r.stderr);
     // The tree marks the dependency as already installed (DEP-23).
     assert!(
@@ -8522,7 +8552,7 @@ fn sync_upgrade_refreshes_then_applies_upgrades() {
     sb.edit_source(); // upstream change, not yet synced
 
     // One command fetches the change and (on `y`) applies the upgrade.
-    let r = sb.mind_with_input(&["sync", "--upgrade"], Some("y\n"));
+    let r = sb.mind_tty(&["sync", "--upgrade"], "y\n");
     assert!(r.success, "{}", r.stderr);
     assert!(r.stdout.contains("updated"), "sync ran: {}", r.stdout);
     assert!(
@@ -15136,7 +15166,7 @@ fn unmeld_json_stdout_is_only_the_result_object_when_an_uninstall_hook_is_skippe
     );
     assert!(sb.mind(&["meld", &sb.source_spec()]).success, "meld");
 
-    let r = sb.mind(&["unmeld", "agents", "--json"]);
+    let r = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(r.success, "unmeld --json: {} {}", r.stdout, r.stderr);
     serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
         panic!(
@@ -15177,7 +15207,7 @@ fn hook_skip_notes_stay_on_stdout_in_text_mode() {
         "[[hooks]]\nname = \"cleanup\"\nrun = \"echo clean\"\nevent = \"uninstall\"\n",
     );
     assert!(un.mind(&["meld", &un.source_spec()]).success, "meld");
-    let r = un.mind(&["unmeld", "agents"]);
+    let r = un.mind(&["unmeld", "agents", "--yes"]);
     assert!(r.success, "unmeld: {} {}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains("note: skipped uninstall hook 'cleanup'"),
@@ -16184,7 +16214,7 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // leaves it green. Anchor on the discriminating substring the
     // disclosure itself introduces ("this filter matched"/the filter text),
     // and require it to precede the confirm prompt.
-    let r = one.mind(&["sync", "skills", "--upgrade"]);
+    let r = one.mind_tty(&["sync", "skills", "--upgrade"], "n\n");
     assert!(
         r.stdout.contains("matched 2 sources"),
         "the disclosure's discriminating substring must appear on stdout: {}",
@@ -16205,9 +16235,8 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
         "the disclosure must precede the confirm prompt: {}",
         r.stdout
     );
-    // A non-TTY `confirm_default_yes` declines rather than erroring, so the run
-    // exits 0 having changed nothing. The invariant that matters is that it did
-    // not apply without consent.
+    // Declining exits 0 having changed nothing. The invariant that matters is
+    // that it did not apply without consent.
     let unapplied =
         std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
     assert!(
@@ -16238,7 +16267,7 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // pass a regression where this run errored early or never reached the
     // confirm block at all. Anchor it with a positive assertion that the
     // run really did reach the (unscoped) confirmation prompt.
-    let single = one.mind(&["sync", &one_id, "--upgrade"]);
+    let single = one.mind_tty(&["sync", &one_id, "--upgrade"], "n\n");
     assert!(
         single.stdout.contains("apply these upgrades?"),
         "the single-match run must still reach the confirm prompt \
@@ -16309,7 +16338,7 @@ fn upgrade_item_ref_filter_names_every_matched_source_before_consent() {
     let one_id = format!("{}/skills", one.base_name());
     let two_id = format!("{}/skills", two.base_name());
 
-    let r = one.mind(&["upgrade", "skills#*"]);
+    let r = one.mind_tty(&["upgrade", "skills#*"], "n\n");
     assert!(
         r.stdout.contains("matched 2 sources"),
         "the disclosure's discriminating substring must appear on stdout: {}",
@@ -16331,7 +16360,7 @@ fn upgrade_item_ref_filter_names_every_matched_source_before_consent() {
         r.stdout
     );
 
-    // Nothing applied without consent (non-TTY confirm declines, LIFE-45).
+    // Nothing applied without consent (the prompt was declined).
     let unapplied =
         std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
     assert!(
@@ -17697,6 +17726,7 @@ fn unmeld_runs_uninstall_hook_with_dangerous_flag() {
     let unmeld = sb.mind(&[
         "unmeld",
         "uninstall-hook",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
@@ -17737,6 +17767,7 @@ fn unmeld_uninstall_hook_override_replaces_declared() {
     let unmeld = sb.mind(&[
         "unmeld",
         "uninstall-override",
+        "--yes",
         "--uninstall-hook",
         &format!("touch {om}"),
         "--accept-hooks=install,update,uninstall",
@@ -17782,8 +17813,9 @@ fn unmeld_non_tty_skips_uninstall_hook_but_still_removes_source() {
         meld.stdout, meld.stderr
     );
 
-    // Unmeld without the dangerous flag: non-TTY -> skip hook, still remove source.
-    let unmeld = sb.mind(&["unmeld", "uninstall-skip"]);
+    // Unmeld without the dangerous flag: non-TTY -> skip hook, still remove
+    // source. `--yes` confirms the removal itself (CLI-259).
+    let unmeld = sb.mind(&["unmeld", "uninstall-skip", "--yes"]);
     assert!(
         unmeld.success,
         "unmeld should succeed even when hook is skipped: {} {}",
@@ -18112,6 +18144,7 @@ fn unmeld_failing_uninstall_hook_leaves_source_melded() {
     let r = sb.mind(&[
         "unmeld",
         "failing-uninstall-hook",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
@@ -19107,7 +19140,7 @@ fn every_reachable_verb_emits_valid_json_under_json_flag() {
     assert!(forget.success, "{}", forget.stderr);
     assert!(parse_json(&forget.stdout).is_object(), "{}", forget.stdout);
 
-    let unmeld = sb.mind(&["unmeld", "agents", "--json"]);
+    let unmeld = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(unmeld.success, "{}", unmeld.stderr);
     assert!(parse_json(&unmeld.stdout).is_object(), "{}", unmeld.stdout);
 }
@@ -25121,7 +25154,7 @@ fn skill_collision_same_source_remeld_is_not_a_collision() {
 
     // Unmeld --unlink-only: source is removed from the registry but the
     // installed item remains in the manifest under the original source name.
-    let r = src.mind(&["unmeld", "ns43-remeld", "--unlink-only"]);
+    let r = src.mind(&["unmeld", "ns43-remeld", "--unlink-only", "--yes"]);
     assert!(
         r.success,
         "unmeld --unlink-only must succeed: {} {}",
@@ -26474,7 +26507,7 @@ fn unmeld_keep_items_is_canonical() {
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
-    let r = sb.mind(&["unmeld", "agents", "--keep-items"]);
+    let r = sb.mind(&["unmeld", "agents", "--keep-items", "--yes"]);
     assert!(r.success, "--keep-items must succeed: {}", r.stderr);
 
     // The item's symlink must still exist in the lobe.
@@ -26830,7 +26863,7 @@ fn all_mutating_verbs_carry_schema_1_in_json_envelope() {
     );
 
     // unmeld (removes source and its installed items)
-    let unmeld_r = sb.mind(&["unmeld", "agents", "--json"]);
+    let unmeld_r = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(
         unmeld_r.success,
         "unmeld --json failed: {}",
@@ -28393,7 +28426,10 @@ fn forget_dropped_takes_items_of_an_unmelded_source_and_confirms_several() {
     let sb = melded();
     assert!(sb.mind(&["learn", "dev"]).success);
     assert!(sb.mind(&["learn", "review"]).success);
-    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+    assert!(
+        sb.mind(&["unmeld", "agents", "--keep-items", "--yes"])
+            .success
+    );
 
     // Two items: CLI-42's confirmation applies, and a non-TTY run refuses.
     let r = sb.mind(&["forget", "--dropped"]);
@@ -28416,7 +28452,10 @@ fn forget_dropped_is_narrowed_by_a_ref() {
     let sb = melded();
     assert!(sb.mind(&["learn", "dev"]).success);
     assert!(sb.mind(&["learn", "review"]).success);
-    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+    assert!(
+        sb.mind(&["unmeld", "agents", "--keep-items", "--yes"])
+            .success
+    );
 
     let r = sb.mind(&["forget", "--dropped", "agent:*"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);

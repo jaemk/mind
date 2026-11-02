@@ -1309,6 +1309,10 @@ enum HookOutcome {
 ///
 /// `hook_env` is the profile environment the hooks run with: the selection the
 /// meld is about to apply (HOOK-142).
+///
+/// `defer` records the update-hook baselines but offers no install hook: the
+/// caller has stashed the call to make after the unified plan is answered
+/// (HOOK-183), via [`run_deferred_meld_hooks`].
 #[allow(clippy::too_many_arguments)]
 fn run_install_hooks(
     source: &mut crate::source::Source,
@@ -1320,12 +1324,8 @@ fn run_install_hooks(
     force_rerun: bool,
     extra_hooks: Vec<crate::mindfile::ResolvedHook>,
     hook_env: &crate::hook::HookEnv,
+    defer: bool,
 ) -> Result<HookOutcome> {
-    let mut resolved = mindfile
-        .as_ref()
-        .map(|m| m.resolved_hooks(toml_path))
-        .transpose()?
-        .unwrap_or_default();
     // DSC-61, HOOK-127: curator-supplied hooks (when applied) run after the
     // source's own, through the exact same override/disclosure/decide/run path
     // below. They are remembered as curated so a later `upgrade` can still
@@ -1335,8 +1335,7 @@ fn run_install_hooks(
         .iter()
         .map(|h| (h.run.clone(), h.event.as_str()))
         .collect();
-    resolved.extend(extra_hooks);
-    let (hooks, replaced) = crate::hook::apply_install_override(resolved, install_override);
+    let (hooks, replaced) = meld_hook_set(mindfile, toml_path, install_override, extra_hooks)?;
     // An empty or whitespace-only `--install-hook` is absent (HOOK-3), the same
     // reading `apply_install_override` applies.
     let override_cmd: Option<&str> = install_override.map(str::trim).filter(|s| !s.is_empty());
@@ -1358,7 +1357,10 @@ fn run_install_hooks(
     let clone_path = clone_dir.display().to_string();
     let name = source.name.clone();
 
-    for h in hooks.iter().filter(|h| h.event == HookEvent::Install) {
+    for h in hooks
+        .iter()
+        .filter(|h| h.event == HookEvent::Install && !defer)
+    {
         // HOOK-60: by default re-offer only hooks not yet run at this commit;
         // `--force` (force_rerun) re-offers every install hook.
         if !force_rerun && hook_ran_at(source, &h.run, RecordedEvent::Install, current.as_deref()) {
@@ -1400,7 +1402,8 @@ fn run_install_hooks(
             commit: current.as_deref(),
             replaced: replaced_here,
         };
-        match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
+        let key = crate::consent::HookKey::source_hook(&name, h.event.as_str(), &h.run);
+        match crate::hook::decide(&key, &disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. A progress line, not an
                 // aside: stdout in text mode, and unreachable from `--json`
@@ -1457,6 +1460,214 @@ fn run_install_hooks(
     }
 
     Ok(HookOutcome::Proceed)
+}
+
+/// The hooks a meld has in effect for a source (HOOK-50, HOOK-56, DSC-61): the
+/// manifest's declared hooks, then any curator-supplied ones, with a consumer
+/// `--install-hook` override applied. Returns the set and, when the override
+/// replaced anything, the declared commands it replaced.
+fn meld_hook_set(
+    mindfile: &Option<MindToml>,
+    toml_path: &std::path::Path,
+    install_override: Option<&str>,
+    extra_hooks: Vec<crate::mindfile::ResolvedHook>,
+) -> Result<(Vec<crate::mindfile::ResolvedHook>, Option<Vec<String>>)> {
+    let mut resolved = mindfile
+        .as_ref()
+        .map(|m| m.resolved_hooks(toml_path))
+        .transpose()?
+        .unwrap_or_default();
+    resolved.extend(extra_hooks);
+    Ok(crate::hook::apply_install_override(
+        resolved,
+        install_override,
+    ))
+}
+
+/// A top-level meld's source install hooks, held back until the unified plan
+/// is answered (HOOK-183): everything [`run_install_hooks`] needs to offer
+/// them later.
+struct DeferredMeldHooks {
+    source: String,
+    clone_dir: std::path::PathBuf,
+    install_override: Option<String>,
+    accept: crate::hook::Accept,
+    force_rerun: bool,
+    extra_hooks: Vec<crate::mindfile::ResolvedHook>,
+    hook_env: crate::hook::HookEnv,
+    /// A fresh meld registered the source only so the plan could be shown: an
+    /// abort or a failed hook unregisters it again (HOOK-21, HOOK-53). A
+    /// re-meld leaves the source melded.
+    fresh: bool,
+}
+
+thread_local! {
+    /// Set by `meld_verb` for an interactive text-mode meld: the top-level
+    /// source's install hooks are deferred to the plan (HOOK-183).
+    static DEFER_MELD_HOOKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DEFERRED_MELD_HOOKS: std::cell::RefCell<Option<DeferredMeldHooks>> =
+        const { std::cell::RefCell::new(None) };
+    /// Set when the deferred hooks were aborted, so `meld_verb` stops there.
+    static MELD_ABORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The deferral state of one `meld` (HOOK-183), cleared again when dropped.
+struct MeldPlanScope {
+    _answers: crate::consent::Scope,
+}
+
+impl MeldPlanScope {
+    /// Start a meld: defer the top-level install hooks when `interactive`.
+    fn enter(interactive: bool) -> MeldPlanScope {
+        DEFER_MELD_HOOKS.with(|d| d.set(interactive));
+        DEFERRED_MELD_HOOKS.with(|d| d.borrow_mut().take());
+        MELD_ABORTED.with(|a| a.set(false));
+        MeldPlanScope {
+            _answers: crate::consent::scope(),
+        }
+    }
+}
+
+impl Drop for MeldPlanScope {
+    fn drop(&mut self) {
+        DEFER_MELD_HOOKS.with(|d| d.set(false));
+        DEFERRED_MELD_HOOKS.with(|d| d.borrow_mut().take());
+    }
+}
+
+/// Whether the deferred meld hooks were aborted (or failed) in this meld, so
+/// the rest of the verb stops.
+fn meld_aborted() -> bool {
+    MELD_ABORTED.with(std::cell::Cell::get)
+}
+
+/// Whether this meld's top-level install hooks wait for the plan: only for an
+/// interactive meld whose install hooks would be prompted (HOOK-182: accepted
+/// hooks are not deferred).
+fn defers_meld_hooks(accept: crate::hook::Accept) -> bool {
+    DEFER_MELD_HOOKS.with(std::cell::Cell::get) && !accept.install
+}
+
+/// The plan entries for the deferred meld hooks (HOOK-180), in run order. Empty
+/// when nothing is deferred.
+fn deferred_meld_plan(paths: &Paths) -> Result<Vec<crate::consent::PlannedHook>> {
+    let Some((name, dir, install_override, force_rerun, extra)) = DEFERRED_MELD_HOOKS.with(|d| {
+        d.borrow().as_ref().map(|d| {
+            (
+                d.source.clone(),
+                d.clone_dir.clone(),
+                d.install_override.clone(),
+                d.force_rerun,
+                d.extra_hooks.clone(),
+            )
+        })
+    }) else {
+        return Ok(Vec::new());
+    };
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(&name) else {
+        return Ok(Vec::new());
+    };
+    let mindfile = MindToml::load(&dir).unwrap_or_default();
+    let (hooks, replaced) = meld_hook_set(
+        &mindfile,
+        &dir.join("mind.toml"),
+        install_override.as_deref(),
+        extra,
+    )?;
+    let override_cmd = install_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let commit = source.commit.clone().unwrap_or_default();
+    Ok(hooks
+        .iter()
+        .filter(|h| h.event == HookEvent::Install)
+        .filter(|h| {
+            force_rerun
+                || !hook_ran_at(
+                    source,
+                    &h.run,
+                    RecordedEvent::Install,
+                    source.commit.as_deref(),
+                )
+        })
+        .map(|h| crate::consent::PlannedHook {
+            key: crate::consent::HookKey::source_hook(&name, h.event.as_str(), &h.run),
+            label: h.label().to_string(),
+            optional: h.optional,
+            commit: commit.clone(),
+            run_dir: dir.display().to_string(),
+            inspect: None,
+            browse_url: source.browse_url(&commit),
+            replaced: replaced
+                .as_ref()
+                .filter(|_| override_cmd == Some(h.run.as_str()))
+                .map(|cmds| cmds.join("; ")),
+            accepted: false,
+        })
+        .collect())
+}
+
+/// Offer the deferred meld hooks now, under whatever answer the plan recorded
+/// (HOOK-183). A fresh meld whose hook is aborted or fails is unregistered, as
+/// it would have been had the hook run before registration (HOOK-21, HOOK-53).
+fn run_deferred_meld_hooks(paths: &Paths) -> Result<HookOutcome> {
+    let Some(d) = DEFERRED_MELD_HOOKS.with(|c| c.borrow_mut().take()) else {
+        return Ok(HookOutcome::Proceed);
+    };
+    let mut registry = Registry::load(paths)?;
+    let Some(idx) = registry.sources.iter().position(|s| s.name == d.source) else {
+        return Ok(HookOutcome::Proceed);
+    };
+    let mindfile = MindToml::load(&d.clone_dir).unwrap_or_default();
+    let outcome = run_install_hooks(
+        &mut registry.sources[idx],
+        &d.clone_dir,
+        &mindfile,
+        &d.clone_dir.join("mind.toml"),
+        d.install_override.as_deref(),
+        d.accept,
+        d.force_rerun,
+        d.extra_hooks,
+        &d.hook_env,
+        false,
+    );
+    let drop_source = |registry: &mut Registry| -> Result<()> {
+        let source = registry.sources.remove(idx);
+        // A linked working tree is the user's own; never remove it (CLI-27).
+        if !source.is_linked() {
+            let _ = std::fs::remove_dir_all(&d.clone_dir);
+        }
+        registry.save(paths)
+    };
+    match outcome {
+        Ok(HookOutcome::Proceed) => {
+            registry.save(paths)?;
+            Ok(HookOutcome::Proceed)
+        }
+        Ok(HookOutcome::Abort) => {
+            MELD_ABORTED.with(|a| a.set(true));
+            if d.fresh {
+                drop_source(&mut registry)?;
+                println!("aborted; nothing installed");
+            } else {
+                registry.save(paths)?; // persist any hook that did run
+                println!("aborted; source left in place");
+            }
+            Ok(HookOutcome::Abort)
+        }
+        Err(e) => {
+            MELD_ABORTED.with(|a| a.set(true));
+            if d.fresh {
+                drop_source(&mut registry)?;
+            } else {
+                // spec: LIFE-48 -- keep any earlier hook's record.
+                registry.save(paths)?;
+            }
+            Err(e)
+        }
+    }
 }
 
 /// Stamp a record's provenance after [`record_install_hook`] created it, for a
@@ -2400,6 +2611,26 @@ fn meld_recursive(
     // Install hooks (HOOK-50..60): the working tree is now checked out at the
     // resolved pin, so hooks run in the right tree. A fresh meld runs every
     // (as-yet-unrun) install hook.
+    //
+    // spec: HOOK-180 HOOK-183 -- an interactive top-level meld holds them back
+    // and lists them in the plan it asks before installing, so no hook runs
+    // before the user has seen what will install. A nested source registered
+    // by a curator keeps its own prompt here.
+    let defer = top_level && defers_meld_hooks(accept);
+    if defer {
+        DEFERRED_MELD_HOOKS.with(|d| {
+            *d.borrow_mut() = Some(DeferredMeldHooks {
+                source: source.name.clone(),
+                clone_dir: dir.clone(),
+                install_override: install_hook.clone(),
+                accept,
+                force_rerun: false,
+                extra_hooks: curated_hooks.clone(),
+                hook_env: hook_env.clone(),
+                fresh: true,
+            })
+        });
+    }
     match run_install_hooks(
         &mut source,
         &dir,
@@ -2412,6 +2643,7 @@ fn meld_recursive(
         // disclosure/safety-prompt/non-TTY-skip path as a source's own hooks.
         curated_hooks,
         &hook_env,
+        defer,
     ) {
         Ok(HookOutcome::Proceed) => {}
         Ok(HookOutcome::Abort) => {
@@ -4332,7 +4564,8 @@ fn run_uninstall_hooks(
             commit: Some(commit.as_str()),
             replaced: replaced_here,
         };
-        match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
+        let key = crate::consent::HookKey::source_hook(source_name, h.event.as_str(), &h.run);
+        match crate::hook::decide(&key, &disclosure, h.optional, accept.event(h.event))? {
             crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook. Same as the install-hook
                 // line above. spec: CLI-217
@@ -4370,6 +4603,87 @@ fn run_uninstall_hooks(
     Ok(true)
 }
 
+/// The plan entries for a source's uninstall hooks (HOOK-186): what
+/// [`run_uninstall_hooks`] would offer, with the same `--uninstall-hook`
+/// override applied (HOOK-59).
+fn source_uninstall_plan(
+    paths: &Paths,
+    source: &crate::source::Source,
+    uninstall_hook: Option<&str>,
+    accept: crate::hook::Accept,
+) -> Result<Vec<crate::consent::PlannedHook>> {
+    let clone_dir = source.clone_dir(paths);
+    let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
+    let resolved = mindfile
+        .as_ref()
+        .map(|m| m.resolved_hooks(&clone_dir.join("mind.toml")))
+        .transpose()?
+        .unwrap_or_default();
+    let (resolved, replaced) =
+        crate::hook::apply_hook_override(resolved, uninstall_hook, HookEvent::Uninstall);
+    let override_cmd = uninstall_hook.map(str::trim).filter(|s| !s.is_empty());
+    let commit = source.commit.clone().unwrap_or_default();
+    Ok(resolved
+        .iter()
+        .filter(|h| h.event == HookEvent::Uninstall)
+        .map(|h| crate::consent::PlannedHook {
+            key: crate::consent::HookKey::source_hook(&source.name, "uninstall", &h.run),
+            label: h.label().to_string(),
+            optional: h.optional,
+            commit: commit.clone(),
+            run_dir: clone_dir.display().to_string(),
+            inspect: None,
+            browse_url: source.browse_url(&commit),
+            replaced: replaced
+                .as_ref()
+                .filter(|_| override_cmd == Some(h.run.as_str()))
+                .map(|cmds| cmds.join("; ")),
+            accepted: accept.uninstall,
+        })
+        .collect())
+}
+
+/// Every hook unmelding `source_name` would offer, in teardown order
+/// (HOOK-87, HOOK-186): each installed item's uninstall hooks (unless the
+/// items are kept), then the source's.
+fn unmeld_plan(
+    paths: &Paths,
+    registry: &Registry,
+    source_name: &str,
+    keep_items: bool,
+    uninstall_hook: Option<&str>,
+    accept: crate::hook::Accept,
+) -> Result<Vec<crate::consent::PlannedHook>> {
+    let Some(source) = registry.find(source_name) else {
+        return Ok(Vec::new());
+    };
+    let mut plan = Vec::new();
+    if !keep_items {
+        let manifest = Manifest::load(paths)?;
+        let mut item_catalog: Vec<CatalogItem> = Vec::new();
+        let _ = catalog::scan_source(paths, source, &mut item_catalog);
+        let commit = source.commit.clone().unwrap_or_default();
+        for item in manifest
+            .items
+            .values()
+            .filter(|it| it.source == source_name)
+        {
+            let hooks: Vec<&crate::mindfile::ResolvedHook> =
+                item_catalog_match(&item_catalog, item)
+                    .map(|c| c.uninstall_hooks())
+                    .unwrap_or_default();
+            plan.extend(item_uninstall_plan(paths, item, &hooks, &commit, accept));
+        }
+    }
+    plan.extend(source_uninstall_plan(
+        paths,
+        source,
+        uninstall_hook,
+        accept,
+    )?);
+    Ok(plan)
+}
+
 /// `mind unmeld <name> [--unlink-only] [--yes] [--accept-hooks]`
 /// — drop a source. `name` may be the full `owner/repo`, an unambiguous repo
 /// basename, or a glob (`*`, `?`, `[`) matched against each source's identity and
@@ -4388,6 +4702,8 @@ pub fn unmeld(
     accept: crate::hook::Accept,
     uninstall_hook: Option<String>,
 ) -> Result<()> {
+    // spec: HOOK-186 -- the plan's answer lasts for this verb only.
+    let _answers = crate::consent::scope();
     let out = crate::render::ctx();
     let registry = Registry::load(paths)?;
 
@@ -4439,13 +4755,13 @@ pub fn unmeld(
     }
 
     // CLI-28: when a glob matches more than one source, list the matched sources
-    // and confirm before removing them (CLI-42's multi-item confirmation, applied
-    // at source granularity). `--yes` skips it; a non-TTY run without `--yes`
-    // refuses rather than removing silently.
+    // and confirm once before removing them (CLI-260, at source granularity).
+    // `--yes` skips it; a non-TTY run without `--yes` refuses rather than
+    // removing silently.
     if matched.len() > 1 && !yes {
         // spec: LIFE-45 -- `--json` is always non-interactive (regardless of
-        // whether stdin is a real TTY), so it never reaches the `confirm(...)`
-        // prompt below: the check right after this block returns
+        // whether stdin is a real TTY), so it never reaches the plan prompt
+        // below: the check right after this block returns
         // `ConfirmationRequired` whenever `!is_tty() || out.json`, before the
         // prompt is ever called. The human-readable listing keeps its own
         // `!out.json` guard so it does not print ahead of a JSON error.
@@ -4465,9 +4781,30 @@ pub fn unmeld(
                 ),
             });
         }
-        // `out.json` already returned above, so this branch is reached only for
-        // an interactive TTY.
-        if !confirm("remove these source(s)?")? {
+    }
+    if matched.len() > 1 {
+        // spec: HOOK-186 -- one plan for every matched source's hooks: with the
+        // removal confirmation, or hooks-only under `--yes` (a non-interactive
+        // `--yes` run asks nothing here).
+        let mut hooks = Vec::new();
+        for i in &matched {
+            hooks.extend(unmeld_plan(
+                paths,
+                &registry,
+                &registry.sources[*i].name,
+                unlink_only,
+                uninstall_hook.as_deref(),
+                accept,
+            )?);
+        }
+        let items = (!yes).then_some(PlanItems {
+            question: "remove these source(s)?",
+            always: true,
+            default_yes: false,
+            removal: true,
+            listing: Vec::new(),
+        });
+        if ask_plan(paths, items, hooks)? != PlanOutcome::Proceed {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -4476,8 +4813,8 @@ pub fn unmeld(
     // Removing a source mutates `registry.sources` indices, so resolve each
     // matched source by its name up front and unmeld them one at a time. When the
     // glob matched several sources we already confirmed above at source
-    // granularity, so the per-source item-count confirmation is suppressed (`yes`);
-    // a single match still gets its own item-count confirmation (CLI-21).
+    // granularity, so the per-source confirmation is suppressed (`yes`); a
+    // single match gets its own (CLI-260).
     let multi = matched.len() > 1;
     let names: Vec<String> = matched
         .iter()
@@ -4500,9 +4837,9 @@ pub fn unmeld(
 /// Tear down a single melded source by its full identity, the per-source body
 /// shared by `unmeld` (CLI-21/CLI-22). It removes the source's installed items
 /// (each via its file registry) before the source itself, preserving the HOOK-87
-/// order (item uninstall hooks before the source's). The multi-source/multi-item
-/// confirmation (CLI-42) is the caller's responsibility; this body does not
-/// re-prompt for the item count.
+/// order (item uninstall hooks before the source's). It asks the removal
+/// confirmation itself (CLI-260) unless `yes`, which the caller also sets after
+/// confirming a multi-source glob once.
 fn unmeld_one(
     paths: &Paths,
     source_name: &str,
@@ -4532,10 +4869,74 @@ fn unmeld_one(
         .map(|it| it.key().into())
         .collect();
 
+    // spec: CLI-260 HOOK-186 -- every unmeld confirms before anything is
+    // removed or any uninstall hook runs, defaulting to no; `--yes` answers it
+    // (leaving a hooks-only plan), and a non-TTY or `--json` run without `--yes`
+    // refuses (CLI-259, LIFE-45).
+    let hooks = unmeld_plan(
+        paths,
+        &registry,
+        &source_name,
+        unlink_only,
+        uninstall_hook,
+        accept,
+    )?;
+    if yes {
+        ask_plan(paths, None, hooks)?;
+    } else {
+        let removing = !unlink_only && !item_keys.is_empty();
+        if !out.json {
+            if removing {
+                println!(
+                    "unmelding {source_name} will remove {} installed item(s):",
+                    item_keys.len()
+                );
+                for k in &item_keys {
+                    // spec: DSC-95
+                    println!("  {} {}", out.warn(), strip_ansi(k));
+                }
+            } else {
+                println!("unmelding {source_name}");
+            }
+        }
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
+            let action = if removing {
+                format!(
+                    "unmelding {source_name} (removing {} items)",
+                    item_keys.len()
+                )
+            } else {
+                format!("unmelding {source_name}")
+            };
+            return Err(MindError::ConfirmationRequired {
+                action: json_confirmation_action(action, out.json),
+            });
+        }
+        let question = if removing {
+            "remove these item(s) and unmeld the source?"
+        } else if unlink_only && !item_keys.is_empty() {
+            "unmeld the source and keep its items installed?"
+        } else {
+            "unmeld this source?"
+        };
+        let items = PlanItems {
+            question,
+            always: true,
+            default_yes: false,
+            removal: true,
+            listing: Vec::new(),
+        };
+        if ask_plan(paths, Some(items), hooks)? != PlanOutcome::Proceed {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+
     // CLI-22: `--unlink-only` removes only the source, leaving its items in place,
     // and lists them with the command to remove them later. Uninstall hooks still
-    // run on this path (before the source is removed), since the unlink-only path
-    // has no multi-item confirmation to worry about.
+    // run on this path (before the source is removed).
     if unlink_only {
         let proceed =
             run_uninstall_hooks(paths, &registry, idx, &source_name, uninstall_hook, accept)?;
@@ -4583,40 +4984,8 @@ fn unmeld_one(
         return Ok(());
     }
 
-    // CLI-21: default -- uninstall every item from this source, then remove it.
-    // The multi-item confirmation (CLI-42) happens BEFORE uninstall hooks run, so
-    // a user who declines does not trigger destructive cleanup (HOOK-54).
-    // `--yes` skips the confirmation; a non-TTY run without `--yes` refuses.
-    if item_keys.len() > 1 && !yes {
-        if !out.json {
-            println!(
-                "unmelding {source_name} will remove {} installed item(s):",
-                item_keys.len()
-            );
-            for k in &item_keys {
-                // spec: DSC-95
-                println!("  {} {}", out.warn(), strip_ansi(k));
-            }
-        }
-        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
-        if !crate::hook::is_tty() || out.json {
-            // spec: CLI-232
-            return Err(MindError::ConfirmationRequired {
-                action: json_confirmation_action(
-                    format!(
-                        "unmelding {source_name} (removing {} items)",
-                        item_keys.len()
-                    ),
-                    out.json,
-                ),
-            });
-        }
-        // `out.json` already returned above; this branch is TTY-only.
-        if !confirm("remove these item(s) and unmeld the source?")? {
-            println!("cancelled; nothing removed");
-            return Ok(());
-        }
-    }
+    // CLI-21: default -- uninstall every item from this source, then remove it,
+    // confirmed above before any uninstall hook runs (HOOK-54).
 
     // HOOK-87: teardown reverses install -- each item's uninstall hooks run
     // BEFORE the source's uninstall hooks. The end-to-end order is
@@ -4707,6 +5076,52 @@ pub struct LearnPlan {
     /// closures of several selections instead of summing counts, which would
     /// double-count a shared dependency (CLI-236).
     pub keys: Vec<String>,
+    /// The catalog items behind `keys`, in the same order: what the plan's
+    /// hooks are read from (HOOK-180).
+    pub items: Vec<CatalogItem>,
+}
+
+impl LearnPlan {
+    /// Every hook installing this closure would offer (HOOK-180). A closure
+    /// never holds an installed item (DEP-23), so none is a re-install.
+    fn hooks(
+        &self,
+        paths: &Paths,
+        accept: crate::hook::Accept,
+    ) -> Result<Vec<crate::consent::PlannedHook>> {
+        if self
+            .items
+            .iter()
+            .all(|it| it.build.is_none() && it.hooks.is_empty())
+        {
+            return Ok(Vec::new());
+        }
+        let registry = Registry::load(paths)?;
+        Ok(self
+            .items
+            .iter()
+            .flat_map(|it| item_install_plan(paths, &registry, it, false, accept))
+            .collect())
+    }
+}
+
+/// The hooks of several plans, each item once: two `--learn` matches can
+/// share a dependency (CLI-236).
+fn union_plan_hooks(
+    paths: &Paths,
+    plans: &[LearnPlan],
+    accept: crate::hook::Accept,
+) -> Result<Vec<crate::consent::PlannedHook>> {
+    let mut seen: HashSet<crate::consent::HookKey> = HashSet::new();
+    let mut hooks = Vec::new();
+    for plan in plans {
+        for h in plan.hooks(paths, accept)? {
+            if seen.insert(h.key.clone()) {
+                hooks.push(h);
+            }
+        }
+    }
+    Ok(hooks)
 }
 
 /// One item of one melded source, selected by identity rather than by a ref
@@ -4892,6 +5307,7 @@ fn learn_plan(paths: &Paths, selection: Selection<'_>) -> Result<LearnPlan> {
             .iter()
             .map(|&i| items[i].key().as_str().to_string())
             .collect(),
+        items: order.iter().map(|&i| items[i].clone()).collect(),
     })
 }
 
@@ -4932,6 +5348,7 @@ fn learn_plans(paths: &Paths, targets: &[&LearnTarget]) -> Result<Vec<LearnPlan>
                     .iter()
                     .map(|&i| items[i].key().as_str().to_string())
                     .collect(),
+                items: order.iter().map(|&i| items[i].clone()).collect(),
             })
         })
         .collect()
@@ -4974,27 +5391,42 @@ impl Clobber {
 static OVERWRITE_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The answer to an overwrite prompt: `y` this one, `a` this and every later
-/// one in the run, anything else (or EOF) no.
-#[derive(Debug, PartialEq, Eq)]
+/// one in the run, `n` (or Enter, or EOF) no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OverwriteAnswer {
     Yes,
     All,
     No,
 }
 
-fn parse_overwrite_answer(input: &str) -> OverwriteAnswer {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => OverwriteAnswer::Yes,
-        "a" | "all" => OverwriteAnswer::All,
-        _ => OverwriteAnswer::No,
-    }
-}
+/// The replies of the `[y/N/a]` overwrite prompt (CLI-247, CLI-257).
+const OVERWRITE_CHOICES: [crate::prompt::Choice<OverwriteAnswer>; 3] = [
+    crate::prompt::Choice {
+        keys: &["y", "yes"],
+        value: OverwriteAnswer::Yes,
+    },
+    crate::prompt::Choice {
+        keys: &["n", "no"],
+        value: OverwriteAnswer::No,
+    },
+    crate::prompt::Choice {
+        keys: &["a", "all"],
+        value: OverwriteAnswer::All,
+    },
+];
 
 /// Prompt `[y/N/a]` to overwrite an occupied link target (CLI-35, CLI-247).
 /// An `a` sets `OVERWRITE_ALL` so later conflicts in the run do not ask.
 fn confirm_overwrite(prompt: &str) -> Result<bool> {
-    let line = prompt_line(&format!("\n{prompt} [y/N/a] "))?;
-    Ok(match parse_overwrite_answer(&line) {
+    // spec: DSC-95 -- the prompt embeds a path; sanitize it.
+    let prompt = crate::sanitize::strip_ansi(prompt);
+    let answer = crate::prompt::ask(
+        &format!("\n{prompt} [y/N/a] "),
+        &OVERWRITE_CHOICES,
+        OverwriteAnswer::No,
+        "overwriting an existing link target",
+    )?;
+    Ok(match answer {
         OverwriteAnswer::Yes => true,
         OverwriteAnswer::All => {
             OVERWRITE_ALL.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5210,6 +5642,8 @@ fn learn_selected(
         clobber,
         accept,
     } = flow;
+    // spec: HOOK-181 -- the plan's answer lasts for this verb only.
+    let _answers = crate::consent::scope();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let out = crate::render::ctx();
@@ -5314,24 +5748,63 @@ fn learn_selected(
     // DEP-31: when the closure adds items beyond the explicit selection, show the
     // tree and prompt; proceed only on a yes (or `--yes`). When it adds nothing,
     // install directly with no prompt and no tree (CLI-30 behavior unchanged).
-    if resolution.adds_dependencies() && !yes {
-        // spec: LIFE-45 -- `--json` is non-interactive: refuse rather than
-        // install a whole dependency closure unprompted. (A non-TTY *text* run
-        // still reaches the prompt below, whose EOF-default is No, so it cancels
-        // safely; only `--json` skipped the prompt entirely and auto-proceeded.)
-        if out.json {
-            // spec: CLI-232
-            return Err(MindError::ConfirmationRequired {
-                action: json_confirmation_action(
-                    format!("installing the dependency closure of '{item_ref}'"),
-                    true,
-                ),
-            });
-        }
+    let asks_closure = resolution.adds_dependencies() && !yes;
+    if asks_closure && (out.json || !crate::hook::is_tty()) {
+        // spec: LIFE-45 CLI-259 -- `--json`, and a run without a TTY, are
+        // non-interactive: refuse rather than install a whole dependency
+        // closure unprompted.
+        // spec: CLI-232
+        return Err(MindError::ConfirmationRequired {
+            action: json_confirmation_action(
+                format!("installing the dependency closure of '{item_ref}'"),
+                out.json,
+            ),
+        });
+    }
+    if asks_closure {
         print!("{}", resolution.render_tree(&items));
-        if !confirm("install this dependency closure?")? {
-            println!("cancelled; nothing installed");
-            return Ok(());
+    }
+    // spec: HOOK-180 HOOK-181 -- one plan for the batch: the closure question
+    // (DEP-31) when there is one, and every hook the install would offer. A
+    // `learn` that asks nothing today (no closure question, no hook to ask
+    // about) still asks nothing.
+    if !out.json {
+        let hooks: Vec<crate::consent::PlannedHook> = closure
+            .iter()
+            .flat_map(|t| item_install_plan(paths, &registry, t, false, accept))
+            .collect();
+        let question = if asks_closure {
+            "install this dependency closure?".to_string()
+        } else {
+            format!("learn these {} item(s)?", closure.len())
+        };
+        let listing = if asks_closure {
+            Vec::new()
+        } else {
+            std::iter::once(format!("would learn {} item(s):", closure.len()))
+                .chain(closure.iter().map(|t| {
+                    format!(
+                        "  {} {}",
+                        t.display_key(),
+                        crate::sanitize::strip_ansi(&t.source)
+                    )
+                }))
+                .collect()
+        };
+        let items = (!yes).then(|| PlanItems {
+            question: &question,
+            always: asks_closure,
+            default_yes: false,
+            removal: false,
+            listing,
+        });
+        match ask_plan(paths, items, hooks)? {
+            PlanOutcome::Proceed => {}
+            PlanOutcome::Cancel => {
+                println!("cancelled; nothing installed");
+                return Ok(());
+            }
+            PlanOutcome::Abort => return Ok(()),
         }
     }
 
@@ -5624,16 +6097,28 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
         return Ok(());
     }
 
-    // Interactive: show the install preview (the dry-run list), then prompt.
+    // Interactive: show the install preview (the dry-run list), then the plan.
     learn(paths, &item_ref, true, flow)?;
-    if confirm_default_yes(&format!(
-        "install these {} item(s) now?",
-        plan.install_count
-    ))? {
-        learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow })
-    } else {
-        println!("skipped; run `mind learn {quoted_item_ref}` to install later");
-        Ok(())
+    let question = format!("install these {} item(s) now?", plan.install_count);
+    // spec: HOOK-180 -- the deferred source hooks and every item's hooks, asked
+    // with the CLI-23 question.
+    match ask_plan(
+        paths,
+        Some(PlanItems {
+            question: &question,
+            always: true,
+            default_yes: true,
+            removal: false,
+            listing: Vec::new(),
+        }),
+        plan.hooks(paths, flow.accept)?,
+    )? {
+        PlanOutcome::Proceed => learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow }),
+        PlanOutcome::Cancel => {
+            println!("skipped; run `mind learn {quoted_item_ref}` to install later");
+            Ok(())
+        }
+        PlanOutcome::Abort => Ok(()),
     }
 }
 
@@ -5843,15 +6328,31 @@ pub fn install_source_items_matching(
         return Ok(());
     }
     // Interactive: preview the whole batch (the dry-run list, dependency
-    // closures included), then prompt once.
+    // closures included), then the plan, asked once.
     for target in &fresh {
         learn_exact(paths, target, true, flow)?;
     }
-    if confirm_default_yes(&format!("install these {} item(s) now?", fresh.len()))? {
-        install_all(InstallFlow { yes: true, ..flow })
-    } else {
-        println!("skipped; run `{quoted}` to install later");
-        Ok(())
+    let targets: Vec<&LearnTarget> = fresh.iter().collect();
+    let hooks = union_plan_hooks(paths, &learn_plans(paths, &targets)?, flow.accept)?;
+    let question = format!("install these {} item(s) now?", fresh.len());
+    // spec: HOOK-180
+    match ask_plan(
+        paths,
+        Some(PlanItems {
+            question: &question,
+            always: true,
+            default_yes: true,
+            removal: false,
+            listing: Vec::new(),
+        }),
+        hooks,
+    )? {
+        PlanOutcome::Proceed => install_all(InstallFlow { yes: true, ..flow }),
+        PlanOutcome::Cancel => {
+            println!("skipped; run `{quoted}` to install later");
+            Ok(())
+        }
+        PlanOutcome::Abort => Ok(()),
     }
 }
 
@@ -5978,19 +6479,37 @@ pub fn install_source_items_subset(
         return Ok(());
     }
 
-    // Interactive: preview, then prompt.
+    // Interactive: preview, then the plan.
+    let mut plans = Vec::new();
     for item_ref in &refs {
         learn(paths, item_ref, true, flow)?;
+        plans.push(learn_preview(paths, item_ref)?);
     }
-    if confirm_default_yes(&format!("install these {count} item(s) now?"))? {
-        for item_ref in &refs {
-            learn(paths, item_ref, false, InstallFlow { yes: true, ..flow })?;
+    let question = format!("install these {count} item(s) now?");
+    // spec: HOOK-180
+    match ask_plan(
+        paths,
+        Some(PlanItems {
+            question: &question,
+            always: true,
+            default_yes: true,
+            removal: false,
+            listing: Vec::new(),
+        }),
+        union_plan_hooks(paths, &plans, flow.accept)?,
+    )? {
+        PlanOutcome::Proceed => {
+            for item_ref in &refs {
+                learn(paths, item_ref, false, InstallFlow { yes: true, ..flow })?;
+            }
         }
-    } else {
-        // spec: CLI-225 -- same rationale as above: shell-quote before
-        // printing.
-        let quoted_ref = crate::error::shell_quote(&format!("{source_name}#*"));
-        println!("skipped; run `mind learn {quoted_ref}` to install later");
+        PlanOutcome::Cancel => {
+            // spec: CLI-225 -- same rationale as above: shell-quote before
+            // printing.
+            let quoted_ref = crate::error::shell_quote(&format!("{source_name}#*"));
+            println!("skipped; run `mind learn {quoted_ref}` to install later");
+        }
+        PlanOutcome::Abort => {}
     }
     Ok(())
 }
@@ -6522,22 +7041,54 @@ pub(crate) fn install_source_profiles(
         return Ok(outcome);
     }
     print_profile_preview(paths, &plan)?;
-    if confirm_default_yes(&format!(
-        "install these {} item(s) now?",
-        plan.pending.len()
-    ))? {
-        outcome.installed_keys = apply_profile_plan(
-            paths,
-            req.source_name,
-            &plan,
-            InstallFlow { yes: true, ..flow },
-            false,
-        )?;
-        outcome.applied = true;
-    } else {
-        println!("skipped; run `{remedy}` to install later");
+    let question = format!("install these {} item(s) now?", plan.pending.len());
+    // spec: HOOK-180
+    match ask_plan(
+        paths,
+        Some(PlanItems {
+            question: &question,
+            always: true,
+            default_yes: true,
+            removal: false,
+            listing: Vec::new(),
+        }),
+        source_keys_plan(paths, req.source_name, &plan.pending, flow.accept)?,
+    )? {
+        PlanOutcome::Proceed => {
+            outcome.installed_keys = apply_profile_plan(
+                paths,
+                req.source_name,
+                &plan,
+                InstallFlow { yes: true, ..flow },
+                false,
+            )?;
+            outcome.applied = true;
+        }
+        PlanOutcome::Cancel => println!("skipped; run `{remedy}` to install later"),
+        PlanOutcome::Abort => {}
     }
     Ok(outcome)
+}
+
+/// The install hooks of `source_name`'s items named by `keys` (effective
+/// `kind:name`), in `keys` order (HOOK-180). A key the catalog no longer
+/// offers contributes nothing.
+fn source_keys_plan(
+    paths: &Paths,
+    source_name: &str,
+    keys: &[String],
+    accept: crate::hook::Accept,
+) -> Result<Vec<crate::consent::PlannedHook>> {
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(Vec::new());
+    };
+    let items = catalog::scan(paths, &single(source))?;
+    Ok(keys
+        .iter()
+        .filter_map(|k| items.iter().find(|it| it.key().as_str() == k))
+        .flat_map(|it| item_install_plan(paths, &registry, it, false, accept))
+        .collect())
 }
 
 /// The `--json` twin of [`install_source_profiles`] (CLI-156, PROF-18):
@@ -8295,6 +8846,24 @@ pub fn remeld(
                 remeld_selection.as_ref(),
                 registry.sources[idx].profiles.as_ref(),
             );
+            // spec: HOOK-180 HOOK-183 -- as for a fresh meld, an interactive
+            // re-meld lists the pending hooks in its plan instead of asking
+            // here.
+            let defer = defers_meld_hooks(accept);
+            if defer {
+                DEFERRED_MELD_HOOKS.with(|d| {
+                    *d.borrow_mut() = Some(DeferredMeldHooks {
+                        source: source_name.clone(),
+                        clone_dir: clone_dir.clone(),
+                        install_override: None,
+                        accept,
+                        force_rerun,
+                        extra_hooks: Vec::new(),
+                        hook_env: hook_env.clone(),
+                        fresh: false,
+                    })
+                });
+            }
             match run_install_hooks(
                 &mut registry.sources[idx],
                 &clone_dir,
@@ -8305,6 +8874,7 @@ pub fn remeld(
                 force_rerun,
                 Vec::new(),
                 &hook_env,
+                defer,
             ) {
                 Ok(HookOutcome::Proceed) => registry.save(paths)?,
                 Ok(HookOutcome::Abort) => {
@@ -8642,6 +9212,10 @@ pub fn install_curated_sources(
     all: bool,
     flow: InstallFlow,
 ) -> Result<()> {
+    // spec: HOOK-183 -- an aborted plan stops the meld before the chain.
+    if meld_aborted() {
+        return Ok(());
+    }
     let registry = Registry::load(paths)?;
     let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
     let mut queue: Vec<String> = vec![super_name.to_string()];
@@ -9755,16 +10329,11 @@ fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Res
         // Non-TTY without --yes: skip (the destination was already used this run).
         return Ok(());
     }
-    print!(
-        "\nSave '{}' as absorb_to in config.toml? [y/N] ",
+    // spec: CLI-257 CLI-258
+    if confirm(&format!(
+        "Save '{}' as absorb_to in config.toml?",
         dest.display()
-    );
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| MindError::io("<stdin>", e))?;
-    if parse_confirm(&line, false) {
+    ))? {
         let mut config = Config::load(paths)?;
         config.absorb_to = Some(dest.to_string_lossy().into_owned());
         paths.ensure_layout()?;
@@ -11194,6 +11763,8 @@ fn upgrade_inner_scoped(
     key_scope: Option<&[String]>,
     accept: crate::hook::Accept,
 ) -> Result<Option<MutationResult>> {
+    // spec: HOOK-181 -- the plan's answer lasts for this pass only.
+    let _answers = crate::consent::scope();
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -11341,18 +11912,31 @@ fn upgrade_inner_scoped(
         }
     }
 
-    // HOOK-11, HOOK-121, HOOK-122: run each source's pending source-level hooks
+    // HOOK-11, HOOK-121, HOOK-122: each source's pending source-level hooks
     // for this update -- its update hooks when it declares any, else its
     // recorded install hooks -- when the commit has advanced past the commit the
     // hook last ran at (or it was recorded but never run). This is a
     // source-level pass, separate from the per-item upgrade loop below.
-    rerun_source_hooks(
+    //
+    // spec: HOOK-180 HOOK-183 -- they are listed in the plan and run only after
+    // it is answered (`run_source_pass` below), never before the pending
+    // upgrades are shown.
+    let source_plan = source_hooks_plan(
         paths,
-        &mut registry,
+        &registry,
         accept,
         hook_scope.as_ref(),
         policy.as_ref(),
-    )?;
+    );
+    let run_source_pass = |registry: &mut Registry| {
+        rerun_source_hooks(
+            paths,
+            registry,
+            accept,
+            hook_scope.as_ref(),
+            policy.as_ref(),
+        )
+    };
 
     // spec: CLI-211 -- a source that cannot be scanned (missing clone, or any
     // other per-source scan failure) must not silently drop its items out of
@@ -11536,6 +12120,10 @@ fn upgrade_inner_scoped(
     };
 
     if pending.is_empty() && !tracking.has_additions() && whole.targets.is_empty() {
+        // spec: HOOK-182 -- no item to upgrade, but a source hook may still be
+        // pending: a hooks-only plan, then the pass.
+        ask_plan(paths, None, source_plan)?;
+        run_source_pass(&mut registry)?;
         // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
         // items it would have contributed were never compared. Report the
         // sources that could not be checked instead of the plain up-to-date line.
@@ -11664,11 +12252,45 @@ fn upgrade_inner_scoped(
             };
             return Err(MindError::ConfirmationRequired { action });
         }
-        if !confirm_default_yes("apply these upgrades?")? {
+    }
+    // spec: HOOK-180 HOOK-184 -- the plan lists the source hooks, then each
+    // pending item's hooks: its build and install (or update, HOOK-125) hooks,
+    // and for a rename the old item's uninstall hooks (HOOK-82).
+    let mut hooks = source_plan;
+    for up in &pending {
+        let is_update = up.new_name == up.old.name;
+        hooks.extend(item_install_plan(
+            paths, &registry, &up.cat, is_update, accept,
+        ));
+        if !is_update {
+            hooks.extend(item_uninstall_plan(
+                paths,
+                &up.old,
+                &up.cat.uninstall_hooks(),
+                &up.old.commit,
+                accept,
+            ));
+        }
+    }
+    // spec: CLI-60 CLI-259 HOOK-182 -- without `--yes` the upgrades are
+    // confirmed with the hooks (off a TTY that refuses); `--yes` answers the
+    // items, leaving a hooks-only plan.
+    let items = (!yes).then(|| PlanItems {
+        question: "apply these upgrades?",
+        always: true,
+        default_yes: true,
+        removal: false,
+        listing: Vec::new(),
+    });
+    match ask_plan(paths, items, hooks)? {
+        PlanOutcome::Proceed => {}
+        PlanOutcome::Cancel | PlanOutcome::Abort => {
             println!("aborted; nothing changed");
             return Ok(None);
         }
     }
+    // spec: HOOK-183 -- the source hooks run after the answer, before items.
+    run_source_pass(&mut registry)?;
 
     let mut manifest = manifest;
     let mut applied: Vec<String> = Vec::new();
@@ -11922,6 +12544,15 @@ fn rerun_source_hooks(
                     );
                 }
                 false
+            } else if let Some(
+                answer @ (crate::consent::Answer::RunAll | crate::consent::Answer::SkipAll),
+            ) = crate::consent::answer_for(&crate::consent::HookKey::source_hook(
+                &source.name,
+                event,
+                &hook.run,
+            )) {
+                // spec: HOOK-181 HOOK-183 -- the upgrade plan listed this hook.
+                answer == crate::consent::Answer::RunAll
             } else {
                 // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
                 let browse_url = source.browse_url(&commit);
@@ -12005,6 +12636,44 @@ fn rerun_source_hooks(
         registry.save(paths)?;
     }
     Ok(())
+}
+
+/// The plan entries for the source hooks [`rerun_source_hooks`] would offer
+/// (HOOK-180, HOOK-183): the same pending selection, scope, and policy filter,
+/// so the plan lists exactly the hooks the pass then runs or skips.
+fn source_hooks_plan(
+    paths: &Paths,
+    registry: &Registry,
+    accept: crate::hook::Accept,
+    in_scope: Option<&HashSet<String>>,
+    policy: Option<&Policy>,
+) -> Vec<crate::consent::PlannedHook> {
+    let mut plan = Vec::new();
+    for source in &registry.sources {
+        if in_scope.is_some_and(|scope| !scope.contains(&source.name)) {
+            continue;
+        }
+        if policy.is_some_and(|p| p.lock() && !p.allow_matches(&source.base_identity())) {
+            continue;
+        }
+        let dir = source.clone_dir(paths);
+        let pending = pending_update_hooks(source, &dir);
+        let commit = source.commit.clone().unwrap_or_default();
+        for hook in pending.hooks {
+            plan.push(crate::consent::PlannedHook {
+                key: crate::consent::HookKey::source_hook(&source.name, pending.event, &hook.run),
+                label: hook.label.clone(),
+                optional: hook.optional,
+                commit: commit.clone(),
+                run_dir: dir.display().to_string(),
+                inspect: None,
+                browse_url: source.browse_url(&commit),
+                replaced: hook.declared_override(),
+                accepted: accept.event_str(pending.event),
+            });
+        }
+    }
+    plan
 }
 
 /// One hook `upgrade` should offer for a source, resolved to what the run and
@@ -14891,6 +15560,8 @@ fn prompt_line(prompt: &str) -> Result<String> {
     // meld prefix preview, CLI-24) can carry ANSI/control/bidi bytes; sanitize
     // before it reaches the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
+    // spec: TUI-44
+    crate::prompt::guard("answering a prompt")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{prompt}");
@@ -14907,39 +15578,312 @@ fn prompt_line(prompt: &str) -> Result<String> {
     })
 }
 
-/// Resolve a yes/no reply. An explicit `y`/`yes` or `n`/`no` (any case, trimmed)
-/// wins; an empty line or any unrecognized reply takes `default_yes`.
-fn parse_confirm(input: &str, default_yes: bool) -> bool {
-    match input.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => true,
-        "n" | "no" => false,
-        _ => default_yes,
-    }
-}
-
-/// Print `prompt {hint}`, read one line from stdin, and resolve it against
-/// `default_yes`. EOF (no input) is always No.
+/// Ask `prompt {hint}` as a yes/no question (CLI-257..259): an unrecognized
+/// reply is asked again, Enter and EOF take `default_yes`, and without a TTY
+/// the run refuses with `ConfirmationRequired` rather than prompting.
 fn read_confirm(prompt: &str, hint: &str, default_yes: bool) -> Result<bool> {
     // spec: DSC-95 -- the single chokepoint every `confirm`/
     // `confirm_default_yes` call routes through; sanitize here so a
     // source-controlled name baked into a prompt string cannot carry ANSI/
     // control/bidi bytes to the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
-    // spec: PRG-5
-    crate::progress::suspend(|| {
-        print!("\n{prompt} {hint} ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        let stdin = std::io::stdin();
-        if stdin
-            .read_line(&mut line)
-            .map_err(|e| MindError::io("<stdin>", e))?
-            == 0
-        {
-            return Ok(false); // EOF (no input) -> treat as No
+    // spec: CLI-259 -- the refusal names the question that was not asked.
+    let action = prompt.trim_end_matches('?').to_string();
+    crate::prompt::ask(
+        &format!("\n{prompt} {hint} "),
+        &crate::prompt::YES_NO,
+        default_yes,
+        &action,
+    )
+}
+
+// ----- Unified install plan (spec/install-hooks.md, HOOK-180..186) -----
+
+/// What a plan's answer leaves the caller to do (HOOK-181).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanOutcome {
+    /// Go ahead with the items; the listed hooks run, skip, or are reviewed as
+    /// answered.
+    Proceed,
+    /// `n`: install (or remove) nothing.
+    Cancel,
+    /// A deferred required source hook was aborted under `r` (HOOK-21): the
+    /// meld already stopped and said so.
+    Abort,
+}
+
+/// The item half of a plan's question (HOOK-180).
+pub(crate) struct PlanItems<'a> {
+    /// The question, e.g. `install these 3 item(s) now?`.
+    pub question: &'a str,
+    /// Ask it even when no hook needs an answer: the verb had its own item
+    /// confirmation (CLI-23, CLI-42, CLI-60, DEP-31). Without it, a run with no
+    /// hook to ask about asks nothing (HOOK-180).
+    pub always: bool,
+    /// The default of the item-only `[Y/n]` / `[y/N]` form.
+    pub default_yes: bool,
+    /// A removal (`unmeld`, HOOK-186): the four-way prompt defaults to `n`
+    /// (`[y/s/r/N]`) instead of `y`.
+    pub removal: bool,
+    /// Lines listing the items, printed before the plan when the caller has
+    /// not already shown them.
+    pub listing: Vec<String>,
+}
+
+/// The replies of the four-way plan prompt (HOOK-181, CLI-257).
+const PLAN_CHOICES: [crate::prompt::Choice<(PlanOutcome, crate::consent::Answer)>; 4] = [
+    crate::prompt::Choice {
+        keys: &["y", "yes"],
+        value: (PlanOutcome::Proceed, crate::consent::Answer::RunAll),
+    },
+    crate::prompt::Choice {
+        keys: &["s", "skip"],
+        value: (PlanOutcome::Proceed, crate::consent::Answer::SkipAll),
+    },
+    crate::prompt::Choice {
+        keys: &["r", "review"],
+        value: (PlanOutcome::Proceed, crate::consent::Answer::Review),
+    },
+    crate::prompt::Choice {
+        keys: &["n", "no"],
+        value: (PlanOutcome::Cancel, crate::consent::Answer::SkipAll),
+    },
+];
+
+/// The replies of the hooks-only prompt (HOOK-182, CLI-257).
+const PLAN_HOOK_CHOICES: [crate::prompt::Choice<crate::consent::Answer>; 3] = [
+    crate::prompt::Choice {
+        keys: &["y", "yes"],
+        value: crate::consent::Answer::RunAll,
+    },
+    crate::prompt::Choice {
+        keys: &["n", "no"],
+        value: crate::consent::Answer::SkipAll,
+    },
+    crate::prompt::Choice {
+        keys: &["r", "review"],
+        value: crate::consent::Answer::Review,
+    },
+];
+
+/// Show one plan and ask once (HOOK-180..183): the items (when `items` is
+/// given; `None` when `--yes` answered them or there are none), then every
+/// hook the run would offer, deferred meld hooks first. The answer is recorded
+/// against each listed hook (`consent`), and any deferred meld hooks are then
+/// offered under it, before the caller installs anything (HOOK-87).
+///
+/// Hooks a previous plan in the same run already answered are not listed
+/// again. Off a TTY, or under `--json`, nothing is asked here: those runs keep
+/// their own paths (HOOK-22, CLI-23, CLI-259) and the item question, when
+/// `always`, refuses through `read_confirm`.
+pub(crate) fn ask_plan(
+    paths: &Paths,
+    items: Option<PlanItems<'_>>,
+    hooks: Vec<crate::consent::PlannedHook>,
+) -> Result<PlanOutcome> {
+    let interactive = crate::hook::is_tty() && !json_mode();
+    let mut listed = deferred_meld_plan(paths)?;
+    listed.extend(hooks);
+    listed.retain(|h| crate::consent::answer_for(&h.key).is_none());
+    let asking = interactive && listed.iter().any(|h| !h.accepted);
+
+    let (outcome, answer) = if asking {
+        // spec: HOOK-180 HOOK-181 HOOK-182
+        crate::progress::suspend(|| {
+            if let Some(it) = &items {
+                for line in &it.listing {
+                    println!("{line}");
+                }
+            }
+            print!("{}", crate::consent::render(&listed));
+        });
+        let prompting = listed.iter().filter(|h| !h.accepted).count();
+        match &items {
+            Some(it) => {
+                // spec: HOOK-181 HOOK-186 -- an install defaults to yes; a
+                // removal defaults to no.
+                let (yes_key, no_key, hint, default) = if it.removal {
+                    ("y", "N", "[y/s/r/N]", PLAN_CHOICES[3].value)
+                } else {
+                    ("Y", "n", "[Y/s/r/n]", PLAN_CHOICES[0].value)
+                };
+                println!(
+                    "  [{yes_key}] yes, run the hooks   [s] yes, skip the hooks   [r] yes, ask about each hook   [{no_key}] no"
+                );
+                let (outcome, answer) = crate::prompt::ask(
+                    &format!(
+                        "{} ({prompting} hook(s) to run) {hint} ",
+                        strip_ansi(it.question)
+                    ),
+                    &PLAN_CHOICES,
+                    default,
+                    it.question.trim_end_matches('?'),
+                )?;
+                (outcome, Some(answer))
+            }
+            None => {
+                println!("  [Y] run them   [n] skip them   [r] ask about each hook");
+                let answer = crate::prompt::ask(
+                    &format!("run these {prompting} hook(s)? [Y/n/r] "),
+                    &PLAN_HOOK_CHOICES,
+                    crate::consent::Answer::RunAll,
+                    "running the listed hooks",
+                )?;
+                (PlanOutcome::Proceed, Some(answer))
+            }
         }
-        Ok(parse_confirm(&line, default_yes))
-    })
+    } else if let Some(it) = items.filter(|it| it.always) {
+        // spec: HOOK-182 -- every hook is accepted (or there are none): the
+        // item confirmation alone, with the accepted hooks shown.
+        if interactive && !listed.is_empty() {
+            for line in &it.listing {
+                println!("{line}");
+            }
+            print!("{}", crate::consent::render(&listed));
+        }
+        let yes = if it.default_yes {
+            confirm_default_yes(it.question)?
+        } else {
+            confirm(it.question)?
+        };
+        let outcome = if yes {
+            PlanOutcome::Proceed
+        } else {
+            PlanOutcome::Cancel
+        };
+        (outcome, None)
+    } else {
+        (PlanOutcome::Proceed, None)
+    };
+
+    if let Some(answer) = answer {
+        crate::consent::grant(listed.iter().map(|h| &h.key), answer);
+    }
+    // spec: HOOK-183 -- the deferred meld hooks run now, before any item: under
+    // the answer (a cancel skips and records them, so a re-meld re-offers them,
+    // HOOK-60).
+    if outcome == PlanOutcome::Cancel {
+        let deferred = deferred_meld_plan(paths)?;
+        crate::consent::grant(
+            deferred.iter().map(|h| &h.key),
+            crate::consent::Answer::SkipAll,
+        );
+    }
+    if matches!(run_deferred_meld_hooks(paths)?, HookOutcome::Abort) {
+        return Ok(PlanOutcome::Abort);
+    }
+    Ok(outcome)
+}
+
+/// The plan entries for installing `item` (HOOK-180, HOOK-184): its build hook
+/// (HOOK-70) and its install hooks, or its update hooks on a re-install
+/// (HOOK-125), in run order. Each names the directory it runs in and the
+/// item's clone path to inspect, since the run directory does not hold the
+/// item yet.
+fn item_install_plan(
+    paths: &Paths,
+    registry: &Registry,
+    item: &CatalogItem,
+    is_update: bool,
+    accept: crate::hook::Accept,
+) -> Vec<crate::consent::PlannedHook> {
+    let commit = registry
+        .find(&item.source)
+        .and_then(|s| s.commit.clone())
+        .unwrap_or_default();
+    let name = item.effective_name();
+    let display_key = item.display_key();
+    let inspect = Some(item.path.display().to_string());
+    let mut plan = Vec::new();
+    if let Some(build) = &item.build {
+        plan.push(crate::consent::PlannedHook {
+            key: crate::consent::HookKey::item_hook(&item.source, &display_key, "build", build),
+            label: "build".to_string(),
+            // A build hook offers run or skip, never abort (HOOK-72).
+            optional: true,
+            commit: commit.clone(),
+            run_dir: paths.staging_path(item.kind, &name).display().to_string(),
+            inspect: inspect.clone(),
+            browse_url: None,
+            replaced: None,
+            accepted: accept.build,
+        });
+    }
+    // The install hook's working directory (HOOK-81): the store directory of a
+    // directory-backed item, else the kind directory holding its file.
+    let store = paths.store_item(item.kind, &name);
+    let run_dir = if item.path.is_dir() {
+        store
+    } else {
+        store
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(store)
+    };
+    for h in item.install_time_hooks(is_update) {
+        plan.push(crate::consent::PlannedHook {
+            key: crate::consent::HookKey::item_hook(
+                &item.source,
+                &display_key,
+                h.event.as_str(),
+                &h.run,
+            ),
+            label: h.label().to_string(),
+            optional: h.optional,
+            commit: commit.clone(),
+            run_dir: run_dir.display().to_string(),
+            inspect: inspect.clone(),
+            browse_url: None,
+            replaced: None,
+            accepted: accept.event(h.event),
+        });
+    }
+    plan
+}
+
+/// The plan entries for removing an installed item (HOOK-186): its uninstall
+/// hooks (HOOK-82), run in its store copy, which exists, so there is nothing
+/// separate to inspect. Empty when the store copy is gone, since
+/// [`uninstall_item`] then runs no hook.
+fn item_uninstall_plan(
+    paths: &Paths,
+    item: &crate::manifest::InstalledItem,
+    hooks: &[&crate::mindfile::ResolvedHook],
+    commit: &str,
+    accept: crate::hook::Accept,
+) -> Vec<crate::consent::PlannedHook> {
+    let store = paths.mind_home.join(&item.store);
+    if !store.exists() {
+        return Vec::new();
+    }
+    let run_dir = if store.is_dir() {
+        store
+    } else {
+        store
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(store)
+    };
+    let display_key = item.display_key();
+    hooks
+        .iter()
+        .map(|h| crate::consent::PlannedHook {
+            key: crate::consent::HookKey::item_hook(
+                &item.source,
+                &display_key,
+                "uninstall",
+                &h.run,
+            ),
+            label: h.label().to_string(),
+            optional: h.optional,
+            commit: commit.to_string(),
+            run_dir: run_dir.display().to_string(),
+            inspect: None,
+            browse_url: None,
+            replaced: None,
+            accepted: accept.uninstall,
+        })
+        .collect()
 }
 
 /// Prompt `[y/N]` on the terminal; default No.
@@ -14947,8 +15891,8 @@ pub(crate) fn confirm(prompt: &str) -> Result<bool> {
     read_confirm(prompt, "[y/N]", false)
 }
 
-/// Like `confirm` but defaulting to yes (`[Y/n]`): a bare Enter (or any reply that
-/// is not an explicit no) confirms. Used where the affirmative is the expected
+/// Like `confirm` but defaulting to yes (`[Y/n]`): a bare Enter (or EOF)
+/// confirms. Used where the affirmative is the expected
 /// path and the action is reversible (the meld install-items prompt, CLI-23).
 pub(crate) fn confirm_default_yes(prompt: &str) -> Result<bool> {
     read_confirm(prompt, "[Y/n]", true)
@@ -14984,6 +15928,9 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         auto_update,
     } = args;
     let accept = accept.accept();
+    // spec: HOOK-180 HOOK-183 -- an interactive meld holds its source install
+    // hooks back for the one plan it asks before installing.
+    let _plan = MeldPlanScope::enter(!json && crate::hook::is_tty());
     // spec: AUP-8 -- a bad level is refused before the clone.
     let grant = auto_update
         .as_deref()
@@ -15213,6 +16160,15 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             // register-only + json: register only, emit the meld result now.
             emit_meld_json_result(meld_sum, vec![], 0, None)?;
         }
+    }
+    // spec: HOOK-182 HOOK-183 -- hooks still held back (nothing to install,
+    // `--register-only`, or every item already installed) get a hooks-only
+    // plan of their own.
+    if !meld_aborted() {
+        ask_plan(paths, None, Vec::new())?;
+    }
+    if meld_aborted() {
+        return Ok(());
     }
     apply_auto_update_grant(paths, &source_ident, grant, !already_melded, yes, json)?;
     // DSC-56: suggest `mind probe` after melding a curated super-source.
@@ -16651,40 +17607,33 @@ mod tests {
         assert!(v.get("removed").is_none(), "empty removed omitted: {v}");
     }
 
-    #[test]
-    fn parse_confirm_default_no_only_yes_confirms() {
-        // spec: CLI-42 - the default-no guard (e.g. the forget glob confirm):
-        // only an explicit yes confirms; empty and unrecognized are no.
-        assert!(parse_confirm("y", false));
-        assert!(parse_confirm("YES", false));
-        assert!(!parse_confirm("", false));
-        assert!(!parse_confirm("n", false));
-        assert!(!parse_confirm("maybe", false));
-    }
-
-    #[test]
-    fn parse_confirm_default_yes_only_no_declines() {
-        // spec: CLI-23 - the meld install prompt defaults to yes: a bare Enter (or
-        // anything but an explicit no) installs; only n/no declines.
-        assert!(parse_confirm("", true));
-        assert!(parse_confirm("y", true));
-        assert!(parse_confirm(" Y \n", true));
-        assert!(parse_confirm("whatever", true));
-        assert!(!parse_confirm("n", true));
-        assert!(!parse_confirm("NO", true));
+    /// Answer the overwrite prompt's choices with `input`, as the terminal would.
+    fn overwrite_answer(input: &str) -> OverwriteAnswer {
+        let mut reader = std::io::Cursor::new(input.as_bytes().to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        crate::prompt::ask_from(
+            &mut reader,
+            &mut out,
+            "overwrite? [y/N/a] ",
+            &OVERWRITE_CHOICES,
+            OverwriteAnswer::No,
+        )
+        .unwrap()
     }
 
     #[test]
     fn overwrite_prompt_answers_yes_all_or_no() {
-        // spec: CLI-247 - `a` accepts this conflict and every later one; the
-        // default (a bare Enter, EOF, anything else) refuses.
-        assert_eq!(parse_overwrite_answer("y"), OverwriteAnswer::Yes);
-        assert_eq!(parse_overwrite_answer(" YES \n"), OverwriteAnswer::Yes);
-        assert_eq!(parse_overwrite_answer("a"), OverwriteAnswer::All);
-        assert_eq!(parse_overwrite_answer("All\n"), OverwriteAnswer::All);
-        assert_eq!(parse_overwrite_answer(""), OverwriteAnswer::No);
-        assert_eq!(parse_overwrite_answer("n"), OverwriteAnswer::No);
-        assert_eq!(parse_overwrite_answer("maybe"), OverwriteAnswer::No);
+        // spec: CLI-247 CLI-257 CLI-258 - `a` accepts this conflict and every
+        // later one; Enter and EOF take the default (refuse); an unrecognized
+        // reply is asked again rather than refusing.
+        assert_eq!(overwrite_answer("y\n"), OverwriteAnswer::Yes);
+        assert_eq!(overwrite_answer(" YES \n"), OverwriteAnswer::Yes);
+        assert_eq!(overwrite_answer("a\n"), OverwriteAnswer::All);
+        assert_eq!(overwrite_answer("All\n"), OverwriteAnswer::All);
+        assert_eq!(overwrite_answer("\n"), OverwriteAnswer::No);
+        assert_eq!(overwrite_answer(""), OverwriteAnswer::No);
+        assert_eq!(overwrite_answer("n\n"), OverwriteAnswer::No);
+        assert_eq!(overwrite_answer("maybe\ny\n"), OverwriteAnswer::Yes);
         // The flags overwrite without a prompt; `Error` never does.
         assert!(Clobber::Force.overwrites());
         assert!(Clobber::Overwrite.overwrites());

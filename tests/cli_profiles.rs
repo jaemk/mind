@@ -701,9 +701,9 @@ fn remeld_adds_to_the_recorded_set_and_never_disables() {
 #[test]
 fn learn_source_profile_uses_learns_gate_and_records() {
     // spec: PROF-17 -- the source is a CLI-36 selector; --dry-run installs
-    // nothing; the dependency-closure confirmation applies (EOF = no); with
-    // --yes the named profile installs (default is not added) and is
-    // recorded.
+    // nothing; the dependency-closure confirmation applies (without a TTY it
+    // refuses, CLI-259); with --yes the named profile installs (default is
+    // not added) and is recorded.
     let sb = Sandbox::new("src");
     assert!(sb.mind(&["meld", &sb.spec(), "--register-only"]).success);
 
@@ -714,13 +714,10 @@ fn learn_source_profile_uses_learns_gate_and_records() {
     assert_eq!(sb.recorded_profiles(), None);
 
     let r = sb.mind(&["learn", "src", "--profile", "full"]);
-    assert!(r.success, "{} {}", r.stdout, r.stderr);
-    assert!(
-        r.stdout.contains("cancelled; nothing installed"),
-        "{}",
-        r.stdout
-    );
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("--yes"), "{}", r.stderr);
     assert!(sb.installed().is_empty());
+    assert_eq!(sb.recorded_profiles(), None);
 
     let r = sb.mind(&["learn", "src", "--profile", "full", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);

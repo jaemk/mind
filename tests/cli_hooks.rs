@@ -5951,11 +5951,11 @@ fn hooks_run_interactive_abort_of_a_required_hook_stops_the_run() {
 }
 
 /// An OPTIONAL source hook prompts two-way (HOOK-52), so the abort reply has no
-/// meaning there: `a` is an unrecognized answer and skips rather than aborting.
-/// The run stays exit 0.
+/// meaning there: `a` is an unrecognized answer, rejected and asked again
+/// (CLI-257), never an abort. The `n` that follows skips. The run stays exit 0.
 #[test]
 fn hooks_run_interactive_optional_hook_never_aborts() {
-    // spec: HOOK-109 HOOK-100
+    // spec: HOOK-109 HOOK-100 CLI-257
     let sb = Sandbox::new("tty-optional");
     sb.write_and_commit(
         "mind.toml",
@@ -5983,7 +5983,7 @@ fn hooks_run_interactive_optional_hook_never_aborts() {
             "tty-optional",
         ],
         &[("MIND_TTY", "1")],
-        "a\n",
+        "a\nn\n",
         60,
     );
     assert!(
@@ -5997,24 +5997,29 @@ fn hooks_run_interactive_optional_hook_never_aborts() {
         r.stdout
     );
     assert!(
+        r.stdout.contains("please answer y or n"),
+        "`a` must be rejected and asked again: {}",
+        r.stdout
+    );
+    assert!(
         r.success,
         "an optional hook can never abort the run: {}\n{}",
         r.stdout, r.stderr
     );
     assert!(
         !sb.sentinel("optional-ran.sentinel").exists(),
-        "an unclear reply must not run an optional hook: {}",
+        "the `n` after the rejected reply must skip the hook: {}",
         r.stdout
     );
 }
 
 /// The bounded-input case the `mind_env_stdin` harness cannot express: two
 /// hooks prompt, one reply is scripted. The second prompt reads EOF, which
-/// HOOK-22 resolves as a skip, so the run terminates instead of blocking on a
-/// reply that never comes.
+/// takes the prompt's default, run (CLI-258), so the run terminates instead of
+/// blocking on a reply that never comes.
 #[test]
 fn hooks_run_prompts_outnumbering_replies_terminate_on_eof() {
-    // spec: HOOK-109 HOOK-100
+    // spec: HOOK-109 HOOK-100 CLI-258
     let sb = Sandbox::new("tty-short-input");
     sb.write_and_commit(
         "mind.toml",
@@ -6047,7 +6052,7 @@ fn hooks_run_prompts_outnumbering_replies_terminate_on_eof() {
             "tty-short-input",
         ],
         &[("MIND_TTY", "1")],
-        "y\n",
+        "n\n",
         60,
     );
     assert!(
@@ -6057,17 +6062,17 @@ fn hooks_run_prompts_outnumbering_replies_terminate_on_eof() {
     );
     assert!(
         r.success,
-        "an EOF skip is not an abort and not a consent failure: {}\n{}",
+        "an EOF default is not an abort and not a consent failure: {}\n{}",
         r.stdout, r.stderr
     );
     assert!(
-        sb.sentinel("short-first.sentinel").exists(),
-        "the answered hook must run: {}",
+        !sb.sentinel("short-first.sentinel").exists(),
+        "the answered hook must be skipped: {}",
         r.stdout
     );
     assert!(
-        !sb.sentinel("short-second.sentinel").exists(),
-        "the unanswered hook must be skipped, never run on a stale reply: {}",
+        sb.sentinel("short-second.sentinel").exists(),
+        "the unanswered hook takes the default, run: {}",
         r.stdout
     );
 }
@@ -6174,20 +6179,24 @@ fn unset_mind_tty_leaves_a_piped_stdin_non_interactive() {
 /// `MIND_TTY` is process-wide, so it turns on the prompt paths of every other
 /// verb too. The CLI-23 post-meld install prompt is the widest of them: it must
 /// become reachable and correct, not reachable and broken. Both arms are
-/// exercised -- an EOF reply declines (and installs nothing), an explicit `y`
-/// installs -- and neither may hang.
+/// exercised -- an explicit `n` declines (and installs nothing), EOF takes the
+/// default and installs (CLI-258) -- and neither may hang.
 #[test]
 fn mind_tty_makes_other_verbs_prompts_reachable_and_correct() {
-    // spec: HOOK-109 CLI-23
+    // spec: HOOK-109 CLI-23 CLI-258
     let sb = Sandbox::new("tty-other-verb");
     sb.write_and_commit(
         "skills/widget/SKILL.md",
         "---\ndescription: widget\n---\n# widget\n",
     );
 
-    // EOF at the prompt declines: nothing is installed, and the run ends.
-    let (r, timed_out) =
-        sb.mind_env_stdin_bounded(&["meld", &sb.source_spec()], &[("MIND_TTY", "1")], "", 60);
+    // `n` at the prompt declines: nothing is installed, and the run ends.
+    let (r, timed_out) = sb.mind_env_stdin_bounded(
+        &["meld", &sb.source_spec()],
+        &[("MIND_TTY", "1")],
+        "n\n",
+        60,
+    );
     assert!(
         !timed_out,
         "an EOF at another verb's prompt must not hang: {}\n{}",
@@ -6201,17 +6210,13 @@ fn mind_tty_makes_other_verbs_prompts_reachable_and_correct() {
     );
     assert!(
         !sb.claude_home.join("skills/widget").exists(),
-        "an EOF reply must decline, not install: {}",
+        "an `n` reply must decline, not install: {}",
         r.stdout
     );
 
-    // And an explicit yes installs, so the prompt is not merely printed.
-    let (r, timed_out) = sb.mind_env_stdin_bounded(
-        &["learn", "tty-other-verb#*"],
-        &[("MIND_TTY", "1")],
-        "y\n",
-        60,
-    );
+    // And EOF takes the default, yes, so the prompt is not merely printed.
+    let (r, timed_out) =
+        sb.mind_env_stdin_bounded(&["meld", &sb.source_spec()], &[("MIND_TTY", "1")], "", 60);
     assert!(!timed_out, "must terminate: {}\n{}", r.stdout, r.stderr);
     assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
     assert!(
@@ -6506,17 +6511,22 @@ fn upgrade_discloses_a_pending_install_hook_with_its_declared_name_and_flag() {
     assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
 
     // Advance so `upgrade` has something to do, then take the interactive
-    // branch and decline: the disclosure is printed either way.
+    // branch: the plan lists the hook (HOOK-180), `r` reviews it on its own
+    // prompt (HOOK-181), and `n` declines there.
     sb.write_and_commit("README.md", "# fixture v2\n");
     assert!(sb.mind(&["sync"]).success, "sync: {}", r.stderr);
     let (r, timed_out) =
-        sb.mind_env_stdin_bounded(&["upgrade", "--yes"], &[("MIND_TTY", "1")], "n\n", 30);
+        sb.mind_env_stdin_bounded(&["upgrade", "--yes"], &[("MIND_TTY", "1")], "r\nn\n", 30);
     assert!(
         !timed_out,
         "upgrade must not hang: {}\n{}",
         r.stdout, r.stderr
     );
     let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("[1] Build the tooling") && out.contains("Event:   install (optional)"),
+        "the plan must list the hook by its declared name and flag: {out}"
+    );
     assert!(
         out.contains("Build the tooling (optional)"),
         "the disclosure must carry the declared name and optional flag: {out}"

@@ -61,8 +61,13 @@ rather than a guess. Use the full identity to pick one instance, such as
 `github.com/acme/skills@jk` for a namespaced instance or
 `github.com/acme/skills#skills/foo` for an [item link](item-links.md).
 
+`unmeld` always lists what it will remove and asks before removing anything.
+The default is no, so Enter removes nothing. `--yes` skips the question and is
+required in a script or CI, where there is no terminal to ask on.
+
 A source can declare uninstall hooks, which run in its clone before the clone
-is removed. They prompt like install hooks; `--uninstall-hook <cmd>` replaces
+is removed. They are listed in that question (see [Install
+hooks](install-hooks.md#uninstall-hooks)); `--uninstall-hook <cmd>` replaces
 them and `--accept-hooks` runs them without a prompt. A required
 uninstall hook that fails or is aborted leaves the source melded.
 

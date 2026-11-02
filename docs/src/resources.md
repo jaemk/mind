@@ -101,7 +101,7 @@ skill:review  [selected]
   resource:allowlist.json  [dependency]
   resource:templates  [dependency]
 
-Install these 3 items? [y/N]
+install this dependency closure? [y/N]
 ```
 
 From there it behaves like any installed item:

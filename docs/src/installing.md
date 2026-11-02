@@ -75,7 +75,7 @@ skill:review  [selected]
   agent:dev   [dependency]
     agent:test  [dependency]
 
-Install these 3 items? [y/N]
+install this dependency closure? [y/N]
 ```
 
 The same goes for the [tools](tooling.md) and [resources](resources.md) an

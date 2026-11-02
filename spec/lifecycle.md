@@ -206,12 +206,9 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   not a mind-owned symlink -- `upgrade`'s apply confirmation (LIFE-14),
   `learn`'s dependency-closure confirmation (DEP-31: a `learn` whose closure
   pulls in dependencies beyond the explicit selection), and `evolve`'s
-  binary-swap confirmation. `upgrade`'s own text-mode (non-`--json`)
-  prompt is unaffected: it reads stdin directly and already treats EOF/no-input
-  as a safe decline, so it does not additionally require a real TTY the way the
-  other sites above do (mirroring DEP-60's TTY check) -- only `--json` could
-  previously bypass it, by skipping the confirm call entirely rather than by a
-  TTY distinction.
+  binary-swap confirmation. A text-mode run without a TTY refuses the same way
+  (CLI-259), so neither `upgrade`'s nor `learn`'s confirmation is answered by
+  EOF from a pipe.
 
 ## Uninstall
 
