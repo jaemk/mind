@@ -70,8 +70,11 @@ CLI-17).
   arbitrary source code runs. It then offers `[Y/n/a]`: run the hook
   (`y`/`Y`/Enter), skip it but continue installing the source and its items
   without building the tooling (`n`/`N`), or abort and install nothing
-  (`a`/`A`). The default (a bare Enter) is
-  run; an unrecognized reply skips, so an unclear answer never runs the hook. When
+  (`a`/`A`). The default (a bare Enter, or EOF, CLI-258) is
+  run; an unrecognized reply is rejected and asked again (CLI-257), so an
+  unclear answer never runs the hook. Where a verb asks a unified plan
+  (HOOK-180, HOOK-186), this prompt appears only for a hook the plan did not
+  list (HOOK-185) or when the user chose to review each hook (`r`, HOOK-181). When
   a `--install-hook` overrides the source's declared `[source].install` (HOOK-2),
   the prompt also shows the declared command and states plainly that the
   user-supplied command is replacing it.
@@ -106,6 +109,8 @@ CLI-17).
   `file://` source yield no URL (only the clone path is shown, since no correct web
   link exists for them). The browse URL is source-derived text and is sanitized on
   the consent surface exactly as the other disclosure fields are (HOOK-91).
+  A unified plan (HOOK-180) shows the same browse URL for each source hook it
+  lists, and for an item hook the clone path to inspect (HOOK-184).
 - `HOOK-91` All source-derived text included in the hook consent disclosure
   (identity, pin description, commit, clone path, hook command, declared
   command) is sanitized -- ANSI escape sequences, C0/DEL/C1 control characters,
@@ -370,6 +375,9 @@ still parsed and folded in (HOOK-50).
   for both; in a non-TTY context every hook is skipped instead (HOOK-22), and
   `--accept-hooks` runs every hook it accepts (HOOK-23, HOOK-150), optional and
   required alike. `optional` does NOT make the hook's failure tolerable (HOOK-53).
+  An unrecognized reply is asked again and EOF runs the hook (CLI-257, CLI-258).
+  A unified plan (HOOK-180) lists the hook as optional or required and answers
+  it with the rest unless the user reviews each one (HOOK-181).
 - `HOOK-53` Any hook's non-zero exit is a hard stop, whether the hook is optional
   or required: at `meld` the clone is removed and nothing is registered
   (HOOK-30); at `unmeld` the unmeld stops and the source remains. `optional`
@@ -397,7 +405,10 @@ still parsed and folded in (HOOK-50).
   --accept-hooks` (or `--accept-hooks=uninstall`, CLI-250) runs them unattended. A required
   uninstall hook that fails or is aborted leaves the source melded. Item uninstall
   hooks run before source uninstall hooks, making teardown the reverse of install
-  (HOOK-87).
+  (HOOK-87). On a TTY the removal confirmation and the uninstall hook prompts
+  are one plan (HOOK-186): the hooks are listed with the confirmation and
+  answered there, and only a hook the user chose to review is prompted on its
+  own.
 - `HOOK-55` Install hooks are recorded as a set on the source's registry entry
   (`install_hooks`: each an effective command plus the commit it last ran at, or
   null when skipped), superseding the single `[source].install`/commit pair
@@ -582,6 +593,104 @@ the item is in place and is for host side effects.
   has been removed and before the clone and registry entry are dropped (the
   multi-item confirmation, CLI-42, still gates all of it). The end-to-end flow is
   `source.install -> item.install* ... item.uninstall* -> source.uninstall`.
+
+## Unified install prompt
+
+Status: done. An interactive install used to ask several separate questions:
+each source install hook (HOOK-20) before the item preview, then the install
+confirmation (CLI-23, CLI-60), then each item's build and install hooks
+(HOOK-72, HOOK-83) as each item installed. The user approved hooks before
+seeing what would install, and a source hook had already run by the time the
+user declined the install. These rules replace that sequence with one plan and
+one answer, given before anything runs. `unmeld` has the same shape with its
+removal confirmation (CLI-42) and uninstall hooks (HOOK-54, HOOK-82), and gets
+the same treatment. HOOK-20, HOOK-24, HOOK-54, HOOK-142, CLI-21, CLI-23, and
+CLI-60 point here.
+
+- `HOOK-180` On a TTY, `meld` (its install-all offer, a `--learn` subset, a
+  profile install, and a re-meld's pending hooks, HOOK-60), `learn`, and
+  `upgrade` (including `sync --upgrade`) gather everything they would do into
+  one plan, shown before any hook runs. The plan lists the items to install or
+  upgrade (the CLI-23 preview, the CLI-61 report), then every hook the run would
+  offer, in run order (HOOK-87): the source's pending install or update hooks
+  (HOOK-55, HOOK-60, HOOK-122), then for each item its build hook (HOOK-70) and
+  its install or update hooks (HOOK-81, HOOK-125). Each hook is shown with the
+  fields of the HOOK-20 disclosure (name, event, required or optional, source
+  identity, commit, command, working directory), sanitized per HOOK-91. A hook
+  that `--accept-hooks` already accepts (HOOK-150) is listed and marked as
+  accepted. The plan replaces the prompts the run would otherwise ask, so a run
+  that would ask nothing today (a `learn` of items with no hooks) still asks
+  nothing. `unmeld` follows the same pattern (HOOK-186). `hooks run`, `forget`,
+  and `curate` are out of scope and keep their current prompts.
+- `HOOK-181` The plan ends in one prompt, `[Y/s/r/n]`:
+  - `y`/`Y`/Enter (the default): install the items and run every listed hook.
+  - `s`: install the items and skip every listed hook. Each skip is reported and
+    recorded as if it had been skipped at its own prompt (HOOK-21, HOOK-55,
+    HOOK-110).
+  - `r`: install the items and prompt each hook on its own at its run point, as
+    today (HOOK-20, HOOK-52, HOOK-72, HOOK-83). This is the only way to answer
+    hooks one at a time, and the only way to reach a required source hook's
+    abort (HOOK-21).
+  - `n`: install nothing and run no hook. On `meld` the source stays registered,
+    as for a declined CLI-23 offer.
+
+  An unrecognized reply is rejected and asked again (CLI-257), so an unclear
+  answer neither runs nor skips anything. EOF takes the default, `y` (CLI-258):
+  the user ran the command, so the intent is to run it fully. A non-TTY run
+  never reaches this prompt (HOOK-182).
+- `HOOK-182` When the run has no items to install (`--register-only`, a re-meld
+  with only pending hooks, or every item already installed) or `--yes` already
+  answers the item part, the plan lists only the hooks and the prompt is
+  `[Y/n/r]`: run every hook, skip every hook, or review each one. When
+  `--accept-hooks` accepts every listed hook, the prompt is the existing item
+  confirmation (CLI-23, CLI-60). When both flags cover the run, there is no
+  prompt. A non-TTY run is unchanged (HOOK-22, CLI-23). `--json` output is
+  unchanged.
+- `HOOK-183` No hook runs before the plan is answered. On `meld`, the source's
+  install hooks run after the answer and before the first item installs, which
+  keeps the HOOK-87 order. On `upgrade`, the source hook pass (HOOK-11, HOOK-121)
+  runs after the answer, so declining the upgrade runs no hook. Hooks still see
+  the selection the run applies (HOOK-142).
+- `HOOK-184` An item hook's directory does not hold the item's files when the
+  plan is shown: a build hook's staging directory (HOOK-71) does not exist yet,
+  and an install or update hook's store directory (HOOK-81) is missing on a
+  first install and holds the old version on an upgrade. So each item hook in
+  the plan shows two locations: the directory it will run in, and the item's
+  path in the source's clone, labeled as the place to inspect the code. The plan
+  states that the clone copy is the item before token expansion (NS-11,
+  TOOL-13). Source hooks are unaffected: they run in the clone, which is already
+  at the disclosed commit (HOOK-24).
+- `HOOK-185` An answer covers exactly the hooks the plan listed. A hook that
+  comes up during the run without having been listed is prompted on its own
+  (HOOK-20), whatever the answer was, so a plan that missed a hook never runs it
+  without consent.
+- `HOOK-186` `unmeld` uses the same plan and prompt. The plan lists the items it
+  will remove (CLI-21; the matched sources for a glob, CLI-28), then every
+  uninstall hook in teardown order (HOOK-87): each item's uninstall hooks
+  (HOOK-82, HOOK-86), then the source's (HOOK-54). It replaces the CLI-42
+  confirmation and the per-hook uninstall prompts, and no hook runs before the
+  answer. The replies and their parsing are HOOK-181's, read for removal: `y`
+  removes the items and runs every listed hook, `s` removes them and skips every
+  hook, `r` removes them and prompts each hook on its own (a required source
+  uninstall hook's abort still leaves the source melded, HOOK-54), and `n`
+  removes nothing. Under `--keep-items` (CLI-22) or `--yes` the plan lists only
+  the hooks and the prompt is HOOK-182's `[Y/n/r]`; with `--accept-hooks`
+  covering every hook, the prompt is the removal confirmation alone. A non-TTY
+  `unmeld` is unchanged (HOOK-54, CLI-42).
+
+Limits of the plan, each covered by HOOK-185 (an unlisted hook is prompted on
+its own):
+
+- A nested source a curator registers during `meld` (DSC-54) keeps its own
+  install hook prompt at registration, before the top-level plan.
+- Aborting a fresh super-source meld at a reviewed source hook (`r`, then `a`)
+  unregisters the top-level source but leaves the nested sources it already
+  registered.
+- `learn <source> --profile` asks its closure question (DEP-31) and then a
+  hooks-only plan, and so do an `upgrade`'s profile and whole-source additions
+  (PROF-21, LIFE-54) after the upgrade plan.
+- On `upgrade` the source hook pass runs after the catalog scan, so an item a
+  source hook generates is seen by the next `upgrade`.
 
 ## Running hooks on demand (`mind hooks run`)
 
@@ -854,8 +963,10 @@ outside the surrounding verb, under the same consent model.
   between a non-TTY skip and an interactive decline) is unreachable from a
   headless test, so the branch that decides whether arbitrary source code runs
   is the one branch nothing verifies. The override changes only which branch is
-  taken; it never bypasses a prompt or consents on the user's behalf, and a
-  prompt that reaches EOF still skips (HOOK-22).
+  taken; it never bypasses a prompt. A prompt that reaches EOF takes its
+  default (CLI-258), the same as a bare Enter at a real terminal, so the
+  override still consents to nothing the user would not get by pressing Enter.
+  The same test decides whether any fixed-choice prompt is shown (CLI-259).
 
 ## Update hooks
 
@@ -1065,8 +1176,11 @@ hooks to do different setup depending on which profiles the consumer enabled.
   about to apply: the profile flags plus, on an interactive meld, the PROF-13
   picker's answer. The picker is therefore asked before the hooks run. A re-meld's
   re-offered hooks see the re-meld's selection (PROF-16). The value is the
-  selection, not the outcome. The hooks run before the install prompt, so a hook
-  still sees a selection whose install is later declined. A name the source does
+  selection, not the outcome. On an interactive meld the hooks run after the
+  unified plan is answered (HOOK-183), and declining it (`n`) runs none of them.
+  Elsewhere (`--accept-hooks`, a nested curated source) they run before the
+  install prompt, so a hook still sees a selection whose install is later
+  declined. A name the source does
   not declare (PROF-14) is left out. `MIND_PROFILES` is empty when no profile
   install follows: `--register-only`, the CLI-23 install-all offer, and a nested
   source whose curator entry routes outside profiles (PROF-26).

@@ -243,8 +243,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   non-TTY context; without `--yes` a non-TTY `meld` registers only and prints how
   to install later (mirroring the install-hook non-TTY behavior, HOOK-22). Only
   the top-level source is offered (a curated super-source's nested sources are not
-  auto-installed), already-installed items are skipped (DEP-23), and a source
-  install hook is still handled by its own prompt during the meld (HOOK-20).
+  auto-installed), and already-installed items are skipped (DEP-23). On a TTY
+  the prompt is the unified plan (HOOK-180): it also lists the source's install
+  hooks and the items' hooks, and answers them with the install.
 - `CLI-236` `meld <repo> --learn <NAME|GLOB>` replaces the CLI-23 install-all
   offer with a subset install: only the source's items matching the patterns are
   installed. The flag is repeatable, and each value may be an exact name
@@ -487,7 +488,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   source (each via its file registry, then its manifest entry), mirroring meld's
   install-by-default (CLI-23): dropping a source cleans up after itself in one
   step. It first lists the items it will remove; the multi-item confirmation
-  (CLI-42) applies, and `--yes` skips it.
+  (CLI-42) applies, and `--yes` skips it. On a TTY that confirmation is the
+  unified plan, which also lists the uninstall hooks (HOOK-186).
 - `CLI-22` `unmeld --keep-items` (deprecated alias: `--unlink-only`, see CLI-166)
   removes only the source (clone and registry entry) and leaves its installed items
   in place. It lists those orphaned items and suggests the `forget` command to
@@ -571,7 +573,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   when both are given.
 - `CLI-247` The CLI-35 overwrite prompt reads `[y/N/a]`. `y` overwrites this
   target, `a` (or `all`) overwrites it and every later conflict in the same
-  run without asking again, and anything else (a bare Enter, EOF) refuses.
+  run without asking again, and `n`, a bare Enter, or EOF refuses (CLI-258).
+  Any other reply is asked again (CLI-257).
 - `CLI-36` `learn <source> --all` is shorthand for `learn '<source>#*'`: it
   appends the `#*` selector to the positional ref, promoting it from an item name
   to a source qualifier and installing every item of that source (CLI-31), deps
@@ -764,10 +767,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## upgrade
 
 - `CLI-60` `upgrade` reports pending upgrades and, unless `--yes` is given, prompts
-  `[Y/n]` (default Yes, a bare Enter applies; EOF counts as No) before applying
+  `[Y/n]` (default Yes, a bare Enter or EOF applies, CLI-258) before applying
   anything. The affirmative is the default because reaching the prompt means the
   user asked to upgrade, and an upgrade is reversible (re-pin and `sync`/`upgrade`,
-  or `forget`).
+  or `forget`). Without a TTY and without `--yes`, `upgrade` refuses with
+  `ConfirmationRequired` (CLI-259). On a TTY the prompt is the unified plan
+  (HOOK-180), which also lists the pending source hooks and each item's hooks;
+  the source hook pass runs only after it is answered (HOOK-183).
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
 - `CLI-176` The compare URL is produced for https remotes using the GitHub
@@ -1454,8 +1460,8 @@ release artifacts as the install script and the Homebrew formula.
   which governs the opposite direction (an explicit `--to` strictly below the
   running version) and would otherwise read as the wrong case for a newer
   prerelease build.
-- `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, EOF
-  counts as No) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
+- `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, a bare
+  Enter or EOF declines, CLI-258) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
   reports the latest available version and whether an update is pending, then exits
   without downloading or replacing anything.
 - `CLI-142` The release artifact is selected exactly as the install script and the
@@ -1540,6 +1546,38 @@ and per-harness `kinds` defaults.
   subcommand (`mind-meld(1)`, `mind-learn(1)`, ...), so the top-level page's
   SUBCOMMANDS cross-references resolve within the same output rather than
   dangling. Hidden subcommands get no page.
+
+## Prompts
+
+Status: done. Every fixed-choice prompt (`src/prompt.rs`) behaves the same
+way. Before these rules an unrecognized reply took a fallback that varied by
+prompt (a hook prompt skipped, a `[Y/n]` confirmation proceeded, a `[y/N]`
+confirmation declined), and EOF declined everywhere. HOOK-20, HOOK-52,
+HOOK-109, CLI-60, CLI-141, CLI-247, CUR-9, DEP-31, and LIFE-45 point here.
+
+- `CLI-257` A fixed-choice prompt accepts only its listed replies (trimmed, any
+  case, with `yes`/`no` accepted for `y`/`n`) and a bare Enter, which takes the
+  prompt's default. Any other reply is rejected: `mind` names the valid replies
+  and asks again until it gets one. This covers every confirmation (`[Y/n]`,
+  `[y/N]`, CLI-23, CLI-42, CLI-60, CLI-141, CUR-9, DEP-31, the breaking-release
+  and lobe-detection confirmations), the overwrite prompt (CLI-247), the hook
+  prompts (HOOK-20, HOOK-52, HOOK-72, HOOK-83), and the unified install prompt
+  (HOOK-181, HOOK-186). Free-text prompts (the namespace prefix, CLI-24; a
+  collision rename; the profile picker, PROF-13) accept any text and are out of
+  scope.
+- `CLI-258` EOF at a fixed-choice prompt takes the prompt's default, exactly as
+  a bare Enter does: the user ran the command, so the intent is to run it
+  fully. A `[Y/n]` prompt proceeds and a `[y/N]` prompt declines.
+- `CLI-259` A fixed-choice prompt is shown only on a TTY (HOOK-109's test).
+  Without one, a run that would prompt does not proceed unless `--yes` (or
+  `--accept-hooks`, for a hook) answers it. Where a verb already defines a
+  non-TTY fallback, that fallback stands: hooks are skipped (HOOK-22), `meld`
+  registers only (CLI-23), and `curate` reports its plan (CUR-9). Everywhere
+  else the run refuses with `ConfirmationRequired`, as `forget` (CLI-42) and
+  `evolve` (CLI-141) do. This covers a text-mode `upgrade` (CLI-60) and a
+  `learn` that pulls in dependencies (DEP-31), which used to read stdin without
+  a TTY and decline on EOF. So CLI-258's EOF rule is only ever reached on a
+  TTY, and a piped command never applies changes nobody was shown.
 
 ## Output and global flags
 

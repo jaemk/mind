@@ -35,6 +35,24 @@ name = "cleanup"
 event = "uninstall"
 ```
 
+## The install plan
+
+On a terminal, `meld`, `learn`, `upgrade`, and `unmeld` show one plan before
+anything runs: the items, then every hook the run would offer, each with its
+event, source, commit, the directory it runs in, and the command. An item hook
+also names its path in the source's clone, which is where to read the code
+before it is copied. The plan asks once:
+
+```
+install these 2 item(s) now? (2 hook(s) to run) [Y/s/r/n]
+```
+
+`y` (the default) installs and runs every listed hook, `s` installs and skips
+them, `r` installs and asks about each hook on its own (the safety prompt
+below), and `n` installs nothing and runs no hook. When there is nothing to
+confirm but the hooks (`--yes`, `--register-only`), the prompt is
+`[Y/n/r]`. An unrecognized reply is asked again; EOF takes the default.
+
 ## The safety prompt
 
 Because a hook is arbitrary code, `mind` discloses the source identity, pin,

@@ -396,7 +396,10 @@ fn run_source_hooks(
                 commit: current.as_deref(),
                 replaced: replaced_here,
             };
-            match crate::hook::decide(&disclosure, h.optional, accept.event(h.event))? {
+            // `hooks run` is outside the unified plan (HOOK-180): no plan ever
+            // lists these, so each is prompted on its own (HOOK-185).
+            let key = crate::consent::HookKey::source_hook(&source_name, h.event.as_str(), &h.run);
+            match crate::hook::decide(&key, &disclosure, h.optional, accept.event(h.event))? {
                 crate::hook::HookAct::Run => {
                     ran += 1;
                     // Unlike the `note:`-prefixed lines around it this is a

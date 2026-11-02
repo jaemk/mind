@@ -134,8 +134,9 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   `--json` the prompt cannot be shown, so this consent is non-interactive
   (LIFE-45): `learn --json` of an item that pulls in dependencies without `--yes`
   refuses with `ConfirmationRequired` rather than installing the closure
-  unprompted. (A non-TTY text run still reaches the prompt, whose EOF-default is
-  No, so it cancels safely without installing.)
+  unprompted. A non-TTY text run without `--yes` refuses the same way (CLI-259).
+  On a TTY the prompt is the unified plan (HOOK-180), which also lists the
+  closure's item hooks.
 - `DEP-32` `--dry-run` (CLI-32) renders the same dependency tree and lists the full
   closure that would be installed, and installs nothing.
 

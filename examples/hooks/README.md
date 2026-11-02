@@ -52,8 +52,10 @@ cd /tmp/hooks-demo && git init -q && git add -A && git commit -qm init
 
 Run `mind probe --no-tui hooks-demo` to browse the catalog entry before melding.
 
-When you meld interactively, `mind` discloses each hook and prompts before
-running it. For each required hook you will see:
+When you meld interactively, `mind` lists every hook in one plan with the items
+it will install and asks once (`[Y/s/r/n]`: run all, skip all, review each, or
+cancel). Choosing `r` prompts each hook on its own. For each required hook you
+will then see:
 
 ```
 ====== hook: build helper tooling ======
@@ -70,7 +72,7 @@ An optional hook (`warm an optional cache`) shows `[Y/n]` with no abort option,
 since skipping it never blocks the meld.
 
 ```
-# Interactive: prompts for each hook in turn.
+# Interactive: one plan, then (on `r`) a prompt for each hook in turn.
 mind meld /tmp/hooks-demo
 
 # Unattended (e.g. CI / non-TTY): run the install hooks without prompting.

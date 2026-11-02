@@ -1129,12 +1129,13 @@ fn meld_learn_declined_at_the_prompt_installs_nothing_and_names_a_working_comman
     // decline installs nothing and prints the same pasteable fallback. Nothing
     // covered this branch: every other integration test is non-TTY, which takes
     // the note branch above instead. `MIND_TTY=1` (HOOK-109) forces the TTY
-    // reading, and a `/dev/null` stdin reaches `read_confirm`'s EOF-is-No.
+    // reading, and the scripted `n` declines (EOF would take the default, yes,
+    // CLI-258).
     let sb = Sandbox::new("lib");
     let r = sb.mind_env(
         &["meld", &sb.source_spec(), "--learn", "review"],
         &[("MIND_TTY", "1")],
-        None,
+        Some("n\n"),
     );
     assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
     assert!(

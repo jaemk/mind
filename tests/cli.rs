@@ -178,6 +178,12 @@ impl Sandbox {
         self.run(args, input, &[])
     }
 
+    /// Run `mind` as if at a terminal (`MIND_TTY=1`, HOOK-109) with `input`
+    /// as the scripted replies: prompts are shown only on a TTY (CLI-259).
+    fn mind_tty(&self, args: &[&str], input: &str) -> Run {
+        self.run(args, Some(input), &[("MIND_TTY", "1")])
+    }
+
     /// Run `mind` with additional environment variables (e.g. MIND_AGENT_HOMES).
     fn mind_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Run {
         self.run(args, None, envs)
@@ -3748,7 +3754,7 @@ fn upgrade_reports_delta_and_declining_changes_nothing() {
     sb.mind(&["sync"]);
 
     // Dry-run report: shows hash and commit deltas with arrows.
-    let report = sb.mind_with_input(&["upgrade"], Some("n\n"));
+    let report = sb.mind_tty(&["upgrade"], "n\n");
     assert!(report.stdout.contains("skill:review"), "{}", report.stdout);
     assert!(report.stdout.contains("hash"), "{}", report.stdout);
     assert!(report.stdout.contains("->"), "{}", report.stdout);
@@ -3756,15 +3762,30 @@ fn upgrade_reports_delta_and_declining_changes_nothing() {
 
     // Declining must leave the installed commit untouched.
     let before = sb.mind(&["recall", "skill:review"]).stdout;
-    let again = sb.mind_with_input(&["upgrade"], Some("n\n"));
+    let again = sb.mind_tty(&["upgrade"], "n\n");
     assert!(again.stdout.contains("aborted"));
     assert_eq!(before, sb.mind(&["recall", "skill:review"]).stdout);
 }
 
 #[test]
+fn upgrade_without_a_tty_or_yes_refuses() {
+    // spec: CLI-60 CLI-259 -- piped stdin is not consent: the run refuses
+    // instead of reading a reply, and changes nothing.
+    let sb = melded();
+    sb.mind(&["learn", "review"]);
+    sb.edit_source();
+    sb.mind(&["sync"]);
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+    let r = sb.mind_with_input(&["upgrade"], Some("y\n"));
+    assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("--yes"), "{}", r.stderr);
+    assert_eq!(before, sb.mind(&["recall", "skill:review"]).stdout);
+}
+
+#[test]
 fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
-    // spec: CLI-60 - the apply prompt defaults to Yes, so a bare Enter applies the
-    // upgrade. (EOF is still No: see the empty-input branch.)
+    // spec: CLI-60 CLI-258 - the apply prompt defaults to Yes, so a bare Enter
+    // applies the upgrade, and so does EOF.
     let sb = melded();
     sb.mind(&["learn", "review"]);
     let before = sb.mind(&["recall", "skill:review"]).stdout;
@@ -3772,7 +3793,7 @@ fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
     sb.mind(&["sync"]);
 
     // A bare Enter (newline, not EOF) confirms.
-    let applied = sb.mind_with_input(&["upgrade"], Some("\n"));
+    let applied = sb.mind_tty(&["upgrade"], "\n");
     assert!(applied.success, "{}", applied.stderr);
     assert!(
         applied.stdout.contains("upgraded skill:review"),
@@ -3785,16 +3806,16 @@ fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
         "the installed commit should have advanced"
     );
 
-    // EOF (no input at all) still declines.
+    // EOF (no input at all) takes the same default.
     sb.write_and_commit(
         "skills/review/SKILL.md",
         "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nedited again\n",
     );
     sb.mind(&["sync"]);
-    let eof = sb.mind_with_input(&["upgrade"], Some(""));
+    let eof = sb.mind_tty(&["upgrade"], "");
     assert!(
-        eof.stdout.contains("aborted"),
-        "EOF must decline: {}",
+        eof.stdout.contains("upgraded skill:review"),
+        "EOF must apply: {}",
         eof.stdout
     );
 }
@@ -7940,7 +7961,7 @@ fn learn_dependency_prompt_decline_installs_nothing() {
     // the tree and prompts. Answering "n" cancels: nothing is installed, the
     // manifest holds neither item, and no symlinks are created.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("n\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "n\n");
     assert!(r.success, "{}", r.stderr);
     // The dependency tree is shown before the prompt.
     assert!(
@@ -7996,11 +8017,11 @@ fn learn_dependency_json_without_yes_refuses() {
 
 #[test]
 fn learn_dependency_prompt_defaults_to_no_on_eof() {
-    // spec: DEP-31
-    // With no stdin (immediate EOF on the prompt), the `[y/N]` default is No, so
-    // the closure is not installed. The prompt and tree are still shown.
+    // spec: DEP-31 CLI-258 CLI-259
+    // At a terminal, EOF on the prompt takes the `[y/N]` default, No, so the
+    // closure is not installed. The prompt and tree are still shown.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some(""));
+    let r = sb.mind_tty(&["learn", "skill:review"], "");
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stdout.contains("agent:reviewer [dep]"),
@@ -8017,6 +8038,13 @@ fn learn_dependency_prompt_defaults_to_no_on_eof() {
     assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+
+    // Without a terminal the prompt is never shown: the run refuses and points
+    // at --yes, even with a "y" piped in.
+    let piped = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    assert!(!piped.success, "{}", piped.stdout);
+    assert!(piped.stderr.contains("--yes"), "{}", piped.stderr);
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
 }
 
 #[test]
@@ -8025,7 +8053,7 @@ fn learn_dependency_prompt_accept_installs_closure() {
     // Answering "y" to the prompt (without --yes) confirms: the whole closure
     // installs, both the selected skill and its pulled-in dependency.
     let sb = dep_fixture();
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "y\n");
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stdout.contains("agent:reviewer [dep]"),
@@ -8129,7 +8157,7 @@ fn learn_dependency_already_installed_prompts_but_reinstalls_only_new() {
     let sb = dep_fixture();
     assert!(sb.mind(&["learn", "agent:reviewer", "--yes"]).success);
 
-    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    let r = sb.mind_tty(&["learn", "skill:review"], "y\n");
     assert!(r.success, "{}", r.stderr);
     // The tree marks the dependency as already installed (DEP-23).
     assert!(
@@ -8522,7 +8550,7 @@ fn sync_upgrade_refreshes_then_applies_upgrades() {
     sb.edit_source(); // upstream change, not yet synced
 
     // One command fetches the change and (on `y`) applies the upgrade.
-    let r = sb.mind_with_input(&["sync", "--upgrade"], Some("y\n"));
+    let r = sb.mind_tty(&["sync", "--upgrade"], "y\n");
     assert!(r.success, "{}", r.stderr);
     assert!(r.stdout.contains("updated"), "sync ran: {}", r.stdout);
     assert!(
@@ -16184,7 +16212,7 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // leaves it green. Anchor on the discriminating substring the
     // disclosure itself introduces ("this filter matched"/the filter text),
     // and require it to precede the confirm prompt.
-    let r = one.mind(&["sync", "skills", "--upgrade"]);
+    let r = one.mind_tty(&["sync", "skills", "--upgrade"], "n\n");
     assert!(
         r.stdout.contains("matched 2 sources"),
         "the disclosure's discriminating substring must appear on stdout: {}",
@@ -16205,9 +16233,8 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
         "the disclosure must precede the confirm prompt: {}",
         r.stdout
     );
-    // A non-TTY `confirm_default_yes` declines rather than erroring, so the run
-    // exits 0 having changed nothing. The invariant that matters is that it did
-    // not apply without consent.
+    // Declining exits 0 having changed nothing. The invariant that matters is
+    // that it did not apply without consent.
     let unapplied =
         std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
     assert!(
@@ -16238,7 +16265,7 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // pass a regression where this run errored early or never reached the
     // confirm block at all. Anchor it with a positive assertion that the
     // run really did reach the (unscoped) confirmation prompt.
-    let single = one.mind(&["sync", &one_id, "--upgrade"]);
+    let single = one.mind_tty(&["sync", &one_id, "--upgrade"], "n\n");
     assert!(
         single.stdout.contains("apply these upgrades?"),
         "the single-match run must still reach the confirm prompt \
@@ -16309,7 +16336,7 @@ fn upgrade_item_ref_filter_names_every_matched_source_before_consent() {
     let one_id = format!("{}/skills", one.base_name());
     let two_id = format!("{}/skills", two.base_name());
 
-    let r = one.mind(&["upgrade", "skills#*"]);
+    let r = one.mind_tty(&["upgrade", "skills#*"], "n\n");
     assert!(
         r.stdout.contains("matched 2 sources"),
         "the disclosure's discriminating substring must appear on stdout: {}",
@@ -16331,7 +16358,7 @@ fn upgrade_item_ref_filter_names_every_matched_source_before_consent() {
         r.stdout
     );
 
-    // Nothing applied without consent (non-TTY confirm declines, LIFE-45).
+    // Nothing applied without consent (the prompt was declined).
     let unapplied =
         std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
     assert!(
