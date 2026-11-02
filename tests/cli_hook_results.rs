@@ -276,7 +276,7 @@ fn an_aborted_hook_is_reported_under_json() {
     let r = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
     assert!(r.success, "meld: {} {}", r.stdout, r.stderr);
     let r = sb.mind_env_stdin(
-        &["unmeld", "abort-src", "--json"],
+        &["unmeld", "abort-src", "--json", "--yes"],
         &[("MIND_TTY", "1")],
         "a\n",
     );

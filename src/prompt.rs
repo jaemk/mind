@@ -5,6 +5,7 @@
 //! else and asks again, and takes EOF as the default. Free-text prompts (the
 //! namespace prefix, a collision rename, the profile picker) do not use it.
 
+use std::cell::Cell;
 use std::io::{BufRead, Write};
 
 use crate::error::{MindError, Result};
@@ -65,12 +66,49 @@ pub fn ask_from<T: Copy, R: BufRead, W: Write>(
     }
 }
 
+thread_local! {
+    /// Set while the probe TUI runs a verb with its stdout captured (TUI-24):
+    /// the terminal is in raw mode behind the browser, so a prompt would be
+    /// invisible and its line read would never end.
+    static CAPTURED: Cell<bool> = const { Cell::new(false) };
+    /// Set when a prompt was refused under `CAPTURED`, so the TUI knows to run
+    /// the verb again on the normal terminal (TUI-44).
+    static REFUSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark the verbs this thread runs from now on as captured (`true`) or not.
+/// Entering capture clears [`refused`].
+pub fn set_captured(on: bool) {
+    if on {
+        REFUSED.with(|r| r.set(false));
+    }
+    CAPTURED.with(|c| c.set(on));
+}
+
+/// Whether a prompt was refused since capture began (TUI-44).
+pub fn refused() -> bool {
+    REFUSED.with(Cell::get)
+}
+
+/// Refuse to prompt while captured (TUI-44): every terminal prompt calls this
+/// before writing its question, and the TUI reruns the verb unsuspended.
+pub fn guard(action: &str) -> Result<()> {
+    if CAPTURED.with(Cell::get) {
+        REFUSED.with(|r| r.set(true));
+        return Err(MindError::ConfirmationRequired {
+            action: action.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// [`ask_from`] on the terminal, with the progress spinner cleared first
 /// (PRG-5). Without a TTY no prompt is shown (CLI-259): the run refuses with
 /// `ConfirmationRequired` naming `action`, so a piped command never applies
 /// anything nobody was shown. Callers whose verb defines a non-TTY fallback
 /// (HOOK-22, CLI-23, CUR-9) take it before reaching here.
 pub fn ask<T: Copy>(prompt: &str, choices: &[Choice<T>], default: T, action: &str) -> Result<T> {
+    guard(action)?;
     if !crate::hook::is_tty() {
         return Err(MindError::ConfirmationRequired {
             action: action.to_string(),
@@ -140,6 +178,28 @@ mod tests {
         assert!(!run("", false).0);
         // EOF after a rejected reply still ends the loop on the default.
         assert!(run("huh\n", true).0);
+    }
+
+    #[test]
+    fn a_captured_verb_refuses_to_prompt_and_says_so() {
+        // spec: TUI-44 -- under the TUI's stdout capture a prompt would be
+        // invisible and block on a raw-mode read; it refuses instead, and
+        // `refused` tells the TUI to rerun the verb on the normal terminal.
+        set_captured(true);
+        assert!(!refused(), "entering capture starts clean");
+        assert!(guard("x").is_err());
+        assert!(refused());
+        let err = ask("go? [Y/n] ", &YES_NO, true, "running a hook").unwrap_err();
+        assert!(
+            matches!(err, MindError::ConfirmationRequired { ref action } if action == "running a hook"),
+            "{err}"
+        );
+        set_captured(false);
+        assert!(guard("x").is_ok(), "outside capture a prompt may ask");
+        assert!(refused(), "the flag survives until the next capture");
+        set_captured(true);
+        assert!(!refused());
+        set_captured(false);
     }
 
     #[test]

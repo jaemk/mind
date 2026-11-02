@@ -193,9 +193,13 @@ manifest, and store.
   screen and redraws. After the verb the user presses Enter to return, so the
   verb's output is readable before the browser redraws. The verbs that suspend are
   `meld` (install-hook disclosure HOOK-20, install confirm CLI-23, SSH passphrase
-  TUI-45) and `unmeld` (uninstall-hook prompt HOOK-54). Non-prompting mutations
-  (learn/forget/sync/upgrade) instead run with stdout captured (TUI-24) and do not
-  suspend.
+  TUI-45) and `unmeld` (uninstall-hook prompt HOOK-54). Other mutations
+  (learn/forget/sync/upgrade, a profile install) run with stdout captured
+  (TUI-24) and do not suspend, unless they need a prompt: an item or source hook
+  to consent to, or the plan that lists them (HOOK-180). A captured verb never
+  prompts. It refuses at its first prompt, before acting on anything the prompt
+  covers, and the TUI then suspends and runs the same action on the normal
+  terminal.
 - `TUI-52` When forgetting a single installed item that other installed items
   depend on (DEP-60), the TUI surfaces the warning in the confirmation
   description -- listing the dependent keys -- before the user confirms. The

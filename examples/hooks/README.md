@@ -12,12 +12,13 @@ at unmeld.
   commit -- never at `meld` (HOOK-120, HOOK-121). A source declaring an update
   hook has it supersede the install hooks at `upgrade`; a source with no update
   hook keeps re-running its install hooks as before (HOOK-122).
-* The disclosure-and-prompt safety model: before any hook runs, `mind` discloses
-  the command and asks the user to approve it. A source can run arbitrary code,
-  so nothing executes without consent.
-* Optional vs required: a required hook prompts run/skip/abort (declining can
-  abort the meld); an optional hook (`optional = true`) prompts run/skip only, so
-  declining never blocks the meld.
+* The disclosure-and-prompt safety model: before any hook runs, `mind` lists it
+  in the meld's plan with its command and asks the user to approve it. A source
+  can run arbitrary code, so nothing executes without consent.
+* Optional vs required: when hooks are reviewed one at a time (`r` at the
+  plan), a required hook prompts run/skip/abort (declining can abort the meld);
+  an optional hook (`optional = true`) prompts run/skip only, so declining never
+  blocks the meld.
 * Non-TTY behavior: with no terminal to prompt on, hooks are skipped rather than
   run blind, unless you pass `--accept-hooks` to run them
   unattended.

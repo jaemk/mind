@@ -16,9 +16,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answer, so declining `meld` or `upgrade` runs none.
 - Every yes/no and lettered prompt asks again on an unrecognized reply, and
   EOF takes the prompt's default instead of declining.
-- Without a terminal, `upgrade`, a `learn` that pulls in dependencies, and
-  `learn <source> --profile` refuse with `ConfirmationRequired` unless `--yes`
-  is given, instead of reading a reply from the pipe.
+- Every `unmeld` confirms before removing anything, including a single-item
+  source and `--keep-items`, and the answer defaults to no (`[y/N]`, or
+  `[y/s/r/N]` when uninstall hooks are listed), so Enter and EOF remove
+  nothing. `--yes` skips it; without a terminal `unmeld` now requires `--yes`.
+- Without a terminal, an `upgrade` with items to apply, a `learn` that pulls
+  in dependencies, and `learn <source> --profile` refuse with
+  `ConfirmationRequired` unless `--yes` is given, instead of reading a reply
+  from the pipe.
+
+### Fixed
+
+- The `probe` TUI no longer hangs when a `learn`, `upgrade`, `forget`, or
+  profile install reaches a hook prompt: it suspends and runs the action on the
+  normal terminal instead.
 
 ## [0.42.0] - 2026-10-31
 

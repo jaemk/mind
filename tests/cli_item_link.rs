@@ -1578,6 +1578,8 @@ fn forget_of_an_emptied_link_hint_shell_quotes_a_quote_carrying_identity() {
     let mut argv = shell_split(cmd);
     assert_eq!(argv.first().map(String::as_str), Some("mind"));
     argv.remove(0);
+    // A piped run confirms the removal with `--yes` (CLI-259).
+    argv.push("--yes".to_string());
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     let unmeld = sb.mind(&args);
     assert!(

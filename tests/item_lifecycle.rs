@@ -328,7 +328,12 @@ fn unmeld_runs_item_uninstall_hooks_before_source_uninstall_hooks() {
     assert!(read_log(&log).is_empty(), "no teardown hooks at meld/learn");
 
     // unmeld: the item's uninstall hook then the source's uninstall hook.
-    let unmeld = sb.mind(&["unmeld", "nest", "--accept-hooks=install,update,uninstall"]);
+    let unmeld = sb.mind(&[
+        "unmeld",
+        "nest",
+        "--yes",
+        "--accept-hooks=install,update,uninstall",
+    ]);
     assert!(
         unmeld.success,
         "unmeld should succeed: {} {}",
@@ -397,7 +402,8 @@ fn unmeld_non_tty_skips_hooks_but_still_removes_source_and_items() {
     );
 
     // No --accept-hooks flag: non-TTY (stdin is /dev/null) skips every hook.
-    let unmeld = sb.mind(&["unmeld", "ntty"]);
+    // `--yes` confirms the removal (CLI-259); it does not accept hooks.
+    let unmeld = sb.mind(&["unmeld", "ntty", "--yes"]);
     assert!(
         unmeld.success,
         "non-TTY unmeld still succeeds: {} {}",
@@ -651,6 +657,7 @@ fn unmeld_item_uninstall_hook_failure_leaves_source_melded() {
     let unmeld = sb.mind(&[
         "unmeld",
         "failun",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(

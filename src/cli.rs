@@ -330,6 +330,9 @@ EXAMPLES:
     /// Unmelds a source and uninstalls every item the source installed; use
     /// `--keep-items` to keep them.
     ///
+    /// It always asks before removing anything, defaulting to no; `--yes`
+    /// skips the question and is required without a terminal.
+    ///
     /// `<name>` is a REF: it must resolve to exactly one source. It may be the
     /// full `host/owner/repo` or an unambiguous trailing suffix (e.g. `repo`
     /// or `owner/repo`); a non-glob name matching more than one source errors

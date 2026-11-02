@@ -266,7 +266,7 @@ fn unmeld_skipped_uninstall_hook_note_is_one_document() {
     let r = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
     assert!(r.success, "meld: {}", r.stderr);
 
-    let r = sb.mind(&["--json", "unmeld", "unmeld-note", "--keep-items"]);
+    let r = sb.mind(&["--json", "unmeld", "unmeld-note", "--keep-items", "--yes"]);
     assert!(
         r.success,
         "unmeld must succeed on a skip: {}\n{}",
@@ -399,6 +399,7 @@ fn unmeld_running_uninstall_hook_is_one_document() {
         "unmeld",
         "unmeld-leak",
         "--keep-items",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(r.success, "unmeld: {}\n{}", r.stdout, r.stderr);

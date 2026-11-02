@@ -395,7 +395,20 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                         r
                     })
                 } else {
-                    action::execute(paths, pending)
+                    // spec: TUI-44 -- a captured verb that reached a prompt (a
+                    // hook, or the plan that lists them, HOOK-180) refused it
+                    // before acting; rerun it on the normal terminal.
+                    execute_or_rerun(
+                        pending,
+                        |p| action::execute(paths, p),
+                        |p| {
+                            term::with_suspended(|| {
+                                let r = action::execute_interactive(paths, p);
+                                pause_for_return();
+                                r
+                            })
+                        },
+                    )
                 };
                 // Drop active_preview unconditionally: on success meld owns its clone,
                 // on failure clean up the temp dir (SourcePreview::drop removes it).
@@ -436,13 +449,28 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
     }
 }
 
+/// Run `pending` captured; when it failed because it reached a prompt it could
+/// not show (`prompt::refused`), run the same action again with `interactive`
+/// (TUI-44). Any other result, success or error, stands.
+fn execute_or_rerun<R>(
+    pending: app::PendingAction,
+    captured: impl FnOnce(app::PendingAction) -> crate::error::Result<R>,
+    interactive: impl FnOnce(app::PendingAction) -> crate::error::Result<R>,
+) -> crate::error::Result<R> {
+    match captured(pending.clone()) {
+        Err(_) if crate::prompt::refused() => interactive(pending),
+        other => other,
+    }
+}
+
 /// Return true if this action kind requires the TUI to suspend (leave raw mode
 /// and the alt-screen) before executing, because the verb may prompt
 /// interactively on stdin/stdout.
 ///
 /// Currently: Meld (install-hook disclosure HOOK-20, install confirm CLI-23,
 /// SSH passphrase TUI-45) and Unmeld (uninstall-hook prompt HOOK-54). All other
-/// actions run with stdout captured while the TUI holds the terminal (TUI-24).
+/// actions run with stdout captured while the TUI holds the terminal (TUI-24),
+/// and are rerun suspended only when they reach a prompt (`prompt::refused`).
 // spec: TUI-44
 pub(crate) fn action_needs_suspension(kind: &crate::tui::app::ActionKind) -> bool {
     use crate::tui::app::ActionKind;
@@ -604,6 +632,54 @@ mod tests {
     use crate::tui::app::{ActionKind, App, PendingAction};
     use crate::tui::data::{Snapshot, SnapshotAvailable, SnapshotInstalled};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn sync_action() -> PendingAction {
+        PendingAction::new(ActionKind::Sync, String::new())
+    }
+
+    #[test]
+    fn a_captured_action_that_reached_a_prompt_reruns_on_the_terminal() {
+        // spec: TUI-44 -- the captured run refuses at its prompt; the same
+        // action then runs interactively, once.
+        let mut reruns = 0;
+        let r = execute_or_rerun(
+            sync_action(),
+            |_| {
+                crate::prompt::set_captured(true);
+                let refused = crate::prompt::guard("running a hook");
+                crate::prompt::set_captured(false);
+                refused.map(|()| "captured")
+            },
+            |p| {
+                reruns += 1;
+                assert!(matches!(p.kind, ActionKind::Sync), "the same action");
+                Ok("interactive")
+            },
+        );
+        assert_eq!(r.unwrap(), "interactive");
+        assert_eq!(reruns, 1);
+    }
+
+    #[test]
+    fn a_captured_action_that_never_prompted_is_not_rerun() {
+        // spec: TUI-44 -- success, and an ordinary error, stand as they are.
+        crate::prompt::set_captured(true);
+        crate::prompt::set_captured(false);
+        let ok = execute_or_rerun(
+            sync_action(),
+            |_| Ok("captured"),
+            |_| -> crate::error::Result<&str> { panic!("no rerun after success") },
+        );
+        assert_eq!(ok.unwrap(), "captured");
+        let err = execute_or_rerun(
+            sync_action(),
+            |_| -> crate::error::Result<&str> {
+                Err(crate::error::MindError::SourceNotFound { name: "x".into() })
+            },
+            |_| panic!("no rerun after an error that was not a refused prompt"),
+        );
+        assert!(err.is_err());
+    }
 
     /// A throwaway `Paths` pointing at a temp dir. The key paths under test
     /// (search-focused input, confirm-modal cancel) route to `apply_intent` and

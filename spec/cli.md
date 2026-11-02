@@ -487,14 +487,21 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-21` `unmeld <name>` by default uninstalls every item installed from the
   source (each via its file registry, then its manifest entry), mirroring meld's
   install-by-default (CLI-23): dropping a source cleans up after itself in one
-  step. It first lists the items it will remove; the multi-item confirmation
-  (CLI-42) applies, and `--yes` skips it. On a TTY that confirmation is the
-  unified plan, which also lists the uninstall hooks (HOOK-186).
+  step. It first lists the items it will remove and confirms (CLI-260). On a
+  TTY that confirmation is the unified plan, which also lists the uninstall
+  hooks (HOOK-186).
+- `CLI-260` Every `unmeld` confirms before it removes anything or runs any
+  uninstall hook: a single-item or empty source, `--keep-items` (CLI-22), and a
+  glob (CLI-28) alike. The confirmation defaults to no: `[y/N]`, or the plan's
+  `[y/s/r/N]` when it lists hooks (HOOK-186), so Enter and EOF (CLI-258)
+  remove nothing. `--yes` (`-y`) skips it. A non-TTY or `--json` run without
+  `--yes` refuses with `ConfirmationRequired` (CLI-259, LIFE-45).
 - `CLI-22` `unmeld --keep-items` (deprecated alias: `--unlink-only`, see CLI-166)
   removes only the source (clone and registry entry) and leaves its installed items
   in place. It lists those orphaned items and suggests the `forget` command to
   remove them later. This is the opt-out from the default item removal (CLI-21),
-  mirroring `meld --register-only` (CLI-165).
+  mirroring `meld --register-only` (CLI-165). It confirms like any `unmeld`
+  (CLI-260).
 - `unmeld` runs the source's uninstall hooks before removal and accepts
   `--accept-hooks` to run them unattended (CLI-250), and
   `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
@@ -533,7 +540,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   several sources is still `AmbiguousSource` (CLI-20), but a glob removes all it
   matches. A glob matching no source is `SourceNotFound`. When a glob matches more
   than one source, `unmeld` lists the matched sources and confirms before removing
-  them (the multi-item confirmation of CLI-42, applied at source granularity);
+  them (the CLI-260 confirmation, once for all of them, defaulting to no);
   `--yes` skips the confirmation.
 
 ## learn
@@ -1574,8 +1581,8 @@ HOOK-109, CLI-60, CLI-141, CLI-247, CUR-9, DEP-31, and LIFE-45 point here.
   non-TTY fallback, that fallback stands: hooks are skipped (HOOK-22), `meld`
   registers only (CLI-23), and `curate` reports its plan (CUR-9). Everywhere
   else the run refuses with `ConfirmationRequired`, as `forget` (CLI-42) and
-  `evolve` (CLI-141) do. This covers a text-mode `upgrade` (CLI-60) and a
-  `learn` that pulls in dependencies (DEP-31), which used to read stdin without
+  `evolve` (CLI-141) do. This covers every `unmeld` (CLI-260), a text-mode
+  `upgrade` (CLI-60), and a `learn` that pulls in dependencies (DEP-31), which used to read stdin without
   a TTY and decline on EOF. So CLI-258's EOF rule is only ever reached on a
   TTY, and a piped command never applies changes nobody was shown.
 

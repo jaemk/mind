@@ -258,6 +258,8 @@ fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
 /// Print the disclosure and the three choices, then ask until a valid reply
 /// (HOOK-20, CLI-257). Only reached on a TTY (HOOK-22).
 pub fn prompt_choice(disclosure: &str) -> Result<HookChoice> {
+    // spec: TUI-44
+    crate::prompt::guard("running a hook")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{disclosure}");
@@ -307,6 +309,8 @@ fn read_optional_choice<R: BufRead>(mut reader: R) -> Result<OptionalChoice> {
 /// Print the disclosure and the two optional-hook choices, then ask until a
 /// valid reply (HOOK-52, CLI-257). Mirrors `prompt_choice`.
 pub fn prompt_choice_optional(disclosure: &str) -> Result<OptionalChoice> {
+    // spec: TUI-44
+    crate::prompt::guard("running a hook")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{disclosure}");

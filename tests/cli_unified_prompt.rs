@@ -305,6 +305,61 @@ fn meld_plan_rejects_an_unclear_reply_and_asks_again() {
 }
 
 #[test]
+fn meld_review_abort_unregisters_a_fresh_source() {
+    // spec: HOOK-181 HOOK-183 -- `r`, then `a` at the required source hook:
+    // the fresh meld is undone and no item installs.
+    let sb = Sandbox::new("plan-abort");
+    let r = sb.tty(&["meld", &sb.spec()], "r\na\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("aborted; nothing installed"),
+        "{}",
+        r.stdout
+    );
+    assert!(!sb.registered(), "{}", r.stdout);
+    assert!(!sb.installed("skills/widget"), "{}", r.stdout);
+    assert!(
+        !sb.ran("src-install") && !sb.ran("item-install"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn remeld_offers_a_skipped_source_hook_in_a_hooks_only_plan() {
+    // spec: HOOK-180 HOOK-182 -- a source hook skipped at the first meld is
+    // re-offered (HOOK-60) through the plan, not its own prompt.
+    let sb = Sandbox::new("plan-remeld");
+    let first = sb.tty(&["meld", &sb.spec()], "s\n");
+    assert!(first.success, "{}\n{}", first.stdout, first.stderr);
+    assert!(!sb.ran("src-install"), "{}", first.stdout);
+    let r = sb.tty(&["meld", &sb.spec()], "y\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[1] setup"), "{}", r.stdout);
+    assert!(r.stdout.contains("[Y/n/r]"), "{}", r.stdout);
+    assert!(!r.stdout.contains("====== hook: "), "{}", r.stdout);
+    assert!(sb.ran("src-install"), "{}", r.stdout);
+}
+
+#[test]
+fn learn_of_an_item_with_a_hook_asks_the_plan() {
+    // spec: HOOK-180 HOOK-181 -- a direct `learn` lists the item and its hook
+    // and asks once; a hookless `learn` asks nothing (covered elsewhere).
+    let sb = Sandbox::new("plan-learn");
+    let reg = sb.piped(&["meld", &sb.spec(), "--register-only"], "");
+    assert!(reg.success, "{}\n{}", reg.stdout, reg.stderr);
+    let r = sb.tty(&["learn", "skill:widget"], "n\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("would learn 1 item(s):"), "{}", r.stdout);
+    assert!(r.stdout.contains("[Y/s/r/n]"), "{}", r.stdout);
+    assert!(!sb.installed("skills/widget"), "{}", r.stdout);
+    let r = sb.tty(&["learn", "skill:widget"], "s\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(sb.installed("skills/widget"), "{}", r.stdout);
+    assert!(!sb.ran("item-install"), "{}", r.stdout);
+}
+
+#[test]
 fn meld_register_only_asks_a_hooks_only_plan() {
     // spec: HOOK-182
     let sb = Sandbox::new("plan-reg");
@@ -345,6 +400,9 @@ fn meld_with_every_hook_accepted_asks_the_item_question_alone() {
     assert!(r.stdout.contains("[Y/n]"), "{}", r.stdout);
     assert!(!r.stdout.contains("[Y/s/r/n]"), "{}", r.stdout);
     assert!(!sb.installed("skills/widget"), "{}", r.stdout);
+    // spec: HOOK-183 -- an accepted source hook is not held back for the plan.
+    assert!(sb.ran("src-install"), "{}", r.stdout);
+    assert!(!sb.ran("item-install"), "{}", r.stdout);
 }
 
 #[test]
@@ -434,7 +492,8 @@ fn unmeld_lists_its_uninstall_hooks_with_the_removal_confirmation() {
         "then the source's: {}",
         r.stdout
     );
-    assert!(r.stdout.contains("[Y/s/r/n]"), "{}", r.stdout);
+    // A removal defaults to no.
+    assert!(r.stdout.contains("[y/s/r/N]"), "{}", r.stdout);
     assert!(
         r.stdout.contains("cancelled; nothing removed"),
         "{}",
@@ -475,26 +534,133 @@ fn unmeld_yes_runs_the_listed_uninstall_hooks() {
 }
 
 #[test]
-fn unmeld_keep_items_asks_a_hooks_only_plan() {
-    // spec: HOOK-186 HOOK-182
+fn unmeld_plan_eof_and_enter_remove_nothing() {
+    // spec: HOOK-186 CLI-258 CLI-260 -- a removal's default is no, so Enter and EOF
+    // cancel.
+    let sb = Sandbox::new("plan-un-eof");
+    sb.meld_all();
+    for input in ["", "\n"] {
+        let r = sb.tty(&["unmeld", &sb.identity()], input);
+        assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+        assert!(
+            r.stdout.contains("cancelled; nothing removed"),
+            "{input:?}: {}",
+            r.stdout
+        );
+        assert!(sb.registered() && sb.installed("skills/widget"));
+        assert!(!sb.ran("item-uninstall") && !sb.ran("src-uninstall"));
+    }
+}
+
+#[test]
+fn unmeld_keep_items_confirms_the_unmeld_with_its_hooks() {
+    // spec: HOOK-186 CLI-260 -- `--keep-items` still asks, defaulting to no;
+    // the plan lists only the source's hook since the items stay.
     let sb = Sandbox::new("plan-un-keep");
     sb.meld_all();
-    let r = sb.tty(&["unmeld", &sb.identity(), "--keep-items"], "n\n");
+    let r = sb.tty(&["unmeld", &sb.identity(), "--keep-items"], "\n");
     assert!(r.success, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stdout.contains("====== hooks: 1 ======"), "{}", r.stdout);
-    assert!(r.stdout.contains("[Y/n/r]"), "{}", r.stdout);
-    assert!(!sb.ran("src-uninstall"), "{}", r.stdout);
+    assert!(r.stdout.contains("[y/s/r/N]"), "{}", r.stdout);
+    assert!(sb.registered(), "Enter cancels: {}", r.stdout);
+    let r = sb.tty(&["unmeld", &sb.identity(), "--keep-items"], "y\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(sb.ran("src-uninstall"), "{}", r.stdout);
     assert!(!sb.registered(), "{}", r.stdout);
     assert!(sb.installed("skills/widget"), "{}", r.stdout);
 }
 
 #[test]
+fn unmeld_keep_items_with_yes_asks_a_hooks_only_plan_that_runs_by_default() {
+    // spec: HOOK-186 HOOK-182 -- `--yes` answers the removal; the hooks-only
+    // plan's default still runs the hooks.
+    let sb = Sandbox::new("plan-un-keep-y");
+    sb.meld_all();
+    let r = sb.tty(&["unmeld", &sb.identity(), "--keep-items", "--yes"], "");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[Y/n/r]"), "{}", r.stdout);
+    assert!(sb.ran("src-uninstall"), "{}", r.stdout);
+    assert!(!sb.registered(), "{}", r.stdout);
+}
+
+#[test]
+fn unmeld_of_a_hookless_single_item_source_still_confirms() {
+    // spec: CLI-260 HOOK-186 -- no hook to list: the removal question alone,
+    // `[y/N]`, and Enter declines.
+    let sb = Sandbox::new("plan-un-bare");
+    write(
+        &sb.source.join("mind.toml"),
+        "[source]\ndescription = \"bare\"\n",
+    );
+    std::fs::remove_dir_all(sb.source.join("skills")).unwrap();
+    sb.write_and_commit("rules/style.md", "---\ndescription: style\n---\n# style\n");
+    let r = sb.piped(&["meld", &sb.spec(), "--yes"], "");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    let r = sb.tty(&["unmeld", &sb.identity()], "\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[y/N]"), "{}", r.stdout);
+    assert!(sb.registered() && sb.installed("rules/style.md"));
+    let r = sb.tty(&["unmeld", &sb.identity()], "y\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(!sb.registered() && !sb.installed("rules/style.md"));
+}
+
+#[test]
+fn unmeld_glob_with_yes_asks_one_hooks_only_plan_for_every_source() {
+    // spec: HOOK-186 HOOK-182 -- a glob over two sources under `--yes`: one
+    // plan lists both sources' uninstall hooks, asked once.
+    let sb = Sandbox::new("multi-a");
+    sb.meld_all();
+    let other = sb.base.join("multi-b");
+    write(
+        &other.join("mind.toml"),
+        &format!(
+            "[[hooks]]\nname = \"b-teardown\"\nrun = \"{}\"\nevent = \"uninstall\"\n",
+            sb.touch("b-uninstall")
+        ),
+    );
+    write(&other.join("rules/b.md"), "---\ndescription: b\n---\n# b\n");
+    git(&other, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&other, &["config", "user.email", "t@t"]);
+    git(&other, &["config", "user.name", "t"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "initial"]);
+    let r = sb.piped(
+        &["meld", &other.to_string_lossy(), "--yes", "--accept-hooks"],
+        "",
+    );
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    let glob = format!(
+        "local/{}/multi-*",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    let r = sb.tty(&["unmeld", &glob, "--yes"], "n\n");
+    assert!(r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("====== hooks: 3 ======"), "{}", r.stdout);
+    assert_eq!(r.stdout.matches("[Y/n/r]").count(), 1, "{}", r.stdout);
+    assert!(r.stdout.contains("[3] b-teardown"), "{}", r.stdout);
+    assert!(
+        !sb.ran("src-uninstall") && !sb.ran("b-uninstall") && !sb.ran("item-uninstall"),
+        "{}",
+        r.stdout
+    );
+    assert!(!sb.registered(), "{}", r.stdout);
+}
+
+#[test]
 fn unmeld_without_a_tty_or_yes_refuses() {
-    // spec: CLI-259 HOOK-186
+    // spec: CLI-259 CLI-260 HOOK-186
     let sb = Sandbox::new("plan-un-pipe");
     sb.meld_all();
     let r = sb.piped(&["unmeld", &sb.identity()], "y\n");
     assert!(!r.success, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stderr.contains("--yes"), "{}", r.stderr);
+    assert!(sb.registered() && sb.installed("skills/widget"));
+    // `--keep-items`, and `--json` even at a terminal, refuse the same way.
+    let r = sb.piped(&["unmeld", &sb.identity(), "--keep-items"], "");
+    assert!(!r.success, "{}\n{}", r.stdout, r.stderr);
+    let r = sb.tty(&["--json", "unmeld", &sb.identity()], "y\n");
+    assert!(!r.success, "{}\n{}", r.stdout, r.stderr);
+    assert!(!sb.ran("src-uninstall") && !sb.ran("item-uninstall"));
     assert!(sb.registered() && sb.installed("skills/widget"));
 }

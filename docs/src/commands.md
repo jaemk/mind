@@ -127,7 +127,8 @@ mind unmeld <NAME> [OPTIONS]
 Uninstall every item a source installed, then drop it. `NAME` must match one
 source unless it is a glob. Use the full identity for one instance:
 `github.com/acme/skills@jk`, `github.com/acme/skills#skills/foo`. Alias
-`remove`, `rm`.
+`remove`, `rm`. It always confirms first, defaulting to no; `--yes` skips the
+confirmation and is required without a terminal.
 
 | flag | effect |
 |------|--------|

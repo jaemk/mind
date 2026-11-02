@@ -4755,13 +4755,13 @@ pub fn unmeld(
     }
 
     // CLI-28: when a glob matches more than one source, list the matched sources
-    // and confirm before removing them (CLI-42's multi-item confirmation, applied
-    // at source granularity). `--yes` skips it; a non-TTY run without `--yes`
-    // refuses rather than removing silently.
+    // and confirm once before removing them (CLI-260, at source granularity).
+    // `--yes` skips it; a non-TTY run without `--yes` refuses rather than
+    // removing silently.
     if matched.len() > 1 && !yes {
         // spec: LIFE-45 -- `--json` is always non-interactive (regardless of
-        // whether stdin is a real TTY), so it never reaches the `confirm(...)`
-        // prompt below: the check right after this block returns
+        // whether stdin is a real TTY), so it never reaches the plan prompt
+        // below: the check right after this block returns
         // `ConfirmationRequired` whenever `!is_tty() || out.json`, before the
         // prompt is ever called. The human-readable listing keeps its own
         // `!out.json` guard so it does not print ahead of a JSON error.
@@ -4781,9 +4781,11 @@ pub fn unmeld(
                 ),
             });
         }
-        // `out.json` already returned above, so this branch is reached only for
-        // an interactive TTY.
-        // spec: HOOK-186 -- one plan for every matched source's hooks.
+    }
+    if matched.len() > 1 {
+        // spec: HOOK-186 -- one plan for every matched source's hooks: with the
+        // removal confirmation, or hooks-only under `--yes` (a non-interactive
+        // `--yes` run asks nothing here).
         let mut hooks = Vec::new();
         for i in &matched {
             hooks.extend(unmeld_plan(
@@ -4795,13 +4797,14 @@ pub fn unmeld(
                 accept,
             )?);
         }
-        let items = PlanItems {
+        let items = (!yes).then_some(PlanItems {
             question: "remove these source(s)?",
             always: true,
             default_yes: false,
+            removal: true,
             listing: Vec::new(),
-        };
-        if ask_plan(paths, Some(items), hooks)? != PlanOutcome::Proceed {
+        });
+        if ask_plan(paths, items, hooks)? != PlanOutcome::Proceed {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -4810,8 +4813,8 @@ pub fn unmeld(
     // Removing a source mutates `registry.sources` indices, so resolve each
     // matched source by its name up front and unmeld them one at a time. When the
     // glob matched several sources we already confirmed above at source
-    // granularity, so the per-source item-count confirmation is suppressed (`yes`);
-    // a single match still gets its own item-count confirmation (CLI-21).
+    // granularity, so the per-source confirmation is suppressed (`yes`); a
+    // single match gets its own (CLI-260).
     let multi = matched.len() > 1;
     let names: Vec<String> = matched
         .iter()
@@ -4834,9 +4837,9 @@ pub fn unmeld(
 /// Tear down a single melded source by its full identity, the per-source body
 /// shared by `unmeld` (CLI-21/CLI-22). It removes the source's installed items
 /// (each via its file registry) before the source itself, preserving the HOOK-87
-/// order (item uninstall hooks before the source's). The multi-source/multi-item
-/// confirmation (CLI-42) is the caller's responsibility; this body does not
-/// re-prompt for the item count.
+/// order (item uninstall hooks before the source's). It asks the removal
+/// confirmation itself (CLI-260) unless `yes`, which the caller also sets after
+/// confirming a multi-source glob once.
 fn unmeld_one(
     paths: &Paths,
     source_name: &str,
@@ -4866,14 +4869,75 @@ fn unmeld_one(
         .map(|it| it.key().into())
         .collect();
 
+    // spec: CLI-260 HOOK-186 -- every unmeld confirms before anything is
+    // removed or any uninstall hook runs, defaulting to no; `--yes` answers it
+    // (leaving a hooks-only plan), and a non-TTY or `--json` run without `--yes`
+    // refuses (CLI-259, LIFE-45).
+    let hooks = unmeld_plan(
+        paths,
+        &registry,
+        &source_name,
+        unlink_only,
+        uninstall_hook,
+        accept,
+    )?;
+    if yes {
+        ask_plan(paths, None, hooks)?;
+    } else {
+        let removing = !unlink_only && !item_keys.is_empty();
+        if !out.json {
+            if removing {
+                println!(
+                    "unmelding {source_name} will remove {} installed item(s):",
+                    item_keys.len()
+                );
+                for k in &item_keys {
+                    // spec: DSC-95
+                    println!("  {} {}", out.warn(), strip_ansi(k));
+                }
+            } else {
+                println!("unmelding {source_name}");
+            }
+        }
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
+            let action = if removing {
+                format!(
+                    "unmelding {source_name} (removing {} items)",
+                    item_keys.len()
+                )
+            } else {
+                format!("unmelding {source_name}")
+            };
+            return Err(MindError::ConfirmationRequired {
+                action: json_confirmation_action(action, out.json),
+            });
+        }
+        let question = if removing {
+            "remove these item(s) and unmeld the source?"
+        } else if unlink_only && !item_keys.is_empty() {
+            "unmeld the source and keep its items installed?"
+        } else {
+            "unmeld this source?"
+        };
+        let items = PlanItems {
+            question,
+            always: true,
+            default_yes: false,
+            removal: true,
+            listing: Vec::new(),
+        };
+        if ask_plan(paths, Some(items), hooks)? != PlanOutcome::Proceed {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+
     // CLI-22: `--unlink-only` removes only the source, leaving its items in place,
     // and lists them with the command to remove them later. Uninstall hooks still
-    // run on this path (before the source is removed), since the unlink-only path
-    // has no multi-item confirmation to worry about.
+    // run on this path (before the source is removed).
     if unlink_only {
-        // spec: HOOK-186 -- the items stay, so a hooks-only plan.
-        let hooks = unmeld_plan(paths, &registry, &source_name, true, uninstall_hook, accept)?;
-        ask_plan(paths, None, hooks)?;
         let proceed =
             run_uninstall_hooks(paths, &registry, idx, &source_name, uninstall_hook, accept)?;
         if !proceed {
@@ -4920,59 +4984,8 @@ fn unmeld_one(
         return Ok(());
     }
 
-    // CLI-21: default -- uninstall every item from this source, then remove it.
-    // The multi-item confirmation (CLI-42) happens BEFORE uninstall hooks run, so
-    // a user who declines does not trigger destructive cleanup (HOOK-54).
-    // `--yes` skips the confirmation; a non-TTY run without `--yes` refuses.
-    // spec: HOOK-186 -- the confirmation is the plan's, with every uninstall
-    // hook listed; without one (`--yes`, a single item) a hooks-only plan.
-    let hooks = unmeld_plan(
-        paths,
-        &registry,
-        &source_name,
-        false,
-        uninstall_hook,
-        accept,
-    )?;
-    let confirming = item_keys.len() > 1 && !yes;
-    if !confirming {
-        ask_plan(paths, None, hooks)?;
-    } else {
-        if !out.json {
-            println!(
-                "unmelding {source_name} will remove {} installed item(s):",
-                item_keys.len()
-            );
-            for k in &item_keys {
-                // spec: DSC-95
-                println!("  {} {}", out.warn(), strip_ansi(k));
-            }
-        }
-        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
-        if !crate::hook::is_tty() || out.json {
-            // spec: CLI-232
-            return Err(MindError::ConfirmationRequired {
-                action: json_confirmation_action(
-                    format!(
-                        "unmelding {source_name} (removing {} items)",
-                        item_keys.len()
-                    ),
-                    out.json,
-                ),
-            });
-        }
-        // `out.json` already returned above; this branch is TTY-only.
-        let items = PlanItems {
-            question: "remove these item(s) and unmeld the source?",
-            always: true,
-            default_yes: false,
-            listing: Vec::new(),
-        };
-        if ask_plan(paths, Some(items), hooks)? != PlanOutcome::Proceed {
-            println!("cancelled; nothing removed");
-            return Ok(());
-        }
-    }
+    // CLI-21: default -- uninstall every item from this source, then remove it,
+    // confirmed above before any uninstall hook runs (HOOK-54).
 
     // HOOK-87: teardown reverses install -- each item's uninstall hooks run
     // BEFORE the source's uninstall hooks. The end-to-end order is
@@ -5782,6 +5795,7 @@ fn learn_selected(
             question: &question,
             always: asks_closure,
             default_yes: false,
+            removal: false,
             listing,
         });
         match ask_plan(paths, items, hooks)? {
@@ -6094,6 +6108,7 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
             question: &question,
             always: true,
             default_yes: true,
+            removal: false,
             listing: Vec::new(),
         }),
         plan.hooks(paths, flow.accept)?,
@@ -6327,6 +6342,7 @@ pub fn install_source_items_matching(
             question: &question,
             always: true,
             default_yes: true,
+            removal: false,
             listing: Vec::new(),
         }),
         hooks,
@@ -6477,6 +6493,7 @@ pub fn install_source_items_subset(
             question: &question,
             always: true,
             default_yes: true,
+            removal: false,
             listing: Vec::new(),
         }),
         union_plan_hooks(paths, &plans, flow.accept)?,
@@ -7032,6 +7049,7 @@ pub(crate) fn install_source_profiles(
             question: &question,
             always: true,
             default_yes: true,
+            removal: false,
             listing: Vec::new(),
         }),
         source_keys_plan(paths, req.source_name, &plan.pending, flow.accept)?,
@@ -12261,6 +12279,7 @@ fn upgrade_inner_scoped(
         question: "apply these upgrades?",
         always: true,
         default_yes: true,
+        removal: false,
         listing: Vec::new(),
     });
     match ask_plan(paths, items, hooks)? {
@@ -15541,6 +15560,8 @@ fn prompt_line(prompt: &str) -> Result<String> {
     // meld prefix preview, CLI-24) can carry ANSI/control/bidi bytes; sanitize
     // before it reaches the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
+    // spec: TUI-44
+    crate::prompt::guard("answering a prompt")?;
     // spec: PRG-5
     crate::progress::suspend(|| {
         print!("{prompt}");
@@ -15601,6 +15622,9 @@ pub(crate) struct PlanItems<'a> {
     pub always: bool,
     /// The default of the item-only `[Y/n]` / `[y/N]` form.
     pub default_yes: bool,
+    /// A removal (`unmeld`, HOOK-186): the four-way prompt defaults to `n`
+    /// (`[y/s/r/N]`) instead of `y`.
+    pub removal: bool,
     /// Lines listing the items, printed before the plan when the caller has
     /// not already shown them.
     pub listing: Vec<String>,
@@ -15676,16 +15700,23 @@ pub(crate) fn ask_plan(
         let prompting = listed.iter().filter(|h| !h.accepted).count();
         match &items {
             Some(it) => {
+                // spec: HOOK-181 HOOK-186 -- an install defaults to yes; a
+                // removal defaults to no.
+                let (yes_key, no_key, hint, default) = if it.removal {
+                    ("y", "N", "[y/s/r/N]", PLAN_CHOICES[3].value)
+                } else {
+                    ("Y", "n", "[Y/s/r/n]", PLAN_CHOICES[0].value)
+                };
                 println!(
-                    "  [Y] yes, run the hooks   [s] yes, skip the hooks   [r] yes, ask about each hook   [n] no"
+                    "  [{yes_key}] yes, run the hooks   [s] yes, skip the hooks   [r] yes, ask about each hook   [{no_key}] no"
                 );
                 let (outcome, answer) = crate::prompt::ask(
                     &format!(
-                        "{} ({prompting} hook(s) to run) [Y/s/r/n] ",
+                        "{} ({prompting} hook(s) to run) {hint} ",
                         strip_ansi(it.question)
                     ),
                     &PLAN_CHOICES,
-                    PLAN_CHOICES[0].value,
+                    default,
                     it.question.trim_end_matches('?'),
                 )?;
                 (outcome, Some(answer))

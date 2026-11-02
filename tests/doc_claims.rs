@@ -352,7 +352,8 @@ fn dead_local_source_recovery_recipe_from_the_docs_works_end_to_end() {
     );
 
     // Step 2: `mind unmeld <name>` to drop it.
-    let r = sb.mind(&["unmeld", &identity]);
+    // `--yes`: this run has no terminal to confirm on (CLI-259).
+    let r = sb.mind(&["unmeld", &identity, "--yes"]);
     assert!(
         r.success,
         "unmeld must drop a source whose linked working tree is gone -- this \
@@ -454,7 +455,7 @@ fn unmeld_of_a_vanished_source_does_not_require_the_directory_to_exist() {
 
     // A bare suffix selector (what a user would actually type) must work too,
     // not only the full identity.
-    let r = sb.mind(&["unmeld", "ghost"]);
+    let r = sb.mind(&["unmeld", "ghost", "--yes"]);
     assert!(
         r.success,
         "unmeld by the short selector must work on a vanished source: {}\n{}",

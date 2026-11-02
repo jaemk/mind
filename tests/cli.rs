@@ -477,7 +477,9 @@ fn remeld_ignored_flags_note_shell_quotes_a_metachar_alias() {
     );
 
     let argv = remedy_argv(&again.stdout);
-    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    // A piped run confirms the removal with `--yes` (CLI-259).
+    args.push("--yes");
     let r = sb.mind(&args);
     assert!(
         r.success,
@@ -543,7 +545,7 @@ fn unmeld_unlink_only_remaining_items_hint_shell_quotes_a_metachar_alias() {
         learn_all.stdout, learn_all.stderr
     );
 
-    let r = sb.mind(&["unmeld", &source_name, "--unlink-only"]);
+    let r = sb.mind(&["unmeld", &source_name, "--unlink-only", "--yes"]);
     assert!(r.success, "unmeld failed: {} {}", r.stdout, r.stderr);
 
     let quoted = shell_quote(&format!("{source_name}#*"));
@@ -1059,7 +1061,7 @@ fn local_source_is_read_from_its_working_tree() {
 
     // unmeld leaves the working tree intact.
     assert!(
-        sb.mind(&["unmeld", "worktree-src", "--unlink-only"])
+        sb.mind(&["unmeld", "worktree-src", "--unlink-only", "--yes"])
             .success
     );
     assert!(
@@ -6768,7 +6770,7 @@ fn unmeld_unlink_only_keeps_installed_items() {
     // installed items, listing them with the forget hint.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
-    let r = sb.mind(&["unmeld", "agents", "--unlink-only"]);
+    let r = sb.mind(&["unmeld", "agents", "--unlink-only", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
 
     // Source is gone.
@@ -6796,7 +6798,7 @@ fn unmeld_forgets_items_by_default() {
     // must not delete the linked local working tree (CLI-27).
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
-    let r = sb.mind(&["unmeld", "agents"]);
+    let r = sb.mind(&["unmeld", "agents", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
         std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
@@ -6866,10 +6868,10 @@ fn unmeld_full_name_resolves_basename_collision() {
 
     // Full owner/repo unmelds exactly one; the basename is then unambiguous.
     assert!(
-        a.mind(&["unmeld", &format!("{}/agents", a.base_name())])
+        a.mind(&["unmeld", &format!("{}/agents", a.base_name()), "--yes"])
             .success
     );
-    assert!(a.mind(&["unmeld", "agents"]).success);
+    assert!(a.mind(&["unmeld", "agents", "--yes"]).success);
 }
 
 #[test]
@@ -6886,7 +6888,7 @@ fn unmeld_glob_removes_only_the_matching_source() {
             .success
     );
 
-    let r = a.mind(&["unmeld", "*agents"]);
+    let r = a.mind(&["unmeld", "*agents", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
 
     // Only the agents source (and its item) is gone; foo survives.
@@ -15164,7 +15166,7 @@ fn unmeld_json_stdout_is_only_the_result_object_when_an_uninstall_hook_is_skippe
     );
     assert!(sb.mind(&["meld", &sb.source_spec()]).success, "meld");
 
-    let r = sb.mind(&["unmeld", "agents", "--json"]);
+    let r = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(r.success, "unmeld --json: {} {}", r.stdout, r.stderr);
     serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
         panic!(
@@ -15205,7 +15207,7 @@ fn hook_skip_notes_stay_on_stdout_in_text_mode() {
         "[[hooks]]\nname = \"cleanup\"\nrun = \"echo clean\"\nevent = \"uninstall\"\n",
     );
     assert!(un.mind(&["meld", &un.source_spec()]).success, "meld");
-    let r = un.mind(&["unmeld", "agents"]);
+    let r = un.mind(&["unmeld", "agents", "--yes"]);
     assert!(r.success, "unmeld: {} {}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains("note: skipped uninstall hook 'cleanup'"),
@@ -17724,6 +17726,7 @@ fn unmeld_runs_uninstall_hook_with_dangerous_flag() {
     let unmeld = sb.mind(&[
         "unmeld",
         "uninstall-hook",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
@@ -17764,6 +17767,7 @@ fn unmeld_uninstall_hook_override_replaces_declared() {
     let unmeld = sb.mind(&[
         "unmeld",
         "uninstall-override",
+        "--yes",
         "--uninstall-hook",
         &format!("touch {om}"),
         "--accept-hooks=install,update,uninstall",
@@ -17809,8 +17813,9 @@ fn unmeld_non_tty_skips_uninstall_hook_but_still_removes_source() {
         meld.stdout, meld.stderr
     );
 
-    // Unmeld without the dangerous flag: non-TTY -> skip hook, still remove source.
-    let unmeld = sb.mind(&["unmeld", "uninstall-skip"]);
+    // Unmeld without the dangerous flag: non-TTY -> skip hook, still remove
+    // source. `--yes` confirms the removal itself (CLI-259).
+    let unmeld = sb.mind(&["unmeld", "uninstall-skip", "--yes"]);
     assert!(
         unmeld.success,
         "unmeld should succeed even when hook is skipped: {} {}",
@@ -18139,6 +18144,7 @@ fn unmeld_failing_uninstall_hook_leaves_source_melded() {
     let r = sb.mind(&[
         "unmeld",
         "failing-uninstall-hook",
+        "--yes",
         "--accept-hooks=install,update,uninstall",
     ]);
     assert!(
@@ -19134,7 +19140,7 @@ fn every_reachable_verb_emits_valid_json_under_json_flag() {
     assert!(forget.success, "{}", forget.stderr);
     assert!(parse_json(&forget.stdout).is_object(), "{}", forget.stdout);
 
-    let unmeld = sb.mind(&["unmeld", "agents", "--json"]);
+    let unmeld = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(unmeld.success, "{}", unmeld.stderr);
     assert!(parse_json(&unmeld.stdout).is_object(), "{}", unmeld.stdout);
 }
@@ -25148,7 +25154,7 @@ fn skill_collision_same_source_remeld_is_not_a_collision() {
 
     // Unmeld --unlink-only: source is removed from the registry but the
     // installed item remains in the manifest under the original source name.
-    let r = src.mind(&["unmeld", "ns43-remeld", "--unlink-only"]);
+    let r = src.mind(&["unmeld", "ns43-remeld", "--unlink-only", "--yes"]);
     assert!(
         r.success,
         "unmeld --unlink-only must succeed: {} {}",
@@ -26501,7 +26507,7 @@ fn unmeld_keep_items_is_canonical() {
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
-    let r = sb.mind(&["unmeld", "agents", "--keep-items"]);
+    let r = sb.mind(&["unmeld", "agents", "--keep-items", "--yes"]);
     assert!(r.success, "--keep-items must succeed: {}", r.stderr);
 
     // The item's symlink must still exist in the lobe.
@@ -26857,7 +26863,7 @@ fn all_mutating_verbs_carry_schema_1_in_json_envelope() {
     );
 
     // unmeld (removes source and its installed items)
-    let unmeld_r = sb.mind(&["unmeld", "agents", "--json"]);
+    let unmeld_r = sb.mind(&["unmeld", "agents", "--json", "--yes"]);
     assert!(
         unmeld_r.success,
         "unmeld --json failed: {}",
@@ -28420,7 +28426,10 @@ fn forget_dropped_takes_items_of_an_unmelded_source_and_confirms_several() {
     let sb = melded();
     assert!(sb.mind(&["learn", "dev"]).success);
     assert!(sb.mind(&["learn", "review"]).success);
-    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+    assert!(
+        sb.mind(&["unmeld", "agents", "--keep-items", "--yes"])
+            .success
+    );
 
     // Two items: CLI-42's confirmation applies, and a non-TTY run refuses.
     let r = sb.mind(&["forget", "--dropped"]);
@@ -28443,7 +28452,10 @@ fn forget_dropped_is_narrowed_by_a_ref() {
     let sb = melded();
     assert!(sb.mind(&["learn", "dev"]).success);
     assert!(sb.mind(&["learn", "review"]).success);
-    assert!(sb.mind(&["unmeld", "agents", "--keep-items"]).success);
+    assert!(
+        sb.mind(&["unmeld", "agents", "--keep-items", "--yes"])
+            .success
+    );
 
     let r = sb.mind(&["forget", "--dropped", "agent:*"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);

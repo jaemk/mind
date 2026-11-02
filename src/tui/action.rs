@@ -57,7 +57,12 @@ fn execute_inner(
 
     let (result, captured) = if capture {
         // Run the verb with stdout captured so nothing leaks onto the alt-screen.
-        with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys, false))
+        // spec: TUI-44 -- a prompt it reaches refuses instead of blocking on a
+        // raw-mode read nobody can see; the caller reruns it unsuspended.
+        crate::prompt::set_captured(true);
+        let r = with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys, false));
+        crate::prompt::set_captured(false);
+        r
     } else {
         // Interactive: the TUI is suspended, so let the verb own the terminal.
         (

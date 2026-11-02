@@ -127,7 +127,7 @@ fn unmeld_leaves_traversal_victim_intact_shape_parent_dir_parts() {
 }"#,
     );
 
-    let r = env.mind(&["unmeld", "../../victim"]);
+    let r = env.mind(&["unmeld", "../../victim", "--yes"]);
     assert!(
         !r.success,
         "unmeld of a traversing source must not report success: stdout={} stderr={}",
@@ -195,7 +195,7 @@ fn unmeld_leaves_traversal_victim_intact_shape_dotted_owner_repo() {
 }"#,
     );
 
-    let r = env.mind(&["unmeld", "traversal2"]);
+    let r = env.mind(&["unmeld", "traversal2", "--yes"]);
     assert!(
         !r.success,
         "unmeld of a traversing source must not report success: stdout={} stderr={}",
@@ -317,7 +317,7 @@ fn the_drop_is_not_written_back_until_a_verb_saves_the_registry() {
 
     // `unmeld` of the surviving entry saves the registry, making the drop
     // permanent as a side effect.
-    let u = env.mind(&["unmeld", "github.com/acme/agents", "--unlink-only"]);
+    let u = env.mind(&["unmeld", "github.com/acme/agents", "--unlink-only", "--yes"]);
     assert!(u.success, "unmeld failed: {} {}", u.stdout, u.stderr);
     let after = std::fs::read_to_string(&file).unwrap();
     assert!(

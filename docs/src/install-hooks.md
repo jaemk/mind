@@ -49,15 +49,17 @@ install these 2 item(s) now? (2 hook(s) to run) [Y/s/r/n]
 
 `y` (the default) installs and runs every listed hook, `s` installs and skips
 them, `r` installs and asks about each hook on its own (the safety prompt
-below), and `n` installs nothing and runs no hook. When there is nothing to
+below), and `n` installs nothing and runs no hook. On `unmeld` the same replies
+remove instead, and the default is `n` (`[y/s/r/N]`). When there is nothing to
 confirm but the hooks (`--yes`, `--register-only`), the prompt is
 `[Y/n/r]`. An unrecognized reply is asked again; EOF takes the default.
 
 ## The safety prompt
 
 Because a hook is arbitrary code, `mind` discloses the source identity, pin,
-commit, clone path, and exact command before running anything, and prompts
-`[Y/n/a]` with three choices: run the hook (the default, a bare Enter), skip it
+commit, clone path, and exact command before running anything. A hook the plan
+did not list, or every hook after an `r` at the plan, gets its own prompt,
+`[Y/n/a]`, with three choices: run the hook (the default, a bare Enter), skip it
 but still install the source and its items, or abort and install nothing. In a
 non-TTY context (CI, scripts) the hook is skipped and a note is printed;
 `--accept-hooks` runs it unattended (`--accept-hooks=install` accepts only
@@ -82,7 +84,8 @@ source is already installed, so abort is treated as skip. `upgrade` also re-runs
 the hook when a source advances to a new commit. `sync --upgrade` accepts
 `--accept-hooks` so a CI pipeline can run hook re-runs
 unattended. Without the flag, a non-TTY `sync --upgrade` skips hook re-runs (the
-same as `upgrade`).
+same as `upgrade`). When items are also out of date, a non-TTY run of either
+refuses unless `--yes` is given.
 
 Because the default is a re-run, write an install hook to be idempotent: safe to
 run again on a host it already set up.
@@ -125,9 +128,14 @@ item's content.
 ## Uninstall hooks
 
 Uninstall hooks (`event = "uninstall"`) run at `unmeld`, in the source's clone,
-before the clone is removed. They use the same safety-prompt model as install
-hooks: required hooks prompt run / skip / abort-the-unmeld; optional hooks prompt
-run / skip; a non-TTY `unmeld` skips them and notes it. `unmeld --uninstall-hook
+before the clone is removed. Every `unmeld` confirms first, and the default is
+no. On a terminal the hooks are listed in that confirmation, `[y/s/r/N]` (see
+[The install plan](#the-install-plan)): `y` removes and runs them, `s` removes
+and skips them, `r` prompts each one (run / skip / abort-the-unmeld for a
+required hook, run / skip for an optional one), and `n`, Enter, or EOF removes
+nothing. `--yes` skips the confirmation and leaves a `[Y/n/r]` question about
+the hooks alone. Without a terminal, `unmeld` needs `--yes`, and then skips the
+hooks and notes it. `unmeld --uninstall-hook
 <cmd>` supplies or overrides the source's declared uninstall hooks. `unmeld
 --accept-hooks` runs them unattended. A required uninstall hook that
 fails or is aborted leaves the source melded.

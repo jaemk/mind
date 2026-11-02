@@ -395,11 +395,11 @@ still parsed and folded in (HOOK-50).
   clobber overwrite, CLI-35).
 - `HOOK-54` Uninstall hooks (`event = "uninstall"`) run at `unmeld`, in the
   source's clone, before the clone and registry entry are removed (so cleanup can
-  use the working tree). On the default unmeld path (CLI-21), the multi-item
-  removal confirmation (CLI-42) runs first; uninstall hooks only run after the
-  user confirms (or `--yes` skips the confirm). A user who declines the confirm
-  does not trigger any hook. On the `--unlink-only` path (CLI-22), which has no
-  multi-item confirm, hooks run before the source is removed. They use
+  use the working tree). On every unmeld path, the removal confirmation
+  (CLI-260) runs first; uninstall hooks only run after the user confirms (or
+  `--yes` skips the confirm). A user who declines the confirm does not trigger
+  any hook. On the `--unlink-only` path (CLI-22) the hooks run before the
+  source is removed, as on the default path. They use
   the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
   optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
   --accept-hooks` (or `--accept-hooks=uninstall`, CLI-250) runs them unattended. A required
@@ -636,7 +636,8 @@ CLI-60 point here.
 
   An unrecognized reply is rejected and asked again (CLI-257), so an unclear
   answer neither runs nor skips anything. EOF takes the default, `y` (CLI-258):
-  the user ran the command, so the intent is to run it fully. A non-TTY run
+  the user ran the command, so the intent is to run it fully. A removal is the
+  exception: `unmeld`'s plan defaults to `n` (HOOK-186). A non-TTY run
   never reaches this prompt (HOOK-182).
 - `HOOK-182` When the run has no items to install (`--register-only`, a re-meld
   with only pending hooks, or every item already installed) or `--yes` already
@@ -650,7 +651,9 @@ CLI-60 point here.
   install hooks run after the answer and before the first item installs, which
   keeps the HOOK-87 order. On `upgrade`, the source hook pass (HOOK-11, HOOK-121)
   runs after the answer, so declining the upgrade runs no hook. Hooks still see
-  the selection the run applies (HOOK-142).
+  the selection the run applies (HOOK-142). A hook `--accept-hooks` accepts
+  needs no answer, so it is not held back: a meld runs an accepted source
+  install hook at registration, as it did before the plan.
 - `HOOK-184` An item hook's directory does not hold the item's files when the
   plan is shown: a build hook's staging directory (HOOK-71) does not exist yet,
   and an install or update hook's store directory (HOOK-81) is missing on a
@@ -673,10 +676,14 @@ CLI-60 point here.
   removes the items and runs every listed hook, `s` removes them and skips every
   hook, `r` removes them and prompts each hook on its own (a required source
   uninstall hook's abort still leaves the source melded, HOOK-54), and `n`
-  removes nothing. Under `--keep-items` (CLI-22) or `--yes` the plan lists only
-  the hooks and the prompt is HOOK-182's `[Y/n/r]`; with `--accept-hooks`
-  covering every hook, the prompt is the removal confirmation alone. A non-TTY
-  `unmeld` is unchanged (HOOK-54, CLI-42).
+  removes nothing. Unlike an install, the default is `n` (`[y/s/r/N]`), so
+  Enter and EOF remove nothing (CLI-260). Every `unmeld` asks it, including a
+  single item and `--keep-items` (CLI-22), whose plan lists only the source's
+  hooks. Under `--yes` the plan lists only the hooks and the prompt is
+  HOOK-182's `[Y/n/r]`, whose default runs them: `--yes` already approved the
+  removal. With `--accept-hooks` covering every hook, the prompt is the removal
+  confirmation alone (`[y/N]`). A non-TTY `unmeld` without `--yes` refuses
+  (CLI-260); with it, hooks are skipped as before (HOOK-54).
 
 Limits of the plan, each covered by HOOK-185 (an unlisted hook is prompted on
 its own):
