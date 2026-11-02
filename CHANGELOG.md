@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-11-02
+
 ### Added
 
 - `[source] history = "full"` in `mind.toml` makes `meld` and `sync` deepen a
@@ -2275,7 +2277,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.44.0...HEAD
+[0.44.0]: https://github.com/jaemk/mind/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/jaemk/mind/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/jaemk/mind/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/jaemk/mind/compare/v0.40.0...v0.41.0
