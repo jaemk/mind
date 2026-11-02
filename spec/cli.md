@@ -1531,7 +1531,7 @@ and per-harness `kinds` defaults.
 
 - `CLI-198` `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot]
   [--force]` is a shorthand for `config lobes add` aimed at a project directory.
-  `dir` defaults to cwd; `--preset` defaults to `windsurf`. It is subject to the
+  `dir` defaults to cwd; `--preset` defaults to `devin` (HARN-24). It is subject to the
   same HARN-7 backfill contract and the same HARN-9 claude_home preservation as
   `config lobes add`. For a managed add, gitignore guidance is printed (the skills
   dir contains symlinks into `~/.mind/store`). `--snapshot` writes frozen real-file
@@ -1542,7 +1542,7 @@ and per-harness `kinds` defaults.
   `--preset`), `--snapshot` (write frozen copies, no config entry; HARN-12), and
   `--force` (overwrite a colliding target in snapshot mode). `--preset` no longer
   conflicts with the positional base path: `config lobes add <dir> --preset
-  windsurf` resolves the lobe as `<dir>/.windsurf`. `config lobes remove` gains
+  devin` resolves the lobe as `<dir>/.devin`. `config lobes remove` gains
   `--snapshot` (convert symlinks to frozen copies before dropping the config entry;
   HARN-12).
 

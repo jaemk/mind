@@ -385,7 +385,7 @@ manages agent homes:
 
 | flag | effect |
 |------|--------|
-| `--preset <NAME>` | `gemini`, `codex`, `universal`, or `windsurf` |
+| `--preset <NAME>` | `gemini`, `codex`, `universal`, `devin`, `devin-cli`, or `windsurf` (legacy) |
 | `--subdir <REL>` | a subdirectory under `PATH` (skills only) |
 | `--snapshot` | `add`: write real-file copies, register nothing; `remove`: replace links with copies first |
 | `-f`, `--force` | overwrite a colliding file |
@@ -404,7 +404,7 @@ manages agent homes:
 mind link-project [DIR] [--preset NAME] [--subdir REL] [--snapshot] [-f]
 ```
 
-Shorthand for `config lobes add DIR --preset windsurf`, with `DIR` defaulting to
+Shorthand for `config lobes add DIR --preset devin`, with `DIR` defaulting to
 the current directory. See [Project lobes](lobes.md#project-lobes).
 
 ## absorb

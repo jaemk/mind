@@ -474,7 +474,8 @@ pub enum MindError {
     UnknownKind { kind: String },
 
     #[error(
-        "'{name}' is not a known lobe preset (expected one of: gemini, codex, universal, windsurf)"
+        "'{name}' is not a known lobe preset (expected one of: {})",
+        crate::paths::preset_names()
     )]
     UnknownPreset { name: String },
 
@@ -2395,12 +2396,9 @@ mod tests {
         }
         .to_string();
         assert!(unknown_preset.contains("emacs"), "{unknown_preset}");
-        // spec: HARN-4 -- the real presets (gemini, codex, universal, windsurf).
+        // spec: HARN-4 -- the real presets, every one of the table's names.
         assert!(
-            unknown_preset.contains("gemini")
-                && unknown_preset.contains("codex")
-                && unknown_preset.contains("universal")
-                && unknown_preset.contains("windsurf"),
+            unknown_preset.contains("gemini, codex, universal, devin, devin-cli, windsurf"),
             "UnknownPreset must list the valid presets: {unknown_preset}"
         );
         assert!(

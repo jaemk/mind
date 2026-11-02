@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `devin` lobe preset for Devin Desktop (formerly Windsurf): a project lobe at
+  `<dir>/.devin`. `config lobes detect` offers it when `~/.config/devin`,
+  `~/.devin`, or `~/.codeium/windsurf` exists.
+- `devin-cli` lobe preset for the Devin CLI's global skills dir,
+  `~/.config/devin`.
+- `introspect` notes each `.windsurf` lobe, with the commands to move it to
+  `.devin`. The note is not counted as an issue; `--json` lists it under `notes`.
+
+### Changed
+
+- `link-project` defaults to the `devin` preset (`<dir>/.devin`) instead of
+  `windsurf`. `--preset windsurf` still adds the legacy `<dir>/.windsurf`
+  lobe, which Devin still reads, and existing windsurf lobes keep working.
+- `config lobes detect` no longer offers the `windsurf` preset; the same
+  machines are offered `devin`.
+
 ## [0.44.0] - 2026-11-02
 
 ### Added

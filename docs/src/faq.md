@@ -33,7 +33,7 @@ your fork.
 
 ## Does it work with harnesses other than Claude Code?
 
-Yes, for skills: Gemini CLI, Antigravity, Codex CLI, Windsurf, and any harness
+Yes, for skills: Gemini CLI, Antigravity, Codex CLI, Devin (formerly Windsurf), and any harness
 that reads `skills/<name>/SKILL.md` from a directory you name. Agents link
 anywhere a lobe admits them. Rules, commands, and workflows are Claude-only.
 See [Use more than one agent](lobes.md).

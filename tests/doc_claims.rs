@@ -470,7 +470,7 @@ fn unmeld_of_a_vanished_source_does_not_require_the_directory_to_exist() {
 // ---------------------------------------------------------------------------
 
 /// A skill and a rule are installed BEFORE the lobe exists. Adding a
-/// `windsurf`-preset (skill-only) lobe afterward must backfill the skill but
+/// `devin`-preset (skill-only) lobe afterward must backfill the skill but
 /// not the rule, proving the doc's unqualified "already-installed items link
 /// in" statement is only true for the kinds the lobe admits.
 #[test]
@@ -503,19 +503,19 @@ fn config_lobes_add_backfills_only_the_kinds_the_lobe_admits() {
         "add",
         project.to_string_lossy().as_ref(),
         "--preset",
-        "windsurf",
+        "devin",
     ]);
     assert!(r.success, "config lobes add: {}\n{}", r.stdout, r.stderr);
 
-    let windsurf = project.join(".windsurf");
+    let devin = project.join(".devin");
     assert!(
-        std::fs::symlink_metadata(windsurf.join("skills/hello")).is_ok(),
-        "the skill is a kind the windsurf lobe admits, so it must be backfilled: {}",
+        std::fs::symlink_metadata(devin.join("skills/hello")).is_ok(),
+        "the skill is a kind the devin lobe admits, so it must be backfilled: {}",
         r.stdout
     );
     assert!(
-        std::fs::symlink_metadata(windsurf.join("rules/style-rule.md")).is_err(),
-        "the windsurf preset is skill-only, so the already-installed rule must \
+        std::fs::symlink_metadata(devin.join("rules/style-rule.md")).is_err(),
+        "the devin preset is skill-only, so the already-installed rule must \
          NOT be backfilled into it: {}",
         r.stdout
     );

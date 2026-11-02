@@ -43,12 +43,12 @@ The on-disk layout and the two persisted JSON files.
   `~/.mind/config.toml`, else `[claude root]`. A leading `~` is expanded. An
   unknown key in `config.toml` is an error (`Toml`).
   Note: each lobe entry may carry a `kinds` filter (HARN-1). Non-Claude lobe
-  presets (gemini, codex, universal, windsurf) are added via
+  presets (gemini, codex, universal, devin, devin-cli, windsurf) are added via
   `config lobes add --preset <name>` (HARN-4) or the auto-detect-and-prompt path
   `config lobes detect` (HARN-5). See harness-lobes.md for the preset path table
   and per-harness `kinds` defaults.
   Note: a lobe may be a global agent home directory (e.g. `~/.gemini/config`) or
-  a project-scoped subdirectory (e.g. `<project>/.windsurf`); both are unified as
+  a project-scoped subdirectory (e.g. `<project>/.devin`); both are unified as
   "any install-target directory". See STO-56 for the reachability gate that
   governs project-scoped lobes.
 - `STO-15` When `~/.mind/config.toml` does not exist, it is created with the

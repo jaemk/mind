@@ -67,7 +67,7 @@ both. See [Use more than one agent](lobes.md).
 
 ```
 cd ~/projects/myapp
-mind link-project --preset windsurf      # or: mind config lobes add ./.claude
+mind link-project                       # or: mind config lobes add ./.claude
 mind learn skill:review --local
 ```
 

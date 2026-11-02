@@ -26,8 +26,8 @@ any of the three.
 
 Each installed item is tracked and checked for drift from its source, install /
 upgrade / uninstall are transactional, and linking works across Claude Code,
-Gemini CLI (Antigravity rides the same home), Codex CLI, and Windsurf (as a
-project lobe), not just `~/.claude`.
+Gemini CLI (Antigravity rides the same home), Codex CLI, and Devin (formerly
+Windsurf), not just `~/.claude`.
 
 Full documentation: https://jaemk.github.io/mind/
 
@@ -103,8 +103,8 @@ mind meld owner/repo --add-root community --add-root experimental
 ```
 
 Lobes (install targets) can be global agent homes (Claude Code, Gemini CLI
-(shared with Antigravity), Codex CLI) or project directories (Windsurf reads
-skills from `<project>/.windsurf/skills/`). See
+(shared with Antigravity), Codex CLI, Devin CLI) or project directories (Devin
+Desktop reads skills from `<project>/.devin/skills/`). See
 [configuration](https://jaemk.github.io/mind/guide/lobes.html)
 for details.
 

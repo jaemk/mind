@@ -24,15 +24,22 @@ mind links a skill as `<lobe>/skills/<name>` and an agent as
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` (native user path; `$CODEX_HOME` toggles, not discovery) | (subagents) | `~/.agents` |
-| Windsurf | `<project>/.windsurf/skills/` | - | `<project>/.windsurf` |
+| Devin Desktop (formerly Windsurf) | `<project>/.devin/skills/` (falls back to `<project>/.windsurf/skills/`) | - | `<project>/.devin` |
+| Devin CLI | `~/.config/devin/skills/` (also `~/.agents/skills/`) | - | `~/.config/devin` |
 
 `~/.agents/` is the emerging vendor-neutral alias: Codex reads it as its user
 skills path and the standard installer targets it.
 
-Windsurf is project-scoped: it has no global skills home, discovering skills only
-from a project's `.windsurf/skills/`. Its lobe is therefore a project subdirectory
-added via `link-project` (HARN-11), not a global home; its machine marker for
-detection is `~/.codeium/windsurf` (HARN-5).
+Windsurf was renamed Devin Desktop on 2026-06-02. Devin prefers a project's
+`.devin/skills/` and still reads `.windsurf/skills/` as a fallback, so the
+project lobe moved to `<project>/.devin` (the `devin` preset, the `link-project`
+default) and the `windsurf` preset remains for the legacy directory (HARN-24).
+Devin Desktop's global skills dir is still the Windsurf-era
+`~/.codeium/windsurf/skills/`; mind does not link there and uses that dir only
+as a detection marker. The Devin CLI reads `~/.config/devin/skills/`, which the
+global `devin-cli` preset targets (HARN-25). Devin's `.devin/rules/` and
+`.devin/workflows/` use Devin's own frontmatter and formats, not Claude rules or
+mind's `.js` workflows, so both presets are skill-only.
 
 `rules` (`rules/<name>.md`) have no cross-tool directory equivalent: the analog is
 a single concatenated context file (`AGENTS.md` / `GEMINI.md`), not a directory of
@@ -56,9 +63,11 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 - `HARN-4` `config lobes add --preset <name>` adds a lobe with the preset's parent
   path and `kinds`. Presets: `gemini` (`~/.gemini/config`, skill -- detected by the
   presence of `~/.gemini`), `codex` (`~/.agents`, skill), `universal` (`~/.agents`,
-  skill), `windsurf` (`<project>/.windsurf`, skill, project-scoped -- detected by
-  the presence of `~/.codeium/windsurf`). Global presets (`gemini`, `codex`,
-  `universal`) resolve the lobe path under `~`; project presets (`windsurf`) resolve
+  skill), `devin` (`<project>/.devin`, skill, project-scoped, HARN-24),
+  `devin-cli` (`~/.config/devin`, skill, HARN-25), `windsurf`
+  (`<project>/.windsurf`, skill, project-scoped, legacy, HARN-24). Global presets
+  (`gemini`, `codex`, `universal`, `devin-cli`) resolve the lobe path under `~`;
+  project presets (`devin`, `windsurf`) resolve
   under the current working directory when no explicit base is given. A preset
   honors the `CLAUDE_HOME`-style overrides where applicable and resolves
   `~`/relative paths to absolute (STO-16). `--preset` may be combined with a
@@ -66,11 +75,12 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   of the default root.
 - `HARN-5` Adding non-Claude lobes is opt-in by auto-detect-and-prompt: a setup
   path detects which known harness dirs exist on the machine and offers to add the
-  matching presets. For global presets (`gemini`, `codex`, `universal`), the
+  matching presets. For global presets (`gemini`, `codex`, `universal`,
+  `devin-cli`), the
   detected lobe is added after confirmation (or immediately with `--yes`). For
-  project-scoped presets (`windsurf`), detection never auto-adds a lobe because the
+  project-scoped presets (`devin`), detection never auto-adds a lobe because the
   project directory is not known at detect time; instead, guidance is printed to run
-  `mind link-project [--preset windsurf]` inside a project directory. The default
+  `mind link-project [--preset devin]` inside a project directory. The default
   lobe set is unchanged (`~/.claude` only, STO-14/STO-15); detection never mutates
   config for project-scoped presets.
 - `HARN-6` mind links the skill/agent files verbatim. Frontmatter portability
@@ -122,7 +132,7 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 
 - `HARN-11` `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot]
   [--force]` is a shorthand for `config lobes add` targeting a project directory.
-  `dir` defaults to cwd; `--preset` defaults to `windsurf`. For a managed
+  `dir` defaults to cwd; `--preset` defaults to `devin` (HARN-24). For a managed
   (non-snapshot) add the same HARN-7 backfill contract applies: `--yes` backfills
   immediately, non-TTY without `--yes` prints the `introspect --fix` note. Gitignore
   guidance is printed for a newly added project lobe (the skills dir contains
@@ -229,7 +239,7 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   configured lobe. It is requested per invocation by `--local` on `learn`/`meld`
   (HARN-20) and is anchored on detecting the registered project lobe living
   under the current working directory (HARN-21). Motivation: project-scoped skills for
-  harnesses like Windsurf, where fanning every installed item into every project
+  harnesses like Devin, where fanning every installed item into every project
   is not always wanted. The fan-out default (HARN-7/HARN-17) is unchanged when
   `--local` is absent.
 
@@ -248,7 +258,7 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 
 - `HARN-21` The project lobe an invocation is "inside" is a configured lobe whose
   directory lives under the current working directory (e.g. a
-  `<project>/.windsurf` windsurf lobe, or a `<project>/<subdir>` lobe registered
+  `<project>/.devin` devin lobe, or a `<project>/<subdir>` lobe registered
   by `config lobes add`/`link-project`). A global home lives under `~`, not under
   an arbitrary project cwd, so it does not qualify. In particular the resolved
   default home (the `MIND_DEFAULT_LOBE` / `CLAUDE_HOME` override, else `~/.claude`)
@@ -266,6 +276,25 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   lobes add` as the fix, or dropping `--local`) rather than silently falling back
   to the global fan-out.
 
+- `HARN-24` The `devin` preset is the project lobe for Devin Desktop (formerly
+  Windsurf): `<project>/.devin`, skill-only, project-scoped, and the
+  `link-project` default (HARN-11). It is detected (HARN-5) when any of
+  `~/.config/devin`, `~/.devin`, or `~/.codeium/windsurf` exists. The
+  `windsurf` preset keeps the legacy `<project>/.windsurf` lobe, which Devin
+  still reads as a fallback, so an existing windsurf lobe keeps working and
+  `--preset windsurf` still adds one; it has no detection marker, so detection
+  never offers it (the same machines are offered `devin` instead).
+- `HARN-25` The `devin-cli` preset is the Devin CLI's global skills home:
+  `~/.config/devin`, skill-only, global, detected when `~/.config/devin` exists
+  and so auto-added by `config lobes detect` like any other global preset.
+- `HARN-26` `introspect` prints a note for each configured lobe whose directory
+  is named `.windsurf`: Devin reads `.devin/skills` first, and the note gives the
+  move (`mind config lobes remove <project>/.windsurf`, then `mind link-project
+  <project>`, whose HARN-7 backfill relinks the installed skills). A note is not
+  an issue: it does not count toward the issue summary, `--fix` leaves the lobe
+  in place, and under `--json` it is listed in a `notes` array (`kind =
+  "legacy-windsurf-lobe"`, `target` = the lobe path) that is omitted when empty.
+
 ## Documentation map
 
 Places that explain lobes / agent homes and reference this feature.
@@ -280,7 +309,7 @@ Places that explain lobes / agent homes and reference this feature.
 - `docs/src/commands.md`: extend the `config lobes` row with `--preset` and the
   detected-home prompt.
 - `docs/src/quickstart.md` and `README.md`: the "install one into each agent home"
-  lines should mention that homes can be Gemini/Codex/Windsurf/Antigravity, not just Claude.
+  lines should mention that homes can be Gemini/Codex/Devin/Antigravity, not just Claude.
 - `docs/src/introduction.md` (mental model) and `docs/src/troubleshooting.md`: a
   note on cross-harness homes and the rules-are-Claude-only / frontmatter-portability
   caveats (HARN-3, HARN-6).

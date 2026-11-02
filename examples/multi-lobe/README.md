@@ -79,7 +79,8 @@ harnesses are installed and choose presets interactively:
 mind config lobes detect
 ```
 
-Available preset names: `gemini`, `codex`, `universal`, `windsurf`. See
+Available preset names: `gemini`, `codex`, `universal`, `devin`, `devin-cli`,
+`windsurf` (legacy). See
 `../../spec/harness-lobes.md` for the per-preset path and `kinds` table
 (HARN-4/HARN-5).
 

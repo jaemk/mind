@@ -837,7 +837,9 @@ EXAMPLES:
     ///
     /// A shorthand for `config lobes add [dir] --preset <name>`. The project
     /// directory `dir` defaults to the current working directory; `--preset`
-    /// defaults to `windsurf` (lobe at `<dir>/.windsurf`, skill-only). Existing
+    /// defaults to `devin` (lobe at `<dir>/.devin`, skill-only; Devin Desktop,
+    /// formerly Windsurf, reads `<dir>/.devin/skills`). `--preset windsurf`
+    /// keeps the legacy `<dir>/.windsurf`, which Devin still reads. Existing
     /// installed skills are linked (or, with `--snapshot`, copied as real files)
     /// into the project dir immediately.
     ///
@@ -850,7 +852,7 @@ EXAMPLES:
         /// Project directory to link into (default: current working directory).
         dir: Option<String>,
 
-        /// Harness preset to use (default: windsurf).
+        /// Harness preset to use (default: devin).
         #[arg(long, value_name = "NAME")]
         preset: Option<String>,
 
@@ -1336,8 +1338,9 @@ pub enum LobesCmd {
     /// Add an agent home, by path or by a `--preset <name>` harness preset.
     ///
     /// With `--preset`, the lobe path is `[base]/preset.rel_path`. For a global
-    /// preset (gemini, codex, universal) the default base is `~`; for a project
-    /// preset (windsurf) the default base is cwd. An explicit positional `base`
+    /// preset (gemini, codex, universal, devin-cli) the default base is `~`; for
+    /// a project preset (devin, windsurf) the default base is cwd. An explicit
+    /// positional `base`
     /// overrides the default. With `--subdir <REL>` (no preset), the lobe path is
     /// `[base]/<REL>` with a skill-only kinds filter; base defaults to cwd.
     // spec: HARN-10 CLI-199
@@ -1350,7 +1353,9 @@ pub enum LobesCmd {
         /// a path or `--preset <name>`.
         path: Option<String>,
 
-        /// Add a known harness preset (gemini, codex, universal, windsurf).
+        /// Add a known harness preset (gemini, codex, universal, devin,
+        /// devin-cli, windsurf; windsurf is the legacy name for devin's
+        /// project lobe).
         /// Resolves the lobe path and kinds filter from the preset definition.
         /// May be combined with a positional base directory.
         #[arg(long, value_name = "NAME")]

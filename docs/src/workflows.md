@@ -194,9 +194,9 @@ the repo, or `learn workflow:<name>`, instead.
 
 A workflow links into the default Claude lobe and into any lobe whose `kinds`
 filter names `workflow`. A lobe with no filter admits it. The non-Claude harness
-presets (gemini, codex, universal, windsurf) admit skills only, so they are
+presets (gemini, codex, universal, devin, devin-cli, windsurf) admit skills only, so they are
 unaffected. That includes `link-project`, which resolves to one of those presets
-(windsurf by default) or, with `--subdir`, to a skill-only filter: neither links
+(devin by default) or, with `--subdir`, to a skill-only filter: neither links
 a workflow.
 
 A project lobe still needs nothing special, but it has to be one that admits the

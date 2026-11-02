@@ -107,7 +107,8 @@ that mind depends on is called out at the requirement that depends on it.
   changes, every managed workflow disappears from the harness at once while
   `mind recall` keeps reporting it installed and healthy, the same exposure
   CMD-6 records for a namespaced command.
-- `WF-12` The harness presets (HARN-4: gemini, codex, universal, windsurf) admit
+- `WF-12` The harness presets (HARN-4: gemini, codex, universal, devin,
+  devin-cli, windsurf) admit
   skills only, so they are unchanged by this kind: a workflow links into the
   default Claude lobe and into any lobe whose `kinds` filter names `workflow`. A
   lobe with no filter admits every linked kind, workflows included.
@@ -115,7 +116,7 @@ that mind depends on is called out at the requirement that depends on it.
   project workflows from `<project>/.claude/workflows/`, which is where a project
   lobe already links a `workflow` item by WF-10. It has to be a lobe that admits
   the kind, and `link-project` never produces one: it resolves to a preset
-  (windsurf by default, CLI-198) or, with `--subdir`, to a skill-only filter, and
+  (devin by default, CLI-198) or, with `--subdir`, to a skill-only filter, and
   both admit skills alone by WF-12. The project lobe that links a workflow is the
   bare `config lobes add <project>/.claude`, which carries no filter. There is no
   `claude` preset, so this is not a gap a preset could close.

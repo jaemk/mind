@@ -14089,6 +14089,32 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         });
     }
 
+    // spec: HARN-26 -- a legacy `<project>/.windsurf` lobe still works (Devin
+    // reads it as a fallback), so it is advice, not an issue: it never counts
+    // toward the summary and `--fix` leaves it alone.
+    let mut notes: Vec<Issue> = Vec::new();
+    if let Ok(cfg) = Config::load(paths) {
+        for entry in &cfg.lobes {
+            let path = std::path::Path::new(entry.path());
+            if path.file_name().is_some_and(|n| n == ".windsurf")
+                && let Some(project) = path.parent()
+            {
+                notes.push(Issue {
+                    kind: "legacy-windsurf-lobe",
+                    target: entry.path().to_string(),
+                    message: format!(
+                        "lobe '{}' uses the legacy Windsurf skills dir; Devin reads \
+                         '.devin/skills' first. To move: `mind config lobes remove {}` \
+                         then `mind link-project {}`",
+                        entry.path(),
+                        entry.path(),
+                        project.display()
+                    ),
+                });
+            }
+        }
+    }
+
     let all_lobes = paths.agent_homes()?;
     // For HARN-8 checks, only consider lobes whose parent dir still exists (skip
     // vanished lobes so they don't generate spurious missing-lobe-link findings).
@@ -14294,7 +14320,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // source name, a lobe path): sanitize once here, covering both the
     // `--json` `Report` below and the human `println!` loop further down,
     // rather than at each of this function's dozen build sites above.
-    for issue in &mut issues {
+    for issue in issues.iter_mut().chain(notes.iter_mut()) {
         issue.target = strip_ansi(&issue.target);
         issue.message = strip_ansi(&issue.message);
     }
@@ -14308,12 +14334,16 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
             // spec: CLI-189 - schema version; always 1.
             schema: u8,
             issues: &'a [Issue],
+            // spec: HARN-26 -- advice that is not an issue; omitted when empty.
+            #[serde(skip_serializing_if = "<[Issue]>::is_empty")]
+            notes: &'a [Issue],
             sources: usize,
             items: usize,
         }
         return print_json(&Report {
             schema: 1,
             issues: &issues,
+            notes: &notes,
             sources: registry.sources.len(),
             items: manifest.items.len(),
         });
@@ -14325,6 +14355,9 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     }
     for issue in &issues {
         println!("{} {}", out.warn(), issue.message);
+    }
+    for note in &notes {
+        println!("note: {}", note.message);
     }
     if issues.is_empty() {
         println!(
@@ -14993,9 +15026,9 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
 }
 
 /// `mind config lobes detect` — detect installed agent homes (lobes) and offer
-/// to add their presets (HARN-5). Global presets (gemini, codex, universal) are
-/// offered for auto-add with confirmation or `--yes`. Project-scoped presets
-/// (windsurf) are never auto-added; detection prints guidance to run
+/// to add their presets (HARN-5). Global presets (gemini, codex, universal,
+/// devin-cli) are offered for auto-add with confirmation or `--yes`.
+/// Project-scoped presets (devin) are never auto-added; detection prints guidance to run
 /// `mind link-project [--preset <name>]` inside a project directory instead.
 /// Honors the POL-40 lobe lock and dedups against the already-configured lobes.
 pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
@@ -15032,7 +15065,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     }
 
     // Split candidates: global presets are offered for auto-add; project-scoped
-    // presets (windsurf) get guidance only -- the project dir is not known here.
+    // presets (devin) get guidance only -- the project dir is not known here.
     // spec: HARN-5
     type LobePair = (&'static str, crate::config::LobeEntry);
     let (global_candidates, project_candidates): (Vec<LobePair>, Vec<LobePair>) =

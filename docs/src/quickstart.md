@@ -61,7 +61,7 @@ changed, and asks before applying anything.
 
 ## Where next
 
-- Install into Gemini CLI, Codex CLI, or Windsurf too:
+- Install into Gemini CLI, Codex CLI, or Devin too:
   [Use more than one agent](lobes.md). `mind config lobes detect` finds the
   harnesses on this machine.
 - Install only part of a large repo:

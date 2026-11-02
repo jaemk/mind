@@ -1016,8 +1016,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             snapshot,
             force,
         } => {
-            // Default preset is windsurf (spec: HARN-11 CLI-198).
-            let preset_name = preset.as_deref().unwrap_or("windsurf");
+            // Default preset is devin (spec: HARN-11 CLI-198).
+            let preset_name = preset.as_deref().unwrap_or("devin");
             let (effective_preset, effective_subdir) = if subdir.is_some() {
                 (None, subdir.as_deref())
             } else {

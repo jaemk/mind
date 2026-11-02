@@ -62,7 +62,7 @@ impl Sandbox {
     }
 
     /// Run `mind` with `HOME` pinned to the sandbox base, so a GLOBAL preset
-    /// (gemini/codex/universal) resolves under the sandbox rather than the real
+    /// (gemini/codex/universal/devin-cli) resolves under the sandbox rather than the real
     /// machine home. HARN-15 creates the resolved lobe path on disk, so any test
     /// exercising a global preset add must sandbox `HOME` or it would mkdir under
     /// the real user's home directory.
@@ -72,7 +72,7 @@ impl Sandbox {
     }
 
     /// Run `mind` with cwd pinned to the sandbox base, so a PROJECT-scoped
-    /// preset (windsurf) with no explicit base resolves under the sandbox rather
+    /// preset (devin) with no explicit base resolves under the sandbox rather
     /// than wherever the test binary happens to run from (e.g. the repo root).
     /// Same HARN-15 rationale as `mind_home_sandboxed`.
     fn mind_cwd_sandboxed(&self, args: &[&str]) -> Run {
@@ -533,30 +533,53 @@ fn preset_add_codex() {
     assert_eq!(kinds, vec!["skill"], "codex kinds");
 }
 
-// HARN-4: the windsurf preset adds its specific parent path and kinds end-to-end
-// through the CLI. windsurf is skill-only.
+// HARN-4 / HARN-24: the devin preset and the legacy windsurf preset each add
+// their project lobe (`.devin` / `.windsurf`) end-to-end through the CLI, both
+// skill-only.
 #[test]
-fn preset_add_windsurf() {
-    // spec: HARN-4
-    let sb = Sandbox::new();
-    let added = sb.mind_cwd_sandboxed(&["config", "lobes", "add", "--preset", "windsurf"]);
-    assert!(added.success, "windsurf add failed: {}", added.stderr);
+fn preset_add_devin_and_legacy_windsurf() {
+    // spec: HARN-4 HARN-24
+    for (preset, rel) in [("devin", ".devin"), ("windsurf", ".windsurf")] {
+        let sb = Sandbox::new();
+        let added = sb.mind_cwd_sandboxed(&["config", "lobes", "add", "--preset", preset]);
+        assert!(added.success, "{preset} add failed: {}", added.stderr);
 
+        let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+        let v = parse_json(&listed.stdout);
+        let entry = v["lobes"]
+            .as_array()
+            .expect("lobes array")
+            .iter()
+            .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(rel)))
+            .unwrap_or_else(|| panic!("a {rel} lobe entry for {preset}: {}", listed.stdout));
+        let kinds: Vec<&str> = entry["kinds"]
+            .as_array()
+            .expect("kinds array")
+            .iter()
+            .map(|k| k.as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["skill"], "{preset} kinds");
+    }
+}
+
+// HARN-25: the devin-cli preset adds the global `~/.config/devin` lobe,
+// skill-only.
+#[test]
+fn preset_add_devin_cli_is_global() {
+    // spec: HARN-25
+    let sb = Sandbox::new();
+    let added = sb.mind_home_sandboxed(&["config", "lobes", "add", "--preset", "devin-cli"]);
+    assert!(added.success, "devin-cli add failed: {}", added.stderr);
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
+    let want = sb.base.join(".config/devin").to_string_lossy().into_owned();
     let entry = v["lobes"]
         .as_array()
         .expect("lobes array")
         .iter()
-        .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".windsurf")))
-        .unwrap_or_else(|| panic!("a .windsurf lobe entry for windsurf: {}", listed.stdout));
-    let kinds: Vec<&str> = entry["kinds"]
-        .as_array()
-        .expect("kinds array")
-        .iter()
-        .map(|k| k.as_str().unwrap())
-        .collect();
-    assert_eq!(kinds, vec!["skill"], "windsurf kinds");
+        .find(|l| l["path"].as_str() == Some(want.as_str()))
+        .unwrap_or_else(|| panic!("a {want} lobe entry: {}", listed.stdout));
+    assert_eq!(entry["kinds"], serde_json::json!(["skill"]));
 }
 
 // HARN-2: a kinds-filtered lobe survives the item lifecycle. Install a skill
@@ -1390,9 +1413,9 @@ fn harn16_unreachable_lobe_prints_note_once_per_process() {
     // spec: HARN-16
     let sb = Sandbox::new();
     let vanished_project = sb.base.join("vanished-project");
-    // Deliberately do NOT create vanished_project: its `.windsurf` lobe is
+    // Deliberately do NOT create vanished_project: its `.devin` lobe is
     // unreachable from the moment it is configured.
-    let unreachable_lobe = vanished_project.join(".windsurf");
+    let unreachable_lobe = vanished_project.join(".devin");
     sb.write_config(&format!(
         "lobes = [\"{}\", \"{}\"]\n",
         sb.claude_home.display(),
@@ -1438,7 +1461,7 @@ fn harn16_unreachable_lobe_note_shell_quotes_a_metachar_path() {
     // filesystem in a single path component -- whose parent is never created,
     // so the lobe is unreachable from the moment it is configured.
     let vanished_project = sb.base.join("it's a $(vanished); project");
-    let unreachable_lobe = vanished_project.join(".windsurf");
+    let unreachable_lobe = vanished_project.join(".devin");
     sb.write_config(&format!(
         "lobes = [\"{}\", \"{}\"]\n",
         sb.claude_home.display(),
@@ -1491,7 +1514,7 @@ fn harn17_link_project_backfills_existing_items_immediately() {
         r.stdout
     );
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/skills/review")).is_ok(),
+        std::fs::symlink_metadata(proj.join(".devin/skills/review")).is_ok(),
         "HARN-17: the already-installed skill must be linked immediately by \
          link-project: {}",
         r.stdout
@@ -1881,25 +1904,25 @@ fn detect_yes_preserves_claude_home_on_empty_lobes_config() {
     );
 }
 
-// HARN-11 / CLI-198: `link-project <dir>` (default preset = windsurf) registers a
-// project-scoped windsurf lobe at `<dir>/.windsurf`, then a `learn` fans the skill
-// into it. Rules (Claude-only) must NOT appear in the windsurf lobe (HARN-10).
+// HARN-11 / CLI-198: `link-project <dir>` (default preset = devin) registers a
+// project-scoped devin lobe at `<dir>/.devin`, then a `learn` fans the skill
+// into it. Rules (Claude-only) must NOT appear in the devin lobe (HARN-10).
 #[test]
-fn link_project_adds_windsurf_lobe_and_fans_skill() {
+fn link_project_adds_devin_lobe_and_fans_skill() {
     // spec: HARN-11 CLI-198
     let sb = Sandbox::new();
     let proj = sb.base.join("myproject");
     std::fs::create_dir_all(&proj).unwrap();
     let proj_str = proj.to_string_lossy().into_owned();
 
-    // `mind link-project <proj>` -- no --preset means windsurf by default (HARN-11).
+    // `mind link-project <proj>` -- no --preset means devin by default (HARN-11).
     let r = sb.mind(&["link-project", &proj_str]);
     assert!(r.success, "link-project failed: {}", r.stderr);
 
-    // Config must record the windsurf lobe at <proj>/.windsurf with kinds=[skill].
+    // Config must record the devin lobe at <proj>/.devin with kinds=[skill].
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     let ws_entry = v["lobes"]
         .as_array()
         .expect("lobes array")
@@ -1907,7 +1930,7 @@ fn link_project_adds_windsurf_lobe_and_fans_skill() {
         .find(|l| l["path"].as_str() == Some(ws_path.as_str()))
         .unwrap_or_else(|| {
             panic!(
-                "windsurf lobe at {ws_path} must be in config: {}",
+                "devin lobe at {ws_path} must be in config: {}",
                 listed.stdout
             )
         });
@@ -1920,7 +1943,7 @@ fn link_project_adds_windsurf_lobe_and_fans_skill() {
     assert_eq!(
         kinds,
         vec!["skill"],
-        "windsurf lobe must be skill-only (HARN-10)"
+        "devin lobe must be skill-only (HARN-10)"
     );
 
     // Gitignore guidance must appear in output for project-scoped lobes (HARN-11).
@@ -1935,20 +1958,20 @@ fn link_project_adds_windsurf_lobe_and_fans_skill() {
     assert!(sb.mind(&["learn", "review"]).success, "learn skill");
     assert!(sb.mind(&["learn", "style"]).success, "learn rule");
 
-    // Skill must be linked into the windsurf lobe.
+    // Skill must be linked into the devin lobe.
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/skills/review")).is_ok(),
-        "skill must fan into the windsurf project lobe"
+        std::fs::symlink_metadata(proj.join(".devin/skills/review")).is_ok(),
+        "skill must fan into the devin project lobe"
     );
-    // Rule must NOT be linked into the windsurf lobe (skill-only).
+    // Rule must NOT be linked into the devin lobe (skill-only).
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/rules")).is_err()
-            && std::fs::symlink_metadata(proj.join(".windsurf/rules/style.md")).is_err(),
-        "rule must NOT land in the windsurf lobe (skill-only, HARN-10)"
+        std::fs::symlink_metadata(proj.join(".devin/rules")).is_err()
+            && std::fs::symlink_metadata(proj.join(".devin/rules/style.md")).is_err(),
+        "rule must NOT land in the devin lobe (skill-only, HARN-10)"
     );
 }
 
-// HARN-10 / CLI-199: `config lobes add <proj> --preset windsurf` is equivalent to
+// HARN-10 / CLI-199: `config lobes add <proj> --preset devin` is equivalent to
 // `link-project <proj>`, and `--subdir <rel>` creates a skill-only lobe at
 // `<proj>/<rel>`. A missing base directory returns a LobeBaseMissing error.
 #[test]
@@ -1959,14 +1982,14 @@ fn config_lobes_add_with_preset_and_subdir() {
     std::fs::create_dir_all(&proj).unwrap();
     let proj_str = proj.to_string_lossy().into_owned();
 
-    // `config lobes add <proj> --preset windsurf` = alias for link-project.
-    let r = sb.mind(&["config", "lobes", "add", &proj_str, "--preset", "windsurf"]);
+    // `config lobes add <proj> --preset devin` = alias for link-project.
+    let r = sb.mind(&["config", "lobes", "add", &proj_str, "--preset", "devin"]);
     assert!(
         r.success,
-        "config lobes add --preset windsurf failed: {}",
+        "config lobes add --preset devin failed: {}",
         r.stderr
     );
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
     assert!(
@@ -1975,7 +1998,7 @@ fn config_lobes_add_with_preset_and_subdir() {
             .unwrap()
             .iter()
             .any(|l| l["path"].as_str() == Some(ws_path.as_str())),
-        "config lobes add --preset windsurf must register the windsurf lobe: {}",
+        "config lobes add --preset devin must register the devin lobe: {}",
         listed.stdout
     );
 
@@ -2016,7 +2039,7 @@ fn config_lobes_add_with_preset_and_subdir() {
         "add",
         "/nonexistent/proj/xyz",
         "--preset",
-        "windsurf",
+        "devin",
     ]);
     assert!(!missing.success, "missing base must fail");
     assert!(
@@ -2029,7 +2052,7 @@ fn config_lobes_add_with_preset_and_subdir() {
     );
 }
 
-// HARN-10 / CLI-198: `link-project` with no explicit dir defaults to cwd (windsurf
+// HARN-10 / CLI-198: `link-project` with no explicit dir defaults to cwd (devin
 // preset).
 #[test]
 fn link_project_defaults_to_cwd() {
@@ -2046,7 +2069,7 @@ fn link_project_defaults_to_cwd() {
     let r = sb.run_cwd(&["link-project"], &[], Some(&proj));
     assert!(r.success, "link-project (cwd) failed: {}", r.stderr);
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
     assert!(
@@ -2055,13 +2078,84 @@ fn link_project_defaults_to_cwd() {
             .unwrap()
             .iter()
             .any(|l| l["path"].as_str() == Some(ws_path.as_str())),
-        "link-project with no dir must use cwd/.windsurf: {}",
+        "link-project with no dir must use cwd/.devin: {}",
         listed.stdout
     );
 }
 
+// HARN-26: a legacy `<project>/.windsurf` lobe draws an `introspect` note with
+// the move commands, not an issue; a `.devin` lobe draws none.
+#[test]
+fn introspect_notes_legacy_windsurf_lobe() {
+    // spec: HARN-26
+    let sb = Sandbox::new();
+    let legacy = sb.base.join("legacy");
+    let current = sb.base.join("current");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    let legacy_str = legacy.to_string_lossy().into_owned();
+    let current_str = current.to_string_lossy().into_owned();
+    let r = sb.mind(&["link-project", &legacy_str, "--preset", "windsurf"]);
+    assert!(r.success, "{}", r.stderr);
+    let r = sb.mind(&["link-project", &current_str]);
+    assert!(r.success, "{}", r.stderr);
+    let lobe = legacy.join(".windsurf").to_string_lossy().into_owned();
+
+    let human = sb.mind(&["introspect"]);
+    assert!(human.success, "{}", human.stderr);
+    assert!(
+        human.stdout.contains(&format!(
+            "note: lobe '{lobe}' uses the legacy Windsurf skills dir"
+        )),
+        "{}",
+        human.stdout
+    );
+    assert!(
+        human.stdout.contains(&format!(
+            "`mind config lobes remove {lobe}` then `mind link-project {legacy_str}`"
+        )),
+        "{}",
+        human.stdout
+    );
+    assert!(
+        human.stdout.contains("all good"),
+        "a note is not an issue: {}",
+        human.stdout
+    );
+
+    let json = sb.mind(&["introspect", "--json"]);
+    let v = parse_json(&json.stdout);
+    assert_eq!(v["issues"], serde_json::json!([]), "{}", json.stdout);
+    let notes = v["notes"].as_array().expect("notes array");
+    assert_eq!(notes.len(), 1, "only the .windsurf lobe: {}", json.stdout);
+    assert_eq!(notes[0]["kind"], "legacy-windsurf-lobe");
+    assert_eq!(notes[0]["target"], lobe.as_str());
+
+    // `--fix` leaves the legacy lobe registered.
+    let fixed = sb.mind(&["introspect", "--fix"]);
+    assert!(fixed.success, "{}", fixed.stderr);
+    let listed = parse_json(&sb.mind(&["config", "lobes", "list", "--json"]).stdout);
+    assert!(
+        listed["lobes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["path"].as_str() == Some(lobe.as_str())),
+        "{listed}"
+    );
+}
+
+// HARN-26: with no legacy lobe, `introspect --json` carries no `notes` key.
+#[test]
+fn introspect_json_omits_notes_without_legacy_lobe() {
+    // spec: HARN-26
+    let sb = Sandbox::new();
+    let v = parse_json(&sb.mind(&["introspect", "--json"]).stdout);
+    assert!(v.get("notes").is_none(), "{v}");
+}
+
 // HARN-12: `--snapshot` on `link-project` writes frozen real-file copies to
-// `<proj>/.windsurf/...`, registers NO config entry, and a subsequent `forget`
+// `<proj>/.devin/...`, registers NO config entry, and a subsequent `forget`
 // leaves the frozen copy intact.
 #[test]
 fn snapshot_writes_real_files_no_lobe_registered() {
@@ -2084,7 +2178,7 @@ fn snapshot_writes_real_files_no_lobe_registered() {
     );
 
     // The skill dir must exist as a REAL directory (not a symlink).
-    let skill_dir = proj.join(".windsurf/skills/review");
+    let skill_dir = proj.join(".devin/skills/review");
     let md = std::fs::metadata(&skill_dir);
     assert!(
         md.is_ok(),
@@ -2099,10 +2193,10 @@ fn snapshot_writes_real_files_no_lobe_registered() {
         "snapshot must write a real dir, not a symlink"
     );
 
-    // Config must NOT have a windsurf lobe entry (no managed registration).
+    // Config must NOT have a devin lobe entry (no managed registration).
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     assert!(
         !v["lobes"]
             .as_array()
@@ -2141,13 +2235,13 @@ fn lobe_remove_snapshot_converts_symlinks_to_real_files() {
         "learn skill"
     );
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
-    let skill_link = proj.join(".windsurf/skills/review");
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
+    let skill_link = proj.join(".devin/skills/review");
 
     // Symlink must be present before removal.
     assert!(
         std::fs::symlink_metadata(&skill_link).is_ok(),
-        "skill symlink must exist in the windsurf lobe before remove"
+        "skill symlink must exist in the devin lobe before remove"
     );
     let pre_sym_md = std::fs::symlink_metadata(&skill_link).unwrap();
     assert!(
@@ -2173,7 +2267,7 @@ fn lobe_remove_snapshot_converts_symlinks_to_real_files() {
             .unwrap()
             .iter()
             .any(|l| l["path"].as_str() == Some(ws_path.as_str())),
-        "windsurf lobe must be gone from config after remove --snapshot: {}",
+        "devin lobe must be gone from config after remove --snapshot: {}",
         listed.stdout
     );
 
@@ -2207,8 +2301,8 @@ fn introspect_reports_vanished_lobe() {
         "learn skill"
     );
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
-    let skill_link = proj.join(".windsurf/skills/review");
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
+    let skill_link = proj.join(".devin/skills/review");
     assert!(
         std::fs::symlink_metadata(&skill_link).is_ok(),
         "skill link must exist before vanishing the dir"
@@ -2240,7 +2334,7 @@ fn introspect_reports_vanished_lobe() {
     assert_eq!(
         vanished["target"].as_str(),
         Some(ws_path.as_str()),
-        "vanished-lobe target must be the windsurf lobe path"
+        "vanished-lobe target must be the devin lobe path"
     );
 
     // Config must still have the vanished lobe (no --fix, no pruning).
@@ -2274,9 +2368,9 @@ fn introspect_fix_prunes_vanished_lobe() {
         "learn skill"
     );
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
 
-    // Confirm the manifest has a link under the windsurf lobe before vanishing.
+    // Confirm the manifest has a link under the devin lobe before vanishing.
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
             .unwrap();
@@ -2286,7 +2380,7 @@ fn introspect_fix_prunes_vanished_lobe() {
             .unwrap()
             .iter()
             .any(|l| l.as_str().map(|s| s.starts_with(&ws_path)).unwrap_or(false)),
-        "manifest must record a link inside the windsurf lobe before fix"
+        "manifest must record a link inside the devin lobe before fix"
     );
 
     // Vanish the project directory.
@@ -2342,7 +2436,7 @@ fn harn18_fixed_vanished_lobe_is_not_also_an_outstanding_issue() {
         "learn skill"
     );
 
-    // Vanish the project directory so its `.windsurf` lobe becomes unreachable.
+    // Vanish the project directory so its `.devin` lobe becomes unreachable.
     std::fs::remove_dir_all(&proj).unwrap();
 
     // The JSON `issues` array from THIS SAME run must be empty: the pruned
@@ -2394,7 +2488,7 @@ fn harn18_fixed_vanished_lobe_is_not_also_an_outstanding_issue() {
     );
 }
 
-// HARN-5: when a project-scoped preset (windsurf) is detected, `config lobes
+// HARN-5: when a project-scoped preset (devin) is detected, `config lobes
 // detect` prints guidance to run `mind link-project` but does NOT add a lobe
 // (even with --yes). The JSON output includes a `guidance` field.
 #[test]
@@ -2402,7 +2496,7 @@ fn detect_project_scoped_preset_prints_guidance_not_add() {
     // spec: HARN-5
     let sb = Sandbox::new();
     let detect_home = sb.base.join("detect-ws");
-    // windsurf detection marker is .codeium/windsurf.
+    // Devin Desktop's Windsurf-era global home is one of devin's markers.
     std::fs::create_dir_all(detect_home.join(".codeium/windsurf")).unwrap();
     let detect_str = detect_home.to_string_lossy().into_owned();
 
@@ -2414,25 +2508,25 @@ fn detect_project_scoped_preset_prints_guidance_not_add() {
     assert!(r.success, "detect failed: {}", r.stderr);
     assert!(
         r.stdout.contains("link-project"),
-        "detect of windsurf must print link-project guidance: {}",
+        "detect of devin must print link-project guidance: {}",
         r.stdout
     );
 
-    // Config must still be empty (no windsurf lobe added).
+    // Config must still be empty (no devin lobe added).
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
-    let has_windsurf = v["lobes"]
+    let has_devin = v["lobes"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".windsurf")));
+        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".devin")));
     assert!(
-        !has_windsurf,
-        "detect must NOT add a project-scoped windsurf lobe: {}",
+        !has_devin,
+        "detect must NOT add a project-scoped devin lobe: {}",
         listed.stdout
     );
 
-    // --yes must also NOT add the windsurf lobe (project-scoped).
+    // --yes must also NOT add the devin lobe (project-scoped).
     let r_yes = sb.mind_env(
         &["config", "lobes", "detect", "--yes"],
         &[("MIND_DETECT_HOME", &detect_str)],
@@ -2440,18 +2534,18 @@ fn detect_project_scoped_preset_prints_guidance_not_add() {
     assert!(r_yes.success, "detect --yes failed: {}", r_yes.stderr);
     let listed2 = sb.mind(&["config", "lobes", "list", "--json"]);
     let v2 = parse_json(&listed2.stdout);
-    let has_windsurf2 = v2["lobes"]
+    let has_devin2 = v2["lobes"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".windsurf")));
+        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".devin")));
     assert!(
-        !has_windsurf2,
+        !has_devin2,
         "detect --yes must NOT auto-add a project-scoped preset: {}",
         listed2.stdout
     );
 
-    // JSON output must include windsurf in `detected` with scope=project and a
+    // JSON output must include devin in `detected` with scope=project and a
     // non-empty `guidance` array.
     let r_json = sb.mind_env(
         &["config", "lobes", "detect", "--json"],
@@ -2464,8 +2558,8 @@ fn detect_project_scoped_preset_prints_guidance_not_add() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|d| d["preset"] == "windsurf" && d["scope"] == "project"),
-        "JSON detected must include windsurf with scope=project: {}",
+            .any(|d| d["preset"] == "devin" && d["scope"] == "project"),
+        "JSON detected must include devin with scope=project: {}",
         r_json.stdout
     );
     assert!(
@@ -2493,7 +2587,7 @@ fn snapshot_force_overwrites_foreign_target() {
     let proj_str = proj.to_string_lossy().into_owned();
 
     // Plant a foreign FILE exactly where the frozen skill dir would land.
-    let target = proj.join(".windsurf/skills/review");
+    let target = proj.join(".devin/skills/review");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, "foreign content").unwrap();
 
@@ -2541,16 +2635,16 @@ fn lobe_re_add_json_reports_no_op() {
     std::fs::create_dir_all(&proj).unwrap();
     let proj_str = proj.to_string_lossy().into_owned();
 
-    // First add via link-project (windsurf) registers <proj>/.windsurf.
+    // First add via link-project (devin) registers <proj>/.devin.
     assert!(
         sb.mind(&["link-project", &proj_str]).success,
         "first link-project must succeed"
     );
 
     // Re-add the SAME lobe through the equivalent `config lobes add ... --preset
-    // windsurf --json`: it must report a no-op, not a second entry.
+    // devin --json`: it must report a no-op, not a second entry.
     let second = sb.mind(&[
-        "config", "lobes", "add", &proj_str, "--preset", "windsurf", "--json",
+        "config", "lobes", "add", &proj_str, "--preset", "devin", "--json",
     ]);
     assert!(
         second.success,
@@ -2565,10 +2659,10 @@ fn lobe_re_add_json_reports_no_op() {
         second.stdout
     );
 
-    // The lobe list still shows exactly one windsurf entry.
+    // The lobe list still shows exactly one devin entry.
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let lv = parse_json(&listed.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     let count = lv["lobes"]
         .as_array()
         .unwrap()
@@ -2607,16 +2701,16 @@ fn link_project_first_add_preserves_claude_home() {
         "claude_home must be preserved as an explicit lobe after the first link-project"
     );
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/skills/review")).is_ok(),
-        "the skill must reach the project windsurf lobe"
+        std::fs::symlink_metadata(proj.join(".devin/skills/review")).is_ok(),
+        "the skill must reach the project devin lobe"
     );
 }
 
-// HARN-10: the windsurf skill-only `kinds` filter rejects BOTH an agent and a tool
+// HARN-10: the devin skill-only `kinds` filter rejects BOTH an agent and a tool
 // (existing tests only checked a rule). Installing a skill + agent + tool must
-// materialize ONLY the skill into the windsurf project lobe.
+// materialize ONLY the skill into the devin project lobe.
 #[test]
-fn windsurf_skill_only_rejects_agent_and_tool() {
+fn devin_skill_only_rejects_agent_and_tool() {
     // spec: HARN-10
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let base = std::env::temp_dir().join(format!("mind-ws-kinds-{}-{n}", std::process::id()));
@@ -2666,7 +2760,7 @@ fn windsurf_skill_only_rejects_agent_and_tool() {
         }
     };
 
-    // Register the windsurf project lobe, meld, then learn all three kinds.
+    // Register the devin project lobe, meld, then learn all three kinds.
     assert!(run(&["link-project", proj.to_str().unwrap()]).success);
     assert!(run(&["meld", source.to_str().unwrap()]).success);
     assert!(run(&["learn", "review"]).success, "learn skill");
@@ -2675,22 +2769,22 @@ fn windsurf_skill_only_rejects_agent_and_tool() {
     let lt = run(&["learn", "toolkit"]);
     assert!(lt.success, "learn tool failed: {}", lt.stderr);
 
-    // Only the skill lands in the windsurf lobe.
+    // Only the skill lands in the devin lobe.
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/skills/review")).is_ok(),
-        "skill must land in the windsurf lobe"
+        std::fs::symlink_metadata(proj.join(".devin/skills/review")).is_ok(),
+        "skill must land in the devin lobe"
     );
     // The agent must NOT (skill-only lobe rejects agents).
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/agents")).is_err()
-            && std::fs::symlink_metadata(proj.join(".windsurf/agents/helper.md")).is_err(),
-        "an agent must NOT land in a skill-only windsurf lobe (HARN-10)"
+        std::fs::symlink_metadata(proj.join(".devin/agents")).is_err()
+            && std::fs::symlink_metadata(proj.join(".devin/agents/helper.md")).is_err(),
+        "an agent must NOT land in a skill-only devin lobe (HARN-10)"
     );
     // The tool (even with an explicit link) must NOT.
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/tools")).is_err()
-            && std::fs::symlink_metadata(proj.join(".windsurf/tools/toolkit")).is_err(),
-        "a tool must NOT land in a skill-only windsurf lobe (HARN-10)"
+        std::fs::symlink_metadata(proj.join(".devin/tools")).is_err()
+            && std::fs::symlink_metadata(proj.join(".devin/tools/toolkit")).is_err(),
+        "a tool must NOT land in a skill-only devin lobe (HARN-10)"
     );
 
     let _ = std::fs::remove_dir_all(&base);
@@ -2711,11 +2805,11 @@ fn link_project_json_reports_mutation() {
     let v = parse_json(&r.stdout);
     assert_eq!(v["action"], "lobe-add", "{}", r.stdout);
     assert_eq!(v["outcome"], "added", "{}", r.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     assert_eq!(
         v["target"].as_str(),
         Some(ws_path.as_str()),
-        "target must be the windsurf lobe path: {}",
+        "target must be the devin lobe path: {}",
         r.stdout
     );
     assert!(
@@ -2760,7 +2854,7 @@ fn snapshot_json_reports_frozen_result() {
         "installed keys: {}",
         r.stdout
     );
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     assert_eq!(
         v["target"], ws_path,
         "target is the lobe path: {}",
@@ -2768,7 +2862,7 @@ fn snapshot_json_reports_frozen_result() {
     );
 
     // The freeze actually happened: a real (non-symlink) skill dir exists.
-    let skill_dir = proj.join(".windsurf/skills/review");
+    let skill_dir = proj.join(".devin/skills/review");
     let md = std::fs::symlink_metadata(&skill_dir).expect("frozen skill dir must exist");
     assert!(
         !md.file_type().is_symlink() && md.file_type().is_dir(),
@@ -2829,7 +2923,7 @@ fn remove_snapshot_json_reports_detached_count() {
         sb.mind(&["link-project", &proj_str, "--yes"]).success,
         "managed link-project"
     );
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
 
     let r = sb.mind(&[
         "config",
@@ -2869,7 +2963,7 @@ fn snapshot_no_items_is_noop_not_error() {
         r.stdout
     );
     assert!(
-        std::fs::symlink_metadata(proj.join(".windsurf/skills")).is_err(),
+        std::fs::symlink_metadata(proj.join(".devin/skills")).is_err(),
         "no skills dir must be created when there is nothing to snapshot"
     );
 }
@@ -2902,7 +2996,7 @@ fn link_project_twice_is_idempotent() {
 
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&listed.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
     let count = v["lobes"]
         .as_array()
         .unwrap()
@@ -2911,12 +3005,12 @@ fn link_project_twice_is_idempotent() {
         .count();
     assert_eq!(
         count, 1,
-        "the windsurf lobe must appear exactly once after two link-projects: {}",
+        "the devin lobe must appear exactly once after two link-projects: {}",
         listed.stdout
     );
 }
 
-// STO-16: a RELATIVE project base given to `config lobes add ... --preset windsurf`
+// STO-16: a RELATIVE project base given to `config lobes add ... --preset devin`
 // is resolved to an absolute path in the saved config (resolved against cwd).
 #[test]
 fn lobe_add_relative_base_resolves_absolute() {
@@ -2927,7 +3021,7 @@ fn lobe_add_relative_base_resolves_absolute() {
 
     // Run with cwd = sb.base and a RELATIVE base "relproj".
     let r = sb.run_cwd(
-        &["config", "lobes", "add", "relproj", "--preset", "windsurf"],
+        &["config", "lobes", "add", "relproj", "--preset", "devin"],
         &[],
         Some(&sb.base),
     );
@@ -2938,12 +3032,12 @@ fn lobe_add_relative_base_resolves_absolute() {
     let has_abs = v["lobes"].as_array().unwrap().iter().any(|l| {
         l["path"]
             .as_str()
-            .map(|p| p.starts_with('/') && p.ends_with("relproj/.windsurf"))
+            .map(|p| p.starts_with('/') && p.ends_with("relproj/.devin"))
             .unwrap_or(false)
     });
     assert!(
         has_abs,
-        "a relative base must resolve to an absolute windsurf lobe path (STO-16): {}",
+        "a relative base must resolve to an absolute devin lobe path (STO-16): {}",
         listed.stdout
     );
 }
@@ -2999,9 +3093,9 @@ fn lobe_remove_snapshot_multiple_items_keeps_store() {
     assert!(run(&["learn", "one"]).success, "learn one");
     assert!(run(&["learn", "two"]).success, "learn two");
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
-    let link_one = proj.join(".windsurf/skills/one");
-    let link_two = proj.join(".windsurf/skills/two");
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
+    let link_one = proj.join(".devin/skills/one");
+    let link_two = proj.join(".devin/skills/two");
     assert!(
         std::fs::symlink_metadata(&link_one)
             .unwrap()
@@ -3011,7 +3105,7 @@ fn lobe_remove_snapshot_multiple_items_keeps_store() {
                 .unwrap()
                 .file_type()
                 .is_symlink(),
-        "both skills must be symlinked into the windsurf lobe before remove"
+        "both skills must be symlinked into the devin lobe before remove"
     );
 
     // Capture the store paths so we can assert they survive the freeze.
@@ -3130,14 +3224,7 @@ fn harn15_missing_explicit_base_is_refused_and_creates_nothing() {
 
     // Three entry points share `resolve_lobe`; all three must refuse.
     for args in [
-        vec![
-            "config",
-            "lobes",
-            "add",
-            &missing_str,
-            "--preset",
-            "windsurf",
-        ],
+        vec!["config", "lobes", "add", &missing_str, "--preset", "devin"],
         vec![
             "config",
             "lobes",
@@ -3210,8 +3297,8 @@ fn harn15_snapshot_add_creates_no_lobe_dir_and_no_config_entry() {
 fn harn16_note_is_per_lobe_and_names_both_remedies() {
     // spec: HARN-16
     let sb = Sandbox::new();
-    let gone_a = sb.base.join("gone-a").join(".windsurf");
-    let gone_b = sb.base.join("gone-b").join(".windsurf");
+    let gone_a = sb.base.join("gone-a").join(".devin");
+    let gone_b = sb.base.join("gone-b").join(".devin");
     sb.write_config(&format!(
         "lobes = [\"{}\", \"{}\", \"{}\"]\n",
         sb.claude_home.display(),
@@ -3277,7 +3364,7 @@ fn harn16_note_is_per_lobe_and_names_both_remedies() {
 fn harn16_no_note_for_an_unreachable_lobe_that_excludes_the_kind() {
     // spec: HARN-16
     let sb = Sandbox::new();
-    let gone = sb.base.join("gone-skillonly").join(".windsurf");
+    let gone = sb.base.join("gone-skillonly").join(".devin");
     sb.write_config(&format!(
         "lobes = [\"{}\", {{ path = \"{}\", kinds = [\"skill\"] }}]\n",
         sb.claude_home.display(),
@@ -3642,7 +3729,7 @@ fn harn18_repaired_finding_is_dropped_without_hiding_the_rest() {
         "learn skill"
     );
 
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    let ws_path = proj.join(".devin").to_string_lossy().into_owned();
 
     // Issue 1 (repairable in this run): the project directory vanishes.
     std::fs::remove_dir_all(&proj).unwrap();
@@ -3758,7 +3845,7 @@ fn harn18_without_fix_the_vanished_lobe_is_still_counted() {
 fn harn16_unreachable_note_keeps_json_stdout_parseable() {
     // spec: HARN-16 CLI-217
     let sb = Sandbox::new();
-    let gone = sb.base.join("gone-json").join(".windsurf");
+    let gone = sb.base.join("gone-json").join(".devin");
     sb.write_config(&format!(
         "lobes = [\"{}\", \"{}\"]\n",
         sb.claude_home.display(),
@@ -4374,11 +4461,11 @@ fn learn_into_a_lobe_whose_directory_is_a_dangling_symlink_names_the_broken_link
 // for a workflow -- the harness reads project workflows from
 // `<project>/.claude/workflows/`, exactly where such a lobe already links one
 // by WF-10. The failure mode this closes is a project lobe that DOES carry a
-// kinds filter: `--subdir` and every harness preset (windsurf included, per
+// kinds filter: `--subdir` and every harness preset (devin included, per
 // the preset table in paths.rs) admit skills only, and
 // `a_skills_only_lobe_admits_no_workflows` (tests/cli_workflows.rs) proves
 // that filter is live. `link-project`'s own
-// default (the windsurf preset) and its `--subdir` form are both skill-only,
+// default (the devin preset) and its `--subdir` form are both skill-only,
 // so neither exercises the no-filter path; the bare `config lobes add <path>`
 // form is the one with no kinds restriction (`Lobe::all_kinds`, paths.rs),
 // which is what registers the project lobe here.
@@ -4418,7 +4505,7 @@ fn wf13_project_lobe_with_no_kinds_filter_admits_a_workflow() {
 
 // WF-13 (the negative half): `link-project` can never produce a lobe that
 // admits a workflow. Both of its forms carry a `kinds` filter -- the default
-// windsurf preset (the `paths.rs` preset table, `kinds: &[ItemKind::Skill]`)
+// devin preset (the `paths.rs` preset table, `kinds: &[ItemKind::Skill]`)
 // and `--subdir` (`paths.rs`, `kinds: Some(vec![ItemKind::Skill])`) -- and
 // there is no `claude` preset to opt out with. So a workflow learned while a
 // project lobe is registered lands in the default Claude lobe and NOWHERE in
@@ -4440,7 +4527,7 @@ fn wf13_link_project_lobe_never_links_a_workflow() {
     git(&sb.source, &["add", "-A"]);
     git(&sb.source, &["commit", "-qm", "add workflow"]);
 
-    // Form 1: the default preset (windsurf).
+    // Form 1: the default preset (devin).
     let ws_proj = sb.base.join("ws-proj");
     std::fs::create_dir_all(&ws_proj).unwrap();
     let ws_str = ws_proj.to_string_lossy().into_owned();
@@ -4471,8 +4558,8 @@ fn wf13_link_project_lobe_never_links_a_workflow() {
     // Control: the skill fans into BOTH project lobes, so they are registered
     // and live.
     assert!(
-        std::fs::symlink_metadata(ws_proj.join(".windsurf/skills/review")).is_ok(),
-        "the windsurf project lobe must receive the skill: {}",
+        std::fs::symlink_metadata(ws_proj.join(".devin/skills/review")).is_ok(),
+        "the devin project lobe must receive the skill: {}",
         learned_skill.stdout
     );
     assert!(
@@ -4483,12 +4570,12 @@ fn wf13_link_project_lobe_never_links_a_workflow() {
 
     // spec: WF-13 -- and neither receives the workflow.
     assert!(
-        std::fs::symlink_metadata(ws_proj.join(".windsurf/workflows/deploy.js")).is_err(),
-        "a link-project (windsurf preset) lobe must not link a workflow"
+        std::fs::symlink_metadata(ws_proj.join(".devin/workflows/deploy.js")).is_err(),
+        "a link-project (devin preset) lobe must not link a workflow"
     );
     assert!(
-        std::fs::symlink_metadata(ws_proj.join(".windsurf/workflows")).is_err(),
-        "a link-project (windsurf preset) lobe must not even create workflows/"
+        std::fs::symlink_metadata(ws_proj.join(".devin/workflows")).is_err(),
+        "a link-project (devin preset) lobe must not even create workflows/"
     );
     assert!(
         std::fs::symlink_metadata(sd_proj.join(".claude/workflows/deploy.js")).is_err(),

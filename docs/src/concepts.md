@@ -35,7 +35,7 @@ unless you mean to have both.
 
 **Lobe.** A directory `mind` links items into: an agent home holding `skills/`,
 `agents/`, `rules/`, `commands/`, and `workflows/`. The default lobe is
-`~/.claude`. You can add Gemini CLI, Codex CLI, Windsurf, or any directory, each
+`~/.claude`. You can add Gemini CLI, Codex CLI, Devin, or any directory, each
 optionally limited to the kinds that harness understands. See
 [Use more than one agent](lobes.md).
 

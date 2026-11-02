@@ -96,7 +96,8 @@ guide recommend a skill for new items.
   with a prefix as `<prefix>:<group>:<name>` on disk; this double-colon
   composition has NOT been verified against a live session, unlike the
   single-colon case above.
-- `CMD-7` The harness presets (HARN-4: gemini, codex, universal, windsurf) admit
+- `CMD-7` The harness presets (HARN-4: gemini, codex, universal, devin,
+  devin-cli, windsurf) admit
   skills only, so they are unchanged by this kind: a command links into the
   default Claude lobe and into any lobe whose `kinds` filter names `command`. A
   lobe with no filter admits every linked kind, commands included.

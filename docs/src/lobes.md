@@ -1,7 +1,7 @@
 # Use more than one agent
 
 `mind` links every installed item into each configured agent home, called a
-*lobe*. The default is `~/.claude`. Add Gemini CLI, Codex CLI, Windsurf, or any
+*lobe*. The default is `~/.claude`. Add Gemini CLI, Codex CLI, Devin, or any
 directory, and items you install appear in all of them.
 
 ```
@@ -19,14 +19,16 @@ A preset knows a harness's directory and which item kinds it understands:
 | `gemini` | `~/.gemini/config` (Gemini CLI and Antigravity) | skill |
 | `codex` | `~/.agents` | skill |
 | `universal` | `~/.agents` | skill |
-| `windsurf` | `<dir>/.windsurf`, default the current directory | skill |
+| `devin` | `<dir>/.devin` (Devin Desktop, formerly Windsurf), default the current directory | skill |
+| `devin-cli` | `~/.config/devin` (Devin CLI) | skill |
+| `windsurf` | `<dir>/.windsurf` (legacy; Devin still reads it), default the current directory | skill |
 
 ```
 mind config lobes add --preset gemini
 # + added gemini lobe ~/.gemini/config [skill]
 
-mind config lobes add . --preset windsurf
-# + added windsurf lobe ./.windsurf [skill]
+mind config lobes add . --preset devin
+# + added devin lobe ./.devin [skill]
 ```
 
 Adding a lobe creates its directory and links every already-installed item of
@@ -45,7 +47,12 @@ only). It never changes config without one of those.
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
-| Windsurf | `<project>/.windsurf/skills/` | - | `<project>/.windsurf` |
+| Devin Desktop | `<project>/.devin/skills/` (falls back to `.windsurf/skills/`) | - | `<project>/.devin` |
+| Devin CLI | `~/.config/devin/skills/` | - | `~/.config/devin` |
+
+Detection offers `devin` when `~/.config/devin`, `~/.devin`, or the
+Windsurf-era `~/.codeium/windsurf` exists, and `devin-cli` when
+`~/.config/devin` exists. It never offers `windsurf`.
 
 ## Which kinds link where
 
@@ -77,19 +84,28 @@ to expect the link.
 
 ## Project lobes
 
-A lobe can live inside a project instead of your home directory. Windsurf only
-reads skills from a project's `.windsurf/skills/`, so a Windsurf lobe is always
-a project lobe:
+A lobe can live inside a project instead of your home directory. Devin Desktop
+reads project skills from `.devin/skills/`:
 
 ```
 cd ~/projects/myapp
 mind link-project
-# + added windsurf lobe ./.windsurf [skill]
+# + added devin lobe ./.devin [skill]
 ```
 
-`link-project` is shorthand for `config lobes add . --preset windsurf`. Use
+`link-project` is shorthand for `config lobes add . --preset devin`. Use
 `--preset` for another harness or `--subdir <dir>` for an arbitrary
 subdirectory (skills only), for example `--subdir .cursor`.
+
+A project linked before the Windsurf rename has a `.windsurf` lobe. Devin still
+reads it, and `mind introspect` notes it with the commands to move it:
+
+```
+mind config lobes remove ~/projects/myapp/.windsurf
+mind link-project ~/projects/myapp      # relinks every installed skill into .devin
+```
+
+As with any `lobes remove`, the links already in `.windsurf` stay in place.
 
 A managed project lobe holds symlinks into `~/.mind/store`, so add its
 directory to the project's `.gitignore`. To commit the skills with the project
@@ -115,7 +131,7 @@ project's lobe only, instead of every lobe.
 
 ```
 mind config lobes remove ~/.gemini/config              # unregister; links are left in place
-mind config lobes remove ./.windsurf --snapshot        # replace links with copies, then unregister
+mind config lobes remove ./.devin --snapshot           # replace links with copies, then unregister
 ```
 
 ## Frontmatter is not translated

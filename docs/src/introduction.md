@@ -6,7 +6,7 @@ tools, and shared resources) from git repos into your agent homes, and keeps it 
 Point it at any repo that ships agent tooling and it finds the items by their
 layout, with no manifest required. It copies the items you choose into a store
 it manages and links them into `~/.claude` (or Gemini CLI, Codex CLI,
-Windsurf, or any directory you name). Later it tells you what changed upstream
+Devin, or any directory you name). Later it tells you what changed upstream
 and upgrades on your say-so.
 
 ```

@@ -129,7 +129,7 @@ pub enum Scope {
 }
 
 /// A known harness preset (HARN-4): the lobe path (relative to the detection
-/// base / home) and the kinds it admits. `marker_rel` is the on-disk signal
+/// base / home) and the kinds it admits. `markers` are the on-disk signals
 /// [`detect_homes`] checks to decide the harness is installed.
 #[derive(Debug)]
 pub struct Preset {
@@ -141,10 +141,11 @@ pub struct Preset {
     pub rel_path: &'static str,
     /// The kinds this preset's lobe admits.
     pub kinds: &'static [ItemKind],
-    /// The directory whose presence signals this harness is installed, relative
-    /// to the detection base (e.g. `.gemini` for Gemini, `.codex` for Codex,
-    /// `.codeium/windsurf` for Windsurf).
-    pub marker_rel: &'static str,
+    /// The directories whose presence signals this harness is installed,
+    /// relative to the detection base (e.g. `.gemini` for Gemini, `.codex` for
+    /// Codex); any one present is enough. Empty for a preset detection never
+    /// offers (the legacy `windsurf`, HARN-24).
+    pub markers: &'static [&'static str],
     /// Whether this preset is global (linked under a shared harness home) or
     /// project-scoped (linked under a per-project directory).
     pub scope: Scope,
@@ -154,42 +155,72 @@ pub struct Preset {
 /// - `gemini`: `~/.gemini` exists (Gemini CLI / Antigravity shared home; lobe is `~/.gemini/config`).
 /// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
 /// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
-/// - `windsurf`: `~/.codeium/windsurf` exists (Windsurf IDE's real global config home;
-///   lobe is `<project>/.windsurf`, project-scoped because Windsurf discovers skills
-///   only at `<project>/.windsurf/skills/<name>/SKILL.md`, not from a global dir).
+/// - `devin`: any of `~/.config/devin`, `~/.devin`, `~/.codeium/windsurf` exists
+///   (Devin Desktop, formerly Windsurf, and the Devin CLI; HARN-24). The lobe is
+///   `<project>/.devin`, the project skills dir Devin prefers.
+/// - `devin-cli`: `~/.config/devin` exists (the Devin CLI's global config home,
+///   whose `skills/` it reads; HARN-25).
+/// - `windsurf`: never detected. It is the legacy name for the project lobe
+///   (`<project>/.windsurf`), which Devin still reads as a fallback (HARN-24).
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "gemini",
         rel_path: ".gemini/config",
         kinds: &[ItemKind::Skill],
-        marker_rel: ".gemini",
+        markers: &[".gemini"],
         scope: Scope::Global,
     },
     Preset {
         name: "codex",
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
-        marker_rel: ".codex",
+        markers: &[".codex"],
         scope: Scope::Global,
     },
     Preset {
         name: "universal",
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
-        marker_rel: ".agents",
+        markers: &[".agents"],
         scope: Scope::Global,
     },
+    // spec: HARN-24
+    Preset {
+        name: "devin",
+        rel_path: ".devin",
+        kinds: &[ItemKind::Skill],
+        // The Devin CLI's home, Devin Desktop's extensions dir, and the
+        // Windsurf-era global config home Devin Desktop still uses.
+        markers: &[".config/devin", ".devin", ".codeium/windsurf"],
+        scope: Scope::Project,
+    },
+    // spec: HARN-25
+    Preset {
+        name: "devin-cli",
+        rel_path: ".config/devin",
+        kinds: &[ItemKind::Skill],
+        markers: &[".config/devin"],
+        scope: Scope::Global,
+    },
+    // spec: HARN-24 -- legacy: Devin still reads `<project>/.windsurf/skills`,
+    // so the preset keeps working, but detection offers `devin` instead.
     Preset {
         name: "windsurf",
         rel_path: ".windsurf",
         kinds: &[ItemKind::Skill],
-        // The real Windsurf global config home is ~/.codeium/windsurf, not ~/.windsurf.
-        // Detection checks for the real global home so it fires when Windsurf is installed,
-        // not on an arbitrary ~/.windsurf dir. (spec: STO-56)
-        marker_rel: ".codeium/windsurf",
+        markers: &[],
         scope: Scope::Project,
     },
 ];
+
+/// The preset names, comma-separated, for messages listing them (HARN-4).
+pub fn preset_names() -> String {
+    PRESETS
+        .iter()
+        .map(|p| p.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Look up a preset by name, erroring with [`MindError::UnknownPreset`] on a bad
 /// name (HARN-4).
@@ -528,7 +559,7 @@ impl Paths {
         let base = Self::detect_base()?;
         let mut found = Vec::new();
         for preset in PRESETS {
-            if base.join(preset.marker_rel).is_dir() {
+            if preset.markers.iter().any(|m| base.join(m).is_dir()) {
                 found.push((
                     preset.name,
                     Lobe {
@@ -2068,23 +2099,41 @@ mod tests {
         assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
         assert_eq!(lookup_preset("universal").unwrap().scope, Scope::Global);
 
+        // spec: HARN-24 -- devin is the project preset at <project>/.devin.
+        let devin = lookup_preset("devin").unwrap();
+        assert_eq!(devin.rel_path, ".devin");
+        assert_eq!(devin.kinds, &[ItemKind::Skill]);
+        assert_eq!(devin.scope, Scope::Project);
+        assert_eq!(
+            devin.markers,
+            &[".config/devin", ".devin", ".codeium/windsurf"]
+        );
+
+        // spec: HARN-25 -- devin-cli is the global preset at ~/.config/devin.
+        let devin_cli = lookup_preset("devin-cli").unwrap();
+        assert_eq!(devin_cli.rel_path, ".config/devin");
+        assert_eq!(devin_cli.kinds, &[ItemKind::Skill]);
+        assert_eq!(devin_cli.scope, Scope::Global);
+        assert_eq!(devin_cli.markers, &[".config/devin"]);
+
+        // spec: HARN-24 -- windsurf is legacy: same project layout under
+        // .windsurf, and no marker, so detection never offers it.
         let windsurf = lookup_preset("windsurf").unwrap();
         assert_eq!(windsurf.rel_path, ".windsurf");
         assert_eq!(windsurf.kinds, &[ItemKind::Skill]);
-        // Windsurf is project-scoped: it discovers skills only per-project.
         assert_eq!(windsurf.scope, Scope::Project);
-        // Windsurf's detection marker is the real global config home, not .windsurf.
-        assert_eq!(windsurf.marker_rel, ".codeium/windsurf");
+        assert!(windsurf.markers.is_empty());
 
-        // preset_lobe("windsurf") returns the cwd/.windsurf lobe (Project scope,
-        // no explicit base -> defaults to cwd).
-        let ws_lobe = Paths::preset_lobe("windsurf").unwrap();
-        assert!(
-            ws_lobe.path.is_absolute(),
-            "preset path must be absolute (STO-16)"
-        );
-        assert!(ws_lobe.path.ends_with(".windsurf"));
-        assert_eq!(ws_lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+        // A project preset with no explicit base defaults to cwd.
+        for (name, rel) in [("devin", ".devin"), ("windsurf", ".windsurf")] {
+            let lobe = Paths::preset_lobe(name).unwrap();
+            assert!(
+                lobe.path.is_absolute(),
+                "preset path must be absolute (STO-16)"
+            );
+            assert!(lobe.path.ends_with(rel), "{name}: {}", lobe.path.display());
+            assert_eq!(lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+        }
 
         // Removed presets are unknown.
         assert!(matches!(
@@ -2113,23 +2162,17 @@ mod tests {
         assert!(Paths::preset_lobe("nope").is_err());
     }
 
-    // HARN-5: detect_homes reports a preset only when its marker dir exists under
-    // the detection base ($MIND_DETECT_HOME), and reports the lobe under that base.
-    // Windsurf's marker changed from `.windsurf` to `.codeium/windsurf` (the real
-    // Windsurf global config home); its lobe subdir stays `.windsurf`.
-    #[test]
-    fn detect_homes_reports_existing_marker_dirs() {
-        // spec: HARN-5
+    /// `detect_homes` against a fresh base holding exactly `dirs`.
+    fn detect_with(tag: &str, dirs: &[&str]) -> (PathBuf, Vec<(&'static str, Lobe)>) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-detect-{}-{n}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("mind-detect-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        // Create .gemini and .agents but NOT .codex/.gemini/config.
-        // Windsurf's detection marker is now .codeium/windsurf (not .windsurf).
-        std::fs::create_dir_all(base.join(".gemini")).unwrap();
-        std::fs::create_dir_all(base.join(".agents")).unwrap();
-        std::fs::create_dir_all(base.join(".codeium/windsurf")).unwrap();
-
+        std::fs::create_dir_all(&base).unwrap();
+        for d in dirs {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
         // SAFETY: ENV_LOCK is held.
         unsafe {
             std::env::set_var("MIND_DETECT_HOME", &base);
@@ -2139,7 +2182,17 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_DETECT_HOME");
         }
-        let detected = detected.unwrap();
+        (base, detected.unwrap())
+    }
+
+    // HARN-5: detect_homes reports a preset only when its marker dir exists under
+    // the detection base ($MIND_DETECT_HOME), and reports the lobe under that base.
+    #[test]
+    fn detect_homes_reports_existing_marker_dirs() {
+        // spec: HARN-5 HARN-24
+        // .gemini, .agents, and the Windsurf-era Devin Desktop home, but no
+        // .codex and no ~/.config/devin.
+        let (base, detected) = detect_with("all", &[".gemini", ".agents", ".codeium/windsurf"]);
 
         let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"gemini"), "gemini marker exists: {names:?}");
@@ -2160,55 +2213,54 @@ mod tests {
             Some([ItemKind::Skill].as_slice())
         );
 
-        // Windsurf detected via .codeium/windsurf marker; lobe subdir is still .windsurf.
-        assert!(
-            names.contains(&"windsurf"),
-            "windsurf .codeium/windsurf marker exists: {names:?}"
-        );
-        let (_, ws_lobe) = detected.iter().find(|(n, _)| *n == "windsurf").unwrap();
-        assert_eq!(ws_lobe.path, base.join(".windsurf"));
-        assert_eq!(ws_lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
-
-        // .windsurf alone is no longer the windsurf marker; windsurf must NOT be
-        // double-detected.
+        // The Windsurf-era home is detected as devin (project lobe <base>/.devin),
+        // never as the legacy windsurf preset, and devin-cli needs ~/.config/devin.
         assert_eq!(
-            names.iter().filter(|n| **n == "windsurf").count(),
+            names.iter().filter(|n| **n == "devin").count(),
             1,
-            "windsurf must appear exactly once in detected list"
+            "devin must appear exactly once: {names:?}"
         );
+        let (_, devin_lobe) = detected.iter().find(|(n, _)| *n == "devin").unwrap();
+        assert_eq!(devin_lobe.path, base.join(".devin"));
+        assert_eq!(
+            devin_lobe.kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice())
+        );
+        assert!(!names.contains(&"windsurf"), "{names:?}");
+        assert!(!names.contains(&"devin-cli"), "{names:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // HARN-5 / windsurf: a bare `.windsurf` directory (without `.codeium/windsurf`)
-    // no longer triggers windsurf detection after the marker change.
+    // HARN-24: each of devin's markers alone detects it; a bare `.windsurf` dir
+    // detects nothing.
     #[test]
-    fn detect_homes_windsurf_requires_codeium_marker_not_bare_windsurf_dir() {
-        // spec: HARN-5
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-detect-ws-{}-{n}", std::process::id()));
+    fn detect_homes_devin_markers() {
+        // spec: HARN-24
+        for marker in [".config/devin", ".devin", ".codeium/windsurf"] {
+            let (base, detected) = detect_with("devin", &[marker]);
+            let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
+            assert!(names.contains(&"devin"), "{marker}: {names:?}");
+            assert!(!names.contains(&"windsurf"), "{marker}: {names:?}");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+        let (base, detected) = detect_with("bare-windsurf", &[".windsurf"]);
+        assert!(detected.is_empty(), "{detected:?}");
         let _ = std::fs::remove_dir_all(&base);
-        // Create .windsurf but NOT .codeium/windsurf.
-        std::fs::create_dir_all(base.join(".windsurf")).unwrap();
+    }
 
-        // SAFETY: ENV_LOCK is held.
-        unsafe {
-            std::env::set_var("MIND_DETECT_HOME", &base);
-        }
-        let detected = Paths::detect_homes();
-        // SAFETY: ENV_LOCK is held.
-        unsafe {
-            std::env::remove_var("MIND_DETECT_HOME");
-        }
-        let detected = detected.unwrap();
-
-        let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
-        assert!(
-            !names.contains(&"windsurf"),
-            "bare .windsurf dir must no longer trigger windsurf detection (marker is .codeium/windsurf): {names:?}"
-        );
-
+    // HARN-25: ~/.config/devin detects devin-cli, a global lobe at that dir.
+    #[test]
+    fn detect_homes_devin_cli_is_global_at_config_devin() {
+        // spec: HARN-25
+        let (base, detected) = detect_with("devin-cli", &[".config/devin"]);
+        let (_, lobe) = detected
+            .iter()
+            .find(|(n, _)| *n == "devin-cli")
+            .expect("devin-cli detected");
+        assert_eq!(lobe.path, base.join(".config/devin"));
+        assert_eq!(lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+        assert_eq!(lookup_preset("devin-cli").unwrap().scope, Scope::Global);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -2642,13 +2694,16 @@ mod tests {
         );
     }
 
-    // resolve_lobe: windsurf scope is Project; gemini/codex/universal are Global.
+    // resolve_lobe: devin/windsurf are Project; gemini/codex/universal/devin-cli
+    // are Global.
     #[test]
     fn preset_scope_assignments() {
         // spec: HARN-4
         assert_eq!(lookup_preset("gemini").unwrap().scope, Scope::Global);
         assert_eq!(lookup_preset("codex").unwrap().scope, Scope::Global);
         assert_eq!(lookup_preset("universal").unwrap().scope, Scope::Global);
+        assert_eq!(lookup_preset("devin-cli").unwrap().scope, Scope::Global);
+        assert_eq!(lookup_preset("devin").unwrap().scope, Scope::Project);
         assert_eq!(lookup_preset("windsurf").unwrap().scope, Scope::Project);
     }
 }
