@@ -174,7 +174,7 @@ fn release_tag_checks(
             .subsec_nanos()
     ));
     let _guard = TempDirGuard(tmp.clone());
-    if let Err(e) = git::clone_at(
+    if let Err(e) = git::clone_shallow_at(
         tags_url,
         &tmp,
         &crate::source::Pin::Tag(highest.tag.clone()),
@@ -377,7 +377,8 @@ fn resolve_target(
     paths::mkdir_p(&tmp)?;
     let guard = TempDirGuard(tmp.clone());
 
-    git::clone(&source.url, &tmp)?;
+    // spec: DSC-120 -- a throwaway clone stays shallow regardless of history.
+    git::clone_shallow_at(&source.url, &tmp, &crate::source::Pin::DefaultBranch)?;
     Ok((tmp, Some(guard), false, source.url))
 }
 

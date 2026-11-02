@@ -595,6 +595,34 @@ run = "make build"
   consumer flag overrides it. Declaring more than one is a `MindToml` error. (See
   CLI-18 for clone behavior and CLI-55 for how `sync` treats each pin kind.)
 
+## Clone depth
+
+A source's clone holds only what installing from it needs: the checked-out
+tree, not the repo's history.
+
+- `DSC-118` Every clone `mind` makes of a source is shallow (`--depth 1`). A
+  default-branch, `follow-branch`, tag, or version pin clones just that tip. A
+  `ref` pin clones the default branch's tip at depth 1 and then fetches the
+  pinned commit by itself at depth 1. When the remote refuses a fetch by commit
+  sha (a server that does not serve unadvertised commits), `mind` falls back to
+  fetching the full history of every branch and tag (a depth-1 clone is
+  single-branch, so the default branch alone could miss the commit) and checks
+  the commit out from that.
+- `DSC-119` A fetch into an existing clone (`sync`, version resolution, the
+  release metadata reads of VER-3/VER-41/VER-64) is depth 1 while the clone is
+  shallow. A clone that holds its complete history is fetched without
+  `--depth`, so no fetch truncates history already there. A `ref`-pinned clone
+  that already holds the pinned commit is not fetched at all: a commit sha is
+  immutable.
+- `DSC-120` `[source] history = "full"` declares that a source needs its
+  complete git history (e.g. a hook or tool that reads `git log`). The values
+  are `"shallow"` (the default, DSC-118) and `"full"`; any other value fails
+  the `mind.toml` parse. After `meld` or `sync` checks out a tree whose root
+  `mind.toml` declares `"full"`, a shallow clone is deepened (`git fetch
+  --unshallow`) and stays complete from then on (DSC-119), including after
+  the declaration is dropped. The throwaway clones `review` and the TUI preview
+  make stay shallow regardless.
+
 ## Scan roots
 
 By default convention discovery (DSC-10..12) scans the repo root. A monorepo, or

@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `[source] history = "full"` in `mind.toml` makes `meld` and `sync` deepen a
+  source's clone to its complete history, for hooks and tools that read it.
+
+### Changed
+
+- A source pinned to a commit (`pin-ref`, `--pin <sha>`) clones at depth 1 and
+  fetches only that commit, instead of cloning the whole history. A remote that
+  refuses a fetch by sha still gets the full fetch.
+- `sync` of a commit-pinned source no longer fetches when the clone already
+  holds the commit.
+- A clone with complete history is fetched without `--depth`, so `sync` no
+  longer cuts it back to one commit.
+
+### Fixed
+
+- Updated `pulldown-cmark` to 0.13.6 for RUSTSEC-2026-0433.
+
 ## [0.43.0] - 2026-11-02
 
 ### Changed

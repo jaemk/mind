@@ -198,6 +198,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   freezes (`HEAD` or a bare ref, CLI-200), the point is first checked out to
   resolve its current commit, which is then persisted as a `ref` pin. A pin that
   does not resolve in the remote is a `Git` error and nothing is registered.
+  The clone is shallow (DSC-118) unless the source declares `history = "full"`
+  (DSC-120).
 - `CLI-200` `--pin <value>` where the value freezes to an immutable `ref` pin:
   `--pin HEAD` freezes the current resolved tip (the point that would otherwise be
   melded: the remote default branch, a deep-link branch ref (LNK-3), or a
@@ -763,9 +765,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   throughout, as `sync` did before CLI-248.
 - `CLI-55` `sync` resolves each source against its recorded pin (STO-18): a
   `follow-branch` source resets to that branch's current tip and updates the
-  recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the
-  pinned tag / commit, so its recorded commit moves only if the upstream tag was
-  moved (a moved tag is reset to). A version pin re-resolves its range
+  recorded commit; a `pin-tag` source re-fetches but stays at the pinned tag, so
+  its recorded commit moves only if the upstream tag was moved (a moved tag is
+  reset to); a `pin-ref` source stays at its commit, fetching it only when the
+  clone lacks it (DSC-119). A version pin re-resolves its range
   (VER-43). `sync` never changes the pin itself (cf.
   CLI-52 for aliases). `upgrade` and `introspect` operate on the synced (pinned)
   content, so a `pin-tag` source does not report drift as upstream's default

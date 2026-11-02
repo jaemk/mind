@@ -75,7 +75,10 @@ pub fn preview(paths: &Paths, spec: &str) -> Result<SourcePreview> {
     crate::paths::mkdir_p(&temp_dir)?;
 
     // Clone at the default branch for the preview.
-    if let Err(e) = git::clone(&source.url, &temp_dir) {
+    // spec: DSC-120 -- a throwaway clone stays shallow regardless of history.
+    if let Err(e) =
+        git::clone_shallow_at(&source.url, &temp_dir, &crate::source::Pin::DefaultBranch)
+    {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(e);
     }

@@ -473,15 +473,26 @@ fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool)
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Clone `url` into `dest` at the point specified by `pin` (CLI-18).
+/// Clone `url` into `dest` at the point specified by `pin` (CLI-18), shallow
+/// (DSC-118), then deepen it when the checked-out `mind.toml` declares
+/// `[source] history = "full"` (DSC-120). For a clone that persists as a
+/// melded source; a throwaway clone uses [`clone_shallow_at`].
+pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
+    clone_shallow_at(url, dest, pin)?;
+    deepen_if_declared(url, dest)
+}
+
+/// Clone `url` into `dest` at `pin` at depth 1 (DSC-118), ignoring any
+/// `[source] history` declaration. For throwaway clones (`review`, the TUI
+/// preview) that only read the checked-out tree.
 ///
-/// - `DefaultBranch` — shallow clone of the remote default branch (original
-///   behavior).
+/// - `DefaultBranch` — shallow clone of the remote default branch.
 /// - `FollowBranch(b)` — shallow clone with `--branch <b>`.
 /// - `Tag(t)` — shallow clone with `--branch <t>` (git accepts tag names here).
-/// - `Ref(sha)` — clone without depth (a shallow clone cannot fetch an arbitrary
-///   sha by default), then fetch the specific commit and check it out.
-pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
+/// - `Ref(sha)` — shallow clone of the default branch, then a depth-1 fetch of
+///   the commit itself (falling back to the full history when the remote
+///   refuses a fetch by sha), then check it out.
+pub fn clone_shallow_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
     let dest_str = dest.to_string_lossy().into_owned();
     match pin {
         Pin::DefaultBranch => {
@@ -515,20 +526,18 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             )?;
         }
         Pin::Ref(sha) => {
-            // A shallow clone cannot fetch an arbitrary commit sha because
-            // protocol/pack-protocol limits apply. Clone without --depth so
-            // all objects are available, then check out the target commit.
-            // For file:// and local repos this always works. For real network
-            // remotes this costs more bandwidth but is unavoidable unless the
-            // server supports `uploadpack.allowReachableSHA1InWant`.
+            // spec: DSC-118 -- clone the default branch's tip at depth 1, then
+            // fetch the pinned commit by itself (`ensure_commit`), rather than
+            // the whole history.
             //
             // `git checkout <commit>` does not accept `--` before the commit
             // argument (that form means "path operands follow"). Injection
             // safety is provided by `validate_ref_value` at parse time (DSC-66),
             // which rejects any value starting with `-` before it reaches here.
             // `--` before the URL guards the URL positional (DSC-66).
-            run(url, None, &["clone", "--", url, &dest_str])?;
-            run(url, Some(dest), &["checkout", sha])?;
+            run(url, None, &["clone", "--depth", "1", "--", url, &dest_str])?;
+            let target = ensure_commit(url, dest, sha)?;
+            run(url, Some(dest), &["checkout", &target])?;
         }
         Pin::Version(v) => {
             // The caller resolves the range to a release tag first (VER-40);
@@ -558,11 +567,91 @@ fn resolved_tag<'a>(url: &str, v: &'a crate::source::VersionPin) -> Result<&'a s
         })
 }
 
-/// Clone `url` into `dest` (shallow, default branch). Preserved for callers
-/// that do not supply a pin (original behavior, same as `clone_at` with
-/// `Pin::DefaultBranch`).
+/// Clone `url` into `dest` at the default branch, the same as `clone_at` with
+/// `Pin::DefaultBranch` (so a `history = "full"` declaration is honored).
 pub fn clone(url: &str, dest: &Path) -> Result<()> {
     clone_at(url, dest, &Pin::DefaultBranch)
+}
+
+/// Whether the clone at `dir` is shallow (`rev-parse
+/// --is-shallow-repository`). A failed check reads as shallow, which keeps
+/// the fetch at depth 1 (the default) rather than pulling the full history.
+fn is_shallow(url: &str, dir: &Path) -> bool {
+    run(url, Some(dir), &["rev-parse", "--is-shallow-repository"]).map_or(true, |s| s != "false")
+}
+
+/// The depth arguments for a fetch into the clone at `dir` (DSC-119):
+/// `--depth 1` while the clone is shallow, none once it holds the complete
+/// history, so a fetch never truncates history the clone already has.
+// spec: DSC-119
+fn fetch_depth(url: &str, dir: &Path) -> &'static [&'static str] {
+    if is_shallow(url, dir) {
+        &["--depth", "1"]
+    } else {
+        &[]
+    }
+}
+
+/// `git fetch <depth> <rest>` in `dir`, with the depth from [`fetch_depth`].
+fn fetch(url: &str, dir: &Path, rest: &[&str]) -> Result<String> {
+    let mut args: Vec<&str> = vec!["fetch"];
+    args.extend_from_slice(fetch_depth(url, dir));
+    args.extend_from_slice(rest);
+    run(url, Some(dir), &args)
+}
+
+/// Make sure the commit `rev` names is in the clone at `dir` (DSC-118,
+/// DSC-119), returning the revision to check out. `rev` is usually a sha, but
+/// a `--pin <ref>` freeze (CLI-200) resolves a branch or tag name through the
+/// same path. A commit already present is not fetched (a sha is immutable).
+/// Otherwise it is fetched by itself and its concrete sha returned (a fetch by
+/// name lands only in `FETCH_HEAD`); a remote that refuses that fetch gets a
+/// full-history fetch of every branch and tag instead (`--unshallow` for a
+/// shallow clone), after which `rev` resolves as git's checkout would.
+/// The explicit refspecs matter: a depth-1 clone is single-branch, so a plain
+/// `fetch origin` would miss a commit that only another branch or a tag reaches.
+// spec: DSC-118 DSC-119
+fn ensure_commit(url: &str, dir: &Path, rev: &str) -> Result<String> {
+    let object = format!("{rev}^{{commit}}");
+    if run(url, Some(dir), &["cat-file", "-e", &object]).is_ok() {
+        return Ok(rev.to_string());
+    }
+    if fetch(url, dir, &["origin", "--", rev]).is_ok() {
+        return run(url, Some(dir), &["rev-parse", "FETCH_HEAD^{commit}"]);
+    }
+    let mut args: Vec<&str> = vec!["fetch"];
+    if is_shallow(url, dir) {
+        args.push("--unshallow");
+    }
+    args.extend_from_slice(&[
+        "origin",
+        "--",
+        "+refs/heads/*:refs/remotes/origin/*",
+        "+refs/tags/*:refs/tags/*",
+    ]);
+    run(url, Some(dir), &args)?;
+    Ok(rev.to_string())
+}
+
+/// Whether the tree checked out at `dir` declares `[source] history = "full"`
+/// (DSC-120). An unreadable or invalid `mind.toml` reads as not declaring it:
+/// the scan that follows reports the file's error.
+fn declares_full_history(dir: &Path) -> bool {
+    matches!(
+        crate::mindfile::MindToml::load(dir),
+        Ok(Some(t)) if t.source.history == Some(crate::mindfile::History::Full)
+    )
+}
+
+/// Deepen the clone at `dir` to its complete history when its checked-out
+/// `mind.toml` declares `history = "full"` and the clone is still shallow
+/// (DSC-120). Once deepened, later fetches keep it complete (DSC-119).
+// spec: DSC-120
+fn deepen_if_declared(url: &str, dir: &Path) -> Result<()> {
+    if declares_full_history(dir) && is_shallow(url, dir) {
+        run(url, Some(dir), &["fetch", "--unshallow", "origin"])?;
+    }
+    Ok(())
 }
 
 /// Resolve an existing clone against `pin` (CLI-55):
@@ -571,13 +660,22 @@ pub fn clone(url: &str, dest: &Path) -> Result<()> {
 /// - `FollowBranch(b)` — fetch that branch, reset to it.
 /// - `Tag(t)` — force-fetch tags so a re-pointed tag is picked up, then reset
 ///   to the tag.
-/// - `Ref(sha)` — fetch all objects (including the pinned sha if the shallow
-///   clone does not have it), then reset to the sha.  The recorded commit
-///   stays at `sha` unless the caller changes the pin.
+/// - `Ref(sha)` — fetch the pinned sha only when the clone does not already
+///   hold it (DSC-119), then reset to the sha.  The recorded commit stays at
+///   `sha` unless the caller changes the pin.
+///
+/// Fetches are depth 1 while the clone is shallow and full once it is
+/// complete (DSC-119); afterwards a `history = "full"` declaration in the
+/// checked-out tree deepens a shallow clone (DSC-120).
 pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
+    sync_to_pin_shallow(url, dir, pin)?;
+    deepen_if_declared(url, dir)
+}
+
+fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
     match pin {
         Pin::DefaultBranch => {
-            run(url, Some(dir), &["fetch", "--depth", "1", "origin"])?;
+            fetch(url, dir, &["origin"])?;
             // Reset to whatever origin's HEAD points at.
             let head = run(url, Some(dir), &["rev-parse", "origin/HEAD"]).or_else(|_| {
                 // Some remotes don't advertise origin/HEAD after a shallow fetch.
@@ -593,11 +691,7 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             // Insert `--` after `origin` so the branch name is always treated as
             // a refspec operand, never as an option (DSC-66). This is the correct
             // end-of-options form for `git fetch`.
-            run(
-                url,
-                Some(dir),
-                &["fetch", "--depth", "1", "origin", "--", branch],
-            )?;
+            fetch(url, dir, &["origin", "--", branch])?;
             // FETCH_HEAD is an internal git ref, not user-supplied.
             run(url, Some(dir), &["reset", "--hard", "FETCH_HEAD"])?;
         }
@@ -605,12 +699,12 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             // Force-fetch tags so a re-pointed tag moves the local ref.
             // The refspec `+refs/tags/{tag}:refs/tags/{tag}` already encodes the
             // tag name inside a fixed-prefix string; the `--` before the refspec
-            // guards the positional argument position (DSC-66).
-            run(
+            // guards the positional argument position (DSC-66). Depth 1 while
+            // the clone is shallow (DSC-119).
+            fetch(
                 url,
-                Some(dir),
+                dir,
                 &[
-                    "fetch",
                     "--force",
                     "origin",
                     "--",
@@ -624,24 +718,21 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             run(url, Some(dir), &["reset", "--hard", tag])?;
         }
         Pin::Ref(sha) => {
-            // Fetch all to ensure the pinned sha is present (it may be missing
-            // if the original clone was shallow).
-            run(url, Some(dir), &["fetch", "origin"])?;
+            // spec: DSC-119 -- a sha is immutable, so a clone that already
+            // holds it needs no fetch; otherwise fetch just that commit.
+            let target = ensure_commit(url, dir, sha)?;
             // Same as Tag: no `--` before the commit; injection safety comes
             // from `validate_ref_value` at parse time (DSC-66).
-            run(url, Some(dir), &["reset", "--hard", sha])?;
+            run(url, Some(dir), &["reset", "--hard", &target])?;
         }
         Pin::Version(v) => {
             // The caller has already resolved the range and decided whether a
             // moved tag may be followed (VER-44); this only moves to the tag.
             let tag = resolved_tag(url, v)?;
-            run(
+            fetch(
                 url,
-                Some(dir),
+                dir,
                 &[
-                    "fetch",
-                    "--depth",
-                    "1",
                     "--force",
                     "origin",
                     "--",
@@ -685,7 +776,7 @@ pub fn ls_remote_tags(url: &str) -> Result<Vec<(String, String)>> {
 /// has no `mind.toml`. Size-capped like every other metadata read (DSC-91).
 // spec: VER-3
 pub fn default_branch_mind_toml(url: &str, dir: &Path) -> Result<Option<String>> {
-    run(url, Some(dir), &["fetch", "--depth", "1", "origin", "HEAD"])?;
+    fetch(url, dir, &["origin", "HEAD"])?;
     let Ok(size) = run(url, Some(dir), &["cat-file", "-s", "FETCH_HEAD:mind.toml"]) else {
         return Ok(None);
     };
@@ -712,18 +803,10 @@ pub fn default_branch_mind_toml(url: &str, dir: &Path) -> Result<Option<String>>
 pub fn tag_annotation(url: &str, dir: &Path, tag: &str) -> Result<Option<String>> {
     validate_ref_value(tag)?;
     let tag_ref = format!("refs/tags/{tag}");
-    run(
+    fetch(
         url,
-        Some(dir),
-        &[
-            "fetch",
-            "--depth",
-            "1",
-            "--force",
-            "origin",
-            "--",
-            &format!("+{tag_ref}:{tag_ref}"),
-        ],
+        dir,
+        &["--force", "origin", "--", &format!("+{tag_ref}:{tag_ref}")],
     )?;
     if run(url, Some(dir), &["cat-file", "-t", &tag_ref])? != "tag" {
         return Ok(None);
@@ -757,18 +840,10 @@ pub fn tag_mind_toml(url: &str, dir: &Path, tag: &str, fetch: bool) -> Result<Op
     validate_ref_value(tag)?;
     let tag_ref = format!("refs/tags/{tag}");
     if fetch {
-        run(
+        self::fetch(
             url,
-            Some(dir),
-            &[
-                "fetch",
-                "--depth",
-                "1",
-                "--force",
-                "origin",
-                "--",
-                &format!("+{tag_ref}:{tag_ref}"),
-            ],
+            dir,
+            &["--force", "origin", "--", &format!("+{tag_ref}:{tag_ref}")],
         )?;
     }
     let spec = format!("{tag_ref}:mind.toml");
@@ -1731,6 +1806,158 @@ mod tests {
             "pin-tag with unmoved tag should stay at A"
         );
 
+        cleanup(&base);
+    }
+
+    // ---- clone depth (DSC-118..120) -----------------------------------------
+
+    /// Whether `dir` holds commit `sha`.
+    fn has_commit(dir: &Path, sha: &str) -> bool {
+        Command::new("git")
+            .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+            .current_dir(dir)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// Commit a root `mind.toml` declaring `history = "full"` on the remote.
+    fn declare_full_history(remote: &Path) -> String {
+        fs::write(remote.join("mind.toml"), "[source]\nhistory = \"full\"\n").unwrap();
+        git(remote, &["add", "mind.toml"]);
+        git(remote, &["commit", "-qm", "declare full history"]);
+        read_head(remote)
+    }
+
+    #[test]
+    fn clone_at_every_pin_is_shallow() {
+        // spec: DSC-118 -- every pin kind clones at depth 1.
+        let base = tmpdir("depth-all");
+        let (remote, sha_a, sha_b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let pins = [
+            ("default", Pin::DefaultBranch),
+            ("follow", Pin::FollowBranch("stable".into())),
+            ("tag", Pin::Tag("v1.0".into())),
+            ("ref", Pin::Ref(sha_b.clone())),
+        ];
+        for (name, pin) in pins {
+            let dest = base.join(name);
+            clone_at(&url, &dest, &pin).unwrap();
+            assert!(is_shallow(&url, &dest), "{name} clone must be shallow");
+        }
+        // The ref pin fetched B by itself: its parent A never arrived.
+        assert!(has_commit(&base.join("ref"), &sha_b));
+        assert!(
+            !has_commit(&base.join("ref"), &sha_a),
+            "a ref pin must fetch only the pinned commit, not its history"
+        );
+        cleanup(&base);
+    }
+
+    #[test]
+    fn ref_pin_falls_back_to_full_fetch_when_sha_fetch_is_refused() {
+        // spec: DSC-118 -- a remote that refuses a fetch by sha (protocol v0
+        // with no allow*SHA1InWant) gets a full fetch of every branch and tag,
+        // so a commit only another branch reaches is still found.
+        let base = tmpdir("depth-fallback");
+        let (remote, _a, _b, _c) = make_remote(&base);
+        git(&remote, &["checkout", "-qb", "side"]);
+        fs::write(remote.join("side.txt"), "side 1").unwrap();
+        git(&remote, &["add", "side.txt"]);
+        git(&remote, &["commit", "-qm", "side 1"]);
+        let side_1 = read_head(&remote);
+        fs::write(remote.join("side.txt"), "side 2").unwrap();
+        git(&remote, &["commit", "-aqm", "side 2"]);
+        git(&remote, &["checkout", "-q", "main"]);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_shallow_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        // Protocol v0 refuses a want for a commit no ref advertises.
+        git(&dest, &["config", "protocol.version", "0"]);
+        assert!(!has_commit(&dest, &side_1));
+        ensure_commit(&url, &dest, &side_1).expect("fallback fetch finds the commit");
+        assert!(has_commit(&dest, &side_1));
+        assert!(!is_shallow(&url, &dest), "the fallback deepens the clone");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn sync_ref_pin_holding_the_commit_does_not_fetch() {
+        // spec: DSC-119 -- a sha is immutable: with the commit already local,
+        // sync never reaches the remote (here, a remote that no longer exists).
+        let base = tmpdir("depth-ref-nofetch");
+        let (remote, _a, sha_b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Ref(sha_b.clone())).unwrap();
+        let gone = format!("file://{}", base.join("gone").display());
+        git(&dest, &["remote", "set-url", "origin", &gone]);
+        sync_to_pin(&gone, &dest, &Pin::Ref(sha_b.clone())).expect("no fetch needed");
+        assert_eq!(read_head(&dest), sha_b);
+        cleanup(&base);
+    }
+
+    #[test]
+    fn complete_clone_stays_complete_across_syncs() {
+        // spec: DSC-119 -- once a clone holds its whole history, fetches run
+        // without --depth, so a sync (and a metadata read) never truncates it.
+        let base = tmpdir("depth-stays-full");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_shallow_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        git(&dest, &["fetch", "-q", "--unshallow", "origin"]);
+        assert!(!is_shallow(&url, &dest));
+
+        fs::write(remote.join("file.txt"), "version D").unwrap();
+        git(&remote, &["commit", "-aqm", "commit D"]);
+        let sha_d = read_head(&remote);
+        sync_to_pin(&url, &dest, &Pin::DefaultBranch).unwrap();
+        default_branch_mind_toml(&url, &dest).unwrap();
+        assert_eq!(read_head(&dest), sha_d);
+        assert!(!is_shallow(&url, &dest), "a sync must not re-shallow");
+        assert!(has_commit(&dest, &sha_a));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn history_full_deepens_the_clone() {
+        // spec: DSC-120 -- `[source] history = "full"` in the checked-out tree
+        // deepens the clone; a throwaway clone ignores it.
+        let base = tmpdir("depth-history-full");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        declare_full_history(&remote);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert!(!is_shallow(&url, &dest), "history = full must deepen");
+        assert!(has_commit(&dest, &sha_a));
+
+        let throwaway = base.join("throwaway");
+        clone_shallow_at(&url, &throwaway, &Pin::DefaultBranch).unwrap();
+        assert!(is_shallow(&url, &throwaway));
+        cleanup(&base);
+    }
+
+    #[test]
+    fn history_full_declared_later_deepens_on_sync() {
+        // spec: DSC-120 -- a source that declares `history = "full"` after it
+        // was melded is deepened by the next sync that checks the file out.
+        let base = tmpdir("depth-history-sync");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert!(is_shallow(&url, &dest));
+
+        declare_full_history(&remote);
+        sync_to_pin(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert!(!is_shallow(&url, &dest));
+        assert!(has_commit(&dest, &sha_a));
         cleanup(&base);
     }
 

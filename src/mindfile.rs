@@ -151,6 +151,17 @@ pub struct SourceMeta {
     /// `"compatible"`, or `"breaking"`.
     #[serde(rename = "auto-update")]
     pub auto_update: Option<RawAutoUpdate>,
+    /// How much git history the source's clone keeps (DSC-120): absent or
+    /// `"shallow"` keeps the depth-1 clone (DSC-118); `"full"` deepens it.
+    pub history: Option<History>,
+}
+
+/// `[source].history` (DSC-120). Any other value is a `MindToml` error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum History {
+    Shallow,
+    Full,
 }
 
 /// The raw `[source].auto-update` value, before
@@ -4369,6 +4380,23 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // spec: DSC-120
+    #[test]
+    fn source_history_parses_shallow_and_full_only() {
+        let parse = |s: &str| toml::from_str::<MindToml>(s).map(|t| t.source.history);
+        assert_eq!(parse("").unwrap(), None);
+        assert_eq!(
+            parse("[source]\nhistory = \"shallow\"\n").unwrap(),
+            Some(History::Shallow)
+        );
+        assert_eq!(
+            parse("[source]\nhistory = \"full\"\n").unwrap(),
+            Some(History::Full)
+        );
+        assert!(parse("[source]\nhistory = \"deep\"\n").is_err());
+        assert!(parse("[source]\nhistory = true\n").is_err());
     }
 
     // spec: PROF-1 PROF-2

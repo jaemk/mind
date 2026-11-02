@@ -60,6 +60,7 @@ follow-branch = "main"                   # pin: track a branch ...
 # pin-ref = "a1b2c3d"                     # ... or to an exact commit (pick one)
 roots = ["packages"]                     # scan under these dirs, not the repo root
 ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
+# history = "full"                        # clone the whole history, not just the tip
 ```
 
 - **`namespace`** (previously `prefix`): every item installs as `<namespace>:<name>`
@@ -126,6 +127,11 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   item's path IS a single file, so there is no path inside it for a pattern to
   match. See
   [spec/ignore.md](https://github.com/jaemk/mind/blob/main/spec/ignore.md).
+- **`history`**: `"shallow"` (the default) or `"full"`. `mind` clones every
+  source at depth 1, so a large repo melds without downloading its history.
+  Set `"full"` when a hook or tool needs the history (e.g. it runs `git log`):
+  the next `meld` or `sync` deepens the clone, and it stays complete. An older
+  `mind` rejects the key, so set `min-mind-version` alongside.
 
 ## `[[hooks]]` - lifecycle hooks
 
