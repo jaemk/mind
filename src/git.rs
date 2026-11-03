@@ -604,21 +604,55 @@ fn fetch(url: &str, dir: &Path, rest: &[&str]) -> Result<String> {
 /// DSC-119), returning the revision to check out. `rev` is usually a sha, but
 /// a `--pin <ref>` freeze (CLI-200) resolves a branch or tag name through the
 /// same path. A commit already present is not fetched (a sha is immutable).
-/// Otherwise it is fetched by itself and its concrete sha returned (a fetch by
-/// name lands only in `FETCH_HEAD`); a remote that refuses that fetch gets a
-/// full-history fetch of every branch and tag instead (`--unshallow` for a
-/// shallow clone), after which `rev` resolves as git's checkout would.
-/// The explicit refspecs matter: a depth-1 clone is single-branch, so a plain
-/// `fetch origin` would miss a commit that only another branch or a tag reaches.
-// spec: DSC-118 DSC-119
+/// Otherwise it is fetched by itself; a remote that refuses that fetch gets a
+/// full-history fetch of every branch and tag instead ([`fetch_all_history`]).
+///
+/// A name is fetched only as `refs/tags/<name>` or `refs/heads/<name>`
+/// ([`pin_refs`]), never through git's own name lookup, and a hex prefix
+/// resolves only to a commit, never to a ref spelled the same (DSC-122). The
+/// result is always a full sha.
+// spec: DSC-118 DSC-119 DSC-122
 fn ensure_commit(url: &str, dir: &Path, rev: &str) -> Result<String> {
+    if is_sha_prefix(rev) {
+        if let Some(sha) = commit_with_prefix(url, dir, rev)? {
+            return Ok(sha);
+        }
+        fetch_all_history(url, dir)?;
+        return commit_with_prefix(url, dir, rev)?.ok_or_else(|| MindError::InvalidRef {
+            value: rev.to_string(),
+            reason: "no commit on the remote's branches or tags starts with it".to_string(),
+        });
+    }
     let object = format!("{rev}^{{commit}}");
-    if run(url, Some(dir), &["cat-file", "-e", &object]).is_ok() {
+    if is_full_sha(rev) {
+        if run(url, Some(dir), &["cat-file", "-e", &object]).is_err() {
+            if fetch(url, dir, &["origin", "--", rev]).is_err() {
+                fetch_all_history(url, dir)?;
+            }
+            run(url, Some(dir), &["cat-file", "-e", &object])?;
+        }
         return Ok(rev.to_string());
     }
-    if fetch(url, dir, &["origin", "--", rev]).is_ok() {
-        return run(url, Some(dir), &["rev-parse", "FETCH_HEAD^{commit}"]);
+    let refs = pin_refs(rev, false)?;
+    if run(url, Some(dir), &["cat-file", "-e", &object]).is_ok() {
+        return run(url, Some(dir), &["rev-parse", "--verify", &object]);
     }
+    for remote_ref in &refs {
+        if fetch(url, dir, &["origin", "--", remote_ref]).is_ok() {
+            return run(url, Some(dir), &["rev-parse", "FETCH_HEAD^{commit}"]);
+        }
+    }
+    // Not a plain branch or tag (e.g. `main~1`): resolve it against the
+    // remote's branches and tags, the only refs the fallback fetches.
+    fetch_all_history(url, dir)?;
+    run(url, Some(dir), &["rev-parse", "--verify", &object])
+}
+
+/// Fetch the complete history of every branch and tag into the clone at `dir`
+/// (`--unshallow` when shallow). The explicit refspecs matter: a depth-1 clone
+/// is single-branch, so a plain `fetch origin` would miss a commit that only
+/// another branch or a tag reaches.
+fn fetch_all_history(url: &str, dir: &Path) -> Result<()> {
     let mut args: Vec<&str> = vec!["fetch"];
     if is_shallow(url, dir) {
         args.push("--unshallow");
@@ -629,8 +663,72 @@ fn ensure_commit(url: &str, dir: &Path, rev: &str) -> Result<String> {
         "+refs/heads/*:refs/remotes/origin/*",
         "+refs/tags/*:refs/tags/*",
     ]);
-    run(url, Some(dir), &args)?;
-    Ok(rev.to_string())
+    run(url, Some(dir), &args).map(|_| ())
+}
+
+/// Whether `rev` is a full commit sha (40 hex digits, or 64 for SHA-256).
+fn is_full_sha(rev: &str) -> bool {
+    matches!(rev.len(), 40 | 64) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `rev` is an abbreviated commit sha: 4 (git's minimum) to 39 hex
+/// digits (DSC-122).
+fn is_sha_prefix(rev: &str) -> bool {
+    (4..40).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The one commit in the clone at `dir` whose sha starts with `prefix`,
+/// looked up among objects only (`rev-parse --disambiguate`), so a ref named
+/// like the prefix never stands in for it (DSC-122). `None` when no commit
+/// matches; an error when more than one does.
+fn commit_with_prefix(url: &str, dir: &Path, prefix: &str) -> Result<Option<String>> {
+    let arg = format!("--disambiguate={prefix}");
+    let objects = run(url, Some(dir), &["rev-parse", &arg]).unwrap_or_default();
+    let commits: Vec<&str> = objects
+        .lines()
+        .filter(|o| run(url, Some(dir), &["cat-file", "-t", o]).is_ok_and(|t| t == "commit"))
+        .collect();
+    match commits.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some((*one).to_string())),
+        _ => Err(MindError::InvalidRef {
+            value: prefix.to_string(),
+            reason: "more than one commit starts with it; pin the full sha".to_string(),
+        }),
+    }
+}
+
+/// The remote refs a pin's name may be fetched as (DSC-122): a branch
+/// (`refs/heads/<name>`) or a tag (`refs/tags/<name>`), never another
+/// namespace such as GitHub's `refs/pull/<n>/head`. A `ref` pin tries the tag
+/// first, the order git's own lookup uses; a `follow-branch` pin asks only for
+/// the branch. A value already spelled `refs/heads/...` or `refs/tags/...` is
+/// used as given. Any other `refs/...` value, or one holding refspec syntax
+/// (`:`, `*`), is an `InvalidRef` error.
+// spec: DSC-122
+fn pin_refs(name: &str, branch_only: bool) -> Result<Vec<String>> {
+    let invalid = |reason: &str| MindError::InvalidRef {
+        value: name.to_string(),
+        reason: reason.to_string(),
+    };
+    if name.contains([':', '*']) {
+        return Err(invalid(
+            "a pin names a branch, tag, or commit; ':' and '*' are refspec syntax",
+        ));
+    }
+    if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
+        return Ok(vec![name.to_string()]);
+    }
+    if name.starts_with("refs/") {
+        return Err(invalid(
+            "a pin may name only refs/heads/<branch> or refs/tags/<tag>",
+        ));
+    }
+    Ok(if branch_only {
+        vec![format!("refs/heads/{name}")]
+    } else {
+        vec![format!("refs/tags/{name}"), format!("refs/heads/{name}")]
+    })
 }
 
 /// Whether the tree checked out at `dir` declares `[source] history = "full"`
@@ -701,8 +799,10 @@ fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
         Pin::FollowBranch(branch) => {
             // Insert `--` after `origin` so the branch name is always treated as
             // a refspec operand, never as an option (DSC-66). This is the correct
-            // end-of-options form for `git fetch`.
-            fetch(url, dir, &["origin", "--", branch])?;
+            // end-of-options form for `git fetch`. The branch is fetched by
+            // its qualified name so it cannot match another namespace (DSC-122).
+            let remote_ref = pin_refs(branch, true)?.remove(0);
+            fetch(url, dir, &["origin", "--", &remote_ref])?;
             // FETCH_HEAD is an internal git ref, not user-supplied.
             run(url, Some(dir), &["reset", "--hard", "FETCH_HEAD"])?;
         }
@@ -1864,6 +1964,125 @@ mod tests {
             !has_commit(&base.join("ref"), &sha_a),
             "a ref pin must fetch only the pinned commit, not its history"
         );
+        cleanup(&base);
+    }
+
+    /// Point `refs/pull/1/head` on `remote` at a new commit no branch or tag
+    /// reaches (GitHub's pull request heads), and return that commit.
+    fn add_pull_head(remote: &Path) -> String {
+        git(remote, &["checkout", "-q", "--detach"]);
+        fs::write(remote.join("file.txt"), "pull request").unwrap();
+        git(remote, &["commit", "-aqm", "pull request"]);
+        let pr = read_head(remote);
+        git(remote, &["update-ref", "refs/pull/1/head", &pr]);
+        git(remote, &["checkout", "-q", "main"]);
+        pr
+    }
+
+    #[test]
+    fn ref_pin_name_never_fetches_outside_branches_and_tags() {
+        // spec: DSC-122 -- git's own name lookup would match `pull/1/head` to
+        // the remote's `refs/pull/1/head`; a pin reaches only heads and tags.
+        let base = tmpdir("pin-pull-ref");
+        let (remote, _a, _b, _c) = make_remote(&base);
+        let pr = add_pull_head(&remote);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        assert!(clone_at(&url, &dest, &Pin::Ref("pull/1/head".into())).is_err());
+        if dest.exists() {
+            assert!(!has_commit(&dest, &pr), "the pull request never arrives");
+        }
+        let err = clone_at(&url, &base.join("q"), &Pin::Ref("refs/pull/1/head".into()))
+            .expect_err("a refs/pull value is refused");
+        assert!(matches!(err, MindError::InvalidRef { .. }), "{err}");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn follow_branch_sync_never_fetches_outside_branches() {
+        // spec: DSC-122 -- a followed branch is fetched as refs/heads/<name>.
+        let base = tmpdir("follow-pull-ref");
+        let (remote, _a, _b, sha_c) = make_remote(&base);
+        let pr = add_pull_head(&remote);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        assert!(sync_to_pin(&url, &dest, &Pin::FollowBranch("pull/1/head".into())).is_err());
+        assert!(!has_commit(&dest, &pr));
+        assert_eq!(read_head(&dest), sha_c, "a failed sync leaves the clone");
+        // A qualified branch name still follows.
+        sync_to_pin(&url, &dest, &Pin::FollowBranch("refs/heads/stable".into())).unwrap();
+        assert_eq!(read_file(&dest, "file.txt"), "version A");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn short_sha_pin_resolves_to_the_commit_not_a_same_named_ref() {
+        // spec: DSC-122 -- a branch named like the pinned prefix must not
+        // stand in for the commit, on a first clone or on a sync.
+        let base = tmpdir("pin-short-sha");
+        let (remote, _a, sha_b, _c) = make_remote(&base);
+        let short = &sha_b[..8];
+        git(&remote, &["checkout", "-q", "--orphan", "decoy"]);
+        fs::write(remote.join("file.txt"), "decoy").unwrap();
+        git(&remote, &["commit", "-aqm", "decoy"]);
+        git(&remote, &["branch", "-m", short]);
+        git(&remote, &["tag", short]);
+        git(&remote, &["checkout", "-q", "main"]);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Ref(short.to_string())).unwrap();
+        assert_eq!(read_head(&dest), sha_b);
+        sync_to_pin(&url, &dest, &Pin::Ref(short.to_string())).unwrap();
+        assert_eq!(read_head(&dest), sha_b);
+
+        let missing = base.join("missing");
+        let err = clone_at(&url, &missing, &Pin::Ref("0000000f".into()))
+            .expect_err("a prefix no commit has fails");
+        assert!(matches!(err, MindError::InvalidRef { .. }), "{err}");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn pin_names_holding_refspec_syntax_are_refused() {
+        // spec: DSC-122 -- `:` would turn the fetch into src:dst and write a
+        // local ref; `*` would fetch a pattern.
+        let base = tmpdir("pin-refspec");
+        let (remote, _a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
+        for bad in ["stable:refs/heads/planted", "refs/heads/*"] {
+            for pin in [Pin::Ref(bad.into()), Pin::FollowBranch(bad.into())] {
+                let err = sync_to_pin(&url, &dest, &pin).expect_err(bad);
+                assert!(matches!(err, MindError::InvalidRef { .. }), "{bad}: {err}");
+            }
+        }
+        let planted = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/planted"])
+            .current_dir(&dest)
+            .status()
+            .unwrap();
+        assert!(!planted.success(), "no local ref was written");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn ref_pin_by_tag_or_branch_name_resolves_to_its_commit() {
+        // spec: DSC-122 -- plain and qualified tag and branch names still
+        // resolve, a tag before a branch of the same name.
+        let base = tmpdir("pin-names");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+        for (i, name) in ["v1.0", "refs/tags/v1.0", "stable", "refs/heads/stable"]
+            .iter()
+            .enumerate()
+        {
+            let dest = base.join(format!("c{i}"));
+            clone_at(&url, &dest, &Pin::Ref((*name).into())).unwrap();
+            assert_eq!(read_head(&dest), sha_a, "{name}");
+        }
         cleanup(&base);
     }
 

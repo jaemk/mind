@@ -38,6 +38,11 @@ Note that `--pin stable` and `--pin branch=stable` differ. The first takes a
 one-time snapshot of `stable` that `sync` never moves; the second keeps
 tracking the branch. Use `branch=` to keep following.
 
+A pin name resolves only to a branch or a tag on the remote (`refs/heads/` or
+`refs/tags/`, a tag first), never to another ref such as a pull request head.
+A value of 4 to 39 hex digits is an abbreviated commit sha and resolves only to
+that commit.
+
 A source's own `mind.toml` can declare a pin (`follow-branch`, `pin-tag`,
 `pin-ref`, or `pin-version` under `[source]`). A `--pin` you pass overrides it.
 
