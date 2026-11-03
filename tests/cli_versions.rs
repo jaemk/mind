@@ -722,6 +722,40 @@ fn a_compatible_move_that_drops_or_rekinds_an_item_is_warned_about() {
 }
 
 #[test]
+fn a_release_that_breaks_an_item_manifest_is_not_warned_as_a_drop() {
+    // spec: DSC-123 -- a skill skipped for an unreadable mind.toml is still
+    // shipped, so the compatible move does not "drop" it or hint at prune.
+    let sb = Sandbox::new("ver-unreadable");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(
+        &sb.source.join("skills/helper/SKILL.md"),
+        "---\nname: helper\ndescription: h\n---\n",
+    );
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+    assert!(sb.claude_home.join("skills/helper").exists());
+
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write_file(&sb.source.join("skills/helper/mind.toml"), "bogus = 1\n");
+    release(&sb, "one-one", "v1.1.0");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("skipping skill 'helper'"), "{}", r.stderr);
+    assert!(!r.stdout.contains("looks breaking"), "{}", r.stdout);
+    assert!(!r.stderr.contains("mind prune"), "{}", r.stderr);
+    assert!(
+        sb.installed_agent().contains("two"),
+        "the upgrade went ahead"
+    );
+    assert!(sb.claude_home.join("skills/helper").exists());
+}
+
+#[test]
 fn a_release_that_drops_an_item_of_a_pruning_source_prunes_it_without_a_warning() {
     // spec: LIFE-57 LIFE-58
     let sb = Sandbox::new("ver-prune");

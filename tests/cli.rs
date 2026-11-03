@@ -28903,4 +28903,24 @@ fn an_item_with_an_unreadable_manifest_is_not_pruned() {
         r.stdout
     );
     assert!(!r.stdout.contains("removed upstream"), "{}", r.stdout);
+
+    let j = parse_json(&sb.mind(&["recall", "--json"]).stdout);
+    let rows = j["items"][0]["items"].as_array().expect("items array");
+    let review = rows
+        .iter()
+        .find(|r| r["key"] == "skill:review")
+        .expect("the skipped skill is listed");
+    assert_eq!(review["orphaned"], true, "{review}");
+    assert_eq!(review["unreadable"], true, "{review}");
+
+    let v = parse_json(&sb.mind(&["introspect", "--json"]).stdout);
+    let kinds: Vec<&str> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["target"] == "skill:review")
+        .filter_map(|i| i["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"unreadable-upstream"), "{v}");
+    assert!(!kinds.contains(&"removed-upstream"), "{v}");
 }
