@@ -506,11 +506,17 @@ pub fn clone_shallow_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             // so it is already safe.  Validate anyway (DSC-66) so a bad value
             // is caught at parse time before reaching any subprocess.
             // `--` before the URL guards the URL positional (DSC-66).
+            // spec: DSC-122 -- `--branch` takes a short name, so a value
+            // spelled `refs/heads/<name>` is passed as `<name>`.
+            let remote_ref = pin_refs(branch, true)?.remove(0);
+            let short = remote_ref
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&remote_ref);
             run(
                 url,
                 None,
                 &[
-                    "clone", "--depth", "1", "--branch", branch, "--", url, &dest_str,
+                    "clone", "--depth", "1", "--branch", short, "--", url, &dest_str,
                 ],
             )?;
         }
@@ -716,6 +722,9 @@ fn pin_refs(name: &str, branch_only: bool) -> Result<Vec<String>> {
         reason: reason.to_string(),
     };
     reject_refspec_syntax(name)?;
+    if branch_only && name.starts_with("refs/tags/") {
+        return Err(invalid("a follow-branch pin names a branch, not a tag"));
+    }
     if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
         return Ok(vec![name.to_string()]);
     }
@@ -2039,6 +2048,16 @@ mod tests {
         // A qualified branch name still follows.
         sync_to_pin(&url, &dest, &Pin::FollowBranch("refs/heads/stable".into())).unwrap();
         assert_eq!(read_file(&dest, "file.txt"), "version A");
+        // ...and on a first clone, which `git clone --branch` reads as a name.
+        let fresh = base.join("fresh");
+        clone_at(&url, &fresh, &Pin::FollowBranch("refs/heads/stable".into())).unwrap();
+        assert_eq!(read_file(&fresh, "file.txt"), "version A");
+        // A branch pin never names a tag.
+        let pin = Pin::FollowBranch("refs/tags/v1.0".into());
+        let err = sync_to_pin(&url, &dest, &pin).expect_err("a tag is not a branch");
+        assert!(matches!(err, MindError::InvalidRef { .. }), "{err}");
+        let err = clone_at(&url, &base.join("tag"), &pin).expect_err("a tag is not a branch");
+        assert!(matches!(err, MindError::InvalidRef { .. }), "{err}");
         cleanup(&base);
     }
 
