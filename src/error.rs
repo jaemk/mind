@@ -1173,6 +1173,14 @@ pub enum MindError {
     )]
     DestinationNotRepo { path: String },
 
+    /// HOOK-144: a `mind` started by a hook found the lock held, by the `mind`
+    /// that runs the hook.
+    #[error(
+        "mind cannot run inside a hook while the mind command that ran the hook holds its lock; \
+         move this step out of the hook"
+    )]
+    NestedInHook,
+
     /// DSC-66: a pin/ref value that would be misinterpreted as a git option was
     /// rejected at parse time before it could reach a git subprocess.
     #[error("invalid ref value '{value}': {reason}")]
@@ -1917,6 +1925,7 @@ impl MindError {
             MindError::NotADirectory { .. } => "not-a-directory",
             MindError::ConfirmationRequired { .. } => "confirmation-required",
             MindError::DestinationNotRepo { .. } => "destination-not-repo",
+            MindError::NestedInHook => "nested-in-hook",
             MindError::InvalidRef { .. } => "invalid-ref",
             MindError::AbsorbCollision { .. } => "absorb-collision",
             MindError::AgentCollision { .. } => "agent-collision",
@@ -3101,6 +3110,7 @@ mod tests {
             "homebrew-managed"
         );
         assert_eq!(MindError::HomeDirNotFound.kind(), "home-dir-not-found");
+        assert_eq!(MindError::NestedInHook.kind(), "nested-in-hook");
         assert_eq!(MindError::GitNotFound.kind(), "git-not-found");
         assert_eq!(MindError::ReleaseAssetEmpty.kind(), "release-asset-empty");
         assert_eq!(MindError::LobeTargetRequired.kind(), "lobe-target-required");

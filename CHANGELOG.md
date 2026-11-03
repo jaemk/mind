@@ -51,6 +51,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before any clone or fetch instead of being passed to `git fetch` as a
   refspec, where `:` could write a ref into the source's clone and `*` fetched
   every matching tag.
+- A `mind` command run from inside a hook no longer waits forever on the lock
+  held by the `mind` that runs the hook. Every hook runs with `MIND_IN_HOOK=1`,
+  and a `mind` started with it fails with `nested-in-hook` when the lock is
+  held, which fails the hook.
 
 ## [0.44.0] - 2026-11-02
 

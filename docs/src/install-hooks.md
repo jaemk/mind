@@ -109,7 +109,9 @@ An update hook is also where a source removes what `mind` never recorded, such
 as files an older install script wrote. Items `mind` installed are removed by
 `[source] prune = true` instead (see
 [Remove the items you drop](releasing.md#remove-the-items-you-drop)). A hook
-runs while `upgrade` holds mind's lock, so it cannot call `mind` itself.
+runs while `upgrade` holds mind's lock, so it cannot call `mind` itself: every
+hook runs with `MIND_IN_HOOK=1`, and a `mind` command started with it fails
+with `nested-in-hook` rather than wait for a lock that is never released.
 
 A source that declares no update hook is unaffected: its install hooks re-run as
 before. An update hook never runs at `meld` or on a re-meld, is recorded against
