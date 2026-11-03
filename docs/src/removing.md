@@ -30,13 +30,20 @@ non-interactive run skips it unless you pass `--accept-hooks`.
 ## Clear items a source dropped
 
 ```
-mind forget --dropped              # every item marked "removed upstream"
+mind prune                         # every item marked "removed upstream"
+mind prune acme/skills             # only what acme/skills dropped
 mind forget --dropped 'agent:*'    # only the dropped agents
 ```
 
 An item a source stops offering stays installed, and `recall` marks it
-"removed upstream". `--dropped` removes those, plus the items of a source you
-dropped with `unmeld --keep-items`.
+"removed upstream". `prune` removes those, plus the items of a source you
+dropped with `unmeld --keep-items`. A source with no clone on disk is left
+alone, since nothing says what it dropped. `mind forget --dropped` is the same
+operation, narrowed by item instead of by source.
+
+A source can declare `prune = true` in its `mind.toml`, and then `mind upgrade`
+removes the items a new commit dropped as part of the upgrade (see
+[Remove the items you drop](releasing.md#remove-the-items-you-drop)).
 
 ## Turn off an install profile
 

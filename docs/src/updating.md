@@ -17,7 +17,8 @@ after. Nothing changes until you confirm.
 mind upgrade                       # everything
 mind upgrade skill:review          # one item
 mind upgrade 'owner/repo#*'        # every installed item from one source
-mind upgrade --source owner/repo   # fetch and upgrade one source only
+mind upgrade owner/repo            # fetch and upgrade one source only
+mind upgrade --source owner/repo   # the same, when an item shares the name
 mind upgrade --no-sync             # skip the fetch; compare against the clones on disk
 mind upgrade --yes                 # apply without asking
 ```
@@ -27,7 +28,14 @@ source unfetched and unchanged. Unlike `'owner/repo#*'`, it also offers items
 the source added to an enabled install profile. Add an item to narrow it further
 (`mind upgrade skill:review --source owner/repo`). A `--source` filter that
 matches no melded source is an error; an item filter that matches no installed
-item reports that everything is up to date. Each upgrade is transactional: the new copy is built
+item reports that everything is up to date.
+
+A plain `mind upgrade <name>` is read as an item filter first. When it matches
+no installed item but does match a melded source, it upgrades that source as
+`--source` would. When it matches both, the item wins and a note names the
+`--source` spelling.
+
+Each upgrade is transactional: the new copy is built
 first and the old one is kept until the swap succeeds, so a failed upgrade
 leaves the previous version in place.
 
@@ -35,7 +43,10 @@ leaves the previous version in place.
 
 - offers items a source added to an [install profile](choosing-items.md#install-profiles)
   you enabled, and reports items that left one without removing them. This
-  runs on a plain `upgrade` or `upgrade --source`, not on `upgrade <item>`.
+  runs on a plain `upgrade` or `upgrade <source>`, not on `upgrade <item>`.
+- removes the installed items a source dropped, when the source declares
+  `prune = true` (see [Remove the items you drop](releasing.md#remove-the-items-you-drop)).
+  Otherwise they stay installed until `mind prune`.
 - re-runs a source's install hooks when the source moved to a new commit, or
   its update hooks if it declares any. See [Run setup with hooks](install-hooks.md).
 - reports a rename when an item's installed name changed (for example after a

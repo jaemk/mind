@@ -106,7 +106,37 @@ Run `mind review` before you tag. It compares your tree with your highest
 stable, non-yanked release (the one a new consumer gets) and reports each of
 these as an `apparent-break` advisory. A compatible
 release that does one anyway still installs, with a warning; the dropped item
-stays installed until the consumer runs `mind forget --dropped`.
+stays installed until the consumer runs `mind prune`, unless the source prunes
+(below).
+
+## Remove the items you drop
+
+```toml
+[source]
+prune = true
+min-mind-version = "0.45"   # older mind versions reject the key
+```
+
+With `prune = true` on the commit a consumer upgrades to, `mind upgrade`
+removes every installed item of the source that the commit no longer offers.
+The upgrade report lists them under `removed upstream, to prune`, and the
+upgrade's confirmation covers them. Without it, a dropped item stays installed
+and `recall` marks it "removed upstream" until the consumer runs `mind prune`.
+
+`mind` prunes only what it installed and recorded. Files it never tracked,
+such as what an install script wrote before the source used `mind`, are yours
+to remove; an update hook can do it:
+
+```toml
+[[hooks]]
+name = "remove the pre-mind review skill"
+event = "update"
+run = "rm -rf ~/.claude/skills/old-review"
+```
+
+The hook runs while `upgrade` holds mind's lock, so it cannot call `mind`
+itself (`mind forget` from the hook waits forever). See
+[Update hooks](install-hooks.md#update-hooks).
 
 ## Yank a release
 

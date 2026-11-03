@@ -222,6 +222,8 @@ and verified.
 | mind refuses an item install up front on a non-unix platform instead of falling back to an unrecognized copy | done | LIFE-50 |
 | `upgrade`'s rename-collision checks run after the pending report, so an aborting batch still shows what else was pending | done | LIFE-51 |
 | `upgrade` and `sync --upgrade` install items new to a source installed whole; `--skip-new` defers them, `--ignore-new` records them as seen | done | LIFE-53, LIFE-54, LIFE-55, LIFE-56 |
+| `mind prune [source]` removes installed items no longer part of a melded source (the `forget --dropped` set), narrowed by a source filter | done | CLI-261 |
+| A source declaring `[source] prune = true` has the items a new commit dropped removed by the upgrade pass | done | LIFE-57, LIFE-58 |
 | TUI poll re-scans a source's catalog only when its registry record changes (linked sources on the TUI-87 schedule) | done | TUI-85 |
 | TUI poll runs on a background thread, off the input thread | done | TUI-86 |
 | TUI poll reads on-screen sources every tick, off-screen ones every 10s | done | TUI-87 |
@@ -255,6 +257,7 @@ and verified.
 | `sync [source]` accepts an optional source filter, syncing every matching source | done | CLI-231 |
 | `sync <filter> --upgrade`'s upgrade pass and its hook re-run are scoped to the filter's matched sources | done | CLI-232 |
 | `upgrade --source <filter>` syncs and upgrades only the matched sources; composes with `[item]` | done | CLI-244 |
+| `upgrade <source>`: a positional matching no installed item but a melded source upgrades that source; an item match keeps its meaning | done | CLI-262 |
 | `sync <filter> --upgrade` names the filter's matched sources in the confirmation when it matched more than one | done | CLI-233 |
 | Item-name capture rejects control/bidi/zero-width code points: a hard error for a `mind.toml` declaration, skip-with-warning in the convention scan | done | DSC-96 |
 | `[[items]] link` target is confined to the item kind's directory; anything else is refused | done | DSC-97 |

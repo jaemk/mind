@@ -359,6 +359,7 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
         | Command::Unmeld { .. }
         | Command::Learn { .. }
         | Command::Forget { .. }
+        | Command::Prune { .. }
         | Command::Sync { .. }
         | Command::Upgrade { .. }
         | Command::Absorb { .. }
@@ -615,6 +616,7 @@ fn verb_name(command: &Command) -> &'static str {
         Command::Unmeld { .. } => "unmeld",
         Command::Learn { .. } => "learn",
         Command::Forget { .. } => "forget",
+        Command::Prune { .. } => "prune",
         Command::Sync { .. } => "sync",
         Command::Upgrade { .. } => "upgrade",
         Command::Curate { .. } => "curate",
@@ -858,6 +860,12 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             force,
             accept.accept(),
         ),
+        // spec: CLI-261
+        Command::Prune {
+            source,
+            force,
+            accept,
+        } => commands::prune(paths, source.as_deref(), yes, force, accept.accept()),
         Command::Sync {
             source,
             upgrade,
@@ -887,6 +895,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             commands::set_allow_breaking(allow_breaking);
             // spec: LIFE-55
             commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
+            // spec: CLI-262 - a target naming no installed item but a melded
+            // source is that source's `--source` filter.
+            let (item, source) = commands::upgrade_target(paths, item, source)?;
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if let Some(source) = source {
                 // spec: CLI-244 - scope the sync and the pass to one source.
@@ -1123,6 +1134,7 @@ mod tests {
         assert_eq!(mode_of(&["mind", "unmeld", "src"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "learn", "review"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "forget", "review"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "prune"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "sync"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "sync", "--upgrade"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "upgrade"]), LockMode::Exclusive);
@@ -1238,6 +1250,7 @@ mod tests {
             &["mind", "unmeld", "src"],
             &["mind", "learn", "review"],
             &["mind", "forget", "review"],
+            &["mind", "prune"],
             &["mind", "sync"],
             &["mind", "sync", "--upgrade"],
             &["mind", "upgrade"],
@@ -1292,6 +1305,7 @@ mod tests {
         (&["unmeld"], &["mind", "unmeld", "src"]),
         (&["learn"], &["mind", "learn", "review"]),
         (&["forget"], &["mind", "forget", "review"]),
+        (&["prune"], &["mind", "prune"]),
         (&["sync"], &["mind", "sync"]),
         (&["upgrade"], &["mind", "upgrade"]),
         (&["recall"], &["mind", "recall"]),

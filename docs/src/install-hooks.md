@@ -105,6 +105,12 @@ run = "make upgrade"          # runs at upgrade, and `make install` does not
 event = "update"
 ```
 
+An update hook is also where a source removes what `mind` never recorded, such
+as files an older install script wrote. Items `mind` installed are removed by
+`[source] prune = true` instead (see
+[Remove the items you drop](releasing.md#remove-the-items-you-drop)). A hook
+runs while `upgrade` holds mind's lock, so it cannot call `mind` itself.
+
 A source that declares no update hook is unaffected: its install hooks re-run as
 before. An update hook never runs at `meld` or on a re-meld, is recorded against
 the commit it ran at exactly as an install hook is (so it is not re-offered until
