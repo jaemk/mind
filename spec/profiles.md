@@ -254,7 +254,8 @@ items only the old set wanted are then leftovers, which `prune` removes.
   For a source that declares `prune`, applying a change that disables a
   profile also runs the source through the same run's upgrade pass (CUR-6),
   which prunes the leftovers this leaves (PROF-39); otherwise they stay until
-  `mind prune`.
+  `mind prune`. `curate` prints PROF-40's leftovers note after its upgrade
+  pass, so it names only the leftovers that pass kept.
 
 ## Curators and dump
 

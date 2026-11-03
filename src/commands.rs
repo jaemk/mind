@@ -7076,7 +7076,7 @@ pub(crate) fn install_source_profiles(
 /// Print how many profile leftovers (PROF-37) `source_name` has and the
 /// `mind prune <source>` that removes them. Silent when there are none or
 /// they cannot be computed.
-fn note_profile_leftovers(paths: &Paths, source_name: &str) {
+pub(crate) fn note_profile_leftovers(paths: &Paths, source_name: &str) {
     let found = (|| -> Result<(Vec<String>, bool)> {
         let registry = Registry::load(paths)?;
         let Some(source) = registry.find(source_name) else {
@@ -7115,7 +7115,9 @@ fn note_profile_leftovers(paths: &Paths, source_name: &str) {
     );
 }
 
-fn install_source_profiles_once(
+/// [`install_source_profiles`] without the leftovers note, for a caller that
+/// prints it later (`curate`, after its upgrade pass may have pruned them).
+pub(crate) fn install_source_profiles_once(
     paths: &Paths,
     req: &ProfileInstall<'_>,
     flow: InstallFlow,

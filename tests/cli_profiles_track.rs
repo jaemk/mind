@@ -1783,6 +1783,12 @@ fn curator_entry_listing_fewer_profiles_disables_and_prunes() {
     assert_eq!(sb.recorded_profiles(), Some(svec(&["basic"])));
     assert!(r.stdout.contains("pruned agent:planner"), "{}", r.all());
     assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+    // The leftovers note is printed after the pass, so it names nothing here.
+    assert!(
+        !r.stdout.contains("no longer in its enabled profiles"),
+        "{}",
+        r.all()
+    );
 }
 
 #[test]
