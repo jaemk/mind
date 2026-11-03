@@ -1776,6 +1776,20 @@ fn an_item_a_new_member_requires_is_not_a_leftover() {
 }
 
 #[test]
+fn remeld_retags_a_closure_item_with_its_members_current_profiles() {
+    // spec: PROF-40 PROF-6 PROF-20 -- `helper` was pulled in by `deploy`
+    // under `full`; after the re-meld `deploy` is only in `extra`, and so is
+    // its closure item.
+    let sb = Sandbox::with_toml("src", &format!("{PROFILES}extra = [\"skill:deploy\"]\n"));
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    assert_eq!(sb.reasons("skill:helper"), svec(&["full"]));
+    sb.ok(&["meld", &sb.spec(), "--profile", "extra", "--yes"]);
+    assert_eq!(sb.reasons("skill:deploy"), svec(&["extra"]));
+    assert_eq!(sb.reasons("skill:helper"), svec(&["extra"]));
+    assert_eq!(sb.reasons("agent:planner"), svec(&["full"]));
+}
+
+#[test]
 fn remeld_json_lists_the_profile_leftovers() {
     // spec: PROF-40 CLI-153 -- the json twin of the leftovers note.
     let sb = Sandbox::new("src");

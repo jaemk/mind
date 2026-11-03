@@ -6900,13 +6900,22 @@ fn apply_profile_plan(
         // one `curate` did not offer too) is tagged with the profiles it is
         // in now; then names no longer enabled leave the reasons of items
         // that keep another, and the rest are left as leftovers (PROF-37).
+        // A closure item carries the profiles of each member that reaches it
+        // (PROF-6), so it is retagged along with its members.
+        // Best effort: the installs already ran, so a scan error here must not
+        // stop them from being recorded.
+        let closure_reasons =
+            replaced_closure_reasons(paths, source_name, &plan.expansion).unwrap_or_default();
         for entry in manifest.items.values_mut() {
             if entry.source != source_name {
                 continue;
             }
             let bare = format!("{}:{}", entry.kind.as_str(), entry.bare_name);
+            let pre_existing = !installed_keys.iter().any(|k| *k == entry.key().as_str());
             if let Some(profiles) = plan.expansion.keys.get(&bare) {
-                let pre_existing = !installed_keys.iter().any(|k| *k == entry.key().as_str());
+                crate::profile::tag_reasons(entry, profiles, pre_existing);
+            }
+            if let Some(profiles) = closure_reasons.get(&bare) {
                 crate::profile::tag_reasons(entry, profiles, pre_existing);
             }
             crate::profile::strip_disabled_reasons(entry, &plan.enabled);
@@ -6941,6 +6950,38 @@ fn apply_profile_plan(
         Some(e) => Err(e),
         None => Ok(installed_keys),
     }
+}
+
+/// For a replacing install (PROF-40): each item of `source_name` that a
+/// member of `expansion` reaches through its dependencies (DEP-1, DEP-4),
+/// keyed by bare `kind:name`, with the profiles of every member reaching it.
+fn replaced_closure_reasons(
+    paths: &Paths,
+    source_name: &str,
+    expansion: &crate::profile::Expansion,
+) -> Result<std::collections::BTreeMap<String, BTreeSet<String>>> {
+    let mut out: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    if expansion.keys.is_empty() {
+        return Ok(out);
+    }
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(out);
+    };
+    let catalog = catalog::scan(paths, &single(source))?;
+    let bare = |c: &CatalogItem| format!("{}:{}", c.kind.as_str(), c.name);
+    for (i, member) in catalog.iter().enumerate() {
+        let Some(profiles) = expansion.keys.get(&bare(member)) else {
+            continue;
+        };
+        for j in crate::deps::reachable(&catalog, &[i], read_item_text) {
+            out.entry(bare(&catalog[j]))
+                .or_default()
+                .extend(profiles.iter().cloned());
+        }
+    }
+    Ok(out)
 }
 
 /// The PROF-12 preview header: the enabled profiles, the other declared ones,
