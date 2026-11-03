@@ -86,9 +86,12 @@ Shapes:
 
 - `recall` and `probe`: `{"schema": 1, "items": [...]}`.
 - `introspect`: `{"schema": 1, "issues": [...], "sources": N, "items": N}`.
-- Every changing verb (`meld`, `learn`, `forget`, `sync`, `upgrade`, `unmeld`,
-  `config lobes add` and `remove`) returns an object with `"schema": 1` and at
-  least `action`, `target`, and `outcome`.
+- Every changing verb (`meld`, `learn`, `forget`, `prune`, `sync`, `upgrade`,
+  `unmeld`, `config lobes add` and `remove`) returns an object with
+  `"schema": 1` and at least `action`, `target`, and `outcome`. `forget`,
+  `prune`, `upgrade`, and `sync --upgrade` list the keys they removed in
+  `removed` (absent when none); an `upgrade` that only pruned (a source declaring `prune = true`)
+  has outcome `pruned`.
 - `review`: `{"schema": 1, "action": "review", "outcome": "clean|advisory|failed",
   "hard": [...], "advisory": [...], "fixed": [...]}`, each finding being
   `{"kind": "<slug>", "message": "<text>"}`.
@@ -103,8 +106,8 @@ Shapes:
   [Hooks](#hooks)).
 - `curate`: one document whose `outcome` is `clean`, `pending`, or `applied`.
 - `auto-update run`: `{"schema": 1, "action": "auto-update run", "target": "*",
-  "outcome": "ok|partial|skipped", "moved": [...], "held": [...], "failed":
-  [...], "breaking": [...]}`.
+  "outcome": "ok|partial|skipped", "moved": [...], "pruned": [...], "held":
+  [...], "failed": [...], "breaking": [...]}`.
 
 `config auto-update on|off` returns the changing-verb object with `count` set
 to the number of `settings.json` files changed.
@@ -142,8 +145,9 @@ Specific cases:
 - `sync` exits 1 if any source failed to fetch, after saving the ones that
   succeeded.
 - `review` exits 1 on a hard finding and 0 on advisory findings only.
-- `upgrade <filter>` with no match reports up to date and exits 0;
-  `sync <filter>` with no match is an error.
+- `upgrade <filter>` matching neither an installed item nor a melded source
+  reports up to date and exits 0; `sync <filter>` and `prune <filter>` with no
+  match are errors.
 
 ## Output format
 

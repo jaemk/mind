@@ -859,6 +859,7 @@ fn cli_218_every_driven_verb_is_json_or_a_named_exclusion() {
         vec!["--json", "sync"],
         vec!["--json", "upgrade", "--yes"],
         vec!["--json", "forget", "widget", "--yes"],
+        vec!["--json", "prune", "--yes"],
         vec!["--json", "unmeld", "boundary", "--yes"],
     ];
     for args in included {
