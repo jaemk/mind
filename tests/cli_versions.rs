@@ -751,6 +751,46 @@ fn a_release_that_drops_an_item_of_a_pruning_source_prunes_it_without_a_warning(
 }
 
 #[test]
+fn a_breaking_release_not_taken_prunes_nothing() {
+    // spec: LIFE-57 VER-63 -- the prune is read from the release the source
+    // resolves to, so a breaking release the user has not accepted removes
+    // nothing; taking it does.
+    let sb = Sandbox::new("ver-prune-breaking");
+    write_file(
+        &sb.source.join("mind.toml"),
+        &format!("{RELEASE_TAGS}prune = true\n"),
+    );
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
+    release(&sb, "two-zero", "v2.0.0");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("breaking"), "{}", r.stdout);
+    assert!(!r.stdout.contains("pruned"), "{}", r.stdout);
+    assert!(
+        sb.claude_home.join("agents/gone.md").exists(),
+        "{}",
+        r.stdout
+    );
+    assert!(sb.installed_agent().contains("one"), "{}", r.stdout);
+
+    let r = sb.mind(&["upgrade", "--yes", "--allow-breaking"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:gone"), "{}", r.stdout);
+    assert!(!sb.claude_home.join("agents/gone.md").exists());
+    assert!(sb.installed_agent().contains("two"), "{}", r.stdout);
+}
+
+#[test]
 fn a_compatible_move_that_removes_a_token_referent_is_warned_about() {
     // spec: VER-65
     let sb = Sandbox::new("ver-looks-breaking-ref");

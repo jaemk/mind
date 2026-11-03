@@ -14,8 +14,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of a melded source: its source no longer offers it, or the source was
   unmelded with `--keep-items`. The optional filter is the one `sync` takes,
   matched against the source each item came from. It is the same operation as
-  `forget --dropped`, which still narrows by item, and the hint `upgrade`
-  prints for a dropped item now names `mind prune`.
+  `forget --dropped`, which still narrows by item. The hint `upgrade` prints
+  for a dropped item and `recall`'s `(removed upstream)` marker now name
+  `mind prune`.
 - `[source] prune = true` in a source's `mind.toml` makes `upgrade` (and
   `sync --upgrade`, `curate`, `auto-update run`) remove the installed items
   the new commit no longer offers, listed in the report and covered by the

@@ -13955,7 +13955,9 @@ pub fn recall(
                 format!(
                     "installed @ {} {}",
                     short(&m.commit),
-                    out.yellow("(removed upstream)")
+                    // spec: CLI-261 -- point at the command that clears it, as
+                    // the outdated marker points at `mind upgrade`.
+                    out.yellow("(removed upstream; run mind prune)")
                 ),
             ]);
         }
