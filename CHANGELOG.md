@@ -45,8 +45,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GitHub pull request head. Any other `refs/...` value is refused.
 - A `ref` pin holding an abbreviated commit sha resolves to that commit, not to
   a branch or tag on the remote named like it.
-- A pin value holding `:` or `*` is refused instead of being passed to `git
-  fetch` as a refspec, where `:` could write a ref into the source's clone.
+- A `ref`, `follow-branch`, or tag pin value holding `:` or `*` is refused
+  before any clone or fetch instead of being passed to `git fetch` as a
+  refspec, where `:` could write a ref into the source's clone and `*` fetched
+  every matching tag.
 
 ## [0.44.0] - 2026-11-02
 

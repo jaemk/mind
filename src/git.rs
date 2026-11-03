@@ -493,6 +493,7 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
 ///   the commit itself (falling back to the full history when the remote
 ///   refuses a fetch by sha), then check it out.
 pub fn clone_shallow_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
+    reject_pin_refspec(pin)?;
     let dest_str = dest.to_string_lossy().into_owned();
     match pin {
         Pin::DefaultBranch => {
@@ -620,7 +621,10 @@ fn ensure_commit(url: &str, dir: &Path, rev: &str) -> Result<String> {
         fetch_all_history(url, dir)?;
         return commit_with_prefix(url, dir, rev)?.ok_or_else(|| MindError::InvalidRef {
             value: rev.to_string(),
-            reason: "no commit on the remote's branches or tags starts with it".to_string(),
+            reason: format!(
+                "no commit on the remote's branches or tags starts with it (to pin a \
+                 branch or tag with this name, use refs/heads/{rev} or refs/tags/{rev})"
+            ),
         });
     }
     let object = format!("{rev}^{{commit}}");
@@ -711,11 +715,7 @@ fn pin_refs(name: &str, branch_only: bool) -> Result<Vec<String>> {
         value: name.to_string(),
         reason: reason.to_string(),
     };
-    if name.contains([':', '*']) {
-        return Err(invalid(
-            "a pin names a branch, tag, or commit; ':' and '*' are refspec syntax",
-        ));
-    }
+    reject_refspec_syntax(name)?;
     if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
         return Ok(vec![name.to_string()]);
     }
@@ -729,6 +729,30 @@ fn pin_refs(name: &str, branch_only: bool) -> Result<Vec<String>> {
     } else {
         vec![format!("refs/tags/{name}"), format!("refs/heads/{name}")]
     })
+}
+
+/// [`reject_refspec_syntax`] for the value of a branch, tag, or `ref` pin, run
+/// before a clone or sync touches the remote, so a refused value leaves no
+/// partial clone behind.
+fn reject_pin_refspec(pin: &Pin) -> Result<()> {
+    match pin {
+        Pin::FollowBranch(name) | Pin::Tag(name) | Pin::Ref(name) => reject_refspec_syntax(name),
+        Pin::DefaultBranch | Pin::Version(_) => Ok(()),
+    }
+}
+
+/// Refuse a pin value holding refspec syntax (DSC-122): `:` would turn a
+/// fetch into `src:dst` and `*` into a pattern.
+// spec: DSC-122
+fn reject_refspec_syntax(name: &str) -> Result<()> {
+    if name.contains([':', '*']) {
+        return Err(MindError::InvalidRef {
+            value: name.to_string(),
+            reason: "a pin names a branch, tag, or commit; ':' and '*' are refspec syntax"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Whether the tree checked out at `dir` declares `[source] history = "full"`
@@ -782,6 +806,7 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
 }
 
 fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
+    reject_pin_refspec(pin)?;
     match pin {
         Pin::DefaultBranch => {
             fetch(url, dir, &["origin"])?;
@@ -811,7 +836,8 @@ fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             // The refspec `+refs/tags/{tag}:refs/tags/{tag}` already encodes the
             // tag name inside a fixed-prefix string; the `--` before the refspec
             // guards the positional argument position (DSC-66). Depth 1 while
-            // the clone is shallow (DSC-119).
+            // the clone is shallow (DSC-119). `reject_pin_refspec` above has
+            // refused a `*` (a pattern) or `:` (a second destination).
             fetch(
                 url,
                 dir,
@@ -2041,6 +2067,14 @@ mod tests {
         let err = clone_at(&url, &missing, &Pin::Ref("0000000f".into()))
             .expect_err("a prefix no commit has fails");
         assert!(matches!(err, MindError::InvalidRef { .. }), "{err}");
+        assert!(
+            err.to_string().contains("refs/tags/0000000f"),
+            "the error names the qualified spelling: {err}"
+        );
+        // A same-named tag is reachable by its qualified name.
+        let qualified = base.join("qualified");
+        clone_at(&url, &qualified, &Pin::Ref(format!("refs/tags/{short}"))).unwrap();
+        assert_ne!(read_head(&qualified), sha_b, "the tag, not the commit");
         cleanup(&base);
     }
 
@@ -2053,12 +2087,28 @@ mod tests {
         let url = format!("file://{}", remote.display());
         let dest = base.join("clone");
         clone_at(&url, &dest, &Pin::DefaultBranch).unwrap();
-        for bad in ["stable:refs/heads/planted", "refs/heads/*"] {
-            for pin in [Pin::Ref(bad.into()), Pin::FollowBranch(bad.into())] {
+        let mut fresh = 0;
+        for bad in ["stable:refs/heads/planted", "refs/heads/*", "v*"] {
+            for pin in [
+                Pin::Ref(bad.into()),
+                Pin::FollowBranch(bad.into()),
+                Pin::Tag(bad.into()),
+            ] {
                 let err = sync_to_pin(&url, &dest, &pin).expect_err(bad);
                 assert!(matches!(err, MindError::InvalidRef { .. }), "{bad}: {err}");
+                fresh += 1;
+                let target = base.join(format!("fresh{fresh}"));
+                let err = clone_at(&url, &target, &pin).expect_err(bad);
+                assert!(matches!(err, MindError::InvalidRef { .. }), "{bad}: {err}");
+                assert!(!target.exists(), "{bad}: refused before cloning");
             }
         }
+        let tag = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/tags/v1.0"])
+            .current_dir(&dest)
+            .status()
+            .unwrap();
+        assert!(!tag.success(), "the `v*` tag pin fetched no tags");
         let planted = Command::new("git")
             .args(["show-ref", "--verify", "--quiet", "refs/heads/planted"])
             .current_dir(&dest)
