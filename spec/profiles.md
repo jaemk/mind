@@ -241,7 +241,8 @@ items only the old set wanted are then leftovers, which `prune` removes.
   --profile` remains the form that adds to the set (PROF-17). Applying the
   install records the new set exactly; the snapshot keeps the keys still in
   the new expansion plus those just installed. Each installed member of the
-  new expansion is tagged with the profiles it is in now (PROF-20), and an
+  new expansion is tagged with the profiles it is in now (PROF-20), as is each
+  installed closure item with the profiles of the members reaching it (PROF-6), and an
   item's reasons then lose the names no longer enabled when another remains,
   so a later `forget --profile` (PROF-25) reads current reasons. A set left empty clears
   both recorded fields, as PROF-25 does. Nothing is uninstalled by the
