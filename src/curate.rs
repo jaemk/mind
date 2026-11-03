@@ -608,6 +608,9 @@ fn apply(
     // spec: CUR-6 -- the upgrade pass runs once over every source that needs it,
     // not once per source: one report, one hook re-run pass.
     let mut upgrade_scope: Vec<String> = Vec::new();
+    // Sources whose profile install was applied, for the PROF-40 leftovers
+    // note after the upgrade pass.
+    let mut noted: Vec<String> = Vec::new();
 
     for change in ordered {
         if !applies(change, flags.prune) {
@@ -639,7 +642,15 @@ fn apply(
                 }
                 // spec: CUR-3 -- and install what the entry declares, in the
                 // same run. This is the half `sync`'s re-walk does not do.
-                install_declared(paths, &change.source, curator, entry, flow, &mut skipped)?;
+                install_declared(
+                    paths,
+                    &change.source,
+                    curator,
+                    entry,
+                    flow,
+                    &mut skipped,
+                    &mut noted,
+                )?;
                 applied.push(format!("register:{}", change.source));
             }
             Action::Install { source, refs } => {
@@ -657,27 +668,34 @@ fn apply(
                 // spec: PROF-27 -- the profile install, recording the enabled
                 // set; only members missing from the snapshot are offered.
                 let registry = Registry::load(paths)?;
-                if let Some(reg) = registry.find(source)
-                    && let Err(e) = install_entry_profiles(
+                if let Some(reg) = registry.find(source) {
+                    match install_entry_profiles(
                         paths,
                         reg,
                         selection,
                         install_items.as_ref(),
                         flow,
                         true,
-                    )
-                {
-                    // spec: HOOK-172 -- a member's hook failing is not a bad
-                    // selection: it stops the run.
-                    if e.is_hook_stop() {
-                        return Err(e);
+                    ) {
+                        Ok(applied) => {
+                            if applied && !noted.contains(source) {
+                                noted.push(source.clone());
+                            }
+                        }
+                        Err(e) => {
+                            // spec: HOOK-172 -- a member's hook failing is not
+                            // a bad selection: it stops the run.
+                            if e.is_hook_stop() {
+                                return Err(e);
+                            }
+                            warn_skip(source, "could not install the entry's profiles", &e);
+                            skipped.push(SkippedEntry::new(
+                                source.clone(),
+                                "profile_selection_invalid",
+                            ));
+                            continue;
+                        }
                     }
-                    warn_skip(source, "could not install the entry's profiles", &e);
-                    skipped.push(SkippedEntry::new(
-                        source.clone(),
-                        "profile_selection_invalid",
-                    ));
-                    continue;
                 }
                 // spec: PROF-41 PROF-39 -- a change that disabled a profile
                 // of a source declaring `prune` puts the source in this run's
@@ -742,6 +760,13 @@ fn apply(
         // the pass never re-fetches here.
         commands::upgrade_sources_no_sync(paths, true, &upgrade_scope, flags.accept)?;
     }
+    // spec: PROF-41 PROF-39 -- the leftovers note reads the state after the
+    // upgrade pass, so a pruning source the pass cleaned up prints nothing.
+    if !out.json {
+        for source in &noted {
+            commands::note_profile_leftovers(paths, source);
+        }
+    }
     if !out.json && !applied.is_empty() {
         println!("{} applied {} change(s)", out.ok(), applied.len());
     }
@@ -758,6 +783,7 @@ fn install_declared(
     entry: &NestedSource,
     flow: InstallFlow,
     skipped: &mut Vec<SkippedEntry>,
+    noted: &mut Vec<String>,
 ) -> Result<()> {
     // spec: PROF-26 -- an entry routed to profiles installs through them, the
     // same rule `meld` applies to the entry.
@@ -773,7 +799,12 @@ fn install_declared(
                     flow,
                     false,
                 ) {
-                    Ok(()) => Ok(()),
+                    Ok(applied) => {
+                        if applied {
+                            noted.push(source.to_string());
+                        }
+                        Ok(())
+                    }
                     // spec: HOOK-172 -- a member's hook failing is not a bad
                     // selection: it stops the run.
                     Err(e) if e.is_hook_stop() => Err(e),
@@ -887,7 +918,9 @@ fn disabled_names(recorded: Option<&[String]>, enabled: &[String]) -> String {
 /// Apply a profile-routed entry (PROF-27): the profile install with
 /// `only_missing_from_snapshot` and the entry's selection, recording the
 /// entry's profiles on the source. `only_missing` is false at first
-/// registration, when there is no snapshot to honor.
+/// registration, when there is no snapshot to honor. Returns whether the
+/// install was applied; the PROF-40 leftovers note is the caller's, printed
+/// after the run's upgrade pass so it never names items that pass pruned.
 fn install_entry_profiles(
     paths: &Paths,
     source: &Source,
@@ -895,7 +928,7 @@ fn install_entry_profiles(
     install_items: Option<&Vec<String>>,
     flow: InstallFlow,
     only_missing: bool,
-) -> Result<()> {
+) -> Result<bool> {
     // `install-items` joins the batch as bare patterns (DSC-62 silent-skip).
     let mut patterns: Vec<String> = Vec::new();
     if let Some(refs) = install_items.filter(|r| !r.is_empty()) {
@@ -913,12 +946,14 @@ fn install_entry_profiles(
         // spec: PROF-41 -- the entry's selection is the source's whole set.
         replace: true,
     };
-    if crate::render::ctx().json {
-        commands::install_source_profiles_for_json(paths, &req, flow)?;
+    let applied = if crate::render::ctx().json {
+        commands::install_source_profiles_for_json(paths, &req, flow)?
+            .0
+            .applied
     } else {
-        commands::install_source_profiles(paths, &req, flow)?;
-    }
-    Ok(())
+        commands::install_source_profiles_once(paths, &req, flow)?.applied
+    };
+    Ok(applied)
 }
 
 // ---------------------------------------------------------------------------
