@@ -16716,9 +16716,29 @@ struct AutoUpdateJson {
     target: &'static str,
     outcome: &'static str,
     moved: Vec<String>,
+    pruned: Vec<String>,
     held: Vec<String>,
     failed: Vec<String>,
     breaking: Vec<BreakingMoveJson>,
+}
+
+/// The display keys of the items in `before` whose stable identity (source,
+/// kind, bare name) is gone from `after`: what an upgrade pass pruned
+/// (LIFE-57). A rename keeps its identity, so it is not counted.
+fn removed_identities(before: &Manifest, after: &Manifest) -> Vec<String> {
+    let mut keys: Vec<String> = before
+        .items
+        .values()
+        .filter(|b| {
+            !after
+                .items
+                .values()
+                .any(|a| a.source == b.source && a.kind == b.kind && a.bare_name == b.bare_name)
+        })
+        .map(|b| b.display_key())
+        .collect();
+    keys.sort();
+    keys
 }
 
 /// `mind auto-update run` (AUP-15..21): sync and upgrade every source whose
@@ -16751,6 +16771,7 @@ pub fn auto_update_run(
                 target: "*",
                 outcome: "skipped",
                 moved: Vec::new(),
+                pruned: Vec::new(),
                 held: Vec::new(),
                 failed: Vec::new(),
                 breaking: Vec::new(),
@@ -16872,8 +16893,11 @@ pub fn auto_update_run(
     registry.save(paths)?;
 
     if !moved_names.is_empty() {
+        // spec: LIFE-57 AUP-21 -- the pass may prune; record what it removed,
+        // since a background run has no one watching.
+        let before = Manifest::load(paths)?;
         // The ordinary pass, scoped to what moved, with --yes and no prompts.
-        if let Err(e) = upgrade_inner_scoped(
+        let pass = upgrade_inner_scoped(
             paths,
             true,
             None,
@@ -16881,7 +16905,11 @@ pub fn auto_update_run(
             SourceScope::Names(&moved_names, None),
             None,
             crate::hook::Accept::default(),
-        ) {
+        );
+        if let Ok(after) = Manifest::load(paths) {
+            report.pruned = removed_identities(&before, &after);
+        }
+        if let Err(e) = pass {
             report
                 .failed
                 .push(format!("upgrade: {}", strip_ansi(&e.to_string())));
@@ -16908,6 +16936,7 @@ pub fn auto_update_run(
                 "partial"
             },
             moved: report.moved,
+            pruned: report.pruned,
             held: report.held,
             failed: report.failed,
             breaking,
@@ -16915,6 +16944,9 @@ pub fn auto_update_run(
     }
     for line in &report.moved {
         println!("auto-update: moved {line}");
+    }
+    for line in &report.pruned {
+        println!("auto-update: pruned {line}");
     }
     for line in &report.held {
         println!("auto-update: held {line}");

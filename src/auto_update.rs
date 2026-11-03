@@ -93,6 +93,10 @@ pub struct Report {
     /// `<source> 1.4.2 -> 1.5.0`, one per source moved.
     #[serde(default)]
     pub moved: Vec<String>,
+    /// `<key>`, one per item the run removed because its source declares
+    /// `prune` and the new commit dropped it (LIFE-57).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<String>,
     /// `<source> 1.5.0: <why>`, one per source held for consent (AUP-17).
     #[serde(default)]
     pub held: Vec<String>,
@@ -103,7 +107,10 @@ pub struct Report {
 
 impl Report {
     pub fn is_empty(&self) -> bool {
-        self.moved.is_empty() && self.held.is_empty() && self.failed.is_empty()
+        self.moved.is_empty()
+            && self.pruned.is_empty()
+            && self.held.is_empty()
+            && self.failed.is_empty()
     }
 }
 
@@ -162,6 +169,7 @@ pub fn append_log(paths: &Paths, report: &Report) {
     let t = report.time;
     for (what, lines) in [
         ("moved", &report.moved),
+        ("pruned", &report.pruned),
         ("held", &report.held),
         ("failed", &report.failed),
     ] {
@@ -182,11 +190,19 @@ pub fn summary(reports: &[Report]) -> Option<String> {
         .iter()
         .flat_map(|r| r.moved.iter().map(String::as_str))
         .collect();
+    let pruned = reports.iter().map(|r| r.pruned.len()).sum::<usize>();
     let held = reports.iter().map(|r| r.held.len()).sum::<usize>();
     let failed = reports.iter().map(|r| r.failed.len()).sum::<usize>();
     let mut parts: Vec<String> = Vec::new();
     if !moved.is_empty() {
         parts.push(moved.join(", "));
+    }
+    // spec: LIFE-57 -- a run removes items unattended, so it says so.
+    if pruned > 0 {
+        parts.push(format!(
+            "{pruned} item{} pruned (see auto-update.log)",
+            if pruned == 1 { "" } else { "s" }
+        ));
     }
     if held > 0 {
         parts.push(format!(
@@ -466,6 +482,17 @@ mod tests {
             summary(&[a, b]).unwrap(),
             "auto-update: acme/skills 1.4.2 -> 1.5.0, acme/tools 0.3.0 -> 0.3.1; \
              1 source held for hook consent (run mind upgrade); 2 failures (see auto-update.log)"
+        );
+        // spec: LIFE-57
+        let c = Report {
+            moved: vec!["acme/old 1.0.0 -> 1.1.0".into()],
+            pruned: vec!["skill:gone".into()],
+            ..Report::default()
+        };
+        assert!(!c.is_empty());
+        assert_eq!(
+            summary(&[c]).unwrap(),
+            "auto-update: acme/old 1.0.0 -> 1.1.0; 1 item pruned (see auto-update.log)"
         );
     }
 

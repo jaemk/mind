@@ -157,6 +157,8 @@ major once the maintainer recommends it with `pin-version`. `recall` shows each
 source's level.
 
 A run never prompts. A source whose move would run a hook is left where it is
-until you run `mind upgrade`. The next `recall` or `upgrade` prints a one-line
-summary of what auto-update did, and `~/.mind/auto-update.log` keeps the
-history.
+until you run `mind upgrade`. A source that declares `prune = true` has the
+items its new release dropped removed by the run. The next `recall` or
+`upgrade` prints a one-line summary of what auto-update did, including how many
+items it pruned, and `~/.mind/auto-update.log` keeps the history, one line per
+pruned item.
