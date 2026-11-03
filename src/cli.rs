@@ -562,7 +562,9 @@ EXAMPLES:
     /// "removed upstream" by `recall`), or whose source is no longer melded
     /// (`unmeld --keep-items`). An item of a melded source whose clone is
     /// missing is kept. The same set as `forget --dropped`. No uninstall hooks
-    /// run: a dropped item's hooks went with it.
+    /// run, since a dropped item's hooks went with it, and there is no
+    /// dependents check. Removing more than one item asks first; `--yes` skips
+    /// that.
     // spec: CLI-261
     #[command(after_help = "\
 EXAMPLES:
@@ -581,13 +583,6 @@ EXAMPLES:
         /// installed from, so a source unmelded with `--keep-items` still
         /// matches.
         source: Option<String>,
-
-        /// Skip the dependents confirmation when removing a single item that
-        /// other installed items depend on. The global `--yes` also skips the
-        /// confirmation shown when more than one item would go.
-        // spec: DEP-60 CLI-42
-        #[arg(short = 'f', long)]
-        force: bool,
     },
 
     /// Refresh melded source clones and catalogs (all, or only those matching

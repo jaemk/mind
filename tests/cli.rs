@@ -28581,7 +28581,45 @@ fn prune_is_narrowed_to_the_sources_a_filter_matches() {
     // A filter naming no source is an error, not a silent no-op.
     let r = sb.mind(&["prune", "nosuchsource"]);
     assert!(!r.success, "{}", r.stdout);
+    assert!(r.stderr.contains("nosuchsource"), "{}", r.stderr);
     assert_eq!(installed_keys(&sb), vec!["agent:dev".to_string()]);
+
+    // A malformed glob is refused before anything is removed.
+    let r = sb.mind(&["prune", "[agents"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["agent:dev".to_string()]);
+}
+
+#[test]
+fn prune_removes_a_dropped_item_a_remaining_item_still_requires() {
+    // spec: CLI-261 DEP-50 -- the dependency graph comes from the catalog,
+    // which no longer lists the dropped agent, so no dependents gate applies
+    // and the requiring skill is left installed.
+    let sb = Sandbox::bare("prune-deps");
+    sb.write_and_commit(
+        "agents/target.md",
+        "---\nname: target\ndescription: Target\n---\n# target\n",
+    );
+    sb.write_and_commit(
+        "skills/user/SKILL.md",
+        "---\nname: user\ndescription: U\nrequires: agent:target\n---\n# user\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "prune-deps#*", "--yes"]).success);
+    // Upstream drops the agent but the skill still requires it.
+    sb.remove_and_commit("agents/target.md");
+
+    let r = sb.mind(&["prune"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:target"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:user".to_string()]);
+
+    // Neither `forget`'s `--force` nor `--accept-hooks` is offered.
+    for flag in ["--force", "--accept-hooks"] {
+        let r = sb.mind(&["prune", flag]);
+        assert!(!r.success, "{flag}: {}", r.stdout);
+        assert!(r.stderr.contains("unexpected argument"), "{}", r.stderr);
+    }
 }
 
 #[test]
@@ -28606,6 +28644,16 @@ fn upgrade_takes_a_plain_source_when_no_installed_item_matches() {
     let r = sb.mind(&["upgrade", "review", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(r.stdout.contains("upgraded skill:review"), "{}", r.stdout);
+
+    // With `--source` given, the positional is always an item filter: `tools`
+    // names no installed item, so nothing is upgraded.
+    tools.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Ship the build\n---\n# deploy skill\nagain\n",
+    );
+    let r = sb.mind(&["upgrade", "tools", "--source", "tools", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("upgraded skill:deploy"), "{}", r.stdout);
 
     // A ref matching neither is still up to date, exit 0 (CLI-64).
     let r = sb.mind(&["upgrade", "nothing-here"]);
@@ -28754,4 +28802,68 @@ fn sync_upgrade_prunes_and_reports_the_pruned_keys_under_json() {
     assert_eq!(v["action"], "sync", "{v}");
     assert_eq!(v["removed"], serde_json::json!(["agent:dev"]), "{v}");
     assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}
+
+#[test]
+fn declining_an_upgrade_that_would_prune_removes_nothing() {
+    // spec: LIFE-57 -- the pass's confirmation covers the prunes.
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let r = sb.mind_tty(&["upgrade"], "n\n");
+    assert!(
+        r.stdout.contains("1 item removed upstream, to prune"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb).len(), 2, "{}", r.stdout);
+    assert!(sb.claude_home.join("agents/dev.md").exists());
+
+    // Off a terminal, without --yes, the pass refuses rather than prune.
+    let r = sb.mind(&["upgrade"]);
+    assert!(!r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb).len(), 2, "{}", r.stdout);
+}
+
+#[test]
+fn a_pruned_item_runs_no_uninstall_hook() {
+    // spec: LIFE-57 CLI-245 -- an item's hooks come from its source's catalog,
+    // which no longer lists a dropped item.
+    let sb = melded();
+    let marker = sb.base.join("uninstalled");
+    let hooked = format!(
+        "---\nname: dev\ndescription: d\nuninstall: touch {}\n---\n# dev\n",
+        marker.display()
+    );
+    sb.write_and_commit("agents/dev.md", &hooked);
+    assert!(sb.mind(&["learn", "dev", "--accept-hooks"]).success);
+    // Control: forgetting the item while its source still offers it runs the
+    // hook.
+    let r = sb.mind(&["forget", "dev", "--accept-hooks"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(marker.exists(), "the hook is live: {}", r.stdout);
+    std::fs::remove_file(&marker).unwrap();
+
+    assert!(sb.mind(&["learn", "dev", "--accept-hooks"]).success);
+    write(&sb.source.join("mind.toml"), "[source]\nprune = true\n");
+    sb.remove_and_commit("agents/dev.md");
+    let r = sb.mind(&["upgrade", "--yes", "--accept-hooks"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert!(!marker.exists(), "no uninstall hook ran: {}", r.stdout);
+}
+
+#[test]
+fn an_upgrade_prunes_nothing_from_a_source_whose_tree_is_missing() {
+    // spec: LIFE-57 -- a source with no clone says nothing about what it
+    // dropped, so the pass must not read its empty scan as every item gone.
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let moved = sb.base.join("moved");
+    std::fs::rename(&sb.source, &moved).unwrap();
+    let r = sb.mind(&["upgrade", "--yes"]);
+    std::fs::rename(&moved, &sb.source).unwrap();
+    assert!(!r.stdout.contains("pruned"), "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        installed_keys(&sb),
+        vec!["agent:dev".to_string(), "skill:review".to_string()]
+    );
 }

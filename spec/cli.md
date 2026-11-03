@@ -653,9 +653,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   to those items. A filter that matches neither an installed item's source nor
   a melded source is a `SourceNotFound` error, and a malformed glob is
   `InvalidPattern`. CLI-42's confirmation applies when more than one item
-  would go, and `--force` means what it means on `forget` (DEP-60). As with
-  `forget --dropped`, no item uninstall hook runs, so `prune` takes no
-  `--accept-hooks`. Each removal prints `pruned <key>`. With nothing dropped it prints
+  would go. As with `forget --dropped`, no item uninstall hook runs, and no
+  DEP-60 dependents check applies: the dependency graph is built from the
+  catalog, which no longer lists a dropped item, so an installed item that
+  still requires one is already broken upstream and is left installed
+  (DEP-50). `prune` therefore takes neither `--accept-hooks` nor `--force`.
+  Each removal prints `pruned <key>`. With nothing dropped it prints
   `no dropped items; nothing to prune`. Under `--json` the result's `action`
   is `prune` and its `target` the filter (`*` without one), with outcome
   `removed` (the keys in `removed`) or `no-op`. Narrowing by item is

@@ -443,6 +443,12 @@ fn a_run_reports_and_logs_the_items_a_pruning_source_dropped() {
     assert!(sb.installed_agent().contains("one-one"), "dev upgraded");
     let log = std::fs::read_to_string(sb.mind_home.join("auto-update.log")).unwrap();
     assert!(log.contains("pruned agent:old"), "{log}");
+    assert_eq!(
+        sb.state()["unshown"][0]["pruned"],
+        serde_json::json!(["agent:old"]),
+        "{}",
+        sb.state()
+    );
 
     let r = sb.mind(&["recall"]);
     assert!(
