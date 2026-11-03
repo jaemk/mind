@@ -1336,6 +1336,40 @@ fn meld_hooks_see_the_enabled_profiles_and_item_reasons() {
 }
 
 #[test]
+fn replacing_remeld_hooks_see_only_the_new_selection() {
+    // spec: HOOK-142 PROF-40 -- a re-meld whose flags replace the recorded set
+    // shows its source hooks that set, not the old one plus the flags.
+    let sb = hooked("src");
+    let r = sb.mind_hooked(
+        &["meld", &sb.spec(), "--profile", "full", "--yes"],
+        &[],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    sb.take_hook_log();
+    let r = sb.mind_hooked(
+        &[
+            "meld",
+            &sb.spec(),
+            "--no-default-profile",
+            "--profile",
+            "basic",
+            "--yes",
+            "--force",
+        ],
+        &[],
+        None,
+    );
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let log = sb.take_hook_log();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("source install basic|"),
+        "{log:?}"
+    );
+}
+
+#[test]
 fn hook_vars_are_always_set_and_override_inherited_values() {
     // spec: HOOK-140 HOOK-142 -- with no profile install following
     // (`--register-only`) both are empty, never the inherited value.
