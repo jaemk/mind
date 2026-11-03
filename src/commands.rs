@@ -10499,15 +10499,11 @@ pub fn forget(
 
 /// `mind prune [<source>]` -- remove every installed item that is no longer
 /// part of a melded source: the `forget --dropped` set (CLI-245), narrowed to
-/// the items whose recorded source matches the `source` filter.
+/// the items whose recorded source matches the `source` filter. An item's
+/// uninstall hooks are read from its source's catalog, which no longer lists
+/// any of these, so none run and there is no hook consent to take.
 // spec: CLI-261
-pub fn prune(
-    paths: &Paths,
-    source: Option<&str>,
-    yes: bool,
-    force: bool,
-    accept: crate::hook::Accept,
-) -> Result<()> {
+pub fn prune(paths: &Paths, source: Option<&str>, yes: bool, force: bool) -> Result<()> {
     let manifest = Manifest::load(paths)?;
     if let Some(sel) = source {
         crate::resolve::validate_source_selector(sel)?;
@@ -10525,7 +10521,16 @@ pub fn prune(
     }
     let keys = dropped_item_keys(paths, &manifest, None, source)?;
     let target = source.unwrap_or("*");
-    forget_dropped(paths, "prune", manifest, keys, target, yes, force, accept)
+    forget_dropped(
+        paths,
+        "prune",
+        manifest,
+        keys,
+        target,
+        yes,
+        force,
+        crate::hook::Accept::default(),
+    )
 }
 
 /// Remove the CLI-245 dropped set `keys`, reporting under `action` (`forget`
@@ -12658,9 +12663,9 @@ fn upgrade_inner_scoped(
         applied_keys.push(installed.key().into());
         manifest.insert(installed);
     }
-    // spec: LIFE-57 -- after the upgrades, under the same answer. The item is
-    // gone from its source's catalog, so it has no uninstall hooks to run
-    // (HOOK-84), as with `forget`.
+    // spec: LIFE-57 -- after the upgrades, under the same answer. An item's
+    // uninstall hooks are read from its source's catalog, which no longer
+    // lists it, so none run, as with `forget` of a dropped item.
     let mut pruned: Vec<String> = Vec::new();
     for item in &prunes {
         let commit = registry

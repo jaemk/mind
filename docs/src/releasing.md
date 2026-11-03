@@ -123,6 +123,9 @@ The upgrade report lists them under `removed upstream, to prune`, and the
 upgrade's confirmation covers them. Without it, a dropped item stays installed
 and `recall` marks it "removed upstream" until the consumer runs `mind prune`.
 
+A pruned item's own uninstall hooks do not run, since the commit that dropped
+the item dropped its hooks too. Move any cleanup it needs into an update hook.
+
 `mind` prunes only what it installed and recorded. Files it never tracked,
 such as what an install script wrote before the source used `mind`, are yours
 to remove; an update hook can do it:

@@ -205,10 +205,12 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   has no clone prunes nothing, nor does an item the managed policy keeps the
   pass from (POL-12). The report lists the items under `removed upstream, to
   prune`, the pass's confirmation covers them (`--yes` answers it), and they
-  are removed after the pending upgrades are applied, each printing `pruned
-  <key>`. The item is gone from its source's catalog, so it runs no uninstall
-  hook (HOOK-84). `prune` absent or `false` leaves dropped items installed, as
-  before. Only items in the manifest are seen; files `mind` never recorded are
+  are removed after the pending upgrades are applied and before any profile
+  or new-item additions (PROF-21, LIFE-54) are installed, each printing
+  `pruned <key>`. No item uninstall hook runs: an item's hooks are read from
+  its source's catalog (HOOK-82), which no longer lists it, as with `forget
+  --dropped` (CLI-245). `prune` absent or `false` leaves dropped items
+  installed, as before. Only items in the manifest are seen; files `mind` never recorded are
   the source's own to remove, for example in an update hook.
 - `LIFE-58` An item the pass prunes is not reported by VER-65 as a drop, and
   does not earn CLI-245's `mind prune` hint. Under `--json` the pruned keys
