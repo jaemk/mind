@@ -1456,6 +1456,30 @@ mod tests {
         }
     }
 
+    /// The verb table at the top of docs/src/commands.md names every visible
+    /// top-level verb clap knows, so a new verb cannot ship without a row.
+    #[test]
+    fn the_commands_doc_lists_every_visible_verb() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/src/commands.md"),
+        )
+        .expect("read docs/src/commands.md");
+        let table: Vec<&str> = doc
+            .lines()
+            .skip_while(|l| !l.starts_with("| verb |"))
+            .take_while(|l| l.starts_with('|'))
+            .collect();
+        assert!(table.len() > 10, "found the verb table: {table:?}");
+        let cmd = Cli::command();
+        for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
+            let name = format!("`{}`", sub.get_name());
+            assert!(
+                table.iter().any(|row| row.contains(&name)),
+                "docs/src/commands.md's verb table has no row for {name}"
+            );
+        }
+    }
+
     /// The CLI-221 `details` slot is process-global state, so its whole risk
     /// surface is "what is in there when nobody put anything in there". All of
     /// it is asserted in ONE test on purpose: `build_error_envelope` TAKES the

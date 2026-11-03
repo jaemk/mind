@@ -134,6 +134,7 @@ source can declare its own; you can impose one with `meld --namespace`. See
 | unmeld | drop a source and, by default, uninstall its items |
 | learn | install an item |
 | forget | uninstall an item |
+| prune | uninstall the items a source no longer offers |
 | recall | list what is installed |
 | probe | browse and search what sources offer |
 | introspect | check for drift and broken links |

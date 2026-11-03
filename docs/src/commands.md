@@ -9,6 +9,7 @@ same text in the terminal. For the vocabulary, see [Core concepts](concepts.md).
 | [`unmeld`](#unmeld) | drop a source and uninstall its items |
 | [`learn`](#learn) | install items |
 | [`forget`](#forget) | uninstall items |
+| [`prune`](#prune) | uninstall items their sources no longer offer |
 | [`recall`](#recall) | list what is installed, or one item's details |
 | [`probe`](#probe) | browse and search what sources offer |
 | [`sync`](#sync) | fetch sources |
