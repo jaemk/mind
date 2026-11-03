@@ -7077,24 +7077,34 @@ pub(crate) fn install_source_profiles(
 /// `mind prune <source>` that removes them. Silent when there are none or
 /// they cannot be computed.
 fn note_profile_leftovers(paths: &Paths, source_name: &str) {
-    let found = (|| -> Result<Vec<String>> {
+    let found = (|| -> Result<(Vec<String>, bool)> {
         let registry = Registry::load(paths)?;
         let Some(source) = registry.find(source_name) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         };
         let manifest = Manifest::load(paths)?;
         let catalog = catalog::scan(paths, &registry)?;
         let graph = manifest_graph(&catalog, &manifest);
-        profile_leftovers(paths, &catalog, &manifest, &graph, source)
+        Ok((
+            profile_leftovers(paths, &catalog, &manifest, &graph, source)?,
+            declares_prune(paths, source),
+        ))
     })()
     .unwrap_or_default();
+    let (found, prunes) = found;
     if found.is_empty() {
         return;
     }
     let safe = strip_ansi(source_name);
+    // spec: PROF-39 -- a pruning source's next upgrade removes them too.
+    let also = if prunes {
+        " (or `mind upgrade`, since the source declares `prune`)"
+    } else {
+        ""
+    };
     println!(
         "note: {} item(s) of {safe} are no longer in its enabled profiles: {}; run `mind prune {}` \
-         to remove them",
+         to remove them{also}",
         found.len(),
         found
             .iter()

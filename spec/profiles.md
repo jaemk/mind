@@ -243,7 +243,8 @@ items only the old set wanted are then leftovers, which `prune` removes.
   so a later `forget --profile` (PROF-25) reads current reasons. A set left empty clears
   both recorded fields, as PROF-25 does. Nothing is uninstalled by the
   re-meld: it prints how many leftovers (PROF-37) the source now has and
-  names `mind prune <source>` (shell-quoted, CLI-225). A declined re-meld
+  names `mind prune <source>` (shell-quoted, CLI-225), and also `mind
+  upgrade` when the source declares `prune` (PROF-39). A declined re-meld
   records nothing (PROF-19).
 - `PROF-41` On a curator-owned source (STO-82), the profile-routed entry's
   enabled set is the source's whole recorded set: applying its `curate`

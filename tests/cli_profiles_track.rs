@@ -1673,7 +1673,13 @@ fn upgrade_prunes_leftovers_a_remeld_left_on_a_pruning_source() {
     // not only this pass's departures, and are not upgraded first.
     let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
     sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
-    sb.ok(&["meld", &sb.spec(), "--yes", "--profile", "basic"]);
+    let r = sb.ok(&["meld", &sb.spec(), "--yes", "--profile", "basic"]);
+    assert!(
+        r.stdout
+            .contains("(or `mind upgrade`, since the source declares `prune`)"),
+        "{}",
+        r.stdout
+    );
     sb.commit_file(
         "agents/planner.md",
         "---\nname: planner\ndescription: Planner agent\n---\n# planner v2\n",
