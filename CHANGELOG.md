@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-02
+
+### Added
+
+- `mind prune [<source>]` removes every installed item that is no longer part
+  of a melded source: its source no longer offers it, or the source was
+  unmelded with `--keep-items`. The optional filter is the one `sync` takes,
+  matched against the source each item came from. It is the same operation as
+  `forget --dropped`, which still narrows by item, and the hint `upgrade`
+  prints for a dropped item now names `mind prune`.
+- `[source] prune = true` in a source's `mind.toml` makes `upgrade` (and
+  `sync --upgrade`, `curate`, `auto-update run`) remove the installed items
+  the new commit no longer offers, listed in the report and covered by the
+  upgrade's confirmation. Under `--json` the pruned keys are in `removed`.
+  Older `mind` versions reject the key, so set `min-mind-version = "0.45"`.
+- `mind upgrade <source>`: a value that matches no installed item but does
+  match a melded source upgrades that source, as `--source` does.
+
+### Changed
+
+- `mind upgrade <name>` where `<name>` matches no installed item but names a
+  melded source now upgrades that source instead of reporting everything up to
+  date. A name that matches an installed item keeps its meaning, with a note
+  when it also names a source.
+- A `ref` pin of 4 to 39 hex digits is read as an abbreviated commit sha. A
+  branch or tag with such a name is pinned with `--pin branch=<name>` or
+  `--pin tag=<name>`.
+
 ### Fixed
 
 - A `ref` or `follow-branch` pin name is fetched only as a branch
@@ -2304,7 +2332,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.44.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.45.0...HEAD
+[0.45.0]: https://github.com/jaemk/mind/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/jaemk/mind/compare/v0.43.0...v0.44.0
 [0.43.0]: https://github.com/jaemk/mind/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/jaemk/mind/compare/v0.41.0...v0.42.0
