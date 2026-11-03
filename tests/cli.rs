@@ -28752,6 +28752,33 @@ fn upgrade_prunes_items_a_pruning_source_dropped() {
 }
 
 #[test]
+fn a_pruning_source_prunes_only_its_own_items() {
+    // spec: LIFE-57 -- `prune` is read from each item's own source: one
+    // source declaring it leaves another source's dropped items installed.
+    let (sb, tools) = melded_two_sources();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "deploy"]).success);
+    write(&sb.source.join("mind.toml"), "[source]\nprune = true\n");
+    sb.remove_and_commit("agents/dev.md");
+    tools.remove_and_commit("skills/deploy/SKILL.md");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert!(!r.stdout.contains("pruned skill:deploy"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:deploy".to_string()]);
+    assert!(sb.claude_home.join("skills/deploy").exists());
+
+    let recall = sb.mind(&["recall"]);
+    let deploy = recall
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:deploy"))
+        .unwrap_or_default();
+    assert!(deploy.contains("removed upstream"), "{}", recall.stdout);
+}
+
+#[test]
 fn upgrade_keeps_dropped_items_of_a_source_that_does_not_prune() {
     // spec: LIFE-57
     for toml in [None, Some("[source]\nprune = false\n")] {
