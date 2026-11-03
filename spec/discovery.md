@@ -646,7 +646,9 @@ tree, not the repo's history.
   would also match other namespaces such as GitHub's `refs/pull/<n>/head`. A
   `ref` pin tries the tag first (git's own order); a `follow-branch` pin asks
   only for the branch. A value spelled `refs/heads/...` or `refs/tags/...` is
-  used as given. Any other `refs/...` value is an `InvalidRef` error. A
+  used as given, on the first clone as on a sync, except that a
+  `follow-branch` pin spelled `refs/tags/...` is an `InvalidRef` error. Any
+  other `refs/...` value is an `InvalidRef` error. A
   `ref`, `follow-branch`, or `pin-tag` value holding refspec syntax (`:` or
   `*`) is an `InvalidRef` error before any clone or fetch. A `ref` pin of 4
   to 39 hex digits is an abbreviated commit sha: it resolves only against
