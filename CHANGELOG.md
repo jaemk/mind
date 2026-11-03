@@ -19,6 +19,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A source declaring `[source] prune = true` has the upgrade pass remove its
   profile leftovers too, listed under `no longer in the enabled profiles, to
   prune`.
+- `meld --json` and `curate --json` list the profile leftovers a changed
+  profile set left behind in `profile_leftovers`.
 
 ### Changed
 
