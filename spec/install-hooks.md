@@ -1169,7 +1169,8 @@ hooks to do different setup depending on which profiles the consumer enabled.
 - `HOOK-141` The values describe the profile state the operation leaves behind:
   - While a profile install is applied (`meld`, a re-meld, `learn <source>
     --profile`, `curate`, an `upgrade` addition per PROF-21), `MIND_PROFILES`
-    is the recorded set plus the profiles being enabled. An installed item's
+    is the recorded set plus the profiles being enabled, or the new set alone
+    when the install replaces the recorded one (PROF-40, PROF-41). An installed item's
     `MIND_ITEM_PROFILES` includes the profiles it is being installed for. For a
     closure item, those are the profiles of the member that pulled it in
     (PROF-6).
@@ -1182,7 +1183,8 @@ hooks to do different setup depending on which profiles the consumer enabled.
 - `HOOK-142` A source's install hooks at `meld` see the selection the meld is
   about to apply: the profile flags plus, on an interactive meld, the PROF-13
   picker's answer. The picker is therefore asked before the hooks run. A re-meld's
-  re-offered hooks see the re-meld's selection (PROF-16). The value is the
+  re-offered hooks see the re-meld's selection (PROF-16): added to the
+  recorded set, or alone when the flags replace it (PROF-40). The value is the
   selection, not the outcome. On an interactive meld the hooks run after the
   unified plan is answered (HOOK-183), and declining it (`n`) runs none of them.
   Elsewhere (`--accept-hooks`, a nested curated source) they run before the

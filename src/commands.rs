@@ -9124,7 +9124,12 @@ pub fn remeld(
             let hook_env = meld_hook_env(
                 mindfile.as_ref().and_then(|m| m.profiles.as_ref()),
                 remeld_selection.as_ref().map(|(sel, _)| sel),
-                registry.sources[idx].profiles.as_ref(),
+                // spec: HOOK-142 PROF-40 -- a replacing selection is the
+                // whole set the hooks see, not an addition to the recorded one.
+                match &remeld_selection {
+                    Some((_, true)) => None,
+                    _ => registry.sources[idx].profiles.as_ref(),
+                },
             );
             // spec: HOOK-180 HOOK-183 -- as for a fresh meld, an interactive
             // re-meld lists the pending hooks in its plan instead of asking
