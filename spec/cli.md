@@ -838,8 +838,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   CLI-63/CLI-65 but does match a melded source under `sync`'s filter
   (CLI-231) is read as `--source <filter>` (CLI-244): `mind upgrade
   owner/repo` syncs and upgrades that source. One that matches an installed
-  item keeps its CLI-63 meaning; when it also matches a melded source, a note
-  on stderr names the `mind upgrade --source <filter>` spelling. One that
+  item keeps its CLI-63 meaning; when it also matches a melded source and is
+  not a glob, a note on stderr names the `mind upgrade --source <filter>`
+  spelling. One that
   matches neither is unchanged (CLI-64: up to date, exit 0). With `--source`
   given, the positional is always an item filter.
 - `CLI-65` When the `item` filter's name is a glob (`*`, `?`, `[`), `upgrade`

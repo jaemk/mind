@@ -11758,6 +11758,11 @@ pub fn upgrade_target(
         Err(_) => false,
     };
     if names_item {
+        // A glob (`mind upgrade '*'`) was written as an item filter; only a
+        // plain name can be meant as the source it also names.
+        if crate::resolve::is_glob(target) {
+            return Ok((item, source));
+        }
         eprintln!(
             "note: {} also names a melded source; `mind upgrade --source {}` upgrades that source",
             strip_ansi(target),

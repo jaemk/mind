@@ -213,8 +213,9 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 - `LIFE-58` An item the pass prunes is not reported by VER-65 as a drop, and
   does not earn CLI-245's `mind prune` hint. Under `--json` the pruned keys
   are in the result's `removed` (in `sync --upgrade`'s result too), and an
-  `upgrade` that pruned without installing anything has outcome `pruned`. A `--json` run without `--yes` that would
-  prune refuses with `ConfirmationRequired` (LIFE-45), removing nothing.
+  `upgrade` that pruned without installing anything has outcome `pruned`. A
+  `--json` run without `--yes` that would prune refuses with
+  `ConfirmationRequired` (LIFE-45), removing nothing.
 
 ## Non-interactive confirmation (`--json`)
 

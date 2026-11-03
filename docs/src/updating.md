@@ -27,8 +27,8 @@ mind upgrade --yes                 # apply without asking
 source unfetched and unchanged. Unlike `'owner/repo#*'`, it also offers items
 the source added to an enabled install profile. Add an item to narrow it further
 (`mind upgrade skill:review --source owner/repo`). A `--source` filter that
-matches no melded source is an error; an item filter that matches no installed
-item reports that everything is up to date.
+matches no melded source is an error; an item filter that matches neither an
+installed item nor a melded source reports that everything is up to date.
 
 A plain `mind upgrade <name>` is read as an item filter first. When it matches
 no installed item but does match a melded source, it upgrades that source as
