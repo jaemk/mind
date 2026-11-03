@@ -7636,7 +7636,40 @@ fn profile_leftovers(
         .filter(|c| c.source == source.name)
         .map(|c| format!("{}:{}", c.kind.as_str(), c.name))
         .collect();
-    let candidates = crate::profile::leftover_candidates(&of_source, &offered, &expansion);
+    let mut candidates = crate::profile::leftover_candidates(&of_source, &offered, &expansion);
+    // spec: PROF-37 -- the enabled set also wants what its members require,
+    // including a member not installed yet (an addition this pass or a later
+    // upgrade installs): pruning such an item would only have that install
+    // bring it back. A member the consumer forgot (in the snapshot, not
+    // installed, PROF-23) wants nothing.
+    let snapshot: BTreeSet<&String> = source.profile_snapshot.iter().flatten().collect();
+    let roots: Vec<usize> = catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.source == source.name)
+        .filter(|(_, c)| {
+            let bare = format!("{}:{}", c.kind.as_str(), c.name);
+            expansion.keys.contains_key(&bare)
+                && (!snapshot.contains(&bare)
+                    || manifest
+                        .items
+                        .get(c.key().as_str())
+                        .is_some_and(|m| m.source == source.name))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let required: BTreeSet<String> = crate::deps::reachable(catalog, &roots, read_item_text)
+        .into_iter()
+        .map(|i| &catalog[i])
+        .filter(|c| c.source == source.name)
+        .map(|c| format!("{}:{}", c.kind.as_str(), c.name))
+        .collect();
+    candidates.retain(|k| {
+        manifest
+            .items
+            .get(k.as_str())
+            .is_none_or(|m| !required.contains(&format!("{}:{}", m.kind.as_str(), m.bare_name)))
+    });
     let (mut remove, _kept) = keep_needed(graph, candidates);
     remove.sort();
     Ok(remove)
@@ -12857,13 +12890,15 @@ fn upgrade_inner_scoped(
                 .unwrap_or_default()
         })
         .collect();
+    // The hooks are read from the source's current catalog, so the plan names
+    // its current commit, as the run below and `forget` do.
     for (item, item_hooks) in left_prunes.iter().zip(&left_hooks) {
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
         hooks.extend(item_uninstall_plan(
-            paths,
-            item,
-            item_hooks,
-            &item.commit,
-            accept,
+            paths, item, item_hooks, &commit, accept,
         ));
     }
     // spec: CLI-60 CLI-259 HOOK-182 -- without `--yes` the upgrades are

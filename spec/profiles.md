@@ -212,7 +212,10 @@ items only the old set wanted are then leftovers, which `prune` removes.
   enabled set: its recorded names the source still declares, or none for a
   source that is not profile-tracked. A candidate another installed item
   depends on is not a leftover (DEP-60), so a closure item of a member that
-  stays enabled is kept. An item the source no longer offers is a dropped item
+  stays enabled is kept. Neither is a candidate a member of that expansion
+  requires (DEP-1, DEP-4), even a member not installed yet (a PROF-21
+  addition), since installing that member would bring it back; a member the
+  consumer forgot (PROF-23) requires nothing here. An item the source no longer offers is a dropped item
   (CLI-245), not a leftover. A source whose root `mind.toml` no longer
   declares any profile has no leftovers, since dropping the table says
   nothing about which items a consumer wants. When the enabled set does not
