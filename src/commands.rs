@@ -10590,11 +10590,14 @@ fn dropped_item_keys(
         .filter(|m| source.is_none_or(|sel| crate::resolve::source_matches_glob(&m.source, sel)))
         .filter(|m| match registry.find(&m.source) {
             None => true,
+            // spec: DSC-123 -- an item skipped for an unreadable manifest is
+            // still shipped, not dropped.
             Some(s) => {
                 clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
                     && !catalog.iter().any(|it| {
                         it.source == m.source && it.kind == m.kind && it.name == m.bare_name
                     })
+                    && !catalog::dropped_as_unreadable(&m.source, m.kind, &m.bare_name)
             }
         })
         .map(|m| m.key().into())
@@ -12292,6 +12295,13 @@ fn upgrade_inner_scoped(
             // about what it dropped.
             if let Some(s) = registry.find(&installed.source)
                 && !unscannable.contains(&s.name)
+                // spec: DSC-123 -- skipped for an unreadable manifest, so
+                // still shipped.
+                && !catalog::dropped_as_unreadable(
+                    &installed.source,
+                    installed.kind,
+                    &installed.bare_name,
+                )
                 && clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
                 && *prune_sources
                     .entry(s.name.clone())
@@ -13956,8 +13966,13 @@ pub fn recall(
                     "installed @ {} {}",
                     short(&m.commit),
                     // spec: CLI-261 -- point at the command that clears it, as
-                    // the outdated marker points at `mind upgrade`.
-                    out.yellow("(removed upstream; run mind prune)")
+                    // the outdated marker points at `mind upgrade`. DSC-123: an
+                    // item skipped for an unreadable manifest is not removed.
+                    if catalog::dropped_as_unreadable(&m.source, m.kind, &m.bare_name) {
+                        out.yellow("(its manifest upstream is unreadable)")
+                    } else {
+                        out.yellow("(removed upstream; run mind prune)")
+                    }
                 ),
             ]);
         }

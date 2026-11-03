@@ -274,6 +274,12 @@ run = "make build"
   read is the item's own, not the one that declared it. A root `[[items]]` entry
   that declares hooks is authoritative (HOOK-132) and the item manifest is never
   read at all, so it cannot be dropped for one.
+- `DSC-123` An item DSC-98 drops is still shipped by its source, so an
+  installed copy of it is not "no longer part of" the source: an upgrade of a
+  source that declares `prune` (lifecycle.md LIFE-57), `mind prune`, and
+  `forget --dropped` (cli.md CLI-245, CLI-261) leave it installed, and
+  `recall` marks it `(its manifest upstream is unreadable)` instead of
+  `(removed upstream; run mind prune)`.
 - `DSC-99` An item whose source has NO effective namespace prefix
   (namespacing.md) but whose bare name contains `:` is warned about, naming the
   item and its source. The name is still installed as written: `:` is

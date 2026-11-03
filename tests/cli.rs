@@ -28873,3 +28873,34 @@ fn an_upgrade_prunes_nothing_from_a_source_whose_tree_is_missing() {
         vec!["agent:dev".to_string(), "skill:review".to_string()]
     );
 }
+
+#[test]
+fn an_item_with_an_unreadable_manifest_is_not_pruned() {
+    // spec: DSC-123 -- the scan drops an item whose own mind.toml will not
+    // parse (DSC-98), but the source still ships it: neither an upgrade of a
+    // pruning source nor `mind prune` removes it, and `recall` does not call
+    // it removed upstream.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    write(&sb.source.join("mind.toml"), "[source]\nprune = true\n");
+    sb.write_and_commit("skills/review/mind.toml", "bogus = 1\n");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("skipping skill 'review'"), "{}", r.stderr);
+    assert!(!r.stdout.contains("pruned"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+
+    let r = sb.mind(&["prune", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+    assert!(sb.claude_home.join("skills/review").exists());
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.stdout.contains("(its manifest upstream is unreadable)"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("removed upstream"), "{}", r.stdout);
+}

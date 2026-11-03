@@ -16,7 +16,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matched against the source each item came from. It is the same operation as
   `forget --dropped`, which still narrows by item. The hint `upgrade` prints
   for a dropped item and `recall`'s `(removed upstream)` marker now name
-  `mind prune`.
+  `mind prune`. An item the scan skips because its own `mind.toml` will not
+  parse is still shipped, so neither `prune` nor `forget --dropped` removes
+  it, and `recall` marks it `(its manifest upstream is unreadable)`.
 - `[source] prune = true` in a source's `mind.toml` makes `upgrade` (and
   `sync --upgrade`, `curate`, `auto-update run`) remove the installed items
   the new commit no longer offers, listed in the report and covered by the

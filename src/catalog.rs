@@ -328,6 +328,32 @@ pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
         .is_some_and(|d| d.to_lowercase().contains(&q))
 }
 
+thread_local! {
+    /// Stable identities `(source, kind, bare name)` a scan on this thread
+    /// dropped for an unreadable item manifest (DSC-98).
+    static UNREADABLE: std::cell::RefCell<std::collections::HashSet<(String, ItemKind, String)>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn record_unreadable(source: &str, kind: ItemKind, name: &str) {
+    UNREADABLE.with(|u| {
+        u.borrow_mut()
+            .insert((source.to_string(), kind, name.to_string()))
+    });
+}
+
+/// Whether a scan in this process dropped the item `(source, kind, name)`
+/// because its own manifest could not be read (DSC-98). The source still
+/// ships such an item, so its absence from the catalog is not a removal
+/// upstream and nothing prunes it (LIFE-57, CLI-245).
+// spec: DSC-123
+pub fn dropped_as_unreadable(source: &str, kind: ItemKind, name: &str) -> bool {
+    UNREADABLE.with(|u| {
+        u.borrow()
+            .contains(&(source.to_string(), kind, name.to_string()))
+    })
+}
+
 /// Scan every melded source for installable items.
 ///
 /// A source whose linked working tree has vanished
@@ -1665,6 +1691,7 @@ fn item_declared_hooks(
             Ok(_) => {}
             // spec: DSC-98 DSC-102
             Err(e) => {
+                record_unreadable(&source.name, kind, name);
                 crate::render::scan_warn(format!(
                     "warning: skipping {} '{}' in source '{}': {e}",
                     kind.as_str(),
