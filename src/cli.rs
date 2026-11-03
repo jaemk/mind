@@ -503,7 +503,7 @@ EXAMPLES:
     mind forget 'local/projects/agents#skill:*'      # every skill from a local source
     mind forget owner/repo --profile full
     mind forget --unmanaged
-    mind forget --dropped
+    mind forget --dropped                            # the same as `mind prune`
 
     A source goes before `#`; `mind recall --sources` lists the identities (a
     local path melds as `local/<parent dir>/<dir>`). Quote a glob so the shell
@@ -547,6 +547,43 @@ EXAMPLES:
         /// `--yes` also skips this same prompt, but additionally skips the
         /// separate confirmation shown when a glob would remove more than one
         /// item; `--force` alone skips only the dependents prompt.
+        // spec: DEP-60 CLI-42
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        // spec: CLI-227 CLI-250
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
+    },
+
+    /// Remove installed items that are no longer part of a melded source.
+    ///
+    /// Removes every installed item its source no longer offers (marked
+    /// "removed upstream" by `recall`), or whose source is no longer melded
+    /// (`unmeld --keep-items`). An item of a melded source whose clone is
+    /// missing is kept. The same set as `forget --dropped`.
+    // spec: CLI-261
+    #[command(after_help = "\
+EXAMPLES:
+    mind prune
+    mind prune --yes
+    mind prune owner/repo                            # only one source's dropped items
+    mind prune '*skills'                             # sources matching a glob
+
+    To narrow by item, use `mind forget --dropped <item>`. A source can prune
+    for you: `[source] prune = true` in its mind.toml makes `mind upgrade`
+    remove the items a new commit no longer offers.")]
+    Prune {
+        /// Only prune items from the source(s) matching this filter: an exact
+        /// name, a trailing suffix like `repo` or `owner/repo`, or a glob, the
+        /// filter `sync [source]` takes. It matches the source an item was
+        /// installed from, so a source unmelded with `--keep-items` still
+        /// matches.
+        source: Option<String>,
+
+        /// Skip the dependents confirmation when removing a single item that
+        /// other installed items depend on. The global `--yes` also skips the
+        /// confirmation shown when more than one item would go.
         // spec: DEP-60 CLI-42
         #[arg(short = 'f', long)]
         force: bool,
@@ -636,6 +673,12 @@ EXAMPLES:
         /// spans more than one source, a disclosure names every matched
         /// source before the install-hook re-run pass -- even when nothing is
         /// pending -- and this disclosure is NOT suppressed by `--yes`.
+        /// A value that matches no installed item but does match a melded
+        /// source (`mind upgrade owner/repo`) upgrades that source, the same
+        /// scope as the source filter below; when it matches both, the item
+        /// wins.
+        // spec: CLI-63 CLI-262
+        #[arg(value_name = "ITEM|SOURCE")]
         item: Option<String>,
 
         /// Only sync and upgrade sources matching this filter: an exact name,

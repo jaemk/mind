@@ -28493,3 +28493,255 @@ fn forget_dropped_keeps_items_of_a_source_whose_clone_is_missing() {
     assert!(r.stdout.contains("no dropped items"), "{}", r.stdout);
     assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
 }
+
+// ---------------------------------------------------------------------------
+// prune (CLI-261) and source-declared prune on upgrade (LIFE-57, LIFE-58)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prune_removes_items_no_longer_part_of_a_melded_source() {
+    // spec: CLI-261
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    sb.remove_and_commit("agents/dev.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let r = sb.mind(&["prune"]);
+    assert!(r.success, "prune failed: {} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+    assert!(!sb.claude_home.join("agents/dev.md").exists());
+    assert!(sb.claude_home.join("skills/review").exists());
+
+    let r = sb.mind(&["prune"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("no dropped items; nothing to prune"),
+        "{}",
+        r.stdout
+    );
+    let r = sb.mind(&["prune", "--json"]);
+    assert!(r.success, "{}", r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("JSON");
+    assert_eq!(v["action"], "prune", "{v}");
+    assert_eq!(v["outcome"], "no-op", "{v}");
+}
+
+#[test]
+fn prune_confirms_several_and_matches_an_unmelded_source() {
+    // spec: CLI-261
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(
+        sb.mind(&["unmeld", "agents", "--keep-items", "--yes"])
+            .success
+    );
+
+    let r = sb.mind(&["prune"]);
+    assert!(!r.success, "a multi-item prune must confirm: {}", r.stdout);
+    assert!(
+        r.stdout.contains("prune would remove 2 item(s)"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(installed_keys(&sb).len(), 2, "nothing removed on refusal");
+
+    // The filter matches the source the items were installed from, though
+    // it is no longer melded.
+    let r = sb.mind(&["prune", "agents", "--json", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("JSON");
+    assert_eq!(v["action"], "prune", "{v}");
+    assert_eq!(v["target"], "agents", "{v}");
+    assert_eq!(
+        v["removed"],
+        serde_json::json!(["agent:dev", "skill:review"]),
+        "{v}"
+    );
+    assert!(installed_keys(&sb).is_empty());
+}
+
+#[test]
+fn prune_is_narrowed_to_the_sources_a_filter_matches() {
+    // spec: CLI-261
+    let (sb, tools) = melded_two_sources();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "deploy"]).success);
+    sb.remove_and_commit("agents/dev.md");
+    tools.remove_and_commit("skills/deploy/SKILL.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let r = sb.mind(&["prune", "*tools"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned skill:deploy"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["agent:dev".to_string()]);
+
+    // A filter naming no source is an error, not a silent no-op.
+    let r = sb.mind(&["prune", "nosuchsource"]);
+    assert!(!r.success, "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["agent:dev".to_string()]);
+}
+
+#[test]
+fn upgrade_takes_a_plain_source_when_no_installed_item_matches() {
+    // spec: CLI-262
+    let (sb, tools) = melded_two_sources();
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["learn", "deploy"]).success);
+    sb.edit_source();
+    tools.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Ship the build\n---\n# deploy skill\nedited\n",
+    );
+
+    // `tools` names no installed item, so it scopes the pass to that source.
+    let r = sb.mind(&["upgrade", "tools", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("upgraded skill:deploy"), "{}", r.stdout);
+    assert!(!r.stdout.contains("upgraded skill:review"), "{}", r.stdout);
+
+    // An item ref keeps its meaning (CLI-63).
+    let r = sb.mind(&["upgrade", "review", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("upgraded skill:review"), "{}", r.stdout);
+
+    // A ref matching neither is still up to date, exit 0 (CLI-64).
+    let r = sb.mind(&["upgrade", "nothing-here"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("everything is up to date"),
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn upgrade_prefers_an_installed_item_over_a_source_of_the_same_name() {
+    // spec: CLI-262
+    let (sb, tools) = melded_two_sources();
+    // A skill named like the `tools` source, installed from `agents`.
+    sb.write_and_commit(
+        "skills/tools/SKILL.md",
+        "---\nname: tools\ndescription: t\n---\n# tools skill\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    assert!(sb.mind(&["learn", "skill:tools"]).success);
+    assert!(sb.mind(&["learn", "deploy"]).success);
+    tools.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Ship the build\n---\n# deploy skill\nedited\n",
+    );
+
+    let r = sb.mind(&["upgrade", "tools", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("also names a melded source"),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("mind upgrade --source 'tools'"),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stdout.contains("upgraded skill:deploy"), "{}", r.stdout);
+}
+
+/// A sandbox with `dev` and `review` installed, then `agents/dev.md` removed
+/// upstream in a commit that also writes `mind_toml` (when given).
+fn dropped_upstream(mind_toml: Option<&str>) -> Sandbox {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    if let Some(text) = mind_toml {
+        write(&sb.source.join("mind.toml"), text);
+    }
+    sb.remove_and_commit("agents/dev.md");
+    sb
+}
+
+#[test]
+fn upgrade_prunes_items_a_pruning_source_dropped() {
+    // spec: LIFE-57
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("1 item removed upstream, to prune"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+    assert!(!sb.claude_home.join("agents/dev.md").exists());
+    assert!(sb.claude_home.join("skills/review").exists());
+
+    let again = sb.mind(&["upgrade", "--yes"]);
+    assert!(again.success, "{}", again.stderr);
+    assert!(
+        again.stdout.contains("everything is up to date"),
+        "{}",
+        again.stdout
+    );
+}
+
+#[test]
+fn upgrade_keeps_dropped_items_of_a_source_that_does_not_prune() {
+    // spec: LIFE-57
+    for toml in [None, Some("[source]\nprune = false\n")] {
+        let sb = dropped_upstream(toml);
+        let r = sb.mind(&["upgrade", "--yes"]);
+        assert!(r.success, "upgrade failed: {} {}", r.stdout, r.stderr);
+        assert!(!r.stdout.contains("prune"), "{toml:?}: {}", r.stdout);
+        assert_eq!(
+            installed_keys(&sb),
+            vec!["agent:dev".to_string(), "skill:review".to_string()],
+            "{toml:?}"
+        );
+        assert!(sb.claude_home.join("agents/dev.md").exists(), "{toml:?}");
+    }
+}
+
+#[test]
+fn an_upgrade_item_filter_narrows_what_is_pruned() {
+    // spec: LIFE-57
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let r = sb.mind(&["upgrade", "review", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("pruned"), "{}", r.stdout);
+    assert_eq!(installed_keys(&sb).len(), 2, "{}", r.stdout);
+
+    let r = sb.mind(&["upgrade", "agent:*", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.stdout);
+}
+
+#[test]
+fn an_upgrade_prune_is_confirmed_and_reported_under_json() {
+    // spec: LIFE-58
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let r = sb.mind(&["upgrade", "--json"]);
+    assert!(!r.success, "a prune must be confirmed: {}", r.stdout);
+    assert_eq!(installed_keys(&sb).len(), 2, "nothing removed on refusal");
+
+    let r = sb.mind(&["upgrade", "--json", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("JSON");
+    assert_eq!(v["outcome"], "pruned", "{v}");
+    assert_eq!(v["removed"], serde_json::json!(["agent:dev"]), "{v}");
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}
+
+#[test]
+fn sync_upgrade_prunes_and_reports_the_pruned_keys_under_json() {
+    // spec: LIFE-57 LIFE-58
+    let sb = dropped_upstream(Some("[source]\nprune = true\n"));
+    let r = sb.mind(&["sync", "--upgrade", "--json", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("JSON");
+    assert_eq!(v["action"], "sync", "{v}");
+    assert_eq!(v["removed"], serde_json::json!(["agent:dev"]), "{v}");
+    assert_eq!(installed_keys(&sb), vec!["skill:review".to_string()]);
+}

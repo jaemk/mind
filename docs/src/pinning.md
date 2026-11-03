@@ -89,7 +89,9 @@ is skipped in favor of the next-highest one in range.
 breaking: it drops an installed item, changes an installed item's kind, or
 removes the target of a `{{ns:}}` reference. The warning does not stop the
 upgrade. A dropped item stays installed, so the warning repeats until you
-remove it with `mind forget --dropped`.
+remove it with `mind prune`. A source that declares `prune = true` has
+`upgrade` remove it for you, with no warning (see
+[Remove the items you drop](releasing.md#remove-the-items-you-drop)).
 
 A release outside the range, such as `2.0.0` under `^1.2` or `<2.0`, is a
 breaking release. `upgrade` lists it and does not apply it unless you accept:

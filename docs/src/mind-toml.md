@@ -61,6 +61,7 @@ follow-branch = "main"                   # pin: track a branch ...
 roots = ["packages"]                     # scan under these dirs, not the repo root
 ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
 # history = "full"                        # clone the whole history, not just the tip
+# prune = true                            # upgrade removes the items a new commit dropped
 ```
 
 - **`namespace`** (previously `prefix`): every item installs as `<namespace>:<name>`
@@ -133,6 +134,13 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   the next `meld` or `sync` deepens the clone, and it stays complete. An older
   `mind` rejects the key, so set `min-mind-version` alongside. A consumer can
   ask for the same on any source with `mind meld --full-history`.
+- **`prune`**: `true` makes `mind upgrade` remove each installed item of the
+  source that the commit it upgrades to no longer offers, under the upgrade's
+  confirmation. Read from the commit the source is on. Default `false`: a
+  dropped item stays installed until the consumer runs `mind prune`. `mind`
+  sees only the items it recorded; remove anything else in an update hook. An
+  older `mind` rejects the key, so set `min-mind-version` alongside. See
+  [Remove the items you drop](releasing.md#remove-the-items-you-drop).
 
 ## `[[hooks]]` - lifecycle hooks
 

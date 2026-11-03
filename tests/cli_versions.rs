@@ -708,17 +708,46 @@ fn a_compatible_move_that_drops_or_rekinds_an_item_is_warned_about() {
         sb.installed_agent().contains("two"),
         "the upgrade went ahead"
     );
-    // spec: CLI-245 -- a drop points at the command that clears it.
-    assert!(r.stderr.contains("mind forget --dropped"), "{}", r.stderr);
-    let f = sb.mind(&["forget", "--dropped", "--yes"]);
+    // spec: CLI-245 CLI-261 -- a drop points at the command that clears it.
+    assert!(r.stderr.contains("mind prune"), "{}", r.stderr);
+    let f = sb.mind(&["prune", "--yes"]);
     assert!(f.success, "{}", f.stderr);
-    assert!(f.stdout.contains("forgot agent:gone"), "{}", f.stdout);
+    assert!(f.stdout.contains("pruned agent:gone"), "{}", f.stdout);
     let again = sb.mind(&["upgrade", "--yes"]);
     assert!(
         !again.stdout.contains("drops agent:gone"),
         "{}",
         again.stdout
     );
+}
+
+#[test]
+fn a_release_that_drops_an_item_of_a_pruning_source_prunes_it_without_a_warning() {
+    // spec: LIFE-57 LIFE-58
+    let sb = Sandbox::new("ver-prune");
+    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    release(&sb, "one-zero", "v1.0.0");
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
+            .success
+    );
+
+    write_file(
+        &sb.source.join("mind.toml"),
+        &format!("{RELEASE_TAGS}prune = true\n"),
+    );
+    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
+    release(&sb, "one-one", "v1.1.0");
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("pruned agent:gone"), "{}", r.stdout);
+    assert!(!r.stdout.contains("looks breaking"), "{}", r.stdout);
+    assert!(!r.stderr.contains("mind prune"), "{}", r.stderr);
+    assert!(sb.installed_agent().contains("two"), "{}", r.stdout);
 }
 
 #[test]
@@ -772,7 +801,7 @@ fn an_accepted_breaking_release_is_not_warned_as_looking_breaking() {
     assert!(sb.installed_agent().contains("two"), "{}", r.stdout);
     assert!(!r.stdout.contains("looks breaking"), "{}", r.stdout);
     // spec: CLI-245 -- the dropped item still points at its remover.
-    assert!(r.stderr.contains("mind forget --dropped"), "{}", r.stderr);
+    assert!(r.stderr.contains("mind prune"), "{}", r.stderr);
 }
 
 #[test]

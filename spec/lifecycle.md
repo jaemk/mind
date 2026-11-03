@@ -193,6 +193,29 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   items it proposed) and `ignored_new_items` (those `--ignore-new` recorded),
   each entry an object with `key` and `source`; both are omitted when empty.
 
+### Items a source dropped
+
+- `LIFE-57` A source whose `mind.toml`, at the commit the source is on,
+  declares `[source] prune = true` has its dropped items removed by the
+  upgrade pass: every installed item of the source with no catalog item of
+  the same stable identity (source, kind, bare name). This applies in every
+  upgrade pass (`upgrade`, `upgrade --source`, `sync --upgrade`, `curate`,
+  `auto-update`), narrowed by the pass's item filter, source scope, and key
+  scope like the rest of it. A source that could not be scanned (CLI-211) or
+  has no clone prunes nothing, nor does an item the managed policy keeps the
+  pass from (POL-12). The report lists the items under `removed upstream, to
+  prune`, the pass's confirmation covers them (`--yes` answers it), and they
+  are removed after the pending upgrades are applied, each printing `pruned
+  <key>`. The item is gone from its source's catalog, so it runs no uninstall
+  hook (HOOK-84). `prune` absent or `false` leaves dropped items installed, as
+  before. Only items in the manifest are seen; files `mind` never recorded are
+  the source's own to remove, for example in an update hook.
+- `LIFE-58` An item the pass prunes is not reported by VER-65 as a drop, and
+  does not earn CLI-245's `mind prune` hint. Under `--json` the pruned keys
+  are in the result's `removed` (in `sync --upgrade`'s result too), and an
+  `upgrade` that pruned without installing anything has outcome `pruned`. A `--json` run without `--yes` that would
+  prune refuses with `ConfirmationRequired` (LIFE-45), removing nothing.
+
 ## Non-interactive confirmation (`--json`)
 
 - `LIFE-45` `--json` is always treated as a non-interactive session for a

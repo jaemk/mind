@@ -10468,47 +10468,109 @@ pub fn forget(
     if unmanaged {
         return forget_unmanaged_bulk(paths, item_ref, yes);
     }
-
-    let out = crate::render::ctx();
-    let mut manifest = Manifest::load(paths)?;
-
-    let keys: Vec<String> = if dropped {
+    if dropped {
         // spec: CLI-245
-        let keys = dropped_item_keys(paths, &manifest, item_ref)?;
-        if keys.is_empty() {
-            if out.json {
-                return print_json(&MutationResult::new(
-                    "forget",
-                    item_ref.unwrap_or("--dropped"),
-                    "no-op",
-                ));
-            }
-            println!("no dropped items; nothing to forget");
-            return Ok(());
-        }
-        keys
-    } else {
-        // clap guarantees `item_ref` is Some without --unmanaged or --dropped.
-        let item_ref = item_ref.expect("item_ref required without --unmanaged or --dropped");
-        let parsed = parse_item_ref(item_ref)?;
-        forget_ref_keys(paths, &manifest, &parsed, yes)?
-    };
+        let manifest = Manifest::load(paths)?;
+        let keys = dropped_item_keys(paths, &manifest, item_ref, None)?;
+        let target = item_ref.unwrap_or("--dropped");
+        return forget_dropped(paths, "forget", manifest, keys, target, yes, force, accept);
+    }
+
+    let mut manifest = Manifest::load(paths)?;
+    // clap guarantees `item_ref` is Some without --unmanaged or --dropped.
+    let item_ref = item_ref.expect("item_ref required without --unmanaged or --dropped");
+    let parsed = parse_item_ref(item_ref)?;
+    let keys = forget_ref_keys(paths, &manifest, &parsed, yes)?;
     if keys.is_empty() {
         // An exact ref that named an unmanaged item, already removed.
         return Ok(());
     }
-    let item_ref = item_ref.unwrap_or("--dropped");
-    forget_keys(paths, &mut manifest, keys, item_ref, yes, force, accept)
+    forget_keys(
+        paths,
+        &mut manifest,
+        keys,
+        item_ref,
+        "forget",
+        yes,
+        force,
+        accept,
+    )
+}
+
+/// `mind prune [<source>]` -- remove every installed item that is no longer
+/// part of a melded source: the `forget --dropped` set (CLI-245), narrowed to
+/// the items whose recorded source matches the `source` filter.
+// spec: CLI-261
+pub fn prune(
+    paths: &Paths,
+    source: Option<&str>,
+    yes: bool,
+    force: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let manifest = Manifest::load(paths)?;
+    if let Some(sel) = source {
+        crate::resolve::validate_source_selector(sel)?;
+        // The filter matches the source an item was installed from, so an
+        // unmelded source's items still match; it must name something.
+        let registry = Registry::load(paths)?;
+        let matches = |name: &str| crate::resolve::source_matches_glob(name, sel);
+        if !manifest.items.values().any(|it| matches(&it.source))
+            && !registry.sources.iter().any(|s| matches(&s.name))
+        {
+            return Err(MindError::SourceNotFound {
+                name: sel.to_string(),
+            });
+        }
+    }
+    let keys = dropped_item_keys(paths, &manifest, None, source)?;
+    let target = source.unwrap_or("*");
+    forget_dropped(paths, "prune", manifest, keys, target, yes, force, accept)
+}
+
+/// Remove the CLI-245 dropped set `keys`, reporting under `action` (`forget`
+/// for `forget --dropped`, `prune` for `prune`) and `target`.
+#[allow(clippy::too_many_arguments)]
+fn forget_dropped(
+    paths: &Paths,
+    action: &'static str,
+    mut manifest: Manifest,
+    keys: Vec<String>,
+    target: &str,
+    yes: bool,
+    force: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let out = crate::render::ctx();
+    if keys.is_empty() {
+        if out.json {
+            return print_json(&MutationResult::new(action, target, "no-op"));
+        }
+        println!("no dropped items; nothing to {action}");
+        return Ok(());
+    }
+    forget_keys(
+        paths,
+        &mut manifest,
+        keys,
+        target,
+        action,
+        yes,
+        force,
+        accept,
+    )
 }
 
 /// The installed items `forget --dropped` removes (CLI-245): those whose
 /// source is no longer melded, or whose melded source's catalog has no item
 /// with the same stable identity. An item of a melded source with no clone on
-/// disk is kept. `item_ref` narrows the set like a `forget` glob.
+/// disk is kept. `item_ref` narrows the set like a `forget` glob, and
+/// `source` (a CLI-231 filter) to items whose recorded source it matches.
 fn dropped_item_keys(
     paths: &Paths,
     manifest: &Manifest,
     item_ref: Option<&str>,
+    source: Option<&str>,
 ) -> Result<Vec<String>> {
     let registry = Registry::load(paths)?;
     // A scan error must not make every item look dropped.
@@ -10519,6 +10581,7 @@ fn dropped_item_keys(
     };
     let mut keys: Vec<String> = candidates
         .into_iter()
+        .filter(|m| source.is_none_or(|sel| crate::resolve::source_matches_glob(&m.source, sel)))
         .filter(|m| match registry.find(&m.source) {
             None => true,
             Some(s) => {
@@ -10571,12 +10634,15 @@ fn forget_ref_keys(
 
 /// Remove the installed items `keys` (CLI-40..42): confirm a multi-item
 /// removal, warn about dependents of a single one (DEP-60), run each item's
-/// uninstall hooks, and save the manifest.
+/// uninstall hooks, and save the manifest. `action` names the verb in the
+/// output (`forget` or `prune`).
+#[allow(clippy::too_many_arguments)]
 fn forget_keys(
     paths: &Paths,
     manifest: &mut Manifest,
     keys: Vec<String>,
     item_ref: &str,
+    action: &'static str,
     yes: bool,
     force: bool,
     accept: crate::hook::Accept,
@@ -10587,7 +10653,7 @@ fn forget_keys(
     // a non-TTY run without `--yes` refuses rather than removing silently.
     if keys.len() > 1 && !yes {
         if !out.json {
-            println!("forget would remove {} item(s):", keys.len());
+            println!("{action} would remove {} item(s):", keys.len());
             for key in &keys {
                 // spec: DSC-95
                 println!("  {} {}", out.warn(), crate::sanitize::strip_ansi(key));
@@ -10703,7 +10769,12 @@ fn forget_keys(
         let key_display = crate::sanitize::strip_ansi(&key);
         removed.push(key_display.clone());
         if !out.json {
-            println!("{} forgot {key_display}", out.ok());
+            let verb = if action == "prune" {
+                "pruned"
+            } else {
+                "forgot"
+            };
+            println!("{} {verb} {key_display}", out.ok());
         }
     }
     manifest.save(paths)?;
@@ -10727,7 +10798,7 @@ fn forget_keys(
         }
     }
     if out.json {
-        let mut result = MutationResult::new("forget", item_ref, "removed");
+        let mut result = MutationResult::new(action, item_ref, "removed");
         result.removed = removed;
         return print_json(&result);
     }
@@ -11474,6 +11545,7 @@ pub fn sync_with_selector(
         });
     }
     let mut upgraded: Vec<String> = Vec::new();
+    let mut pruned: Vec<String> = Vec::new();
     let mut version_rows = version_rows;
     let mut breaking_moves: Vec<BreakingMoveJson> = Vec::new();
     if then_upgrade {
@@ -11505,6 +11577,8 @@ pub fn sync_with_selector(
         )?;
         if let Some(result) = pass {
             upgraded = result.installed;
+            // spec: LIFE-58
+            pruned = result.removed;
             // spec: VER-91 -- the pass may have settled a breaking release, so
             // its release state is the current one, and its breaking moves are
             // this run's.
@@ -11530,6 +11604,7 @@ pub fn sync_with_selector(
         // sanitized (`upgrade_inner_scoped` pushes `display_key()`).
         result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
+        result.removed = pruned;
         result.sources = version_rows;
         result.breaking = breaking_moves;
         print_json(&result)?;
@@ -11649,6 +11724,48 @@ pub fn upgrade_source(
         None,
         accept,
     )?)
+}
+
+/// Resolve `upgrade`'s positional target (CLI-262): an item filter as before
+/// (CLI-63..65), or, when it matches no installed item but does match a
+/// melded source, the `--source` filter (CLI-244). An item match wins, with a
+/// note naming the `--source` spelling. Returns `(item, source)`.
+// spec: CLI-262
+pub fn upgrade_target(
+    paths: &Paths,
+    item: Option<String>,
+    source: Option<String>,
+) -> Result<(Option<String>, Option<String>)> {
+    let (Some(target), None) = (item.as_deref(), source.as_deref()) else {
+        return Ok((item, source));
+    };
+    if crate::resolve::validate_source_selector(target).is_err() {
+        return Ok((item, source));
+    }
+    let registry = Registry::load(paths)?;
+    if !registry
+        .sources
+        .iter()
+        .any(|s| crate::resolve::source_matches_glob(&s.name, target))
+    {
+        return Ok((item, source));
+    }
+    let names_item = match parse_item_ref(target) {
+        Ok(parsed) => Manifest::load(paths)?
+            .items
+            .values()
+            .any(|it| crate::resolve::installed_matches_glob(it, &parsed)),
+        Err(_) => false,
+    };
+    if names_item {
+        eprintln!(
+            "note: {} also names a melded source; `mind upgrade --source {}` upgrades that source",
+            strip_ansi(target),
+            crate::error::shell_quote(target)
+        );
+        return Ok((item, source));
+    }
+    Ok((None, Some(target.to_string())))
 }
 
 /// An upgrade pass restricted to a set of SOURCE identities, with the pre-pass
@@ -12099,9 +12216,12 @@ fn upgrade_inner_scoped(
         Manifest::load(paths)?
     };
 
-    warn_apparent_breaks(&registry, &manifest, &catalog, hook_scope.as_ref(), &out);
-
     let mut pending: Vec<Upgrade> = Vec::new();
+    // spec: LIFE-57 -- installed items of a source that declares `prune` and
+    // no longer offers them, removed by this pass.
+    let mut prunes: Vec<crate::manifest::InstalledItem> = Vec::new();
+    let mut prune_sources: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
 
     for installed in manifest.items.values() {
         match upgrade_item_disposition(
@@ -12155,7 +12275,19 @@ fn upgrade_inner_scoped(
                 && c.name == installed.bare_name
                 && c.source == installed.source
         }) else {
-            // Source dropped or item removed upstream; reported by introspect.
+            // Source dropped or item removed upstream; reported by introspect,
+            // and pruned here when the source declares `prune` (LIFE-57). A
+            // source that could not be scanned, or has no clone, says nothing
+            // about what it dropped.
+            if let Some(s) = registry.find(&installed.source)
+                && !unscannable.contains(&s.name)
+                && clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
+                && *prune_sources
+                    .entry(s.name.clone())
+                    .or_insert_with(|| declares_prune(paths, s))
+            {
+                prunes.push(installed.clone());
+            }
             continue;
         };
         let new_hash = cat.content_hash()?;
@@ -12175,6 +12307,15 @@ fn upgrade_inner_scoped(
             });
         }
     }
+    prunes.sort_by_key(|i| i.key());
+    warn_apparent_breaks(
+        &registry,
+        &manifest,
+        &catalog,
+        hook_scope.as_ref(),
+        &prunes,
+        &out,
+    );
 
     // spec: LIFE-46 -- B2: a rename must never evict a DIFFERENT item that
     // already occupies the new effective key. A third-party source edit (e.g.
@@ -12196,7 +12337,11 @@ fn upgrade_inner_scoped(
         r
     };
 
-    if pending.is_empty() && !tracking.has_additions() && whole.targets.is_empty() {
+    if pending.is_empty()
+        && prunes.is_empty()
+        && !tracking.has_additions()
+        && whole.targets.is_empty()
+    {
         // spec: HOOK-182 -- no item to upgrade, but a source hook may still be
         // pending: a hooks-only plan, then the pass.
         ask_plan(paths, None, source_plan)?;
@@ -12231,6 +12376,7 @@ fn upgrade_inner_scoped(
     if !out.json {
         print_upgrade_report(&registry, &pending, &tracking);
         print_whole_additions(&whole);
+        print_prunes(&prunes);
     }
 
     // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
@@ -12507,6 +12653,26 @@ fn upgrade_inner_scoped(
         applied_keys.push(installed.key().into());
         manifest.insert(installed);
     }
+    // spec: LIFE-57 -- after the upgrades, under the same answer. The item is
+    // gone from its source's catalog, so it has no uninstall hooks to run
+    // (HOOK-84), as with `forget`.
+    let mut pruned: Vec<String> = Vec::new();
+    for item in &prunes {
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
+        if let Err(e) = uninstall_item(paths, item, &[], &commit, accept) {
+            save_and_warn_workflows(paths, &manifest, &applied_keys);
+            return Err(e);
+        }
+        manifest.items.remove(item.key().as_str());
+        let key = item.display_key();
+        if !out.json {
+            println!("{} pruned {key}", out.ok());
+        }
+        pruned.push(key);
+    }
     manifest.save(paths)?;
     // spec: WF-24 WF-29 WF-30 WF-31 -- the same post-install warnings `learn`
     // emits, on the same terms: after the manifest is written, so they read the
@@ -12536,9 +12702,17 @@ fn upgrade_inner_scoped(
         applied.extend(keys.iter().map(|k| strip_ansi(k)));
     }
     if out.json {
-        let outcome = if renamed { "renamed" } else { "upgraded" };
+        // spec: LIFE-58
+        let outcome = if renamed {
+            "renamed"
+        } else if applied.is_empty() && !pruned.is_empty() {
+            "pruned"
+        } else {
+            "upgraded"
+        };
         let mut result = MutationResult::new("upgrade", target, outcome);
         result.installed = applied;
+        result.removed = pruned;
         return Ok(Some(with_profiles(result)));
     }
     Ok(None)
@@ -13023,6 +13197,9 @@ fn warn_apparent_breaks(
     manifest: &Manifest,
     catalog: &[CatalogItem],
     scope: Option<&HashSet<String>>,
+    // spec: LIFE-58 -- items this pass prunes (LIFE-57): their drop is
+    // handled, so it is neither warned about nor hinted at.
+    prunes: &[crate::manifest::InstalledItem],
     out: &crate::render::OutputCtx,
 ) {
     let mut any_drop = false;
@@ -13047,7 +13224,7 @@ fn warn_apparent_breaks(
         let from = moved.version.as_deref().unwrap_or("?");
         // A move from outside the range is a breaking release the user took
         // (VER-62, VER-63): expected to break, so only a compatible one is
-        // called out. Its drops still earn the `forget --dropped` hint.
+        // called out. Its drops still earn the `mind prune` hint.
         let compatible = match (vp.parsed_range(), crate::version::Version::parse(from)) {
             (Some(range), Some(v)) => range.matches(&v),
             _ => true,
@@ -13057,6 +13234,7 @@ fn warn_apparent_breaks(
         let cases = apparent_break_cases(
             installed
                 .iter()
+                .filter(|i| !prunes.iter().any(|p| p.key() == i.key()))
                 .map(|i| (i.kind, i.bare_name.as_str(), i.display_key())),
             &siblings,
         );
@@ -13080,8 +13258,36 @@ fn warn_apparent_breaks(
     // spec: CLI-245 -- a dropped item is never upgraded, so the warning
     // repeats until it is forgotten; point at the one command that does that.
     if any_drop {
-        eprintln!("hint: run `mind forget --dropped` to remove items a source no longer offers");
+        eprintln!("hint: run `mind prune` to remove items a source no longer offers");
     }
+}
+
+/// Whether `source`'s checked-out `mind.toml` declares `[source] prune = true`
+/// (LIFE-57). An unreadable or invalid file reads as not declaring it.
+// spec: LIFE-57
+fn declares_prune(paths: &Paths, source: &crate::source::Source) -> bool {
+    matches!(MindToml::load(&source.clone_dir(paths)), Ok(Some(t)) if t.source.prune)
+}
+
+/// List the items an upgrade pass prunes (LIFE-57).
+fn print_prunes(prunes: &[crate::manifest::InstalledItem]) {
+    if prunes.is_empty() {
+        return;
+    }
+    let out = crate::render::ctx();
+    let n = prunes.len();
+    let noun = if n == 1 { "item" } else { "items" };
+    println!("{n} {noun} removed upstream, to prune (the source declares `prune`):\n");
+    for item in prunes {
+        // spec: DSC-95
+        println!(
+            "  {} {} {}",
+            out.warn(),
+            item.display_key(),
+            out.dim(&format!("[{}]", strip_ansi(&item.source)))
+        );
+    }
+    println!();
 }
 
 /// The VER-65 cases a move from `old` items to the catalog `siblings` shows:

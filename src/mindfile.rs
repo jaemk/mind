@@ -154,6 +154,10 @@ pub struct SourceMeta {
     /// How much git history the source's clone keeps (DSC-120): absent or
     /// `"shallow"` keeps the depth-1 clone (DSC-118); `"full"` deepens it.
     pub history: Option<History>,
+    /// Remove the installed items a new commit no longer offers during an
+    /// upgrade pass (LIFE-57). Read from the commit the source is on.
+    #[serde(default)]
+    pub prune: bool,
 }
 
 /// `[source].history` (DSC-120). Any other value is a `MindToml` error.
@@ -4397,6 +4401,16 @@ mod tests {
         );
         assert!(parse("[source]\nhistory = \"deep\"\n").is_err());
         assert!(parse("[source]\nhistory = true\n").is_err());
+    }
+
+    // spec: LIFE-57
+    #[test]
+    fn source_prune_is_a_bool_defaulting_to_false() {
+        let parse = |s: &str| toml::from_str::<MindToml>(s).map(|t| t.source.prune);
+        assert!(!parse("").unwrap());
+        assert!(!parse("[source]\nprune = false\n").unwrap());
+        assert!(parse("[source]\nprune = true\n").unwrap());
+        assert!(parse("[source]\nprune = \"yes\"\n").is_err());
     }
 
     // spec: PROF-1 PROF-2

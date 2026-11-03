@@ -637,7 +637,26 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   whose clone is missing is kept, since nothing says it was dropped. An optional
   `<item>` ref or glob narrows the set. CLI-42's confirmation applies when more
   than one item would go. With nothing dropped it says so and removes nothing;
-  under `--json` the outcome is `no-op`.
+  under `--json` the outcome is `no-op`. The hint `upgrade` prints for a drop
+  (VER-65) names `mind prune` (CLI-261).
+
+## prune
+
+- `CLI-261` `prune [<source>]` removes the CLI-245 set: every installed item
+  whose source is no longer melded, or whose melded source's catalog has no
+  item with its stable identity. An item of a melded source with no clone is
+  kept. `<source>` is `sync`'s filter (CLI-231: an exact name, a trailing
+  suffix, or a glob) matched against the source each item was installed from,
+  so a source unmelded with `--keep-items` still matches; it narrows the set
+  to those items. A filter that matches neither an installed item's source nor
+  a melded source is a `SourceNotFound` error, and a malformed glob is
+  `InvalidPattern`. CLI-42's confirmation applies when more than one item
+  would go, and `--force` and `--accept-hooks` mean what they mean on
+  `forget`. Each removal prints `pruned <key>`. With nothing dropped it prints
+  `no dropped items; nothing to prune`. Under `--json` the result's `action`
+  is `prune` and its `target` the filter (`*` without one), with outcome
+  `removed` (the keys in `removed`) or `no-op`. Narrowing by item is
+  `forget --dropped <item>`, the same operation under `forget`.
 
 ## sync
 
@@ -815,6 +834,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   selects every match (CLI-65) rather than requiring a single one, so it never
   goes through the single-match `resolve()` path (CLI-3) that could raise it.
 - `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
+- `CLI-262` An `upgrade` positional that matches no installed item under
+  CLI-63/CLI-65 but does match a melded source under `sync`'s filter
+  (CLI-231) is read as `--source <filter>` (CLI-244): `mind upgrade
+  owner/repo` syncs and upgrades that source. One that matches an installed
+  item keeps its CLI-63 meaning; when it also matches a melded source, a note
+  on stderr names the `mind upgrade --source <filter>` spelling. One that
+  matches neither is unchanged (CLI-64: up to date, exit 0). With `--source`
+  given, the positional is always an item filter.
 - `CLI-65` When the `item` filter's name is a glob (`*`, `?`, `[`), `upgrade`
   limits the pass to every installed item whose effective name matches the
   glob, mirroring `forget`'s glob selection (CLI-41). The `kind:` prefix and

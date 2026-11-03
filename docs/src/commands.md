@@ -196,7 +196,7 @@ Uninstall items: the store copy and every link. Alias `uninstall`, `unlearn`.
 |------|--------|
 | `--profile <NAME>` | disable a profile of the source named by `ITEM`, forgetting items installed only for it |
 | `--unmanaged` | act on unmanaged lobe items only; with no `ITEM`, all of them |
-| `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them |
+| `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them (the same as [`prune`](#prune)) |
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
 | `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
@@ -220,6 +220,37 @@ mind forget --dropped
 A source goes before `#`; `mind recall --sources` lists the identities (a
 local path melds as `local/<parent dir>/<dir>`). To drop the source too, use
 [`unmeld`](#unmeld).
+
+## prune
+
+```
+mind prune [SOURCE] [OPTIONS]
+```
+
+Remove every installed item that is no longer part of a melded source: its
+source no longer offers it (`recall` marks it "removed upstream"), or its
+source was unmelded with `--keep-items`. `SOURCE` is the filter `sync` takes
+(a name, a trailing suffix like `owner/repo`, or a glob) and limits the
+removal to items from matching sources, including an unmelded one. To narrow
+by item, use `mind forget --dropped <item>`.
+
+| flag | effect |
+|------|--------|
+| `-f`, `--force` | skip the confirmation when other items depend on the one removed |
+| `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
+
+More than one item asks once; `--yes` skips that.
+
+```
+mind prune
+mind prune --yes
+mind prune owner/repo                            # only one source's dropped items
+mind prune '*skills'                             # sources matching a glob
+```
+
+A source that declares `[source] prune = true` has `upgrade` do this for the
+items a new commit dropped. See
+[Remove the items you drop](releasing.md#remove-the-items-you-drop).
 
 ## recall
 
@@ -279,11 +310,20 @@ failed.
 ## upgrade
 
 ```
-mind upgrade [ITEM] [OPTIONS]
+mind upgrade [ITEM|SOURCE] [OPTIONS]
 ```
 
 Fetch the involved sources, report each installed item that changed, and apply
-on confirmation. `ITEM` is a filter.
+on confirmation. `ITEM` is a filter over installed items. A value that matches
+no installed item but does match a melded source upgrades that source, as
+`--source` does. When it matches both, the item wins and a note names the
+`--source` spelling.
+
+```
+mind upgrade                       # everything
+mind upgrade skill:review          # one item
+mind upgrade owner/repo            # one source
+```
 
 | flag | effect |
 |------|--------|
