@@ -631,6 +631,20 @@ tree, not the repo's history.
   existing clone, unlike the discovery flags CLI-206 lists. A linked local
   source is the user's own working tree, which `mind` never fetches into, so
   the flag does not apply to it (a note says so).
+- `DSC-122` A pin names only a branch, a tag, or a commit. When `mind` fetches
+  a pin's name from the remote it asks for `refs/heads/<name>` or
+  `refs/tags/<name>` explicitly, never through git's own name lookup, which
+  would also match other namespaces such as GitHub's `refs/pull/<n>/head`. A
+  `ref` pin tries the tag first (git's own order); a `follow-branch` pin asks
+  only for the branch. A value spelled `refs/heads/...` or `refs/tags/...` is
+  used as given. Any other `refs/...` value, or a value holding refspec syntax
+  (`:` or `*`), is an `InvalidRef` error. A `ref` pin of 4 to 39 hex digits is
+  an abbreviated commit sha: it resolves only against commit objects, never a
+  ref spelled the same, fetching the full history of every branch and tag
+  when the clone does not hold it, and a prefix that matches no commit or more
+  than one is an `InvalidRef` error. A `ref` pin that is neither a sha nor a
+  plain branch or tag name (e.g. `main~1`) resolves after that same
+  full-history fetch, against the remote's branches and tags only.
 
 ## Scan roots
 

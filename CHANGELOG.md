@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A `ref` or `follow-branch` pin name is fetched only as a branch
+  (`refs/heads/<name>`) or a tag (`refs/tags/<name>`). Git's own name lookup
+  let a pin such as `pull/1/head`, including one a curator declares, reach a
+  GitHub pull request head. Any other `refs/...` value is refused.
+- A `ref` pin holding an abbreviated commit sha resolves to that commit, not to
+  a branch or tag on the remote named like it.
+- A pin value holding `:` or `*` is refused instead of being passed to `git
+  fetch` as a refspec, where `:` could write a ref into the source's clone.
+
 ## [0.44.0] - 2026-11-02
 
 ### Added
