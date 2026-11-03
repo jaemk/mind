@@ -7073,11 +7073,11 @@ pub(crate) fn install_source_profiles(
     Ok(outcome)
 }
 
-/// Print how many profile leftovers (PROF-37) `source_name` has and the
-/// `mind prune <source>` that removes them. Silent when there are none or
-/// they cannot be computed.
-pub(crate) fn note_profile_leftovers(paths: &Paths, source_name: &str) {
-    let found = (|| -> Result<(Vec<String>, bool)> {
+/// The profile leftovers (PROF-37) `source_name` has now, and whether it
+/// declares `prune`. Empty when they cannot be computed: the caller only
+/// reports them.
+pub(crate) fn source_profile_leftovers(paths: &Paths, source_name: &str) -> (Vec<String>, bool) {
+    (|| -> Result<(Vec<String>, bool)> {
         let registry = Registry::load(paths)?;
         let Some(source) = registry.find(source_name) else {
             return Ok((Vec::new(), false));
@@ -7090,8 +7090,14 @@ pub(crate) fn note_profile_leftovers(paths: &Paths, source_name: &str) {
             declares_prune(paths, source),
         ))
     })()
-    .unwrap_or_default();
-    let (found, prunes) = found;
+    .unwrap_or_default()
+}
+
+/// Print how many profile leftovers (PROF-37) `source_name` has and the
+/// `mind prune <source>` that removes them. Silent when there are none or
+/// they cannot be computed.
+pub(crate) fn note_profile_leftovers(paths: &Paths, source_name: &str) {
+    let (found, prunes) = source_profile_leftovers(paths, source_name);
     if found.is_empty() {
         return;
     }
@@ -9212,6 +9218,14 @@ pub fn remeld(
                 result.pending_items = Some(pending);
             }
             result.profiles = Some(outcome.enabled);
+            // spec: PROF-40 -- the json twin of the leftovers note.
+            if replace && outcome.applied {
+                result.profile_leftovers = source_profile_leftovers(paths, &source_name)
+                    .0
+                    .iter()
+                    .map(|k| strip_ansi(k))
+                    .collect();
+            }
             return print_json(&result);
         }
         install_source_profiles(paths, &req, flow)?;
@@ -16046,6 +16060,10 @@ struct MutationResult {
     /// depends on them (PROF-25, DEP-60), each naming its dependents.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     kept: Vec<String>,
+    /// The profile leftovers (PROF-37) a re-meld that replaced the enabled set
+    /// left installed for `prune` (PROF-40).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profile_leftovers: Vec<String>,
     /// Each version-pinned source a `sync` or `upgrade` covered, with its
     /// release state (VER-91).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -16075,6 +16093,7 @@ impl MutationResult {
             new_items: Vec::new(),
             ignored_new_items: Vec::new(),
             kept: Vec::new(),
+            profile_leftovers: Vec::new(),
             sources: Vec::new(),
             breaking: Vec::new(),
         }

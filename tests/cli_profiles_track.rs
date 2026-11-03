@@ -1740,6 +1740,32 @@ fn remeld_with_profile_flags_replaces_the_recorded_set() {
 }
 
 #[test]
+fn remeld_json_lists_the_profile_leftovers() {
+    // spec: PROF-40 CLI-153 -- the json twin of the leftovers note.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let doc = json_doc(&sb.ok(&[
+        "meld",
+        &sb.spec(),
+        "--no-default-profile",
+        "--profile",
+        "basic",
+        "--yes",
+        "--json",
+    ]));
+    assert_eq!(
+        strings(&doc["profile_leftovers"]),
+        Some(svec(&["agent:planner", "skill:deploy", "skill:helper"])),
+        "{doc}"
+    );
+    assert_eq!(sb.installed().len(), 5, "a re-meld uninstalls nothing");
+
+    // A re-meld that leaves nothing behind omits the field.
+    let doc = json_doc(&sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes", "--json"]));
+    assert!(doc.get("profile_leftovers").is_none(), "{doc}");
+}
+
+#[test]
 fn remeld_with_only_no_default_profile_untracks_the_source() {
     // spec: PROF-40 PROF-37 -- an empty set clears both recorded fields; the
     // items `default` installed are then leftovers.
@@ -1805,5 +1831,29 @@ fn curator_entry_disabling_a_profile_keeps_items_without_prune() {
     assert_eq!(sb.installed().len(), 5);
     assert!(r.stdout.contains("run `mind prune "), "{}", r.all());
     sb.ok(&["prune", "--yes"]);
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}
+
+#[test]
+fn curate_json_lists_the_profile_leftovers_the_run_kept() {
+    // spec: PROF-41 CUR-13 -- the result document lists what the disabled
+    // profile left; a pruning source's run removes them, so it lists none.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let curator = adopt_by_curator(&sb, ", profiles = [\"full\"]");
+    recurate(&sb, &curator, ", install = true");
+    let doc = json_doc(&sb.ok(&["curate", "--yes", "--json"]));
+    assert_eq!(
+        strings(&doc["profile_leftovers"]),
+        Some(svec(&["agent:planner", "skill:deploy", "skill:helper"])),
+        "{doc}"
+    );
+
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let curator = adopt_by_curator(&sb, ", profiles = [\"full\"]");
+    recurate(&sb, &curator, ", install = true");
+    let doc = json_doc(&sb.ok(&["curate", "--yes", "--json"]));
+    assert!(doc.get("profile_leftovers").is_none(), "{doc}");
     assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
 }

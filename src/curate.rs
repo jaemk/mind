@@ -124,6 +124,10 @@ struct CurateResult {
     changes: Vec<Change>,
     applied: Vec<String>,
     skipped: Vec<SkippedEntry>,
+    /// The profile leftovers (PROF-37) the applied profile changes left
+    /// installed for `prune`, after the run's upgrade pass (PROF-41).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    profile_leftovers: Vec<String>,
 }
 
 /// Run `mind curate`.
@@ -166,6 +170,7 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
                 changes: Vec::new(),
                 applied: Vec::new(),
                 skipped,
+                profile_leftovers: Vec::new(),
             });
         }
         println!("{} curated sources are up to date", out.ok());
@@ -177,15 +182,15 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
 
     // spec: CUR-9 -- `--check` reports and applies nothing, and outranks `--yes`.
     if flags.check {
-        return finish(&plan, Vec::new(), skipped, flags);
+        return finish(&plan, Vec::new(), skipped, Vec::new(), flags);
     }
     if !should_apply(&plan, &flags)? {
-        return finish(&plan, Vec::new(), skipped, flags);
+        return finish(&plan, Vec::new(), skipped, Vec::new(), flags);
     }
 
-    let (applied, apply_skipped) = apply(paths, plan_in_apply_order(&plan), &flags)?;
+    let (applied, apply_skipped, leftovers) = apply(paths, plan_in_apply_order(&plan), &flags)?;
     skipped.extend(apply_skipped);
-    finish(&plan, applied, skipped, flags)
+    finish(&plan, applied, skipped, leftovers, flags)
 }
 
 /// `mind curate --adopt <identity>` (CUR-16): stamp `curated_by` on a source
@@ -449,6 +454,7 @@ fn finish(
     plan: &[Change],
     applied: Vec<String>,
     skipped: Vec<SkippedEntry>,
+    profile_leftovers: Vec<String>,
     flags: CurateFlags,
 ) -> Result<()> {
     let out = crate::render::ctx();
@@ -480,6 +486,7 @@ fn finish(
             changes,
             applied,
             skipped,
+            profile_leftovers,
         });
     }
     report_skipped(&skipped);
@@ -591,12 +598,13 @@ fn plan_in_apply_order(plan: &[Change]) -> Vec<&Change> {
 }
 
 /// Apply the plan in order, returning the applied change ids and anything the
-/// registration path skipped.
+/// registration path skipped, plus (under `--json`) the profile leftovers the
+/// applied profile changes left.
 fn apply(
     paths: &Paths,
     ordered: Vec<&Change>,
     flags: &CurateFlags,
-) -> Result<(Vec<String>, Vec<SkippedEntry>)> {
+) -> Result<(Vec<String>, Vec<SkippedEntry>, Vec<String>)> {
     let out = crate::render::ctx();
     let mut applied: Vec<String> = Vec::new();
     let mut skipped: Vec<SkippedEntry> = Vec::new();
@@ -762,15 +770,21 @@ fn apply(
     }
     // spec: PROF-41 PROF-39 -- the leftovers note reads the state after the
     // upgrade pass, so a pruning source the pass cleaned up prints nothing.
-    if !out.json {
-        for source in &noted {
+    let mut leftovers: Vec<String> = Vec::new();
+    for source in &noted {
+        if out.json {
+            leftovers.extend(commands::source_profile_leftovers(paths, source).0);
+        } else {
             commands::note_profile_leftovers(paths, source);
         }
     }
+    leftovers.sort();
+    leftovers.dedup();
     if !out.json && !applied.is_empty() {
         println!("{} applied {} change(s)", out.ok(), applied.len());
     }
-    Ok((applied, skipped))
+    let leftovers = leftovers.iter().map(|k| strip_ansi(k)).collect();
+    Ok((applied, skipped, leftovers))
 }
 
 /// Install what a curator entry declares for an already-registered source
