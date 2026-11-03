@@ -82,8 +82,8 @@ mind auto-update run                    # what the trigger runs; also usable fro
   array of `{source, from, to, applied, recommended}`. The document is the
   mutating-verb result (CLI-153) with `action: "auto-update run"`, `target:
   "*"`, an `outcome` of `ok`, `partial` (a source failed), or `skipped` (not
-  stale, AUP-19, or the lock was held, AUP-18), and `moved`, `held`, and
-  `failed` lists of the lines AUP-21 logs.
+  stale, AUP-19, or the lock was held, AUP-18), and `moved`, `pruned`, `held`,
+  and `failed` lists of the lines AUP-21 logs.
 
 ## The run
 
@@ -121,8 +121,11 @@ mind auto-update run                    # what the trigger runs; also usable fro
   and any container that leaves empty. A non-Claude lobe gets no trigger;
   `config auto-update on` names it and suggests cron.
 - `AUP-21` A run prints each source it moved, held, or failed
-  (`auto-update: moved acme/skills 1.4.2 -> 1.5.0`), failures on stderr, or
-  that everything is up to date. It also appends those lines to
+  (`auto-update: moved acme/skills 1.4.2 -> 1.5.0`), each item it pruned
+  because the source declares `prune` (LIFE-57, `auto-update: pruned
+  skill:old`), failures on stderr, or that everything is up to date. The
+  summary below counts the pruned items (`1 item pruned (see
+  auto-update.log)`). It also appends those lines to
   `~/.mind/auto-update.log` and keeps the report in `~/.mind/auto-update.json`
   until it is shown. The next `recall` or `upgrade` that is not `--json`
   prints a one-line summary of the reports not yet shown on stderr, such as

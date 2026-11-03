@@ -20,6 +20,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sync --upgrade`, `curate`, `auto-update run`) remove the installed items
   the new commit no longer offers, listed in the report and covered by the
   upgrade's confirmation. Under `--json` the pruned keys are in `removed`.
+  `auto-update run` prints and logs each item it pruned, lists them in its
+  `--json` `pruned`, and counts them in the summary `recall` shows.
   Older `mind` versions reject the key, so set `min-mind-version = "0.45"`.
 - `mind upgrade <source>`: a value that matches no installed item but does
   match a melded source upgrades that source, as `--source` does.

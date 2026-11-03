@@ -408,6 +408,51 @@ fn a_run_takes_a_compatible_release_without_asking() {
 }
 
 #[test]
+fn a_run_reports_and_logs_the_items_a_pruning_source_dropped() {
+    // spec: AUP-13 AUP-21 LIFE-57
+    let sb = Sandbox::new("auto-prune");
+    let prune = toml("prune = true\n");
+    write_file(
+        &sb.source.join("agents/old.md"),
+        "---\nname: old\ndescription: old\n---\nold\n",
+    );
+    sb.commit(&agent("one-zero"), &prune, Some("v1.0.0"));
+    let spec = sb.spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--pin",
+        "version=^1",
+        "--yes",
+        "--auto-update",
+    ]);
+    assert!(r.success, "meld: {}{}", r.stdout, r.stderr);
+    let old_link = sb.claude_home.join("agents/old.md");
+    assert!(old_link.exists(), "old agent installed");
+
+    std::fs::remove_file(sb.source.join("agents/old.md")).unwrap();
+    sb.commit(&agent("one-one"), &prune, Some("v1.1.0"));
+    let r = sb.mind(&["auto-update", "run"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("auto-update: pruned agent:old"),
+        "{}",
+        r.stdout
+    );
+    assert!(!old_link.exists(), "dropped agent removed");
+    assert!(sb.installed_agent().contains("one-one"), "dev upgraded");
+    let log = std::fs::read_to_string(sb.mind_home.join("auto-update.log")).unwrap();
+    assert!(log.contains("pruned agent:old"), "{log}");
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.stderr.contains("1 item pruned (see auto-update.log)"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
 fn a_run_leaves_ungranted_sources_alone() {
     // spec: AUP-1 AUP-10
     let sb = melded("auto-ungranted", "auto-update = true\n", "");

@@ -107,7 +107,8 @@ every other kind an over-cap file fails the scan of its source.
   store/<kind>/<name>/          installed copy of each item (name is effective)
   personal/                     built-in absorb destination, created on demand
   auto-update.json              last auto-update run and reports not yet shown
-  auto-update.log               every auto-update run's moves, holds, and failures
+  auto-update.log               every auto-update run's moves, prunes, holds,
+                                and failures
   .tmp/staging/                 scratch for new copies during transactional installs
   .tmp/backup/                  previous copy held during a swap, for rollback
   .lock                         global advisory lock
