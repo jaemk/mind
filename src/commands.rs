@@ -13256,6 +13256,8 @@ fn warn_apparent_breaks(
             installed
                 .iter()
                 .filter(|i| !prunes.iter().any(|p| p.key() == i.key()))
+                // spec: DSC-123 -- skipped for an unreadable manifest, not dropped.
+                .filter(|i| !catalog::dropped_as_unreadable(&i.source, i.kind, &i.bare_name))
                 .map(|i| (i.kind, i.bare_name.as_str(), i.display_key())),
             &siblings,
         );
@@ -13849,6 +13851,10 @@ pub fn recall(
                         "commit": m.commit.clone(),
                         "orphaned": true,
                     });
+                    // spec: DSC-123 -- still shipped, but its manifest won't parse.
+                    if catalog::dropped_as_unreadable(&m.source, m.kind, &m.bare_name) {
+                        row["unreadable"] = serde_json::Value::Bool(true);
+                    }
                     insert_when_to_use(&mut row, installed_when_to_use(paths, m));
                     rows.push(row);
                 }
@@ -14550,6 +14556,19 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
             .iter()
             .find(|c| c.kind == it.kind && c.name == it.bare_name && c.source == it.source)
         {
+            // spec: DSC-123 -- skipped by the scan for an unreadable manifest,
+            // so still shipped: not a removal.
+            None if catalog::dropped_as_unreadable(&it.source, it.kind, &it.bare_name) => issues
+                .push(Issue {
+                    kind: "unreadable-upstream",
+                    target: it.key().into(),
+                    message: format!(
+                        "{}: its own mind.toml in source '{}' does not parse; it stays \
+                         installed until the source fixes it",
+                        it.key().as_str(),
+                        it.source
+                    ),
+                }),
             None => issues.push(Issue {
                 kind: "removed-upstream",
                 target: it.key().into(),

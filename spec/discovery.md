@@ -279,7 +279,10 @@ run = "make build"
   source that declares `prune` (lifecycle.md LIFE-57), `mind prune`, and
   `forget --dropped` (cli.md CLI-245, CLI-261) leave it installed, and
   `recall` marks it `(its manifest upstream is unreadable)` instead of
-  `(removed upstream; run mind prune)`.
+  `(removed upstream; run mind prune)` (under `--json`, its `orphaned` row
+  also carries `"unreadable": true`). `introspect` reports it as
+  `unreadable-upstream`, not `removed-upstream`, and a version-pinned
+  upgrade's apparent-break warning (VER-65) does not count it as a drop.
 - `DSC-99` An item whose source has NO effective namespace prefix
   (namespacing.md) but whose bare name contains `:` is warned about, naming the
   item and its source. The name is still installed as written: `:` is
