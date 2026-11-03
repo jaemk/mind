@@ -1740,6 +1740,42 @@ fn remeld_with_profile_flags_replaces_the_recorded_set() {
 }
 
 #[test]
+fn an_item_a_new_member_requires_is_not_a_leftover() {
+    // spec: PROF-37 PROF-39 PROF-21 -- `deploy` leaves `full`, but the new
+    // member `test` requires it (and `deploy` requires `helper`): neither
+    // `prune` nor the upgrade pass removes them before `test` is installed.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    sb.commit_file(
+        "skills/test/SKILL.md",
+        "---\nname: test\ndescription: test skill\n---\n# test\nUses {{ns:deploy}}.\n",
+    );
+    sb.commit_toml(
+        "[source]\nprune = true\n\n[profiles]\n\
+         default = [\"basic\"]\n\
+         basic = [\"skill:review\", \"rule:style\"]\n\
+         full = [\"basic\", \"agent:*\", \"skill:test\"]\n",
+    );
+    sb.ok(&["sync"]);
+    let r = sb.ok(&["prune", "--yes"]);
+    assert!(r.stdout.contains("nothing to prune"), "{}", r.all());
+
+    let r = sb.ok(&["upgrade", "--yes"]);
+    assert!(!r.stdout.contains("pruned"), "{}", r.all());
+    assert_eq!(
+        sb.installed(),
+        svec(&[
+            "agent:planner",
+            "rule:style",
+            "skill:deploy",
+            "skill:helper",
+            "skill:review",
+            "skill:test",
+        ])
+    );
+}
+
+#[test]
 fn remeld_json_lists_the_profile_leftovers() {
     // spec: PROF-40 CLI-153 -- the json twin of the leftovers note.
     let sb = Sandbox::new("src");
