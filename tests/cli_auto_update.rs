@@ -559,6 +559,8 @@ fn breaking_moves_follow_the_recommended_range() {
         format!("{} 1.0.0 -> 2.0.0", sb.identity()),
         "{v}"
     );
+    // spec: AUP-13 -- the lists are always present, empty when nothing went.
+    assert_eq!(v["pruned"], serde_json::json!([]), "{v}");
     assert_eq!(
         v["breaking"],
         serde_json::json!([{

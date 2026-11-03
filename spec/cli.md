@@ -1671,18 +1671,22 @@ HOOK-109, CLI-60, CLI-141, CLI-247, CUR-9, DEP-31, and LIFE-45 point here.
   source was already registered with nothing new to install, or `"aborted"` when
   the user aborted at an install-hook prompt and nothing was registered; `learn` -> `"installed"`,
   `"up-to-date"` (already installed), or `"dry-run"` (`--dry-run`); `forget` and
-  `unmeld` -> `"removed"`, with `unmeld --unlink-only` -> `"unlinked"`, and
+  `unmeld` -> `"removed"`, with `forget --dropped` and `prune` -> `"no-op"` when
+  nothing was dropped (CLI-245, CLI-261), `unmeld --unlink-only` -> `"unlinked"`, and
   `unmeld` -> `"aborted"` when the user aborted at an uninstall-hook prompt and
   the source stays melded (`count` is the items already removed); `sync` ->
   `"synced"`, or `"no-op"` when there are no sources; `upgrade` -> `"upgraded"`,
-  `"renamed"`, or `"up-to-date"`; `absorb` -> `"absorbed"`; `config lobes add`/`remove`
+  `"renamed"`, `"pruned"` (it only removed items a pruning source dropped,
+  LIFE-58), or `"up-to-date"`; `absorb` -> `"absorbed"`; `config lobes add`/`remove`
   -> `"added"`/`"removed"`, or `"no-op"` when the lobe was already in the desired
   state. `"up-to-date"` means the verb completed successfully but every item was
   already at the requested state; `"no-op"` means it completed successfully but had
   nothing to act on. A verb MAY add extra fields where it
   genuinely returns more data (for example, `learn` MAY include an `"installed"`
   array listing the effective names of all items installed in that call, including
-  dependency-closure items). The read-only verbs (`recall`, `probe`, `introspect`)
+  dependency-closure items, and `forget`, `prune`, `upgrade`, and `sync
+  --upgrade` include a `"removed"` array of the keys they removed, omitted when
+  they removed none). The read-only verbs (`recall`, `probe`, `introspect`)
   keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are not affected by
   CLI-153. `absorb` is also a mutating verb covered by CLI-153; see ABS-11 for its
   specific extra field. `hooks run` is a mutating verb too (HOOK-101/HOOK-103) but
