@@ -234,12 +234,9 @@ source was unmelded with `--keep-items`. `SOURCE` is the filter `sync` takes
 removal to items from matching sources, including an unmelded one. To narrow
 by item, use `mind forget --dropped <item>`.
 
-| flag | effect |
-|------|--------|
-| `-f`, `--force` | skip the confirmation when other items depend on the one removed |
-
 More than one item asks once; `--yes` skips that. No uninstall hooks run: a
-dropped item's hooks went with it.
+dropped item's hooks went with it. An installed item that still requires a
+dropped one is left installed.
 
 ```
 mind prune

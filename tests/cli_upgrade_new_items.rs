@@ -309,6 +309,38 @@ fn a_forgotten_item_is_not_offered_again() {
 }
 
 #[test]
+fn a_prune_frees_its_link_before_a_new_item_takes_it() {
+    // spec: LIFE-57 LIFE-54 -- an agent links under its frontmatter name, so
+    // renaming its file is a new item at the old link. The prune runs before
+    // the addition, so the new item gets the link instead of colliding.
+    let sb = Sandbox::with_toml("[source]\nprune = true\n");
+    let agent = "---\nname: dev\ndescription: dev agent\n---\n# dev\n";
+    write_file(&sb.source.join("agents/dev.md"), agent);
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "add agent"]);
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    assert!(sb.installed().contains(&"agent:dev".to_string()));
+
+    std::fs::remove_file(sb.source.join("agents/dev.md")).unwrap();
+    write_file(&sb.source.join("agents/developer.md"), agent);
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "rename agent file"]);
+    let r = sb.ok(&["upgrade", "--yes"]);
+    assert!(r.stdout.contains("pruned agent:dev"), "{}", r.all());
+
+    let keys = sb.installed();
+    assert!(keys.contains(&"agent:developer".to_string()), "{keys:?}");
+    assert!(!keys.contains(&"agent:dev".to_string()), "{keys:?}");
+    let link = sb.claude_home.join("agents/dev.md");
+    let target = std::fs::read_link(&link).expect("the new item owns the link");
+    assert!(
+        target.to_string_lossy().contains("developer"),
+        "{}",
+        target.display()
+    );
+}
+
+#[test]
 fn an_item_removed_upstream_leaves_the_snapshot() {
     // spec: LIFE-54
     let sb = Sandbox::new();

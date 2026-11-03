@@ -10500,10 +10500,11 @@ pub fn forget(
 /// `mind prune [<source>]` -- remove every installed item that is no longer
 /// part of a melded source: the `forget --dropped` set (CLI-245), narrowed to
 /// the items whose recorded source matches the `source` filter. An item's
-/// uninstall hooks are read from its source's catalog, which no longer lists
-/// any of these, so none run and there is no hook consent to take.
+/// uninstall hooks and its dependents (DEP-60) are both read from its source's
+/// catalog, which no longer lists any of these, so no hook runs and no
+/// dependents gate applies: there is no hook consent or `--force` to take.
 // spec: CLI-261
-pub fn prune(paths: &Paths, source: Option<&str>, yes: bool, force: bool) -> Result<()> {
+pub fn prune(paths: &Paths, source: Option<&str>, yes: bool) -> Result<()> {
     let manifest = Manifest::load(paths)?;
     if let Some(sel) = source {
         crate::resolve::validate_source_selector(sel)?;
@@ -10528,7 +10529,7 @@ pub fn prune(paths: &Paths, source: Option<&str>, yes: bool, force: bool) -> Res
         keys,
         target,
         yes,
-        force,
+        false,
         crate::hook::Accept::default(),
     )
 }

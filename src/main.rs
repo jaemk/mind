@@ -861,7 +861,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             accept.accept(),
         ),
         // spec: CLI-261
-        Command::Prune { source, force } => commands::prune(paths, source.as_deref(), yes, force),
+        Command::Prune { source } => commands::prune(paths, source.as_deref(), yes),
         Command::Sync {
             source,
             upgrade,
