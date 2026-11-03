@@ -28506,6 +28506,12 @@ fn prune_removes_items_no_longer_part_of_a_melded_source() {
     assert!(sb.mind(&["learn", "review"]).success);
     sb.remove_and_commit("agents/dev.md");
     assert!(sb.mind(&["sync"]).success, "sync failed");
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.stdout.contains("(removed upstream; run mind prune)"),
+        "recall points at prune: {}",
+        r.stdout
+    );
 
     let r = sb.mind(&["prune"]);
     assert!(r.success, "prune failed: {} {}", r.stdout, r.stderr);

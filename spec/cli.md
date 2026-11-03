@@ -662,7 +662,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `no dropped items; nothing to prune`. Under `--json` the result's `action`
   is `prune` and its `target` the filter (`*` without one), with outcome
   `removed` (the keys in `removed`) or `no-op`. Narrowing by item is
-  `forget --dropped <item>`, the same operation under `forget`.
+  `forget --dropped <item>`, the same operation under `forget`. The `recall`
+  status view (CLI-74) marks such an item `(removed upstream; run mind
+  prune)`, as it marks an outdated one `(outdated; run mind upgrade)`.
 
 ## sync
 
