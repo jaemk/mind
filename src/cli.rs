@@ -561,7 +561,8 @@ EXAMPLES:
     /// Removes every installed item its source no longer offers (marked
     /// "removed upstream" by `recall`), or whose source is no longer melded
     /// (`unmeld --keep-items`). An item of a melded source whose clone is
-    /// missing is kept. The same set as `forget --dropped`.
+    /// missing is kept. The same set as `forget --dropped`. No uninstall hooks
+    /// run: a dropped item's hooks went with it.
     // spec: CLI-261
     #[command(after_help = "\
 EXAMPLES:
@@ -587,10 +588,6 @@ EXAMPLES:
         // spec: DEP-60 CLI-42
         #[arg(short = 'f', long)]
         force: bool,
-
-        // spec: CLI-227 CLI-250
-        #[command(flatten)]
-        accept: AcceptHooksArgs,
     },
 
     /// Refresh melded source clones and catalogs (all, or only those matching

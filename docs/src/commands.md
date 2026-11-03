@@ -237,9 +237,9 @@ by item, use `mind forget --dropped <item>`.
 | flag | effect |
 |------|--------|
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
-| `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
-More than one item asks once; `--yes` skips that.
+More than one item asks once; `--yes` skips that. No uninstall hooks run: a
+dropped item's hooks went with it.
 
 ```
 mind prune

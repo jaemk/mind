@@ -636,7 +636,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   melded (`unmeld --keep-items`, CLI-22). An item whose source is melded but
   whose clone is missing is kept, since nothing says it was dropped. An optional
   `<item>` ref or glob narrows the set. CLI-42's confirmation applies when more
-  than one item would go. With nothing dropped it says so and removes nothing;
+  than one item would go. No item uninstall hook runs: an item's hooks are
+  read from its source's catalog (HOOK-82), which no longer lists any item in
+  this set. With nothing dropped it says so and removes nothing;
   under `--json` the outcome is `no-op`. The hint `upgrade` prints for a drop
   (VER-65) names `mind prune` (CLI-261).
 
@@ -651,8 +653,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   to those items. A filter that matches neither an installed item's source nor
   a melded source is a `SourceNotFound` error, and a malformed glob is
   `InvalidPattern`. CLI-42's confirmation applies when more than one item
-  would go, and `--force` and `--accept-hooks` mean what they mean on
-  `forget`. Each removal prints `pruned <key>`. With nothing dropped it prints
+  would go, and `--force` means what it means on `forget` (DEP-60). As with
+  `forget --dropped`, no item uninstall hook runs, so `prune` takes no
+  `--accept-hooks`. Each removal prints `pruned <key>`. With nothing dropped it prints
   `no dropped items; nothing to prune`. Under `--json` the result's `action`
   is `prune` and its `target` the filter (`*` without one), with outcome
   `removed` (the keys in `removed`) or `no-op`. Narrowing by item is
@@ -1644,7 +1647,7 @@ HOOK-109, CLI-60, CLI-141, CLI-247, CUR-9, DEP-31, and LIFE-45 point here.
   warning, `x` for error, `-` for available), so all information is preserved
   without terminal support.
 
-- `CLI-153` Every mutating verb (`meld`, `learn`, `forget`, `sync`, `upgrade`,
+- `CLI-153` Every mutating verb (`meld`, `learn`, `forget`, `prune`, `sync`, `upgrade`,
   `unmeld`, and `config lobes add`/`remove`) emits a structured JSON result object
   on stdout under `--json` and writes nothing else on stdout. The stable fields of
   this object are:
