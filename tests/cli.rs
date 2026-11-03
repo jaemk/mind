@@ -28647,6 +28647,16 @@ fn upgrade_prefers_an_installed_item_over_a_source_of_the_same_name() {
         r.stderr
     );
     assert!(!r.stdout.contains("upgraded skill:deploy"), "{}", r.stdout);
+
+    // A glob is an item filter as written: no note, even though it also
+    // matches the source.
+    let r = sb.mind(&["upgrade", "*", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.contains("also names a melded source"),
+        "{}",
+        r.stderr
+    );
 }
 
 /// A sandbox with `dev` and `review` installed, then `agents/dev.md` removed
