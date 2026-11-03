@@ -1195,6 +1195,13 @@ hooks to do different setup depending on which profiles the consumer enabled.
   install hooks; HOOK-60 is unchanged. A setup step that depends on the profile
   set belongs in an item hook, which runs when the item it serves is installed or
   removed.
+- `HOOK-144` Every hook also runs with `MIND_IN_HOOK=1`. The `mind` command
+  that runs a hook holds mind's lock (STO-40) until the hook exits, so a `mind`
+  the hook starts would wait for that lock forever. A `mind` command that runs
+  with `MIND_IN_HOOK` set and finds the lock held fails at once with a
+  `nested-in-hook` error instead of waiting, which fails the hook. With the
+  lock free (a process the hook left running after `mind` exited), it runs
+  normally.
 
 ## Managed-policy composition (research needed)
 

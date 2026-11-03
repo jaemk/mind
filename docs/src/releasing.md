@@ -138,7 +138,7 @@ run = "rm -rf ~/.claude/skills/old-review"
 ```
 
 The hook runs while `upgrade` holds mind's lock, so it cannot call `mind`
-itself (`mind forget` from the hook waits forever). See
+itself: a `mind` command run from a hook fails with `nested-in-hook`. See
 [Update hooks](install-hooks.md#update-hooks).
 
 ## Yank a release

@@ -72,11 +72,26 @@ fn wait_step(busy: bool) -> Option<crate::progress::Step<'static>> {
     busy.then(|| crate::progress::step("waiting for another mind command to finish"))
 }
 
+/// Set to `1` on every hook `mind` runs (HOOK-144).
+pub const IN_HOOK_ENV: &str = "MIND_IN_HOOK";
+
+/// Refuse to wait on a busy lock from inside a hook (HOOK-144): the holder is
+/// the `mind` that ran the hook, which waits for the hook in turn.
+// spec: HOOK-144
+fn refuse_nested(busy: bool) -> Result<()> {
+    if busy && std::env::var_os(IN_HOOK_ENV).is_some_and(|v| v == "1") {
+        return Err(MindError::NestedInHook);
+    }
+    Ok(())
+}
+
 impl MindLock {
     /// Acquire the lock exclusively (mutating commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn write(&mut self) -> Result<WriteGuard<'_>> {
-        let _step = wait_step(self.inner.try_write().is_err());
+        let busy = self.inner.try_write().is_err();
+        refuse_nested(busy)?;
+        let _step = wait_step(busy);
         let guard = self
             .inner
             .write()
@@ -87,7 +102,9 @@ impl MindLock {
     /// Acquire the lock shared (read-only commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn read(&self) -> Result<ReadGuard<'_>> {
-        let _step = wait_step(self.inner.try_read().is_err());
+        let busy = self.inner.try_read().is_err();
+        refuse_nested(busy)?;
+        let _step = wait_step(busy);
         let guard = self
             .inner
             .read()

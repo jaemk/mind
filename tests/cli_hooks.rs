@@ -457,6 +457,35 @@ fn hooks_list_json_sanitizes_a_hostile_item_name() {
 /// surface that actually reaches a source identity through a real `meld` --
 /// exactly what this fixture uses.
 #[test]
+fn a_mind_started_by_a_hook_fails_instead_of_waiting_on_the_lock() {
+    // spec: HOOK-144 -- the hook's `mind` would wait forever on the lock the
+    // `mind` running the hook holds; it fails at once, failing the hook.
+    let sb = Sandbox::new("nested-mind");
+    let bin = env!("CARGO_BIN_EXE_mind");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[items]]\nkind = \"skill\"\nname = \"widget\"\npath = \"skills/widget\"\n\
+             install = \"'{bin}' recall\"\n"
+        ),
+    );
+    sb.write_and_commit("skills/widget/SKILL.md", "---\ndescription: w\n---\n# w\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let (r, timed_out) =
+        sb.mind_env_stdin_bounded(&["learn", "widget", "--accept-hooks=install"], &[], "", 60);
+    assert!(!timed_out, "the nested mind waited on the lock");
+    assert!(!r.success, "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(r.code, Some(3), "a failed hook: {}", r.stderr);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(all.contains("cannot run inside a hook"), "{all}");
+
+    // With the lock free, `MIND_IN_HOOK` changes nothing.
+    let r = sb.mind_env_stdin(&["recall"], &[("MIND_IN_HOOK", "1")], "");
+    assert!(r.success, "{}", r.stderr);
+}
+
+#[test]
 fn hooks_list_sanitizes_a_hostile_source_name_in_every_form() {
     // spec: DSC-95 CLI-220 HOOK-104
     let hostile_dir = format!("hostsrc{}elmrc", '\u{202E}');

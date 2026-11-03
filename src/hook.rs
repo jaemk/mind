@@ -666,6 +666,9 @@ fn run_hook_framed(
     cmd.arg("-c")
         .arg(command)
         .envs(env.vars())
+        // spec: HOOK-144 -- a `mind` the hook starts must not wait on the
+        // lock this process holds.
+        .env(crate::lock::IN_HOOK_ENV, "1")
         .current_dir(clone_dir)
         .stdin(Stdio::null());
     // spec: HOOK-171 -- a Ctrl-C reaches the hook (same process group) and
