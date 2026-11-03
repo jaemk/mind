@@ -123,6 +123,11 @@ The upgrade report lists them under `removed upstream, to prune`, and the
 upgrade's confirmation covers them. Without it, a dropped item stays installed
 and `recall` marks it "removed upstream" until the consumer runs `mind prune`.
 
+The same key removes items that left the consumer's enabled
+[profiles](authoring-profiles.md#how-changes-reach-consumers), listed under
+`no longer in the enabled profiles, to prune`. Those are still offered, so
+their uninstall hooks do run.
+
 A pruned item's own uninstall hooks do not run, since the commit that dropped
 the item dropped its hooks too. Move any cleanup it needs into an update hook.
 

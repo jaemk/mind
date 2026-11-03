@@ -1450,3 +1450,348 @@ fn probe_json_unmanaged_rows_carry_no_profile_keys() {
         );
     }
 }
+
+// ----- PROF-37..41: pruning to the enabled set -----
+
+/// [`PROFILES`] with `[source] prune = true`.
+const PRUNING_PROFILES: &str = "[source]\nprune = true\n\n[profiles]\n\
+default = [\"basic\"]\n\
+basic = [\"skill:review\", \"rule:style\"]\n\
+full = [\"basic\", \"agent:*\", \"skill:deploy\"]\n";
+
+/// Write a curator repo's `mind.toml` listing `sb`'s source with
+/// `entry_extra` appended to its entry (e.g. `, profiles = ["full"]`).
+fn write_curator(sb: &Sandbox, curator: &Path, entry_extra: &str) {
+    write_file(
+        &curator.join("mind.toml"),
+        &format!(
+            "[discover]\nsources = [\n{{ source = \"{}\"{entry_extra} }}\n]\n",
+            sb.spec()
+        ),
+    );
+}
+
+/// A curator repo listing `sb`'s source (see [`write_curator`]), registered
+/// and owning the source. The source must already be melded.
+fn adopt_by_curator(sb: &Sandbox, entry_extra: &str) -> PathBuf {
+    let curator = sb.base.join("curator");
+    write_curator(sb, &curator, entry_extra);
+    git(&curator, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&curator, &["config", "user.email", "t@t"]);
+    git(&curator, &["config", "user.name", "t"]);
+    git(&curator, &["add", "-A"]);
+    git(&curator, &["commit", "-qm", "initial"]);
+    sb.ok(&["meld", &curator.to_string_lossy(), "--register-only"]);
+    sb.ok(&["curate", "--adopt", &sb.identity(), "--yes"]);
+    curator
+}
+
+/// Rewrite the curator's entry for `sb`'s source and commit it.
+fn recurate(sb: &Sandbox, curator: &Path, entry_extra: &str) {
+    write_curator(sb, curator, entry_extra);
+    git(curator, &["add", "-A"]);
+    git(curator, &["commit", "-qm", "change"]);
+}
+
+#[test]
+fn prune_removes_a_profile_leftover_after_an_upstream_shrink() {
+    // spec: PROF-37 PROF-38 PROF-22 -- `rule:style` left `basic` upstream;
+    // `upgrade` leaves it installed, `prune` removes it.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(PROFILES_MINUS_STYLE);
+    sb.ok(&["upgrade", "--yes"]);
+    assert!(sb.manifest_item("rule:style").is_some());
+
+    let r = sb.ok(&["prune"]);
+    assert!(r.stdout.contains("pruned rule:style"), "{}", r.all());
+    assert_eq!(sb.installed(), svec(&["skill:review"]));
+    assert!(!sb.claude_home.join("rules/style.md").exists());
+
+    let again = sb.ok(&["prune"]);
+    assert!(
+        again
+            .stdout
+            .contains("no dropped items or profile leftovers; nothing to prune"),
+        "{}",
+        again.all()
+    );
+}
+
+#[test]
+fn prune_keeps_closure_explicit_and_needed_items() {
+    // spec: PROF-37 PROF-38 DEP-60 -- a closure item of an enabled member is
+    // not a leftover; once its member leaves, both go; an item learned by
+    // name stays.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let all = svec(&[
+        "agent:planner",
+        "rule:style",
+        "skill:deploy",
+        "skill:helper",
+        "skill:review",
+    ]);
+    assert_eq!(sb.installed(), all);
+    let r = sb.ok(&["prune"]);
+    assert!(r.stdout.contains("nothing to prune"), "{}", r.all());
+    assert_eq!(sb.installed(), all, "helper is needed by deploy");
+
+    sb.ok(&["learn", "agent:planner"]);
+    assert!(sb.explicit("agent:planner"));
+    sb.commit_toml(
+        "[profiles]\n\
+         default = [\"basic\"]\n\
+         basic = [\"skill:review\", \"rule:style\"]\n\
+         full = [\"basic\"]\n",
+    );
+    sb.ok(&["upgrade", "--yes"]);
+    let r = sb.ok(&["prune", "--yes"]);
+    assert!(r.stdout.contains("pruned skill:deploy"), "{}", r.all());
+    assert!(r.stdout.contains("pruned skill:helper"), "{}", r.all());
+    assert_eq!(
+        sb.installed(),
+        svec(&["agent:planner", "rule:style", "skill:review"])
+    );
+}
+
+#[test]
+fn prune_runs_a_leftovers_uninstall_hook_and_honors_the_source_filter() {
+    // spec: PROF-38 CLI-250 CLI-261 -- a leftover is still offered, so its
+    // uninstall hook runs under `--accept-hooks`; a filter naming another
+    // source leaves it alone.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    let _other = register_other(&sb, "other", "");
+    let marker = sb.base.join("style-uninstalled");
+    sb.commit_file(
+        "rules/style.md",
+        &format!(
+            "---\ndescription: Style rule\nuninstall: touch {}\n---\n# style\n",
+            marker.display()
+        ),
+    );
+    sb.commit_toml(PROFILES_MINUS_STYLE);
+    sb.ok(&["sync"]);
+
+    let r = sb.ok(&["prune", "other"]);
+    assert!(r.stdout.contains("nothing to prune"), "{}", r.all());
+    assert!(sb.manifest_item("rule:style").is_some());
+
+    let r = sb.ok(&["prune", &sb.identity(), "--accept-hooks"]);
+    assert!(r.stdout.contains("pruned rule:style"), "{}", r.all());
+    assert!(marker.exists(), "uninstall hook ran: {}", r.all());
+}
+
+#[test]
+fn prune_skips_a_source_whose_profiles_do_not_expand() {
+    // spec: PROF-37 PROF-38 PROF-5 -- an exact member naming no item makes the
+    // enabled set unknowable: warn, keep the source's items.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(
+        "[profiles]\n\
+         default = [\"basic\"]\n\
+         basic = [\"skill:nope\"]\n",
+    );
+    sb.ok(&["sync"]);
+    let r = sb.ok(&["prune"]);
+    assert!(
+        r.all().contains("could not expand the enabled profiles"),
+        "{}",
+        r.all()
+    );
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}
+
+#[test]
+fn upgrade_prunes_profile_leftovers_of_a_pruning_source() {
+    // spec: PROF-39 PROF-22 LIFE-57 -- the source declares `prune`, so the
+    // departure is reported as being pruned and the pass removes it.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(&format!("[source]\nprune = true\n\n{PROFILES_MINUS_STYLE}"));
+
+    let r = sb.ok(&["upgrade", "--yes"]);
+    assert!(
+        r.all().contains("rule:style left profile default of"),
+        "{}",
+        r.all()
+    );
+    assert!(r.all().contains("; to prune"), "{}", r.all());
+    assert!(!r.all().contains("mind forget"), "{}", r.all());
+    assert!(
+        r.stdout
+            .contains("1 item no longer in the enabled profiles, to prune"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("pruned rule:style"), "{}", r.stdout);
+    assert_eq!(sb.installed(), svec(&["skill:review"]));
+}
+
+#[test]
+fn removing_the_profiles_table_prunes_nothing() {
+    // spec: PROF-37 PROF-39 PROF-38 -- a source that stops declaring profiles
+    // says nothing about which items its consumers want: even with `prune`,
+    // neither the upgrade pass nor `prune` removes them.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml("[source]\nprune = true\n");
+    let r = sb.ok(&["upgrade", "--yes"]);
+    assert!(!r.stdout.contains("pruned"), "{}", r.all());
+    let r = sb.ok(&["prune", "--yes"]);
+    assert!(r.stdout.contains("nothing to prune"), "{}", r.all());
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}
+
+#[test]
+fn upgrade_json_prunes_leftovers_only_with_yes() {
+    // spec: PROF-39 LIFE-45 LIFE-58 -- `--json` without `--yes` refuses and
+    // removes nothing; with it the key is in `removed`.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.commit_toml(&format!("[source]\nprune = true\n\n{PROFILES_MINUS_STYLE}"));
+
+    let r = sb.mind(&["upgrade", "--json"]);
+    assert!(!r.success, "{}", r.all());
+    assert!(sb.manifest_item("rule:style").is_some());
+
+    let doc = json_doc(&sb.ok(&["upgrade", "--json", "--yes"]));
+    assert_eq!(
+        strings(&doc["removed"]),
+        Some(svec(&["rule:style"])),
+        "{doc}"
+    );
+    assert_eq!(doc["outcome"], "pruned", "{doc}");
+    assert_eq!(sb.installed(), svec(&["skill:review"]));
+}
+
+#[test]
+fn upgrade_prunes_leftovers_a_remeld_left_on_a_pruning_source() {
+    // spec: PROF-39 PROF-40 -- leftovers are computed from the enabled set,
+    // not only this pass's departures, and are not upgraded first.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    sb.ok(&["meld", &sb.spec(), "--yes", "--profile", "basic"]);
+    sb.commit_file(
+        "agents/planner.md",
+        "---\nname: planner\ndescription: Planner agent\n---\n# planner v2\n",
+    );
+    let r = sb.ok(&["upgrade", "--yes"]);
+    assert!(!r.stdout.contains("upgraded agent:planner"), "{}", r.stdout);
+    assert!(r.stdout.contains("pruned agent:planner"), "{}", r.stdout);
+    assert!(r.stdout.contains("pruned skill:deploy"), "{}", r.stdout);
+    assert!(r.stdout.contains("pruned skill:helper"), "{}", r.stdout);
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}
+
+#[test]
+fn remeld_with_profile_flags_replaces_the_recorded_set() {
+    // spec: PROF-40 PROF-16 PROF-20 -- the flags name the whole set; nothing
+    // is uninstalled, the leftovers are named with `mind prune`, and kept
+    // members carry current reasons.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
+
+    // No flag: the recorded set is re-applied unchanged.
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
+
+    let r = sb.ok(&[
+        "meld",
+        &sb.spec(),
+        "--no-default-profile",
+        "--profile",
+        "basic",
+        "--yes",
+    ]);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["basic"])));
+    assert_eq!(
+        sb.recorded_snapshot(),
+        Some(svec(&["rule:style", "skill:review"]))
+    );
+    assert_eq!(sb.installed().len(), 5, "a re-meld uninstalls nothing");
+    assert!(
+        r.stdout.contains("3 item(s) of ")
+            && r.stdout.contains("are no longer in its enabled profiles"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("run `mind prune "), "{}", r.stdout);
+    assert_eq!(sb.reasons("skill:review"), svec(&["basic"]));
+    assert_eq!(sb.reasons("rule:style"), svec(&["basic"]));
+    assert_eq!(sb.reasons("agent:planner"), svec(&["full"]));
+
+    let r = sb.ok(&["prune", "--yes"]);
+    assert!(r.stdout.contains("pruned agent:planner"), "{}", r.all());
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+
+    // Current reasons: disabling `basic` removes what it installed.
+    sb.ok(&["forget", &sb.identity(), "--profile", "basic", "--yes"]);
+    assert!(sb.installed().is_empty(), "{:?}", sb.installed());
+}
+
+#[test]
+fn remeld_with_only_no_default_profile_untracks_the_source() {
+    // spec: PROF-40 PROF-37 -- an empty set clears both recorded fields; the
+    // items `default` installed are then leftovers.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.ok(&["meld", &sb.spec(), "--no-default-profile", "--yes"]);
+    assert_eq!(sb.recorded_profiles(), None);
+    assert_eq!(sb.recorded_snapshot(), None);
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+    sb.ok(&["prune", "--yes"]);
+    assert!(sb.installed().is_empty(), "{:?}", sb.installed());
+}
+
+#[test]
+fn declined_remeld_records_nothing() {
+    // spec: PROF-40 PROF-19 -- a re-meld that installs nothing on a non-TTY
+    // run without `--yes` leaves the recorded set as it was.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--yes"]);
+    sb.ok(&["meld", &sb.spec(), "--profile", "full"]);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
+}
+
+#[test]
+fn curator_entry_listing_fewer_profiles_disables_and_prunes() {
+    // spec: PROF-41 PROF-39 PROF-27 -- the entry's set replaces the recorded
+    // one; the source declares `prune`, so the same run removes what only the
+    // disabled profiles wanted.
+    let sb = Sandbox::with_toml("src", PRUNING_PROFILES);
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let curator = adopt_by_curator(&sb, ", profiles = [\"full\"]");
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
+
+    recurate(
+        &sb,
+        &curator,
+        ", profiles = [\"basic\"], default-profile = false",
+    );
+    let r = sb.ok(&["curate", "--yes"]);
+    assert!(r.all().contains("disables default, full"), "{}", r.all());
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["basic"])));
+    assert!(r.stdout.contains("pruned agent:planner"), "{}", r.all());
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}
+
+#[test]
+fn curator_entry_disabling_a_profile_keeps_items_without_prune() {
+    // spec: PROF-41 PROF-37 -- without `prune` the items stay; `mind prune`
+    // is named and removes them.
+    let sb = Sandbox::new("src");
+    sb.ok(&["meld", &sb.spec(), "--profile", "full", "--yes"]);
+    let curator = adopt_by_curator(&sb, ", profiles = [\"full\"]");
+    recurate(&sb, &curator, ", install = true");
+    let r = sb.ok(&["curate", "--yes"]);
+    assert!(r.all().contains("disables full"), "{}", r.all());
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
+    assert_eq!(sb.installed().len(), 5);
+    assert!(r.stdout.contains("run `mind prune "), "{}", r.all());
+    sb.ok(&["prune", "--yes"]);
+    assert_eq!(sb.installed(), svec(&["rule:style", "skill:review"]));
+}

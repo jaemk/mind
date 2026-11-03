@@ -28523,7 +28523,8 @@ fn prune_removes_items_no_longer_part_of_a_melded_source() {
     let r = sb.mind(&["prune"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
-        r.stdout.contains("no dropped items; nothing to prune"),
+        r.stdout
+            .contains("no dropped items or profile leftovers; nothing to prune"),
         "{}",
         r.stdout
     );
@@ -28620,12 +28621,13 @@ fn prune_removes_a_dropped_item_a_remaining_item_still_requires() {
     assert!(r.stdout.contains("pruned agent:target"), "{}", r.stdout);
     assert_eq!(installed_keys(&sb), vec!["skill:user".to_string()]);
 
-    // Neither `forget`'s `--force` nor `--accept-hooks` is offered.
-    for flag in ["--force", "--accept-hooks"] {
-        let r = sb.mind(&["prune", flag]);
-        assert!(!r.success, "{flag}: {}", r.stdout);
-        assert!(r.stderr.contains("unexpected argument"), "{}", r.stderr);
-    }
+    // `forget`'s `--force` is not offered; `--accept-hooks` is, for a
+    // profile leftover's uninstall hooks (PROF-38).
+    let r = sb.mind(&["prune", "--force"]);
+    assert!(!r.success, "--force: {}", r.stdout);
+    assert!(r.stderr.contains("unexpected argument"), "{}", r.stderr);
+    let r = sb.mind(&["prune", "--accept-hooks"]);
+    assert!(r.success, "--accept-hooks: {} {}", r.stdout, r.stderr);
 }
 
 #[test]

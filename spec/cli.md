@@ -513,7 +513,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `--dangerously-skip-install-hook-check`, hidden, each gating the uninstall
   hooks those verbs run (CLI-251).
 - `CLI-250` Every verb that runs hooks (`meld`, `learn`, `forget`, `unmeld`,
-  `upgrade`, `sync --upgrade`, `curate`, `hooks run`) takes one consent flag,
+  `prune`, `upgrade`, `sync --upgrade`, `curate`, `hooks run`) takes one
+  consent flag,
   `--accept-hooks[=<events>]`. Bare, it runs every hook without the safety
   prompt; with `=<events>`, a comma-separated list of `install`, `update`,
   `uninstall`, `build`, only the hooks for those events (HOOK-150). The value
@@ -646,20 +647,22 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 - `CLI-261` `prune [<source>]` removes the CLI-245 set: every installed item
   whose source is no longer melded, or whose melded source's catalog has no
-  item with its stable identity. An item of a melded source with no clone is
+  item with its stable identity, together with each source's profile
+  leftovers (PROF-37, PROF-38). An item of a melded source with no clone is
   kept. `<source>` is `sync`'s filter (CLI-231: an exact name, a trailing
   suffix, or a glob) matched against the source each item was installed from,
   so a source unmelded with `--keep-items` still matches; it narrows the set
   to those items. A filter that matches neither an installed item's source nor
   a melded source is a `SourceNotFound` error, and a malformed glob is
   `InvalidPattern`. CLI-42's confirmation applies when more than one item
-  would go. As with `forget --dropped`, no item uninstall hook runs, and no
-  DEP-60 dependents check applies: the dependency graph is built from the
-  catalog, which no longer lists a dropped item, so an installed item that
-  still requires one is already broken upstream and is left installed
-  (DEP-50). `prune` therefore takes neither `--accept-hooks` nor `--force`.
-  Each removal prints `pruned <key>`. With nothing dropped it prints
-  `no dropped items; nothing to prune`. Under `--json` the result's `action`
+  would go. As with `forget --dropped`, no uninstall hook runs for a dropped
+  item, and no DEP-60 dependents check applies: the dependency graph is built
+  from the catalog, which no longer lists a dropped item, so an installed item
+  that still requires one is already broken upstream and is left installed
+  (DEP-50). A profile leftover's uninstall hooks do run, under
+  `--accept-hooks` (CLI-250); `prune` takes no `--force`, since a leftover
+  never has a dependent. Each removal prints `pruned <key>`. With nothing to
+  remove it prints `no dropped items or profile leftovers; nothing to prune`. Under `--json` the result's `action`
   is `prune` and its `target` the filter (`*` without one), with outcome
   `removed` (the keys in `removed`) or `no-op`. Narrowing by item is
   `forget --dropped <item>`, the same operation under `forget`. The `recall`

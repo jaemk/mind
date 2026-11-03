@@ -62,10 +62,14 @@ Consumers who enabled a profile are tracked against it:
 
 - An item you add to an enabled profile is offered to them on their next
   `mind upgrade`.
-- An item you remove from a profile is reported, not uninstalled.
+- An item you remove from a profile is reported and stays installed until the
+  consumer runs `mind prune`. With `prune = true` in `[source]` (see
+  [Remove the items you drop](releasing.md#remove-the-items-you-drop)),
+  `mind upgrade` uninstalls it instead.
 - An item a consumer forgot is not offered again while it stays in the profile.
 - Renaming or removing a profile drops it from consumers' enabled sets with a
-  warning.
+  warning. Its items are then in no enabled profile, so they are pruned the
+  same way. Removing the whole `[profiles]` table prunes nothing.
 
 So treat profile names as part of your public interface, as you would item
 names.

@@ -672,8 +672,8 @@ fn interactive_meld_asks_which_profiles_only_without_a_default() {
 }
 
 #[test]
-fn remeld_adds_to_the_recorded_set_and_never_disables() {
-    // spec: PROF-16
+fn remeld_flags_name_the_whole_recorded_set() {
+    // spec: PROF-16 PROF-40
     let sb = Sandbox::new("src");
     assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
     assert_eq!(sb.recorded_profiles(), Some(svec(&["default"])));
@@ -683,15 +683,25 @@ fn remeld_adds_to_the_recorded_set_and_never_disables() {
     assert_eq!(sb.recorded_profiles(), Some(svec(&["default", "full"])));
     assert!(sb.installed().contains(&"skill:deploy".to_string()));
 
-    let r = sb.mind(&["meld", &sb.spec(), "--no-default-profile", "--yes"]);
+    let r = sb.mind(&[
+        "meld",
+        &sb.spec(),
+        "--no-default-profile",
+        "--profile",
+        "full",
+        "--yes",
+    ]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert_eq!(
         sb.recorded_profiles(),
-        Some(svec(&["default", "full"])),
-        "a re-meld never disables a profile"
+        Some(svec(&["full"])),
+        "the flags replace the recorded set"
     );
-    // A plain re-meld of a tracked source does not fall back to install-all.
+    // A plain re-meld keeps the recorded set and does not fall back to
+    // install-all.
     let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(sb.recorded_profiles(), Some(svec(&["full"])));
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(!sb.installed().contains(&"skill:test".to_string()));
 }

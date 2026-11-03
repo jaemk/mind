@@ -211,7 +211,8 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   its source's catalog (HOOK-82), which no longer lists it, as with `forget
   --dropped` (CLI-245). `prune` absent or `false` leaves dropped items
   installed, as before. Only items in the manifest are seen; files `mind` never recorded are
-  the source's own to remove, for example in an update hook.
+  the source's own to remove, for example in an update hook. The same
+  declaration prunes the source's profile leftovers (profiles.md PROF-39).
 - `LIFE-58` An item the pass prunes is not reported by VER-65 as a drop, and
   does not earn CLI-245's `mind prune` hint. Under `--json` the pruned keys
   are in the result's `removed` (in `sync --upgrade`'s result too), and an

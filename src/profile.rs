@@ -574,6 +574,72 @@ pub fn record_applied(source: &mut Source, enabled: &[String], applied_keys: &[S
     source.profile_snapshot = Some(union(source.profile_snapshot.take(), applied_keys));
 }
 
+/// Record a profile install that replaces `source`'s enabled set (PROF-40,
+/// PROF-41): the recorded set becomes exactly `enabled`, and the snapshot
+/// keeps the keys still in `expansion_keys` plus `applied_keys`, so a member
+/// the consumer forgot stays out of the offer (PROF-23) while a key that left
+/// the expansion is dropped. An empty `enabled` clears both fields, as
+/// disabling the last profile does (PROF-25).
+pub fn record_replaced(
+    source: &mut Source,
+    enabled: &[String],
+    expansion_keys: &[String],
+    applied_keys: &[String],
+) {
+    if enabled.is_empty() {
+        source.profiles = None;
+        source.profile_snapshot = None;
+        return;
+    }
+    let mut snapshot: BTreeSet<String> = source
+        .profile_snapshot
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|k| expansion_keys.contains(k))
+        .collect();
+    snapshot.extend(applied_keys.iter().cloned());
+    let set: BTreeSet<String> = enabled.iter().cloned().collect();
+    source.profiles = Some(set.into_iter().collect());
+    source.profile_snapshot = Some(snapshot.into_iter().collect());
+}
+
+/// Drop the profile names not in `enabled` from `item`'s reasons when at
+/// least one enabled name remains (PROF-40). An item none of whose reasons is
+/// enabled keeps them, so it is still recognized as installed for profiles
+/// and stays a leftover candidate (PROF-37), as PROF-25 keeps the reasons of
+/// an item kept for a dependent.
+pub fn strip_disabled_reasons(item: &mut InstalledItem, enabled: &[String]) {
+    if item.profiles.iter().any(|p| enabled.contains(p)) {
+        item.profiles.retain(|p| enabled.contains(p));
+    }
+}
+
+/// The leftover candidates among one source's installed items (PROF-37): each
+/// installed for profiles (PROF-20), not marked explicit, still offered by
+/// the source (`offered`, bare `kind:name` keys; an item the source no longer
+/// offers is a dropped item, CLI-245, not a leftover), and outside
+/// `expansion`, the source's enabled set expanded against its catalog. The
+/// caller then keeps any candidate another installed item depends on
+/// (DEP-60). Returns manifest keys, sorted.
+pub fn leftover_candidates(
+    items_of_source: &[&InstalledItem],
+    offered: &BTreeSet<String>,
+    expansion: &Expansion,
+) -> Vec<String> {
+    let mut out: Vec<String> = items_of_source
+        .iter()
+        .filter(|m| !m.profiles.is_empty() && !m.is_explicit())
+        .filter(|m| {
+            let bare = format!("{}:{}", m.kind.as_str(), m.bare_name);
+            offered.contains(&bare) && !expansion.keys.contains_key(&bare)
+        })
+        .map(|m| m.key().into())
+        .collect();
+    out.sort();
+    out
+}
+
 /// What disabling one profile does (PROF-25), computed by [`disable_plan`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisablePlan {
@@ -1123,6 +1189,84 @@ mod tests {
         assert_eq!(
             s.profile_snapshot.as_deref().unwrap(),
             ["skill:a", "skill:b"]
+        );
+    }
+
+    // spec: PROF-40 PROF-41
+    #[test]
+    fn record_replaced_sets_exactly_and_trims_the_snapshot() {
+        let mut s = crate::source::parse_spec("o/r").unwrap();
+        s.profiles = Some(vec!["default".into(), "full".into()]);
+        s.profile_snapshot = Some(vec![
+            "skill:a".into(),
+            "skill:forgotten".into(),
+            "skill:gone".into(),
+        ]);
+        record_replaced(
+            &mut s,
+            &["full".into(), "basic".into()],
+            &[
+                "skill:a".into(),
+                "skill:forgotten".into(),
+                "skill:new".into(),
+            ],
+            &["skill:new".into()],
+        );
+        assert_eq!(s.profiles.as_deref().unwrap(), ["basic", "full"]);
+        assert_eq!(
+            s.profile_snapshot.as_deref().unwrap(),
+            ["skill:a", "skill:forgotten", "skill:new"]
+        );
+
+        // An empty set untracks the source.
+        record_replaced(&mut s, &[], &[], &[]);
+        assert!(!s.is_profile_tracked());
+        assert_eq!(s.profiles, None);
+        assert_eq!(s.profile_snapshot, None);
+    }
+
+    // spec: PROF-40
+    #[test]
+    fn strip_disabled_reasons_keeps_reasons_when_none_stays_enabled() {
+        let mut both = installed("both", &["basic", "full"], false);
+        strip_disabled_reasons(&mut both, &["basic".into()]);
+        assert_eq!(both.profiles, vec!["basic"]);
+
+        let mut only_full = installed("only-full", &["full"], false);
+        strip_disabled_reasons(&mut only_full, &["basic".into()]);
+        assert_eq!(only_full.profiles, vec!["full"], "kept: still a leftover");
+    }
+
+    // spec: PROF-37
+    #[test]
+    fn leftover_candidates_are_profile_only_offered_items_outside_the_expansion() {
+        let member = installed("member", &["basic"], false);
+        let left = installed("left", &["full"], false);
+        let explicit = installed("explicit", &["full"], true);
+        let by_name = installed("by-name", &[], false);
+        let dropped = installed("dropped", &["full"], false);
+        let items = [&member, &left, &explicit, &by_name, &dropped];
+        let offered: BTreeSet<String> = [
+            "skill:member",
+            "skill:left",
+            "skill:explicit",
+            "skill:by-name",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let mut expansion = Expansion::default();
+        expansion
+            .keys
+            .insert("skill:member".into(), set(&["basic"]));
+        assert_eq!(
+            leftover_candidates(&items, &offered, &expansion),
+            vec!["skill:left".to_string()]
+        );
+        // Nothing enabled: every profile-only item still offered is one.
+        assert_eq!(
+            leftover_candidates(&items, &offered, &Expansion::default()),
+            vec!["skill:left".to_string(), "skill:member".to_string()]
         );
     }
 

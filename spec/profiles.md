@@ -112,11 +112,12 @@ mind forget owner/repo --profile full       # disable it again
   (CLI-236): the install batch is the union of the profile expansion and the
   `--learn` matches, under one preview and one prompt. Both conflict with
   `--register-only`.
-- `PROF-16` A re-meld (CLI-12) honors the profile flags, adding to the recorded
-  set (PROF-19). On a profile-tracked source the selection is the recorded set
-  (names still declared) plus the flags; `default` is not re-added unless it is
-  recorded or named, so an earlier `--no-default-profile` holds. A re-meld never
-  disables a profile; that is PROF-25.
+- `PROF-16` A re-meld (CLI-12) with no profile flag re-applies a
+  profile-tracked source's recorded set (names still declared); `default` is
+  not re-added unless it is recorded, so an earlier `--no-default-profile`
+  holds. A re-meld with profile flags of a source that is not profile-tracked
+  applies them as a first meld does. On a profile-tracked source the flags
+  replace the recorded set (PROF-40).
 - `PROF-17` `learn <source> --profile <NAME>` installs the named profile's
   expansion for an already-melded source and adds it to the recorded set.
   `<source>` is a source selector as in CLI-36. `learn <source> --all-profiles`
@@ -167,10 +168,12 @@ the user named.
   addition the consumer declines stays out of the snapshot and is offered again
   next time. `--skip-new` and `--ignore-new` apply to additions (LIFE-55).
 - `PROF-22` An item in the snapshot that is no longer in the expansion is
-  reported once as having left its profile and removed from the snapshot. It is
-  never uninstalled by `upgrade`; the report names `mind forget <key>`
-  (shell-quoted, CLI-225) when the item was installed only for profiles. The
-  departure is persisted even when the upgrade itself is declined.
+  reported once as having left its profile and removed from the snapshot. The
+  departure is persisted even when the upgrade itself is declined. The item is
+  then a profile leftover (PROF-37) when it qualifies: the pass prunes it when
+  its source declares `prune` (PROF-39), and the report says `to prune`;
+  otherwise it stays installed and the report names `mind forget <key>`
+  (shell-quoted, CLI-225) when the item was installed only for profiles.
 - `PROF-23` An item the consumer `forget`s stays in the snapshot, so `upgrade`
   does not offer it again while it remains a member. Only a member the
   maintainer adds after the snapshot was taken is offered. This differs on
@@ -196,6 +199,62 @@ the user named.
   Disabling a profile that is not enabled changes nothing. Disabling `default`
   is `--profile default`.
 
+## Pruning to the enabled set
+
+A consumer's enabled set can get leaner without `forget --profile`: the
+maintainer shrinks a profile or `default` (PROF-22, PROF-24), a re-meld names a
+smaller set (PROF-40), or a curator entry lists fewer profiles (PROF-41). The
+items only the old set wanted are then leftovers, which `prune` removes.
+
+- `PROF-37` A *profile leftover* of a melded source is an installed item of
+  that source that records profile reasons (PROF-20), is not marked explicit,
+  is still offered by the source, and is not in the expansion of the source's
+  enabled set: its recorded names the source still declares, or none for a
+  source that is not profile-tracked. A candidate another installed item
+  depends on is not a leftover (DEP-60), so a closure item of a member that
+  stays enabled is kept. An item the source no longer offers is a dropped item
+  (CLI-245), not a leftover. A source whose root `mind.toml` no longer
+  declares any profile has no leftovers, since dropping the table says
+  nothing about which items a consumer wants. When the enabled set does not
+  expand (an exact member naming no item, PROF-5), the source has no
+  leftovers either.
+- `PROF-38` `prune [<source>]` removes each matched source's profile leftovers
+  alongside its dropped items (CLI-261), under the same confirmation. A
+  leftover is still offered, so its uninstall hooks run under `prune`'s hook
+  consent (`--accept-hooks`, CLI-250). A source whose enabled set does not
+  expand is warned about and keeps its items.
+- `PROF-39` An upgrade pass that tracks profiles (unscoped or source-scoped,
+  as PROF-21..24) prunes the profile leftovers of each source that declares
+  `[source] prune = true` (LIFE-57), with the same scope, policy, and clone
+  conditions. The report lists them under `no longer in the enabled profiles,
+  to prune`; the pass's confirmation covers them, their uninstall hooks join
+  its hook plan, and each prints `pruned <key>`. A leftover is not upgraded
+  first. Under `--json` the pruned keys are in `removed`. A source without
+  `prune` keeps its leftovers until `mind prune`.
+- `PROF-40` A re-meld with profile flags of a profile-tracked source replaces
+  its recorded set with the flags' set, computed as a first meld computes it
+  (PROF-9..11): `default` unless `--no-default-profile`, plus each
+  `--profile`, or every profile under `--all-profiles`. `learn <source>
+  --profile` remains the form that adds to the set (PROF-17). Applying the
+  install records the new set exactly; the snapshot keeps the keys still in
+  the new expansion plus those just installed. Each installed member of the
+  new expansion is tagged with the profiles it is in now (PROF-20), and an
+  item's reasons then lose the names no longer enabled when another remains,
+  so a later `forget --profile` (PROF-25) reads current reasons. A set left empty clears
+  both recorded fields, as PROF-25 does. Nothing is uninstalled by the
+  re-meld: it prints how many leftovers (PROF-37) the source now has and
+  names `mind prune <source>` (shell-quoted, CLI-225). A declined re-meld
+  records nothing (PROF-19).
+- `PROF-41` On a curator-owned source (STO-82), the profile-routed entry's
+  enabled set is the source's whole recorded set: applying its `curate`
+  change (PROF-27) records the entry's set exactly, as PROF-40 records a
+  re-meld's, disabling a recorded profile the entry no longer lists, whether
+  the curator dropped it or the consumer enabled it with `learn --profile`.
+  For a source that declares `prune`, applying a change that disables a
+  profile also runs the source through the same run's upgrade pass (CUR-6),
+  which prunes the leftovers this leaves (PROF-39); otherwise they stay until
+  `mind prune`.
+
 ## Curators and dump
 
 - `PROF-26` A `[discover].sources` entry may set `profiles = ["<name>", ...]` and
@@ -211,9 +270,11 @@ the user named.
 - `PROF-27` `curate`'s `install` change (CUR-4) covers an entry's profiles: it
   proposes the members missing from the source's snapshot (PROF-21, PROF-23),
   together with any of the entry's `install-items` that are not installed, as
-  one change, and applying it records the entry's profiles on the source. An
-  entry whose members are all installed but whose profiles are not all recorded
-  proposes a change that only records them. A newly listed entry routed to
+  one change, and applying it records the entry's profiles on the source
+  (PROF-41). An entry whose members are all installed but whose enabled set
+  differs from the recorded one proposes a change that only records it. A
+  change that disables a recorded profile says `disables <names>`. A newly
+  listed entry routed to
   profiles installs through them at registration (CUR-3). An entry whose
   profile selection is invalid (an undeclared name, or an exact member naming
   no item) is skipped with reason `profile_selection_invalid` (CUR-15) rather

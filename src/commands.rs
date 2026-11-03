@@ -6567,6 +6567,10 @@ pub(crate) struct ProfileInstall<'a> {
     /// snapshot (PROF-21, PROF-23, PROF-27): `curate` sets this so a member
     /// the consumer forgot is not re-proposed.
     pub only_missing_from_snapshot: bool,
+    /// Applying the install makes the selection's enabled set the source's
+    /// whole recorded set instead of adding to it (PROF-40, PROF-41): a
+    /// re-meld with profile flags, or a curator entry.
+    pub replace: bool,
 }
 
 /// The result of [`install_source_profiles`] / its `--json` twin.
@@ -6610,6 +6614,10 @@ struct ProfilePlan {
     pending: Vec<String>,
     /// Dependency trees of the fresh members that add dependencies (DEP-31).
     trees: Vec<String>,
+    /// The enabled set's whole expansion, snapshotted members included.
+    expansion: crate::profile::Expansion,
+    /// [`ProfileInstall::replace`].
+    replace: bool,
 }
 
 impl ProfilePlan {
@@ -6808,6 +6816,8 @@ fn plan_profile_install(paths: &Paths, req: &ProfileInstall<'_>) -> Result<Profi
         reasons,
         pending,
         trees,
+        expansion,
+        replace: req.replace,
     })
 }
 
@@ -6835,7 +6845,11 @@ fn apply_profile_plan(
         .find(source_name)
         .and_then(|s| s.profiles.clone())
         .unwrap_or_default();
-    let enabled: BTreeSet<String> = recorded.into_iter().chain(plan.enabled.clone()).collect();
+    let enabled: BTreeSet<String> = if plan.replace {
+        plan.enabled.iter().cloned().collect()
+    } else {
+        recorded.into_iter().chain(plan.enabled.clone()).collect()
+    };
     let _scope = crate::hook::scope_profiles(crate::hook::ProfileScope {
         source: source_name.to_string(),
         enabled: enabled.into_iter().collect(),
@@ -6879,6 +6893,39 @@ fn apply_profile_plan(
         if let Some(bare) = &m.bare_key {
             applied_keys.push(bare.clone());
         }
+    }
+    if plan.replace {
+        // spec: PROF-40 PROF-41 -- the replaced set is the source's whole
+        // enabled set. Every installed member of its expansion (a snapshotted
+        // one `curate` did not offer too) is tagged with the profiles it is
+        // in now; then names no longer enabled leave the reasons of items
+        // that keep another, and the rest are left as leftovers (PROF-37).
+        for entry in manifest.items.values_mut() {
+            if entry.source != source_name {
+                continue;
+            }
+            let bare = format!("{}:{}", entry.kind.as_str(), entry.bare_name);
+            if let Some(profiles) = plan.expansion.keys.get(&bare) {
+                let pre_existing = !installed_keys.iter().any(|k| *k == entry.key().as_str());
+                crate::profile::tag_reasons(entry, profiles, pre_existing);
+            }
+            crate::profile::strip_disabled_reasons(entry, &plan.enabled);
+        }
+        manifest.save(paths)?;
+        let mut registry = Registry::load(paths)?;
+        if let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) {
+            crate::profile::record_replaced(
+                source,
+                &plan.enabled,
+                &plan.expansion.key_list(),
+                &applied_keys,
+            );
+            registry.save(paths)?;
+        }
+        return match failure {
+            Some(e) => Err(e),
+            None => Ok(installed_keys),
+        };
     }
     manifest.save(paths)?;
     if !plan.enabled.is_empty() {
@@ -7017,6 +7064,52 @@ pub(crate) fn install_source_profiles(
     req: &ProfileInstall<'_>,
     flow: InstallFlow,
 ) -> Result<ProfileInstallOutcome> {
+    let outcome = install_source_profiles_once(paths, req, flow)?;
+    // spec: PROF-40 PROF-41 -- a replaced set can leave items behind; name
+    // the command that removes them.
+    if req.replace && outcome.applied && !json_mode() {
+        note_profile_leftovers(paths, req.source_name);
+    }
+    Ok(outcome)
+}
+
+/// Print how many profile leftovers (PROF-37) `source_name` has and the
+/// `mind prune <source>` that removes them. Silent when there are none or
+/// they cannot be computed.
+fn note_profile_leftovers(paths: &Paths, source_name: &str) {
+    let found = (|| -> Result<Vec<String>> {
+        let registry = Registry::load(paths)?;
+        let Some(source) = registry.find(source_name) else {
+            return Ok(Vec::new());
+        };
+        let manifest = Manifest::load(paths)?;
+        let catalog = catalog::scan(paths, &registry)?;
+        let graph = manifest_graph(&catalog, &manifest);
+        profile_leftovers(paths, &catalog, &manifest, &graph, source)
+    })()
+    .unwrap_or_default();
+    if found.is_empty() {
+        return;
+    }
+    let safe = strip_ansi(source_name);
+    println!(
+        "note: {} item(s) of {safe} are no longer in its enabled profiles: {}; run `mind prune {}` \
+         to remove them",
+        found.len(),
+        found
+            .iter()
+            .map(|k| strip_ansi(k))
+            .collect::<Vec<_>>()
+            .join(", "),
+        crate::error::shell_quote(&safe)
+    );
+}
+
+fn install_source_profiles_once(
+    paths: &Paths,
+    req: &ProfileInstall<'_>,
+    flow: InstallFlow,
+) -> Result<ProfileInstallOutcome> {
     // spec: PROF-35
     print_profile_progress(paths, req.source_name, req.selection);
     let plan = plan_profile_install(paths, req)?;
@@ -7030,6 +7123,12 @@ pub(crate) fn install_source_profiles(
     }
     if plan.members.is_empty() {
         if plan.enabled.is_empty() {
+            // spec: PROF-40 -- a replacing selection that enables nothing
+            // still clears the recorded set.
+            if plan.replace {
+                apply_profile_plan(paths, req.source_name, &plan, flow, json)?;
+                outcome.applied = true;
+            }
             // spec: PROF-10 -- nothing enabled, nothing offered.
             if !json {
                 println!(
@@ -7144,6 +7243,12 @@ pub(crate) fn install_source_profiles_for_json(
         ..ProfileInstallOutcome::default()
     };
     if plan.members.is_empty() && plan.enabled.is_empty() {
+        // spec: PROF-40 -- a replacing selection that enables nothing still
+        // clears the recorded set.
+        if plan.replace {
+            apply_profile_plan(paths, req.source_name, &plan, flow, true)?;
+            outcome.applied = true;
+        }
         return Ok((outcome, 0));
     }
     if plan.pending.is_empty() || flow.yes {
@@ -7418,7 +7523,23 @@ fn resolve_profile_disable(
         },
         read_item_text,
     );
-    let mut remove: Vec<String> = plan.removable.clone();
+    let (remove, kept) = keep_needed(&graph, plan.removable.clone());
+    Ok(ProfileDisable {
+        plan,
+        remove,
+        kept,
+        manifest,
+        catalog,
+    })
+}
+
+/// Split `remove` into the keys that can go and the `(key, dependents)` pairs
+/// kept because an installed item outside the removed set depends on them
+/// (DEP-60), repeating until no removed key is still needed.
+fn keep_needed(
+    graph: &crate::deps::InstalledGraph,
+    mut remove: Vec<String>,
+) -> (Vec<String>, Vec<(String, Vec<String>)>) {
     let mut kept: Vec<(String, Vec<String>)> = Vec::new();
     loop {
         let blocked = remove.iter().find_map(|k| {
@@ -7437,13 +7558,70 @@ fn resolve_profile_disable(
             None => break,
         }
     }
-    Ok(ProfileDisable {
-        plan,
-        remove,
-        kept,
-        manifest,
+    (remove, kept)
+}
+
+/// The installed dependency graph over `manifest` (DEP-60), matching each
+/// catalog item by stable identity (source as well as key).
+fn manifest_graph(catalog: &[CatalogItem], manifest: &Manifest) -> crate::deps::InstalledGraph {
+    crate::deps::installed_graph(
         catalog,
-    })
+        |it| {
+            manifest
+                .items
+                .get(it.key().as_str())
+                .is_some_and(|m| m.source == it.source)
+        },
+        read_item_text,
+    )
+}
+
+/// The profile leftovers of `source` (PROF-37): its installed items that
+/// were installed for profiles, are not explicit, are still offered, and are
+/// outside the expansion of its enabled set (the recorded names the source
+/// still declares; none for a source that is not profile-tracked), minus any
+/// another installed item still depends on (DEP-60). Returns manifest keys,
+/// sorted. A source that declares no profiles has none. An expansion that
+/// fails (PROF-5) is the error: what the enabled set wants is unknown, so
+/// nothing can be called a leftover.
+// spec: PROF-37
+fn profile_leftovers(
+    paths: &Paths,
+    catalog: &[CatalogItem],
+    manifest: &Manifest,
+    graph: &crate::deps::InstalledGraph,
+    source: &crate::source::Source,
+) -> Result<Vec<String>> {
+    let of_source: Vec<&crate::manifest::InstalledItem> = manifest
+        .items
+        .values()
+        .filter(|m| m.source == source.name && !m.profiles.is_empty() && !m.is_explicit())
+        .collect();
+    if of_source.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A source that stopped declaring profiles altogether says nothing about
+    // which items its consumers want, so it has no leftovers.
+    let Some(table) = source_profile_table(paths, source)?.filter(|t| !t.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let enabled: Vec<String> = source
+        .profiles
+        .iter()
+        .flatten()
+        .filter(|p| table.contains_key(*p))
+        .cloned()
+        .collect();
+    let expansion = crate::profile::expand(&table, &enabled, catalog, &source.name)?;
+    let offered: BTreeSet<String> = catalog
+        .iter()
+        .filter(|c| c.source == source.name)
+        .map(|c| format!("{}:{}", c.kind.as_str(), c.name))
+        .collect();
+    let candidates = crate::profile::leftover_candidates(&of_source, &offered, &expansion);
+    let (mut remove, _kept) = keep_needed(graph, candidates);
+    remove.sort();
+    Ok(remove)
 }
 
 /// What changing one profile of a melded source would do, for the probe
@@ -7476,6 +7654,7 @@ pub(crate) fn profiles_install_preview(
         selection: &selection,
         learn_patterns: &[],
         only_missing_from_snapshot: false,
+        replace: false,
     };
     let plan = plan_profile_install(paths, &req)?;
     Ok(ProfileChangePreview {
@@ -7532,6 +7711,7 @@ pub fn learn_source_profiles(
         selection,
         learn_patterns: &[],
         only_missing_from_snapshot: false,
+        replace: false,
     };
     // spec: PROF-35
     print_profile_progress(paths, &source_name, selection);
@@ -7606,17 +7786,20 @@ pub fn learn_source_profiles(
     Ok(())
 }
 
-/// The selection a re-meld applies (PROF-16), or `None` to keep the CLI-12
-/// install-all path. A profile flag, a profile-tracked source, or a source
-/// declaring `default` routes through profiles. The recorded set is always
-/// re-enabled (a re-meld never disables, PROF-16); recorded names the source
-/// no longer declares are left to `upgrade` (PROF-24). On a tracked source
-/// `default` is re-enabled only when it is recorded or named.
+/// The selection a re-meld applies (PROF-16, PROF-40), or `None` to keep the
+/// CLI-12 install-all path, paired with whether applying it replaces the
+/// recorded set. A profile flag, a profile-tracked source, or a source
+/// declaring `default` routes through profiles. On a tracked source, profile
+/// flags replace the recorded set, computed as a first meld computes it
+/// (`default` unless `--no-default-profile`, plus `--profile`); with no flag
+/// the recorded set is re-enabled as it is, `default` only when recorded, and
+/// recorded names the source no longer declares are left to `upgrade`
+/// (PROF-24).
 fn remeld_profile_selection(
     paths: &Paths,
     source_name: &str,
     flags: Option<&crate::profile::Selection>,
-) -> Result<Option<crate::profile::Selection>> {
+) -> Result<Option<(crate::profile::Selection, bool)>> {
     let registry = Registry::load(paths)?;
     let Some(source) = registry.find(source_name) else {
         return Ok(None);
@@ -7628,6 +7811,12 @@ fn remeld_profile_selection(
         .is_some_and(|t| t.contains_key(crate::profile::DEFAULT));
     if flags.is_none() && !tracked && !has_default {
         return Ok(None);
+    }
+    // spec: PROF-40 -- profile flags on a tracked source name its whole set.
+    if let Some(sel) = flags
+        && tracked
+    {
+        return Ok(Some((sel.clone(), true)));
     }
     let mut sel = flags.cloned().unwrap_or(crate::profile::Selection {
         include_default: true,
@@ -7643,7 +7832,7 @@ fn remeld_profile_selection(
             }
         }
     }
-    Ok(Some(sel))
+    Ok(Some((sel, false)))
 }
 
 /// The curator-entry form of the profile flags (PROF-26), or `None` to keep
@@ -8191,12 +8380,15 @@ fn installed_by_bare_key<'a>(
 ///
 /// `mode` (LIFE-55) decides what happens to the fresh additions: returned for
 /// the gate, left out (`Skip`), or snapshotted without installing (`Ignore`).
+/// A departure whose manifest key is in `leftovers` is pruned by the pass
+/// (PROF-39), so its line says so instead of naming `mind forget`.
 // spec: PROF-5 PROF-21 PROF-22 PROF-23 PROF-24 LIFE-55
 fn track_profiles_for_upgrade(
     paths: &Paths,
     sources: &[String],
     catalog: &[CatalogItem],
     mode: NewItems,
+    leftovers: &[String],
 ) -> Result<ProfileTracking> {
     let mut tracking = ProfileTracking::default();
     for name in sources {
@@ -8245,14 +8437,18 @@ fn track_profiles_for_upgrade(
                 Some(e) if !e.profiles.is_empty() => e.profiles.clone(),
                 _ => recorded.clone(),
             };
+            // spec: PROF-39 -- a leftover of a pruning source goes with this pass.
+            let to_prune = entry.is_some_and(|e| leftovers.iter().any(|k| *k == e.key().as_str()));
             let forget = entry
-                .filter(|e| !e.is_explicit())
+                .filter(|e| !e.is_explicit() && !to_prune)
                 .map(|_| format!("mind forget {}", crate::error::shell_quote(&safe_key)));
             let mut line = format!(
                 "{safe_key} left profile {} of {safe_source}",
                 profiles.join(", ")
             );
-            if entry.is_some() {
+            if to_prune {
+                line.push_str("; to prune (the source declares `prune`)");
+            } else if entry.is_some() {
                 line.push_str("; it stays installed");
             }
             if let Some(cmd) = &forget {
@@ -8294,6 +8490,7 @@ fn track_profiles_for_upgrade(
             selection: &selection,
             learn_patterns: &[],
             only_missing_from_snapshot: true,
+            replace: false,
         };
         let plan = plan_profile_install(paths, &req)?;
         let ProfilePlan {
@@ -8303,6 +8500,8 @@ fn track_profiles_for_upgrade(
             reasons,
             pending,
             trees,
+            expansion,
+            replace,
         } = plan;
         let (present, fresh): (Vec<ProfileMember>, Vec<ProfileMember>) =
             members.into_iter().partition(|m| m.installed);
@@ -8316,6 +8515,8 @@ fn track_profiles_for_upgrade(
                 reasons: std::collections::BTreeMap::new(),
                 pending: Vec::new(),
                 trees: Vec::new(),
+                expansion: expansion.clone(),
+                replace,
             };
             apply_profile_plan(
                 paths,
@@ -8369,6 +8570,8 @@ fn track_profiles_for_upgrade(
                 reasons,
                 pending,
                 trees,
+                expansion,
+                replace,
             },
         ));
     }
@@ -8910,7 +9113,7 @@ pub fn remeld(
             let force_rerun = clobber == Clobber::Force;
             let hook_env = meld_hook_env(
                 mindfile.as_ref().and_then(|m| m.profiles.as_ref()),
-                remeld_selection.as_ref(),
+                remeld_selection.as_ref().map(|(sel, _)| sel),
                 registry.sources[idx].profiles.as_ref(),
             );
             // spec: HOOK-180 HOOK-183 -- as for a fresh meld, an interactive
@@ -8964,15 +9167,16 @@ pub fn remeld(
         }
     }
 
-    if let Some(selection) = remeld_selection {
-        // spec: PROF-16 -- a re-meld honors the profile flags, adding to the
-        // recorded set; the curated chain is walked as for install-all, but
-        // not under `--learn` (CLI-236).
+    if let Some((selection, replace)) = remeld_selection {
+        // spec: PROF-16 PROF-40 -- a re-meld honors the profile flags, which
+        // replace a tracked source's recorded set; the curated chain is
+        // walked as for install-all, but not under `--learn` (CLI-236).
         let req = ProfileInstall {
             source_name: &source_name,
             selection: &selection,
             learn_patterns,
             only_missing_from_snapshot: false,
+            replace,
         };
         if out.json {
             let (outcome, pending) = install_source_profiles_for_json(paths, &req, flow)?;
@@ -9346,6 +9550,7 @@ pub fn install_curated_sources(
                             selection: &selection,
                             learn_patterns: &patterns,
                             only_missing_from_snapshot: false,
+                            replace: false,
                         },
                         flow,
                     )?;
@@ -9496,6 +9701,7 @@ pub(crate) fn install_curated_sources_for_json(
                             selection: &selection,
                             learn_patterns: &patterns,
                             only_missing_from_snapshot: false,
+                            replace: false,
                         },
                         flow,
                     )?;
@@ -10498,13 +10704,20 @@ pub fn forget(
 }
 
 /// `mind prune [<source>]` -- remove every installed item that is no longer
-/// part of a melded source: the `forget --dropped` set (CLI-245), narrowed to
-/// the items whose recorded source matches the `source` filter. An item's
-/// uninstall hooks and its dependents (DEP-60) are both read from its source's
-/// catalog, which no longer lists any of these, so no hook runs and no
-/// dependents gate applies: there is no hook consent or `--force` to take.
-// spec: CLI-261
-pub fn prune(paths: &Paths, source: Option<&str>, yes: bool) -> Result<()> {
+/// part of a melded source: the `forget --dropped` set (CLI-245) plus each
+/// source's profile leftovers (PROF-37, PROF-38), narrowed to the items whose
+/// recorded source matches the `source` filter. A dropped item's uninstall
+/// hooks and dependents are read from its source's catalog, which no longer
+/// lists it, so none run and no dependents gate applies. A leftover is still
+/// offered: its uninstall hooks run under `accept`, and one another installed
+/// item depends on is never in the set.
+// spec: CLI-261 PROF-38
+pub fn prune(
+    paths: &Paths,
+    source: Option<&str>,
+    yes: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
     let manifest = Manifest::load(paths)?;
     if let Some(sel) = source {
         crate::resolve::validate_source_selector(sel)?;
@@ -10520,22 +10733,61 @@ pub fn prune(paths: &Paths, source: Option<&str>, yes: bool) -> Result<()> {
             });
         }
     }
-    let keys = dropped_item_keys(paths, &manifest, None, source)?;
+    let mut keys = dropped_item_keys(paths, &manifest, None, source)?;
+    for key in all_profile_leftovers(paths, &manifest, source)? {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.sort();
     let target = source.unwrap_or("*");
-    forget_dropped(
-        paths,
-        "prune",
-        manifest,
-        keys,
-        target,
-        yes,
-        false,
-        crate::hook::Accept::default(),
-    )
+    forget_dropped(paths, "prune", manifest, keys, target, yes, false, accept)
 }
 
-/// Remove the CLI-245 dropped set `keys`, reporting under `action` (`forget`
-/// for `forget --dropped`, `prune` for `prune`) and `target`.
+/// The profile leftovers (PROF-37) of every melded source with a clone on
+/// disk, or only of those matching the CLI-231 `filter`, for `prune`
+/// (PROF-38). A source whose enabled set does not expand (PROF-5) is warned
+/// about and contributes nothing.
+fn all_profile_leftovers(
+    paths: &Paths,
+    manifest: &Manifest,
+    filter: Option<&str>,
+) -> Result<Vec<String>> {
+    let registry = Registry::load(paths)?;
+    let sources: Vec<&crate::source::Source> = registry
+        .sources
+        .iter()
+        .filter(|s| filter.is_none_or(|f| crate::resolve::source_matches_glob(&s.name, f)))
+        .filter(|s| {
+            manifest
+                .items
+                .values()
+                .any(|m| m.source == s.name && !m.profiles.is_empty())
+        })
+        .filter(|s| clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir()))
+        .collect();
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog = catalog::scan(paths, &registry)?;
+    let graph = manifest_graph(&catalog, manifest);
+    let mut keys: Vec<String> = Vec::new();
+    for s in sources {
+        match profile_leftovers(paths, &catalog, manifest, &graph, s) {
+            Ok(found) => keys.extend(found),
+            Err(e) => crate::render::warn(format!(
+                "could not expand the enabled profiles of {}: {}; keeping its items",
+                strip_ansi(&s.name),
+                strip_ansi(&e.to_string())
+            )),
+        }
+    }
+    Ok(keys)
+}
+
+/// Remove `keys`, reporting under `action` and `target`: the CLI-245 dropped
+/// set for `forget --dropped`, plus the profile leftovers (PROF-38) for
+/// `prune`.
 #[allow(clippy::too_many_arguments)]
 fn forget_dropped(
     paths: &Paths,
@@ -10552,7 +10804,11 @@ fn forget_dropped(
         if out.json {
             return print_json(&MutationResult::new(action, target, "no-op"));
         }
-        println!("no dropped items; nothing to {action}");
+        if action == "prune" {
+            println!("no dropped items or profile leftovers; nothing to prune");
+        } else {
+            println!("no dropped items; nothing to {action}");
+        }
         return Ok(());
     }
     forget_keys(
@@ -12190,7 +12446,40 @@ fn upgrade_inner_scoped(
         Vec::new()
     };
     let mode = new_items();
-    let tracking = track_profiles_for_upgrade(paths, &profile_sources, &catalog, mode)?;
+    // spec: PROF-39 -- the profile leftovers of a source that declares
+    // `prune`, in the same scope as the profile tracking, computed before it
+    // so the departures it reports can say they are being pruned.
+    let leftover_keys: Vec<String> = if filter.is_none() && key_scope.is_none() {
+        let candidates: Vec<&crate::source::Source> = registry
+            .sources
+            .iter()
+            .filter(|s| {
+                source_scope.as_ref().is_none_or(|sc| sc.contains(&s.name))
+                    && !unscannable.contains(&s.name)
+                    && policy
+                        .as_ref()
+                        .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
+                    && manifest
+                        .items
+                        .values()
+                        .any(|m| m.source == s.name && !m.profiles.is_empty())
+                    && clone_dir_checked(paths, s).is_ok_and(|d| d.is_dir())
+                    && declares_prune(paths, s)
+            })
+            .collect();
+        let mut keys: Vec<String> = Vec::new();
+        if !candidates.is_empty() {
+            let graph = manifest_graph(&catalog, &manifest);
+            for s in candidates {
+                keys.extend(profile_leftovers(paths, &catalog, &manifest, &graph, s)?);
+            }
+        }
+        keys
+    } else {
+        Vec::new()
+    };
+    let tracking =
+        track_profiles_for_upgrade(paths, &profile_sources, &catalog, mode, &leftover_keys)?;
     // spec: LIFE-54 -- the same scoping for sources installed whole; a
     // profile-tracked source is tracked by its profiles instead.
     let whole_sources: Vec<String> = if filter.is_none() && key_scope.is_none() {
@@ -12236,6 +12525,9 @@ fn upgrade_inner_scoped(
     let mut prunes: Vec<crate::manifest::InstalledItem> = Vec::new();
     let mut prune_sources: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
+    // spec: PROF-39 -- installed items its enabled profiles no longer want,
+    // of a source that declares `prune`.
+    let mut left_prunes: Vec<crate::manifest::InstalledItem> = Vec::new();
 
     for installed in manifest.items.values() {
         match upgrade_item_disposition(
@@ -12281,6 +12573,11 @@ fn upgrade_inner_scoped(
                 continue;
             }
             UpgradeDisposition::Consider => {}
+        }
+        // spec: PROF-39 -- a profile leftover is pruned below, not upgraded.
+        if leftover_keys.iter().any(|k| *k == installed.key().as_str()) {
+            left_prunes.push(installed.clone());
+            continue;
         }
         // Match on stable identity (source, kind, bare_name) so a prefix change
         // is seen as a rename of the same item, not an orphan-plus-new-item.
@@ -12329,6 +12626,7 @@ fn upgrade_inner_scoped(
         }
     }
     prunes.sort_by_key(|i| i.key());
+    left_prunes.sort_by_key(|i| i.key());
     warn_apparent_breaks(
         &registry,
         &manifest,
@@ -12360,6 +12658,7 @@ fn upgrade_inner_scoped(
 
     if pending.is_empty()
         && prunes.is_empty()
+        && left_prunes.is_empty()
         && !tracking.has_additions()
         && whole.targets.is_empty()
     {
@@ -12398,6 +12697,7 @@ fn upgrade_inner_scoped(
         print_upgrade_report(&registry, &pending, &tracking);
         print_whole_additions(&whole);
         print_prunes(&prunes);
+        print_left_prunes(&left_prunes);
     }
 
     // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
@@ -12515,6 +12815,25 @@ fn upgrade_inner_scoped(
                 accept,
             ));
         }
+    }
+    // spec: PROF-39 HOOK-180 -- a leftover is still offered, so its uninstall
+    // hooks run and are planned with the rest.
+    let left_hooks: Vec<Vec<&crate::mindfile::ResolvedHook>> = left_prunes
+        .iter()
+        .map(|item| {
+            item_catalog_match(&catalog, item)
+                .map(|c| c.uninstall_hooks())
+                .unwrap_or_default()
+        })
+        .collect();
+    for (item, item_hooks) in left_prunes.iter().zip(&left_hooks) {
+        hooks.extend(item_uninstall_plan(
+            paths,
+            item,
+            item_hooks,
+            &item.commit,
+            accept,
+        ));
     }
     // spec: CLI-60 CLI-259 HOOK-182 -- without `--yes` the upgrades are
     // confirmed with the hooks (off a TTY that refuses); `--yes` answers the
@@ -12684,6 +13003,24 @@ fn upgrade_inner_scoped(
             .and_then(|s| s.commit.clone())
             .unwrap_or_default();
         if let Err(e) = uninstall_item(paths, item, &[], &commit, accept) {
+            save_and_warn_workflows(paths, &manifest, &applied_keys);
+            return Err(e);
+        }
+        manifest.items.remove(item.key().as_str());
+        let key = item.display_key();
+        if !out.json {
+            println!("{} pruned {key}", out.ok());
+        }
+        pruned.push(key);
+    }
+    // spec: PROF-39 -- the profile leftovers, under the same answer; each is
+    // still offered, so its uninstall hooks run.
+    for (item, item_hooks) in left_prunes.iter().zip(&left_hooks) {
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
+        if let Err(e) = uninstall_item(paths, item, item_hooks, &commit, accept) {
             save_and_warn_workflows(paths, &manifest, &applied_keys);
             return Err(e);
         }
@@ -13288,7 +13625,7 @@ fn warn_apparent_breaks(
 /// Whether `source`'s checked-out `mind.toml` declares `[source] prune = true`
 /// (LIFE-57). An unreadable or invalid file reads as not declaring it.
 // spec: LIFE-57
-fn declares_prune(paths: &Paths, source: &crate::source::Source) -> bool {
+pub(crate) fn declares_prune(paths: &Paths, source: &crate::source::Source) -> bool {
     matches!(MindToml::load(&source.clone_dir(paths)), Ok(Some(t)) if t.source.prune)
 }
 
@@ -13302,6 +13639,29 @@ fn print_prunes(prunes: &[crate::manifest::InstalledItem]) {
     let noun = if n == 1 { "item" } else { "items" };
     println!("{n} {noun} removed upstream, to prune (the source declares `prune`):\n");
     for item in prunes {
+        // spec: DSC-95
+        println!(
+            "  {} {} {}",
+            out.warn(),
+            item.display_key(),
+            out.dim(&format!("[{}]", strip_ansi(&item.source)))
+        );
+    }
+    println!();
+}
+
+/// List the profile leftovers an upgrade pass prunes (PROF-39).
+fn print_left_prunes(items: &[crate::manifest::InstalledItem]) {
+    if items.is_empty() {
+        return;
+    }
+    let out = crate::render::ctx();
+    let n = items.len();
+    let noun = if n == 1 { "item" } else { "items" };
+    println!(
+        "{n} {noun} no longer in the enabled profiles, to prune (the source declares `prune`):\n"
+    );
+    for item in items {
         // spec: DSC-95
         println!(
             "  {} {} {}",
@@ -16458,6 +16818,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
                 selection: &selection,
                 learn_patterns: &learn_patterns,
                 only_missing_from_snapshot: false,
+                replace: false,
             };
             if json {
                 let (outcome, pend) = install_source_profiles_for_json(paths, &req, flow)?;

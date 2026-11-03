@@ -89,7 +89,7 @@ missing items, or shows each item's state. Alias `add`.
 |------|--------|
 | `--register-only` | register without offering to install |
 | `--learn <NAME\|GLOB>` | install only matching items (repeatable); see [Choose what a source installs](choosing-items.md) |
-| `--profile <NAME>` | enable an install profile in addition to `default` (repeatable or comma list) |
+| `--profile <NAME>` | enable an install profile in addition to `default` (repeatable or comma list); on a re-meld the profile flags replace the enabled profiles |
 | `--no-default-profile` | leave the `default` profile out |
 | `--all-profiles` | enable every declared profile |
 | `--pin <HEAD\|REF\|branch=NAME\|tag=NAME\|version=RANGE>` | set the version tracked (`'version=*'` tracks every tagged release); also re-pins a melded source; see [Pin a source to a version](pinning.md) |
@@ -235,19 +235,24 @@ source was unmelded with `--keep-items`. `SOURCE` is the filter `sync` takes
 removal to items from matching sources, including an unmelded one. To narrow
 by item, use `mind forget --dropped <item>`.
 
-More than one item asks once; `--yes` skips that. No uninstall hooks run: a
-dropped item's hooks went with it. An installed item that still requires a
-dropped one is left installed.
+It also removes profile leftovers: items installed only for a source's
+profiles that its enabled profiles no longer include. An item you installed by
+name, and one another installed item depends on, is kept.
+
+More than one item asks once; `--yes` skips that. A dropped item's uninstall
+hooks went with it, so none run; an installed item that still requires a
+dropped one is left installed. A leftover's uninstall hooks run after a
+prompt, or without one under `--accept-hooks`.
 
 ```
 mind prune
 mind prune --yes
-mind prune owner/repo                            # only one source's dropped items
+mind prune owner/repo                            # only one source's items
 mind prune '*skills'                             # sources matching a glob
 ```
 
 A source that declares `[source] prune = true` has `upgrade` do this for the
-items a new commit dropped. See
+items a new commit dropped and for its profile leftovers. See
 [Remove the items you drop](releasing.md#remove-the-items-you-drop).
 
 ## recall
