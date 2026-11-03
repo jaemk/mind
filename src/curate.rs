@@ -679,6 +679,26 @@ fn apply(
                     ));
                     continue;
                 }
+                // spec: PROF-41 PROF-39 -- a change that disabled a profile
+                // of a source declaring `prune` puts the source in this run's
+                // upgrade pass, which prunes the leftovers.
+                let before: Vec<String> = registry
+                    .find(source)
+                    .and_then(|s| s.profiles.clone())
+                    .unwrap_or_default();
+                let after_registry = Registry::load(paths)?;
+                let after: Vec<String> = after_registry
+                    .find(source)
+                    .and_then(|s| s.profiles.clone())
+                    .unwrap_or_default();
+                if before.iter().any(|p| !after.contains(p))
+                    && after_registry
+                        .find(source)
+                        .is_some_and(|s| commands::declares_prune(paths, s))
+                    && !upgrade_scope.contains(source)
+                {
+                    upgrade_scope.push(source.clone());
+                }
                 applied.push(format!("install:{source}"));
             }
             Action::Repin { source, pin } => {
@@ -686,7 +706,9 @@ fn apply(
                 applied.push(format!("repin:{source}"));
             }
             Action::Upgrade { source } => {
-                upgrade_scope.push(source.clone());
+                if !upgrade_scope.contains(source) {
+                    upgrade_scope.push(source.clone());
+                }
                 applied.push(format!("upgrade:{source}"));
             }
             Action::Unlist { source } => {
@@ -844,6 +866,24 @@ fn pending_profile_installs(
     Ok(Some((pending, enabled)))
 }
 
+/// Whether two profile-name lists hold the same names, in any order.
+fn same_names(a: &[String], b: &[String]) -> bool {
+    let a: std::collections::BTreeSet<&String> = a.iter().collect();
+    let b: std::collections::BTreeSet<&String> = b.iter().collect();
+    a == b
+}
+
+/// The recorded profile names `enabled` leaves out, comma-joined (PROF-41).
+fn disabled_names(recorded: Option<&[String]>, enabled: &[String]) -> String {
+    recorded
+        .unwrap_or_default()
+        .iter()
+        .filter(|p| !enabled.contains(p))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Apply a profile-routed entry (PROF-27): the profile install with
 /// `only_missing_from_snapshot` and the entry's selection, recording the
 /// entry's profiles on the source. `only_missing` is false at first
@@ -870,6 +910,8 @@ fn install_entry_profiles(
         selection,
         learn_patterns: &patterns,
         only_missing_from_snapshot: only_missing,
+        // spec: PROF-41 -- the entry's selection is the source's whole set.
+        replace: true,
     };
     if crate::render::ctx().json {
         commands::install_source_profiles_for_json(paths, &req, flow)?;
@@ -1189,17 +1231,23 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
             let routed = !matches!(profile_result, Ok(None));
             match profile_result {
                 Ok(Some((pending, enabled))) if !pending.is_empty() => {
+                    let mut detail = format!(
+                        "{} declares {} not installed: {} (profiles: {})",
+                        strip_ansi(&curator.name),
+                        pending.len(),
+                        strip_ansi(&pending.join(", ")),
+                        strip_ansi(&enabled.join(", "))
+                    );
+                    // spec: PROF-41
+                    let disabled = disabled_names(registered.profiles.as_deref(), &enabled);
+                    if !disabled.is_empty() {
+                        detail.push_str(&format!("; disables {}", strip_ansi(&disabled)));
+                    }
                     plan.push(Change::new(
                         "install",
                         curator.name.clone(),
                         registered.name.clone(),
-                        format!(
-                            "{} declares {} not installed: {} (profiles: {})",
-                            strip_ansi(&curator.name),
-                            pending.len(),
-                            strip_ansi(&pending.join(", ")),
-                            strip_ansi(&enabled.join(", "))
-                        ),
+                        detail,
                         Action::InstallProfiles {
                             source: registered.name.clone(),
                             selection: crate::profile::Selection::from_nested(&entry),
@@ -1207,24 +1255,34 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                         },
                     ));
                 }
-                // spec: PROF-27 PROF-19 -- every member is installed already
-                // but the enabled profiles are not all recorded: still record
-                // them, as `meld` does.
+                // spec: PROF-27 PROF-19 PROF-41 -- every member is installed
+                // already but the recorded set differs from the entry's: still
+                // record the entry's, as `meld` does, disabling any recorded
+                // profile the entry no longer lists.
                 Ok(Some((_, enabled)))
-                    if !enabled.is_empty()
-                        && !enabled.iter().all(|p| {
-                            registered.profiles.as_ref().is_some_and(|r| r.contains(p))
-                        }) =>
+                    if !same_names(
+                        registered.profiles.as_deref().unwrap_or_default(),
+                        &enabled,
+                    ) =>
                 {
-                    plan.push(Change::new(
-                        "install",
-                        curator.name.clone(),
-                        registered.name.clone(),
+                    let disabled = disabled_names(registered.profiles.as_deref(), &enabled);
+                    let mut detail = if enabled.is_empty() {
+                        format!("{} enables no profile", strip_ansi(&curator.name))
+                    } else {
                         format!(
                             "{} records profiles {} (members already installed)",
                             strip_ansi(&curator.name),
                             strip_ansi(&enabled.join(", "))
-                        ),
+                        )
+                    };
+                    if !disabled.is_empty() {
+                        detail.push_str(&format!("; disables {}", strip_ansi(&disabled)));
+                    }
+                    plan.push(Change::new(
+                        "install",
+                        curator.name.clone(),
+                        registered.name.clone(),
+                        detail,
                         Action::InstallProfiles {
                             source: registered.name.clone(),
                             selection: crate::profile::Selection::from_nested(&entry),

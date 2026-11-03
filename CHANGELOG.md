@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `mind prune` also removes profile leftovers: items installed only for a
+  source's profiles that its enabled profiles no longer include, because the
+  consumer switched to fewer profiles or the author took the item out of a
+  profile. An item learned by name, and one another installed item depends
+  on, is kept. A leftover's uninstall hooks run, so `prune` takes
+  `--accept-hooks`.
+- A source declaring `[source] prune = true` has the upgrade pass remove its
+  profile leftovers too, listed under `no longer in the enabled profiles, to
+  prune`.
+
+### Changed
+
+- `meld <source>` with `--profile`, `--no-default-profile`, or
+  `--all-profiles` on a source that already has profiles enabled now replaces
+  the enabled profiles instead of adding to them, computed as a first meld
+  computes them. `learn <source> --profile` still adds. The re-meld names the
+  items the old set left behind and `mind prune <source>`.
+- `curate` sets a curator-owned source's enabled profiles to exactly what its
+  entry selects, disabling a profile the entry no longer lists (the change
+  says `disables <names>`). On a source declaring `prune = true`, the same run
+  prunes what the disabled profiles left.
+
 ## [0.45.0] - 2026-11-02
 
 ### Added

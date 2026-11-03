@@ -41,8 +41,16 @@ dropped with `unmeld --keep-items`. A source with no clone on disk is left
 alone, since nothing says what it dropped. `mind forget --dropped` is the same
 operation, narrowed by item instead of by source.
 
+`prune` also removes profile leftovers: items installed only for a source's
+[profiles](choosing-items.md#change-profiles-later) that its enabled profiles
+no longer include, because you switched to fewer profiles or the author took
+the item out of one. It keeps an item you installed by name and an item
+another installed item depends on, and runs a leftover's uninstall hooks
+(`--accept-hooks` runs them without a prompt).
+
 A source can declare `prune = true` in its `mind.toml`, and then `mind upgrade`
-removes the items a new commit dropped as part of the upgrade (see
+removes the items a new commit dropped, and its profile leftovers, as part of
+the upgrade (see
 [Remove the items you drop](releasing.md#remove-the-items-you-drop)).
 
 ## Turn off an install profile

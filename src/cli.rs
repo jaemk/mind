@@ -560,22 +560,27 @@ EXAMPLES:
     ///
     /// Removes every installed item its source no longer offers (marked
     /// "removed upstream" by `recall`), or whose source is no longer melded
-    /// (`unmeld --keep-items`). An item of a melded source whose clone is
-    /// missing is kept. The same set as `forget --dropped`. No uninstall hooks
-    /// run, since a dropped item's hooks went with it, and there is no
-    /// dependents check. Removing more than one item asks first; `--yes` skips
-    /// that.
-    // spec: CLI-261
+    /// (`unmeld --keep-items`): the `forget --dropped` set. An item of a
+    /// melded source whose clone is missing is kept. No uninstall hooks run
+    /// for these, since a dropped item's hooks went with it.
+    ///
+    /// Also removes profile leftovers: items installed only for a source's
+    /// profiles that its enabled profiles no longer include (a profile was
+    /// disabled or shrank upstream). An item you learned by name, or one
+    /// another installed item depends on, is kept. A leftover's uninstall
+    /// hooks run. Removing more than one item asks first; `--yes` skips that.
+    // spec: CLI-261 PROF-38
     #[command(after_help = "\
 EXAMPLES:
     mind prune
     mind prune --yes
-    mind prune owner/repo                            # only one source's dropped items
+    mind prune owner/repo                            # only one source's items
     mind prune '*skills'                             # sources matching a glob
 
     To narrow by item, use `mind forget --dropped <item>`. A source can prune
     for you: `[source] prune = true` in its mind.toml makes `mind upgrade`
-    remove the items a new commit no longer offers.")]
+    remove the items a new commit no longer offers, and its profile
+    leftovers.")]
     Prune {
         /// Only prune items from the source(s) matching this filter: an exact
         /// name, a trailing suffix like `repo` or `owner/repo`, or a glob, the
@@ -583,6 +588,10 @@ EXAMPLES:
         /// installed from, so a source unmelded with `--keep-items` still
         /// matches.
         source: Option<String>,
+
+        // spec: CLI-250 PROF-38
+        #[command(flatten)]
+        accept: AcceptHooksArgs,
     },
 
     /// Refresh melded source clones and catalogs (all, or only those matching
@@ -1277,8 +1286,10 @@ pub struct MeldArgs {
     /// enabled profiles' items instead of the whole source. Composes with
     /// `--learn` (the union is offered). A name the source does not declare
     /// is an error that lists the declared ones. Conflicts with
-    /// `--register-only`.
-    // spec: PROF-9 PROF-14 PROF-15
+    /// `--register-only`. On a re-meld of a source with profiles enabled, the
+    /// profile flags replace the enabled profiles; `mind prune <source>`
+    /// then removes the items only the old ones wanted.
+    // spec: PROF-9 PROF-14 PROF-15 PROF-40
     #[arg(
         long = "profile",
         value_name = "NAME",

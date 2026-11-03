@@ -82,6 +82,8 @@ mind learn owner/repo --profile          # list the profiles you can enable
 mind recall --profiles owner/repo        # the same, with what each installs
 mind learn owner/repo --profile full     # enable full and install its items
 mind forget owner/repo --profile full    # disable full
+mind meld owner/repo --no-default-profile --profile basic   # switch to only basic
+mind prune owner/repo                    # remove what the old set left behind
 ```
 
 `mind recall --profiles` with no source lists every melded source that declares
@@ -91,10 +93,17 @@ Disabling a profile forgets the items that were installed only for it. It keeps
 an item you installed by name, an item another enabled profile includes, and an
 item another installed item depends on.
 
+Re-melding with profile flags switches to exactly the profiles they name
+(`default` included unless `--no-default-profile`), where `learn --profile`
+adds to the enabled set. A curator that lists the source sets its profiles the
+same way on `mind curate`. Neither uninstalls anything: the items only the old
+set wanted stay installed, and `mind prune` removes them.
+
 When the author adds an item to a profile you have enabled, `mind upgrade`
 offers to install it. When an item leaves a profile, `upgrade` reports it and
-leaves it installed; `forget` it if you no longer want it. An item you
-`forget` yourself is not offered again while it stays in the profile.
+leaves it installed; `mind prune` removes it, or `upgrade` does when the source
+declares `prune = true`. An item you `forget` yourself is not offered again
+while it stays in the profile.
 
 ### What profiles do not cover
 
