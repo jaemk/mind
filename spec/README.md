@@ -322,6 +322,7 @@ and verified.
 | Progress spinner on stderr for slow steps (clone, fetch, source refresh, item staging, catalog scan, a wait on another command's lock, `evolve` lookup and download) when stderr is a terminal; `--no-progress` / `MIND_PROGRESS`; notes, prompts, and hooks clear it first; git runs prompt-free under it and retries a suppressed prompt interactively | done | [progress.md](progress.md) (PRG-1..10) |
 | Unified install prompt: `meld`/`learn`/`upgrade`/`unmeld` show one plan (items plus every hook, with an inspect path for item hooks) and ask once before anything runs; `[Y/s/r/n]` runs all hooks, skips all, reviews each, or cancels; an unclear reply re-asks, EOF takes the default | done | [install-hooks.md](install-hooks.md) (HOOK-180..186) |
 | Every fixed-choice prompt rejects an unrecognized reply and asks again, and EOF takes the prompt's default; prompts appear only on a TTY, and without one a run that would prompt needs `--yes` | done | CLI-257, CLI-258, CLI-259 |
+| Items hooks: a source `[[hooks]]` entry with `event = "items"` runs once per command after the source's installed set changes, getting the added/updated/removed items and the full installed set in `MIND_ITEMS_FILE`; pending until a run applies the current set | planned | [install-hooks.md](install-hooks.md) (HOOK-190..197) |
 | Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
 
 ## Documents
@@ -349,7 +350,8 @@ and verified.
   Also covers the update event (HOOK-120..127), which runs at `upgrade` in
   place of re-running install hooks, and where an item declares its own hooks
   (HOOK-130..132): scalar frontmatter keys, or a scoped `mind.toml` in a skill
-  or tool directory.
+  or tool directory. Items hooks (HOOK-190..197, planned) run once per command
+  with a source's installed set.
 - [tooling.md](tooling.md) - resource and helper tooling: the `tool` item kind,
   path-reference tokens (`{{self}}`, `{{tools:name}}`, `{{path:ref}}`), and how an
   item references the tooling it ships.

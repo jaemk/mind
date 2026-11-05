@@ -1205,6 +1205,114 @@ hooks to do different setup depending on which profiles the consumer enabled.
   lock free (a process the hook left running after `mind` exited), it runs
   normally.
 
+## Items hooks
+
+Status: planned. A source's install and uninstall hooks run at `meld` and
+`unmeld`, and an item's hooks run once per item. Neither fits work that depends
+on the set of a source's installed items: a registry, index, or settings
+fragment generated from the installed tools, or a resource several items share
+that should exist while any of them is installed. An items hook is a
+source-level hook that runs once per command with the source's installed set,
+so the author writes "make the host match this set" instead of tracking each
+install and removal. It is another layer, not a replacement: item hooks and
+source hooks run as before.
+
+- `HOOK-190` `event = "items"` is a fourth lifecycle event for a source's
+  `[[hooks]]` entry (HOOK-51) and a curator's `[[discover.sources.hooks]]`
+  entry (DSC-61, HOOK-127). It has the same fields, declaration-order execution,
+  and `optional` semantics as the other events (HOOK-52). It is not valid on an
+  item's hooks (`[[items.hooks]]`, HOOK-131's item manifest, HOOK-130's
+  frontmatter); there it is a `mind.toml` schema error naming the bad value and
+  the events legal for an item.
+- `HOOK-191` An items hook is pending when the source's installed set differs
+  from the set the hook last applied (HOOK-195). A set differs when an item was
+  added, an item was removed, or an installed item's content hash changed. At
+  the end of any command that installs, updates, or removes items of the source,
+  each pending items hook of that source is offered once:
+  - installs: `meld`, `learn` (including `learn <source> --profile`), `curate`,
+    an `upgrade` addition (LIFE-54, PROF-21), and an `auto_meld` install
+    (POL-58);
+  - updates: `upgrade`'s in-place swap (an `upgrade` rename is a removal plus
+    an install);
+  - removals: `forget` (including `forget <source> --profile`), `prune`, an
+    `upgrade` prune pass (PROF-39), and `unmeld`.
+
+  `upgrade` also offers a pending items hook when it changed nothing, so a run
+  that was skipped or failed earlier catches up. A command that touches several
+  sources offers each source's items hooks once, after that source's items.
+  `unmeld --keep-items` (CLI-22) removes no items and does not offer one.
+- `HOOK-192` An items hook runs in the source's clone at the source's current
+  commit, after every item install, update, and removal of the command and after
+  those items' own hooks (HOOK-81, HOOK-82, HOOK-125). This extends HOOK-87:
+  `source.install -> item.install* -> items ... item.uninstall* -> items ->
+  source.uninstall`. At `unmeld` the items hook runs after the items are
+  removed, with an empty installed set, and before the source's uninstall hooks
+  and the removal of the clone.
+- `HOOK-193` An items hook gets `MIND_ITEMS_FILE`, the path to a JSON document
+  that `mind` writes before the hook runs and deletes after it exits:
+
+  ```json
+  {
+    "version": 1,
+    "source": "github.com/acme/tools",
+    "commit": "<sha>",
+    "command": "learn",
+    "added": [],
+    "updated": [],
+    "removed": [],
+    "installed": []
+  }
+  ```
+
+  `command` is the verb that offered the hook (`hooks run` for HOOK-196).
+  `installed` is the source's full installed set after the command. `added`,
+  `updated`, and `removed` are the difference between that set and the set the
+  hook last applied (HOOK-195), not the command's own changes, so changes from
+  a skipped or failed run are not lost. On the first run every installed item is
+  in `added`. Each entry has `kind`, `name` (the bare name), `effective_name`,
+  `store` (the absolute store path; for a removed item, the path it had, which
+  no longer exists), and `profiles` (the item's recorded reasons, PROF-20).
+  Each list is sorted by kind, then effective name. A file is used instead of
+  environment variables because a large source can exceed the per-string
+  environment limit.
+
+  The hook also gets HOOK-140's variables (`MIND_ITEM_PROFILES` empty) and
+  `MIND_IN_HOOK` (HOOK-144). A nested `mind` cannot run while the hook holds the
+  lock, so the document carries everything the hook can learn about the
+  installed set. Every other hook gets `MIND_ITEMS_FILE` set to empty, for the
+  same reason HOOK-140's variables are always set. Cleanup that needs a removed
+  item's files belongs in that item's uninstall hook, which runs while they
+  still exist.
+- `HOOK-194` An items hook is disclosed, prompted, and skipped like a source
+  hook (HOOK-20, HOOK-22, HOOK-52, HOOK-91). The unified plan (HOOK-180,
+  HOOK-186) lists it in run order (HOOK-192) with the counts of added, updated,
+  and removed items it will see. Verbs outside the plan (`forget`, `prune`,
+  `curate`) prompt it on its own. `--accept-hooks` accepts it bare or as
+  `--accept-hooks=items`, which extends CLI-250's event list. Its results go
+  into the `--json` document, the error envelope, and the hook history with
+  event `items` (HOOK-160, HOOK-163).
+- `HOOK-195` The source's registry entry records, for each declared items hook
+  (keyed by command and event, as in HOOK-124), the installed set it last
+  applied: each item's kind, effective name, and content hash. A successful run
+  replaces the record with the set in the `installed` list it was given. A skip,
+  a decline, or a failure leaves the record unchanged, so the hook stays
+  pending. A non-zero exit does not roll back the command's item changes,
+  because they and their own hooks have already run. The command reports the
+  failure, saves its state (LIFE-48), and exits 3 (CLI-255). The record is
+  dropped with the source at `unmeld`. A source that newly declares an items
+  hook has no record, so the hook's first offer lists every installed item as
+  added.
+- `HOOK-196` `hooks run <source> --event items` (CLI-195) runs the source's
+  pending items hooks with `command` set to `hooks run`. `--force` runs them
+  even when they are not pending, in which case the three difference lists may
+  be empty. An item target never runs an items hook. `hooks list` reports each
+  items hook with its pending state and the size of its recorded set. `review`
+  (HOOK-58) and `recall --sources` disclose it like any other source hook.
+- `HOOK-197` `init-source` scaffolds a commented `event = "items"` example
+  alongside its other `[[hooks]]` examples (HOOK-57). Its comment states that
+  the hook receives the full installed set in `MIND_ITEMS_FILE` and should make
+  the host match it, so a re-run with the same set changes nothing.
+
 ## Managed-policy composition (research needed)
 
 Install hooks are arbitrary code execution, which is exactly what an enterprise
