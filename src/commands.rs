@@ -1482,6 +1482,16 @@ fn run_install_hooks(
         );
     }
 
+    // spec: HOOK-190 -- a curator's items hooks are recorded on the source, the
+    // only place a later command can read them from (HOOK-127). They run at
+    // the end of the command, with the installed set (HOOK-191).
+    let curated_items: Vec<crate::mindfile::ResolvedHook> = hooks
+        .iter()
+        .filter(|h| h.event == HookEvent::Items && origin_of(h) == Some(HookOrigin::Curated))
+        .cloned()
+        .collect();
+    crate::items_hook::record_curated(source, &curated_items);
+
     Ok(HookOutcome::Proceed)
 }
 
@@ -5055,6 +5065,12 @@ fn unmeld_one(
         }
     }
     manifest.save(paths)?;
+
+    // spec: HOOK-192 -- the source's items hooks see the emptied set after the
+    // items' own uninstall hooks and before the source's.
+    if forgotten > 0 {
+        crate::items_hook::offer(paths, &source_name, "unmeld", accept, false)?;
+    }
 
     // HOOK-54/87: the source's uninstall hooks run AFTER every item has been
     // removed, still in the clone, before the clone and registry entry are
@@ -10166,6 +10182,18 @@ fn meld_hook_env(
     crate::hook::HookEnv {
         profiles: profiles.into_iter().collect(),
         item_profiles: Vec::new(),
+        items_file: None,
+    }
+}
+
+/// The `recall --sources` token for a source's recorded hooks (HOOK-58,
+/// HOOK-196): none for 0, ` hook` for 1, ` hooks(N)` beyond. Items hooks count
+/// alongside the install and update records.
+fn hook_token(s: &crate::source::Source) -> String {
+    match s.install_hooks.len() + s.items_hooks.len() {
+        0 => String::new(),
+        1 => " hook".to_string(),
+        n => format!(" hooks({n})"),
     }
 }
 
@@ -10176,6 +10204,7 @@ pub(crate) fn source_hook_env(source: &crate::source::Source) -> crate::hook::Ho
         profiles: crate::hook::scoped_profiles(&source.name)
             .unwrap_or_else(|| source.profiles.clone().unwrap_or_default()),
         item_profiles: Vec::new(),
+        items_file: None,
     }
 }
 
@@ -14056,11 +14085,7 @@ pub fn recall(
                 };
                 // HOOK-58: surface that a source carries install hooks with a
                 // count-aware token.
-                let hook = match s.install_hooks.len() {
-                    0 => String::new(),
-                    1 => " hook".to_string(),
-                    n => format!(" hooks({n})"),
-                };
+                let hook = hook_token(s);
                 // MKT-10: show the manifest origin so a native-plugin source is
                 // distinguishable from a convention or mind.toml source.
                 let origin = origin_label(s.origin);
@@ -14363,11 +14388,7 @@ pub fn recall(
             Some(a) => format!(" namespace:{a}"),
             None => String::new(),
         };
-        let hook = match s.install_hooks.len() {
-            0 => String::new(),
-            1 => " hook".to_string(),
-            n => format!(" hooks({n})"),
-        };
+        let hook = hook_token(s);
         // MKT-10: show the manifest origin in the source header so the
         // provenance is visible in the default recall view too.
         let origin = origin_label(s.origin);
@@ -18011,6 +18032,7 @@ mod tests {
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
+            items_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
             profiles: None,
@@ -19301,6 +19323,37 @@ mod tests {
             contents.contains("event = \"update\""),
             "scaffold must show an update-event example: {contents}"
         );
+        // spec: HOOK-197 -- an items-event example that says the hook gets the
+        // full installed set and should make the host match it.
+        assert!(
+            contents.contains("# event = \"items\"")
+                && contents.contains("MIND_ITEMS_FILE")
+                && contents.contains("changes nothing"),
+            "scaffold must show an items-event example: {contents}"
+        );
+        // The hook examples must parse once uncommented: keep each commented
+        // `[[hooks]]` header and `key = value` line, without its `# `.
+        let uncommented: String = contents
+            .lines()
+            .skip_while(|l| l.trim() != "# [[hooks]]")
+            .filter_map(|l| l.strip_prefix("# "))
+            .filter(|l| {
+                *l == "[[hooks]]"
+                    || l.split_once(" = ").is_some_and(|(k, _)| {
+                        !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: MindToml = toml::from_str(&uncommented)
+            .unwrap_or_else(|e| panic!("uncommented scaffold must parse: {e}\n{uncommented}"));
+        let events: Vec<HookEvent> = parsed
+            .resolved_hooks(std::path::Path::new("mind.toml"))
+            .expect("uncommented hooks resolve")
+            .into_iter()
+            .map(|h| h.event)
+            .collect();
+        assert!(events.contains(&HookEvent::Items), "{events:?}");
         // All [[hooks]] content is commented out (lines starting with # after trimming).
         // Check that the literal text "[[hooks]]" is preceded by a #.
         let has_uncommented_hooks = contents.lines().any(|l| l.trim() == "[[hooks]]");
@@ -19327,33 +19380,29 @@ mod tests {
     fn hook_token_is_count_aware() {
         // 0 hooks -> empty string.
         let s0 = hook_source(Some("abc"), &[]);
-        let token0 = match s0.install_hooks.len() {
-            0 => String::new(),
-            1 => " hook".to_string(),
-            n => format!(" hooks({n})"),
-        };
-        assert_eq!(token0, "", "no hooks => empty token");
+        assert_eq!(hook_token(&s0), "", "no hooks => empty token");
 
         // 1 hook -> ` hook`.
         let s1 = hook_source(Some("abc"), &[("make install", Some("abc"))]);
-        let token1 = match s1.install_hooks.len() {
-            0 => String::new(),
-            1 => " hook".to_string(),
-            n => format!(" hooks({n})"),
-        };
-        assert_eq!(token1, " hook", "1 hook => ' hook'");
+        assert_eq!(hook_token(&s1), " hook", "1 hook => ' hook'");
 
         // 2 hooks -> ` hooks(2)`.
         let s2 = hook_source(
             Some("abc"),
             &[("make build", Some("abc")), ("make install", Some("abc"))],
         );
-        let token2 = match s2.install_hooks.len() {
-            0 => String::new(),
-            1 => " hook".to_string(),
-            n => format!(" hooks({n})"),
-        };
-        assert_eq!(token2, " hooks(2)", "2 hooks => ' hooks(2)'");
+        assert_eq!(hook_token(&s2), " hooks(2)", "2 hooks => ' hooks(2)'");
+
+        // spec: HOOK-196 -- a recorded items hook counts too.
+        let mut s3 = hook_source(Some("abc"), &[("make install", Some("abc"))]);
+        s3.items_hooks.push(crate::source::RecordedItemsHook {
+            command: "make registry".into(),
+            applied: None,
+            name: None,
+            optional: false,
+            origin: None,
+        });
+        assert_eq!(hook_token(&s3), " hooks(2)");
     }
 
     // spec: HOOK-50 HOOK-55
@@ -20312,6 +20361,7 @@ mod tests {
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
+            items_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
             profiles: None,

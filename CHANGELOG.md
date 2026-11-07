@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Items hooks: a source `[[hooks]]` entry with `event = "items"` runs once per
+  command that changes the source's installed items, after the items' own
+  hooks. `$MIND_ITEMS_FILE` names a JSON document listing the items added,
+  updated, and removed since the hook last ran successfully, plus the full
+  installed set. A skipped or failed run stays pending and is offered again
+  by the next `upgrade`, or on demand with `mind hooks run <source> --event
+  items`. `--accept-hooks=items` accepts it, and `init-source` scaffolds an
+  example.
+
 ## [0.46.0] - 2026-11-03
 
 ### Added

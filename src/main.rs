@@ -16,6 +16,7 @@ mod hook_log;
 mod hooks_cmd;
 mod ignore;
 mod install;
+mod items_hook;
 mod lock;
 mod manifest;
 mod mindfile;
@@ -695,7 +696,67 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Run the verb, then offer the items hooks it made pending (HOOK-191): the
+/// manifest is snapshotted before a verb that can change installed items, and
+/// a source whose items differ afterwards has its pending items hooks offered
+/// once. A verb that fails offers none; a later `upgrade` catches up.
+// spec: HOOK-191
 fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
+    let settle = items_settle(&cli.command);
+    let before = settle.as_ref().map(|_| items_hook::snapshot(paths));
+    dispatch_verb(cli, paths)?;
+    if let (Some((verb, scope, accept)), Some(before)) = (settle, before) {
+        items_hook::settle(paths, &before, verb, &scope, accept)?;
+    }
+    Ok(())
+}
+
+/// The verb name, settle scope, and accepted events for a command that can
+/// change installed items (HOOK-191), or `None` for one that cannot. `unmeld`
+/// offers its source's items hooks itself, before the source's uninstall
+/// hooks (HOOK-192), and so is not listed.
+fn items_settle(
+    command: &Command,
+) -> Option<(&'static str, items_hook::Scope, crate::hook::Accept)> {
+    use items_hook::Scope;
+    Some(match command {
+        Command::Meld(args) => ("meld", Scope::Touched, args.accept.accept()),
+        Command::Learn {
+            dry_run: false,
+            accept,
+            ..
+        } => ("learn", Scope::Touched, accept.accept()),
+        Command::Forget { accept, .. } => ("forget", Scope::Touched, accept.accept()),
+        Command::Prune { accept, .. } => ("prune", Scope::Touched, accept.accept()),
+        Command::Curate {
+            check: false,
+            accept,
+            ..
+        } => ("curate", Scope::Touched, accept.accept()),
+        Command::Absorb { .. } => ("absorb", Scope::Touched, crate::hook::Accept::default()),
+        // spec: HOOK-191 -- an upgrade also offers what an earlier run left
+        // pending, in the sources it covers.
+        Command::Sync {
+            source,
+            upgrade: true,
+            accept,
+            ..
+        } => ("sync", Scope::Pending(source.clone()), accept.accept()),
+        Command::Sync { accept, .. } => ("sync", Scope::Touched, accept.accept()),
+        Command::Upgrade {
+            item: Some(_),
+            source: None,
+            accept,
+            ..
+        } => ("upgrade", Scope::Touched, accept.accept()),
+        Command::Upgrade { source, accept, .. } => {
+            ("upgrade", Scope::Pending(source.clone()), accept.accept())
+        }
+        _ => return None,
+    })
+}
+
+fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
     // Global flags sourced before the match moves cli.command.
     let json = cli.json;
     let yes = cli.yes;
@@ -1889,6 +1950,7 @@ mod tests {
             update: true,
             uninstall: true,
             build: false,
+            items: false,
         };
         let upgrade_accept = |flag: &str| match Cli::try_parse_from(["mind", "upgrade", flag])
             .expect("legacy flag should parse")

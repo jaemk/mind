@@ -21,19 +21,31 @@ use crate::error::{MindError, Result};
 pub struct HookEnv {
     pub profiles: Vec<String>,
     pub item_profiles: Vec<String>,
+    /// The items document an items hook reads (HOOK-193); `None` for every
+    /// other hook, which gets the variable set to empty.
+    pub items_file: Option<std::path::PathBuf>,
 }
 
 impl HookEnv {
-    /// The `(name, value)` pairs set on the child (HOOK-140): sorted,
-    /// deduped, comma-separated, no spaces.
-    pub fn vars(&self) -> [(&'static str, String); 2] {
+    /// The `(name, value)` pairs set on the child (HOOK-140, HOOK-193): the
+    /// profile lists sorted, deduped, comma-separated, no spaces, and the
+    /// items document's path. Every variable is always set, so a value
+    /// inherited from mind's own environment never reaches the hook.
+    pub fn vars(&self) -> [(&'static str, std::ffi::OsString); 3] {
         let join = |v: &[String]| {
             let set: std::collections::BTreeSet<&str> = v.iter().map(String::as_str).collect();
-            set.into_iter().collect::<Vec<_>>().join(",")
+            set.into_iter().collect::<Vec<_>>().join(",").into()
         };
         [
             ("MIND_PROFILES", join(&self.profiles)),
             ("MIND_ITEM_PROFILES", join(&self.item_profiles)),
+            (
+                "MIND_ITEMS_FILE",
+                self.items_file
+                    .as_ref()
+                    .map(|p| p.as_os_str().to_owned())
+                    .unwrap_or_default(),
+            ),
         ]
     }
 }
@@ -48,6 +60,8 @@ pub struct Accept {
     pub update: bool,
     pub uninstall: bool,
     pub build: bool,
+    /// Items hooks (HOOK-194).
+    pub items: bool,
 }
 
 impl Accept {
@@ -57,6 +71,7 @@ impl Accept {
         update: true,
         uninstall: true,
         build: true,
+        items: true,
     };
 
     /// Whether a lifecycle hook for `event` runs without the prompt.
@@ -66,6 +81,7 @@ impl Accept {
             HookEvent::Install => self.install,
             HookEvent::Update => self.update,
             HookEvent::Uninstall => self.uninstall,
+            HookEvent::Items => self.items,
         }
     }
 
@@ -77,6 +93,7 @@ impl Accept {
             "update" => self.update,
             "uninstall" => self.uninstall,
             "build" => self.build,
+            "items" => self.items,
             _ => false,
         }
     }
@@ -1995,19 +2012,20 @@ mod tests {
         );
     }
 
-    // spec: HOOK-140
+    // spec: HOOK-140 HOOK-193
     #[test]
     fn run_hook_sets_profile_vars_sorted_and_always_present() {
         let dir = TempDir::new("env");
         let out = dir.path().join("env.txt");
         let command = format!(
-            "printf '%s|%s|%s' \"$MIND_PROFILES\" \"$MIND_ITEM_PROFILES\" \
-             \"${{MIND_ITEM_PROFILES+set}}\" > '{}'",
+            "printf '%s|%s|%s|%s' \"$MIND_PROFILES\" \"$MIND_ITEM_PROFILES\" \
+             \"${{MIND_ITEM_PROFILES+set}}\" \"${{MIND_ITEMS_FILE+set}}$MIND_ITEMS_FILE\" > '{}'",
             out.display()
         );
         let env = HookEnv {
             profiles: vec!["full".into(), "default".into(), "full".into()],
             item_profiles: Vec::new(),
+            items_file: None,
         };
         run_hook(
             &command,
@@ -2020,8 +2038,9 @@ mod tests {
         )
         .unwrap();
         let got = std::fs::read_to_string(&out).unwrap();
-        // Sorted and deduped; the empty item list is still set (not unset).
-        assert_eq!(got, "default,full||set");
+        // Sorted and deduped; the empty item list is still set (not unset),
+        // and so is the items document's path, empty for a non-items hook.
+        assert_eq!(got, "default,full||set|set");
     }
 
     // spec: HOOK-141

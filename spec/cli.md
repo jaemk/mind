@@ -517,7 +517,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   consent flag,
   `--accept-hooks[=<events>]`. Bare, it runs every hook without the safety
   prompt; with `=<events>`, a comma-separated list of `install`, `update`,
-  `uninstall`, `build`, only the hooks for those events (HOOK-150). The value
+  `uninstall`, `build`, `items`, only the hooks for those events (HOOK-150,
+  HOOK-194). The value
   must be attached with `=`, so a bare `--accept-hooks` never consumes the next
   word as its value. The flag is repeatable. An unknown event, or an empty list
   (`--accept-hooks=`), is a usage error. Naming an event the verb never runs
@@ -907,10 +908,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   HOOK-101) or an item ref `<source>#<item>` (that item's hooks, HOOK-102); a ref that
   matches several sources or items runs each in turn.
 - `CLI-195` `mind hooks run` selects the lifecycle event with `--event
-  <install|update|uninstall|build>` (default `install`). `install`, `update`
+  <install|update|uninstall|build|items>` (default `install`). `install`, `update`
   (HOOK-126), and `uninstall` are valid
   for a source or an item target; `build` is valid only for an item target (a source
-  has no build hook, HOOK-103). For a source install or update run, only *pending* hooks
+  has no build hook, HOOK-103), and `items` only for a source target (HOOK-196).
+  For a source install or update run, only *pending* hooks
   run by default (HOOK-55, HOOK-124); `--force` also re-runs hooks already recorded at
   the current commit (HOOK-101). `--accept-hooks` applies as it does to the automatic flows
   (HOOK-23/74/150, CLI-250).
@@ -988,7 +990,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   object. It only reads, so it takes the shared lock (STO-41).
 - `CLI-254` `hooks history` also filters by `--outcome <list>` (any of `ok`,
   `failed`, `skipped`, `declined`, `aborted`, `interrupted`, comma-separated),
-  `--event <list>` (`install`, `update`, `uninstall`, `build`), and `--since
+  `--event <list>` (`install`, `update`, `uninstall`, `build`, `items`), and `--since
   <when>`: a duration (`30m`, `2h`, `7d`, counted back from now) or a UTC date
   or time (`2026-10-28`, `2026-10-28T14:00`, `2026-10-28T14:00:00Z`) that
   keeps records at or after it. Any other `--since` value, including a date
