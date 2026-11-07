@@ -152,7 +152,7 @@ fails or is aborted leaves the source melded.
 
 An `event = "items"` hook runs once per command that changes the source's
 installed items (`meld`, `learn`, `forget`, `prune`, `upgrade`, `curate`,
-`unmeld`), after the items' own hooks. Use it for state built from the whole
+`absorb`, `unmeld`), after the items' own hooks. Use it for state built from the whole
 set: a registry or index of the installed tools, or a resource several items
 share.
 
@@ -186,7 +186,8 @@ full set after the command, so write the hook to make the host match it: a
 re-run with the same set should change nothing.
 
 A skipped, declined, or failed run leaves the hook pending, and the next
-`upgrade` offers it with every change since. A failure exits 3 but keeps the
+`upgrade` offers it with every change since. So do changes made from the
+`probe` TUI or by auto-update, which do not offer it. A failure exits 3 but keeps the
 command's item changes. At `unmeld` it runs with an empty set, before the
 source's uninstall hooks; cleanup that needs a removed item's files belongs in
 that item's uninstall hook. `--accept-hooks=items` runs it unattended.

@@ -5067,9 +5067,14 @@ fn unmeld_one(
     manifest.save(paths)?;
 
     // spec: HOOK-192 -- the source's items hooks see the emptied set after the
-    // items' own uninstall hooks and before the source's.
-    if forgotten > 0 {
-        crate::items_hook::offer(paths, &source_name, "unmeld", accept, false)?;
+    // items' own uninstall hooks and before the source's. Offered even when
+    // this unmeld removed nothing: an earlier skipped run's removals are
+    // still pending, and this is the hook's last chance to see them.
+    crate::items_hook::offer(paths, &source_name, "unmeld", accept, false)?;
+    // `offer` saved its records through its own registry load; carry them
+    // into this one, which the abort path below saves.
+    if let Some(saved) = Registry::load(paths)?.find(&source_name) {
+        registry.sources[idx].items_hooks = saved.items_hooks.clone();
     }
 
     // HOOK-54/87: the source's uninstall hooks run AFTER every item has been
