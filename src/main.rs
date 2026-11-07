@@ -701,7 +701,15 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
 /// a source whose items differ afterwards has its pending items hooks offered
 /// once. A verb that fails offers none; a later `upgrade` catches up.
 // spec: HOOK-191
-fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
+fn dispatch(mut cli: Cli, paths: &Paths) -> Result<()> {
+    // spec: CLI-262 HOOK-191 -- resolve `upgrade`'s positional target before
+    // the settle scope is taken, so `mind upgrade <source>` catches up that
+    // source's pending items hooks as `--source <source>` does.
+    if let Command::Upgrade { item, source, .. } = &mut cli.command {
+        let (i, s) = commands::upgrade_target(paths, item.take(), source.take())?;
+        *item = i;
+        *source = s;
+    }
     let settle = items_settle(&cli.command);
     let before = settle.as_ref().map(|_| items_hook::snapshot(paths));
     dispatch_verb(cli, paths)?;
@@ -954,9 +962,8 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             commands::set_allow_breaking(allow_breaking);
             // spec: LIFE-55
             commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
-            // spec: CLI-262 - a target naming no installed item but a melded
-            // source is that source's `--source` filter.
-            let (item, source) = commands::upgrade_target(paths, item, source)?;
+            // spec: CLI-262 - `dispatch` already resolved a target naming no
+            // installed item but a melded source to that `--source` filter.
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if let Some(source) = source {
                 // spec: CLI-244 - scope the sync and the pass to one source.

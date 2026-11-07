@@ -368,19 +368,22 @@ pub fn offer(
             removed: d.removed.clone(),
             installed: current.iter().map(|a| &a.entry).collect(),
         };
-        let file = write_doc(paths, &doc)?;
-        let mut env = crate::commands::source_hook_env(source);
-        env.items_file = Some(file.clone());
-        let result = crate::hook::run_hook(
-            &hook.run,
-            &dir,
-            &source.name,
-            EVENT,
-            &hook.label,
-            &env,
-            site,
-        );
-        let _ = std::fs::remove_file(&file);
+        let result = write_doc(paths, &doc).and_then(|file| {
+            let mut env = crate::commands::source_hook_env(source);
+            env.items_file = Some(file.clone());
+            let result = crate::hook::run_hook(
+                &hook.run,
+                &dir,
+                &source.name,
+                EVENT,
+                &hook.label,
+                &env,
+                site,
+            );
+            let _ = std::fs::remove_file(&file);
+            result
+        });
+        // Either error keeps the records of the hooks that already ran.
         if let Err(e) = result {
             if dirty {
                 registry.save(paths)?;

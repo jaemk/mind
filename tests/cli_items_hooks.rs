@@ -345,6 +345,47 @@ fn a_skipped_hook_stays_pending_and_upgrade_catches_it_up() {
     assert_eq!(doc["command"], "upgrade");
 }
 
+/// `mind upgrade <source>` (a positional naming a source, CLI-262) catches up
+/// a pending hook the same as `--source <source>`.
+#[test]
+fn upgrade_with_a_positional_source_catches_up_a_pending_hook() {
+    // spec: HOOK-191 CLI-262
+    let sb = registered("ih-upgrade-pos");
+    assert!(sb.mind(&["learn", "alpha"]).ok());
+    assert_eq!(sb.runs(), 0, "skipped without a terminal");
+
+    let r = sb.mind(&[
+        "--yes",
+        "upgrade",
+        &sb.source_id(),
+        "--no-sync",
+        "--accept-hooks=items",
+    ]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs(), 1, "{}", r.stdout);
+    assert_eq!(names(&sb.doc(), "added"), ["alpha"]);
+}
+
+/// An unmeld that removes no items still offers a hook left pending by an
+/// earlier skipped run, so the removals reach it before the source goes.
+#[test]
+fn unmeld_delivers_removals_an_earlier_skip_left_pending() {
+    // spec: HOOK-192 HOOK-195
+    let sb = registered("ih-unmeld-pending");
+    assert!(sb.mind(&["learn", "alpha", "--accept-hooks=items"]).ok());
+    assert_eq!(sb.runs(), 1);
+    let r = sb.mind(&["--yes", "forget", "alpha"]);
+    assert!(r.ok(), "forget: {}", r.stderr);
+    assert_eq!(sb.runs(), 1, "skipped without a terminal");
+
+    let r = sb.mind(&["--yes", "unmeld", &sb.source_id(), "--accept-hooks"]);
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs(), 2, "{}", r.stdout);
+    let doc = sb.doc();
+    assert_eq!(doc["command"], "unmeld");
+    assert_eq!(names(&doc, "removed"), ["alpha"]);
+}
+
 /// A failing items hook exits 3, keeps the command's item changes, and leaves
 /// the hook pending, so the next offer gives it the same difference again.
 #[test]
