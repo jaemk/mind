@@ -105,7 +105,7 @@ missing items, or shows each item's state. Alias `add`.
 | `--install-hook <CMD>` | supply or replace the source's install and update hooks |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
 | `--auto-update[=off\|compatible\|breaking]` | let `auto-update run` update this source; alone, the level the source asks for (else `compatible`); see [Auto-update](updating.md#auto-update) |
-| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events (`install,update,uninstall,build`) |
+| `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events (`install,update,uninstall,build,items`) |
 
 `--auto-update` also applies on a re-meld, so it changes or revokes the level of
 a source you already have; `--full-history` on a re-meld deepens the existing

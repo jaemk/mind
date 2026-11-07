@@ -148,6 +148,49 @@ hooks and notes it. `unmeld --uninstall-hook
 --accept-hooks` runs them unattended. A required uninstall hook that
 fails or is aborted leaves the source melded.
 
+## Items hooks
+
+An `event = "items"` hook runs once per command that changes the source's
+installed items (`meld`, `learn`, `forget`, `prune`, `upgrade`, `curate`,
+`unmeld`), after the items' own hooks. Use it for state built from the whole
+set: a registry or index of the installed tools, or a resource several items
+share.
+
+```toml
+[[hooks]]
+run = "scripts/registry.sh"
+name = "tool registry"
+event = "items"
+```
+
+The hook runs in the source's clone. `$MIND_ITEMS_FILE` names a JSON document:
+
+```json
+{
+  "version": 1,
+  "source": "github.com/acme/tools",
+  "commit": "<sha>",
+  "command": "learn",
+  "added": [{"kind": "tool", "name": "fmt", "effective_name": "fmt",
+             "store": "/home/me/.mind/store/tool/fmt", "profiles": []}],
+  "updated": [],
+  "removed": [],
+  "installed": [{"kind": "tool", "name": "fmt", "effective_name": "fmt",
+                 "store": "/home/me/.mind/store/tool/fmt", "profiles": []}]
+}
+```
+
+`added`, `updated`, and `removed` are relative to the set the hook last ran
+with successfully; `updated` includes a content-only change. `installed` is the
+full set after the command, so write the hook to make the host match it: a
+re-run with the same set should change nothing.
+
+A skipped, declined, or failed run leaves the hook pending, and the next
+`upgrade` offers it with every change since. A failure exits 3 but keeps the
+command's item changes. At `unmeld` it runs with an empty set, before the
+source's uninstall hooks; cleanup that needs a removed item's files belongs in
+that item's uninstall hook. `--accept-hooks=items` runs it unattended.
+
 ## Running hooks on demand
 
 Hooks normally run as a step of another verb: install hooks at `meld`/`upgrade`,
@@ -162,6 +205,7 @@ as an automatic run.
 mind hooks run <source>                     # the source's pending install hooks
 mind hooks run <source> --force             # every install hook, even already-run ones
 mind hooks run <source> --event uninstall   # the source's uninstall hooks
+mind hooks run <source> --event items       # the source's pending items hooks
 mind hooks run <source>#<item>              # an installed item's install hooks
 mind hooks run <source>#<item> --event build  # rebuild the item (transactional)
 mind hooks list <source>                    # list hooks in effect, run nothing
@@ -171,7 +215,8 @@ mind hooks list <source>                    # list hooks in effect, run nothing
 `owner/repo#item` ref (that item's hooks); there is no ambiguity check, so a
 filter matching several sources, or a ref matching several items, runs the
 hook for each in turn. `--event` selects the lifecycle event (`install`,
-`update`, `uninstall`, or `build`); `build` is valid only for an item target.
+`update`, `uninstall`, `build`, or `items`); `build` is valid only for an item
+target and `items` only for a source target.
 `--event update` behaves as `--event install` does at that target: only pending
 hooks run, and `--force` runs them all.
 

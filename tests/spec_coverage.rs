@@ -51,9 +51,10 @@ const ALLOWLIST: &[&str] = &[
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
-    //   items hooks (spec/install-hooks.md, HOOK-190..197): a source hook run once
-    //   per command with the source's installed set.
-    "HOOK-190", "HOOK-191", "HOOK-192", "HOOK-193", "HOOK-194", "HOOK-195", "HOOK-196", "HOOK-197",
+    //   items hooks (spec/install-hooks.md): HOOK-190..197 are implemented and
+    //   cited from tests/cli_items_hooks.rs and unit tests; listing an items
+    //   hook in the unified plan (HOOK-198) is not built yet.
+    "HOOK-198",
     //   ignored files (spec/ignore.md, IGN-1..21) are now implemented and cited
     //   from src/ignore.rs and tests/cli_ignore.rs.
     //   unmanaged lobe items (see spec/unmanaged.md): the scan + recall + probe

@@ -572,6 +572,7 @@ mod tests {
             origin: None,
             plugin_version: None,
             install_hooks: vec![],
+            items_hooks: vec![],
             install_hook: None,
             install_hook_commit: None,
             profiles: None,

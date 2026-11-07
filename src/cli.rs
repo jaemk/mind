@@ -28,16 +28,20 @@ pub enum HookEventArg {
     /// Re-install the item through the transactional build path (stage, build,
     /// swap). Valid for item targets only; a source has no build hook.
     Build,
+    /// Run items hooks: the source hooks that see its whole installed set.
+    /// Valid for source targets only.
+    Items,
 }
 
 /// A hook event `--accept-hooks` may name.
-// spec: CLI-250
+// spec: CLI-250 HOOK-194
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AcceptEventArg {
     Install,
     Update,
     Uninstall,
     Build,
+    Items,
 }
 
 /// `--accept-hooks`, shared by every verb that runs hooks, plus the hidden
@@ -46,7 +50,7 @@ pub enum AcceptEventArg {
 #[derive(Debug, Clone, Default, PartialEq, Eq, clap::Args)]
 pub struct AcceptHooksArgs {
     /// Run hooks without the safety prompt: every hook, or only those for the
-    /// listed events (`--accept-hooks=install,update,uninstall,build`). This
+    /// listed events (`--accept-hooks=install,update,uninstall,build,items`). This
     /// executes arbitrary code from the source; only use it for a source you
     /// trust. Without it, a non-TTY run skips each hook and prints a note.
     #[arg(
@@ -88,6 +92,7 @@ impl AcceptHooksArgs {
                         AcceptEventArg::Update => a.update = true,
                         AcceptEventArg::Uninstall => a.uninstall = true,
                         AcceptEventArg::Build => a.build = true,
+                        AcceptEventArg::Items => a.items = true,
                     }
                 }
                 a
@@ -1580,7 +1585,7 @@ EXAMPLES:
             long,
             value_delimiter = ',',
             value_name = "EVENTS",
-            value_parser = ["install", "update", "uninstall", "build"]
+            value_parser = ["install", "update", "uninstall", "build", "items"]
         )]
         event: Vec<String>,
 

@@ -128,6 +128,10 @@ pub fn run(
             run_source_hooks(paths, &selector, event, force, accept)?
         }
         HookTarget::Item(item_ref) => {
+            // spec: HOOK-196 -- an item target never runs an items hook.
+            if event == HookEventArg::Items {
+                return Err(MindError::ItemsEventRequiresSourceTarget);
+            }
             run_item_hooks(paths, &item_ref, target, event, force, accept)?
         }
     };
@@ -257,6 +261,9 @@ fn run_source_hooks(
     force: bool,
     accept: crate::hook::Accept,
 ) -> Result<HookTally> {
+    if event == HookEventArg::Items {
+        return run_items_hooks(paths, selector, force, accept);
+    }
     let mut registry = Registry::load(paths)?;
 
     let indices: Vec<usize> = registry
@@ -308,6 +315,7 @@ fn run_source_hooks(
             HookEventArg::Update => HookEvent::Update,
             HookEventArg::Uninstall => HookEvent::Uninstall,
             HookEventArg::Build => unreachable!("caller guards build for source targets"),
+            HookEventArg::Items => unreachable!("items runs through run_items_hooks"),
         };
         let event_name = event_label(event);
 
@@ -532,6 +540,68 @@ fn run_source_hooks(
     })
 }
 
+/// `hooks run <source> --event items` (HOOK-196): offer each matched source's
+/// pending items hooks, or every one under `--force`, with `command` set to
+/// `hooks run`. The HOOK-107 accounting applies as for the other events.
+// spec: HOOK-196
+fn run_items_hooks(
+    paths: &Paths,
+    selector: &str,
+    force: bool,
+    accept: crate::hook::Accept,
+) -> Result<HookTally> {
+    let registry = Registry::load(paths)?;
+    let names: Vec<String> = registry
+        .sources
+        .iter()
+        .filter(|s| source_matches_glob(&s.name, selector))
+        .map(|s| s.name.clone())
+        .collect();
+    if names.is_empty() {
+        return Err(MindError::SourceNotFound {
+            name: selector.to_string(),
+        });
+    }
+    let mut tally = HookTally::default();
+    let mut contributors: Vec<String> = Vec::new();
+    for name in &names {
+        let source = registry.find(name).expect("matched above");
+        if crate::items_hook::effective_hooks(paths, source).is_empty() {
+            // spec: CLI-217, DSC-95
+            crate::render::note(format!(
+                "note: no items hooks declared for source {}",
+                strip_ansi(name)
+            ));
+            continue;
+        }
+        let t = crate::items_hook::offer(paths, name, "hooks run", accept, force)?;
+        if t.existed > 0 {
+            contributors.push(name.clone());
+        } else if t.settled > 0 {
+            // spec: HOOK-126 CLI-217 -- say why nothing ran.
+            let quoted = crate::error::shell_quote(&strip_ansi(name));
+            crate::render::note(format!(
+                "note: nothing pending for {}: its items hooks already applied the installed \
+                 set; use --force to run them anyway:\n  mind hooks run {quoted} --event items --force",
+                strip_ansi(name)
+            ));
+        }
+        tally.existed += t.existed;
+        tally.ran += t.ran;
+        tally.skipped_for_consent += t.skipped_for_consent;
+    }
+    // spec: HOOK-107
+    if tally.existed > 0 && tally.ran == 0 && tally.skipped_for_consent > 0 {
+        return Err(MindError::HooksNotRun {
+            target: selector.to_string(),
+            event: "items".to_string(),
+            skipped: tally.skipped_for_consent,
+            resolved: contributors,
+        });
+    }
+    Ok(tally)
+}
+
 // ---------------------------------------------------------------------------
 // Item-level hook runner (HOOK-102 / HOOK-103)
 // ---------------------------------------------------------------------------
@@ -617,6 +687,7 @@ fn run_item_hooks(
             HookEventArg::Build => {
                 run_item_build(paths, installed, accept.build)?;
             }
+            HookEventArg::Items => unreachable!("caller refuses items for item targets"),
             HookEventArg::Install | HookEventArg::Update | HookEventArg::Uninstall => {
                 run_item_lifecycle_hooks(
                     paths,
@@ -848,6 +919,7 @@ fn run_item_lifecycle_hooks(
             )?;
         }
         HookEventArg::Build => unreachable!("build handled by run_item_build"),
+        HookEventArg::Items => unreachable!("items is refused for item targets"),
     }
     Ok(())
 }
@@ -881,11 +953,25 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
         let clone_dir = source.clone_dir(paths);
         let toml_path = clone_dir.join("mind.toml");
         let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
-        let resolved = mindfile
+        let mut resolved = mindfile
             .as_ref()
             .map(|m| m.resolved_hooks(&toml_path))
             .transpose()?
             .unwrap_or_default();
+        // spec: HOOK-190 HOOK-196 -- a curator's items hooks are recorded on the
+        // source, which has no `mind.toml` to declare them.
+        if mindfile.is_none() {
+            resolved.extend(
+                crate::items_hook::effective_hooks(paths, source)
+                    .into_iter()
+                    .map(|h| ResolvedHook {
+                        name: Some(h.label),
+                        run: h.run,
+                        optional: h.optional,
+                        event: HookEvent::Items,
+                    }),
+            );
+        }
 
         // spec: DSC-95 -- `source.name` is attacker-controlled (a local-path
         // meld derives it from directory names).
@@ -902,8 +988,13 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                 // spec: HOOK-124 -- an update hook is recorded in the same
                 // set as an install hook, so it carries the same
                 // pending/last-ran status; an uninstall hook records nothing.
-                let status = recorded_event(h.event)
-                    .map(|rec_event| install_hook_status(source, &h.run, rec_event, current));
+                // spec: HOOK-196 -- an items hook's status is its applied set.
+                let status = if h.event == HookEvent::Items {
+                    Some(crate::items_hook::status(paths, &manifest, source, &h.run))
+                } else {
+                    recorded_event(h.event)
+                        .map(|rec_event| install_hook_status(source, &h.run, rec_event, current))
+                };
                 println!(
                     "  [{event_str}] {kind_str}  {:?}  {}",
                     h.run,
@@ -1628,6 +1719,7 @@ fn event_label(event: HookEventArg) -> &'static str {
         HookEventArg::Update => "update",
         HookEventArg::Uninstall => "uninstall",
         HookEventArg::Build => "build",
+        HookEventArg::Items => "items",
     }
 }
 
