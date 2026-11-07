@@ -24,6 +24,9 @@ pub enum HookEvent {
     /// rather than first installed.
     Update,
     Uninstall,
+    /// Runs once per command with the source's installed set (HOOK-190). Valid
+    /// only on a source's hooks, never on an item's.
+    Items,
 }
 
 impl HookEvent {
@@ -33,8 +36,17 @@ impl HookEvent {
             HookEvent::Install => "install",
             HookEvent::Update => "update",
             HookEvent::Uninstall => "uninstall",
+            HookEvent::Items => "items",
         }
     }
+}
+
+/// Which declaration site a hook array belongs to: a source's hooks may use
+/// the `items` event, an item's may not (HOOK-190).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookSite {
+    Source,
+    Item,
 }
 
 /// One raw `[[hooks]]` entry as deserialized from `mind.toml`.
@@ -448,7 +460,12 @@ impl ItemDecl {
     /// (`resolved_item_hooks`), which prepends those scalars ahead of this
     /// result.
     fn resolved_item_array_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
-        resolve_hook_array(&self.hooks, toml_path, &format!("item '{}'", self.name))
+        resolve_hook_array(
+            &self.hooks,
+            toml_path,
+            &format!("item '{}'", self.name),
+            HookSite::Item,
+        )
     }
 }
 
@@ -521,7 +538,7 @@ impl ItemToml {
     /// This manifest's hooks, validated and in declaration order (HOOK-131).
     /// `path` is the item manifest's own path, so an error localizes to it.
     pub fn resolved_hooks(&self, path: &Path) -> Result<Vec<ResolvedHook>> {
-        resolve_hook_array(&self.hooks, path, "item manifest")
+        resolve_hook_array(&self.hooks, path, "item manifest", HookSite::Item)
     }
 }
 
@@ -533,14 +550,16 @@ impl ItemToml {
 /// 'style'`, `[source]`, `nested source 'owner/repo'`) so a hook error localizes
 /// which declaration is at fault instead of just naming the file.
 ///
-/// Rules: default event is Install; "update" maps to Update (HOOK-120) and
-/// "uninstall" to Uninstall; any other event string is a `MindToml` error.
-/// Empty/whitespace `run` entries are silently dropped (HOOK-3). `run` is
-/// trimmed before storing.
+/// Rules: default event is Install; "update" maps to Update (HOOK-120),
+/// "uninstall" to Uninstall, and, on a source's hooks only, "items" to Items
+/// (HOOK-190); any other event string is a `MindToml` error naming the events
+/// legal at `site`. Empty/whitespace `run` entries are silently dropped
+/// (HOOK-3). `run` is trimmed before storing.
 fn resolve_hook_array(
     hooks: &[Hook],
     toml_path: &std::path::Path,
     location: &str,
+    site: HookSite,
 ) -> Result<Vec<ResolvedHook>> {
     let mut out: Vec<ResolvedHook> = Vec::new();
     for hook in hooks {
@@ -553,16 +572,20 @@ fn resolve_hook_array(
             // spec: HOOK-120
             Some("update") => HookEvent::Update,
             Some("uninstall") => HookEvent::Uninstall,
+            // spec: HOOK-190
+            Some("items") if site == HookSite::Source => HookEvent::Items,
             Some(e) => {
                 // spec: DSC-95 -- the event string is source-controlled and is
                 // echoed back here, on a message that reaches stderr (as a
                 // scan error, or as the DSC-98 item-drop warning).
                 let e = crate::sanitize::strip_ansi(e);
+                let legal = match site {
+                    HookSite::Source => "'install', 'update', 'uninstall', or 'items'",
+                    HookSite::Item => "'install', 'update', or 'uninstall'",
+                };
                 return Err(MindError::MindToml {
                     path: sanitized_path(toml_path),
-                    msg: format!(
-                        "{location}: unknown hook event '{e}'; expected 'install', 'update', or 'uninstall'"
-                    ),
+                    msg: format!("{location}: unknown hook event '{e}'; expected {legal}"),
                 });
             }
         };
@@ -873,6 +896,7 @@ impl NestedSource {
             &self.hooks,
             toml_path,
             &format!("nested source '{}'", self.source),
+            HookSite::Source,
         )
     }
 }
@@ -1332,7 +1356,12 @@ impl MindToml {
         }
 
         // HOOK-51: [[hooks]] entries in declaration order.
-        out.extend(resolve_hook_array(&self.hooks, toml_path, "[source]")?);
+        out.extend(resolve_hook_array(
+            &self.hooks,
+            toml_path,
+            "[source]",
+            HookSite::Source,
+        )?);
 
         Ok(out)
     }
@@ -2323,7 +2352,7 @@ mod tests {
             .to_string();
         assert!(err.contains("'upgrade'"), "must name the bad value: {err}");
         assert!(
-            err.contains("'install', 'update', or 'uninstall'"),
+            err.contains("'install', 'update', 'uninstall', or 'items'"),
             "must name the legal set: {err}"
         );
     }
@@ -2741,6 +2770,65 @@ mod tests {
                 // not just the file, so a multi-item mind.toml is diagnosable.
                 assert!(msg.contains("helper"), "names the offending item: {msg}");
             }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-190 -- `items` is a source event only.
+    #[test]
+    fn items_event_is_valid_on_a_source_and_refused_on_an_item() {
+        let source = r#"
+            [[hooks]]
+            run = "make registry"
+            name = "Registry"
+            event = "items"
+            optional = true
+        "#;
+        let parsed: MindToml = toml::from_str(source).expect("parse");
+        let resolved = parsed
+            .resolved_hooks(Path::new("mind.toml"))
+            .expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].event, HookEvent::Items);
+        assert!(resolved[0].optional);
+        assert_eq!(HookEvent::Items.as_str(), "items");
+
+        let item = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+
+            [[items.hooks]]
+            run = "make registry"
+            event = "items"
+        "#;
+        match first_item_hooks(item).unwrap_err() {
+            MindError::MindToml { msg, .. } => {
+                assert!(msg.contains("'items'"), "names the bad value: {msg}");
+                assert!(
+                    msg.contains("expected 'install', 'update', or 'uninstall'"),
+                    "names only the events legal for an item: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-190 -- a source's unknown event names `items` among the legal set.
+    #[test]
+    fn source_unknown_event_lists_items_as_legal() {
+        let toml = r#"
+            [[hooks]]
+            run = "x"
+            event = "item"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        match parsed.resolved_hooks(Path::new("mind.toml")).unwrap_err() {
+            MindError::MindToml { msg, .. } => assert!(
+                msg.contains("'install', 'update', 'uninstall', or 'items'"),
+                "{msg}"
+            ),
             other => panic!("expected MindError::MindToml, got: {other:?}"),
         }
     }

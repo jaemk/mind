@@ -1207,8 +1207,9 @@ hooks to do different setup depending on which profiles the consumer enabled.
 
 ## Items hooks
 
-Status: planned. A source's install and uninstall hooks run at `meld` and
-`unmeld`, and an item's hooks run once per item. Neither fits work that depends
+Status: partial. HOOK-190..197 are done; HOOK-198 (listing the hook in the
+unified plan) is planned. A source's install and uninstall hooks run at `meld`
+and `unmeld`, and an item's hooks run once per item. Neither fits work that depends
 on the set of a source's installed items: a registry, index, or settings
 fragment generated from the installed tools, or a resource several items share
 that should exist while any of them is installed. An items hook is a
@@ -1230,8 +1231,8 @@ source hooks run as before.
   the end of any command that installs, updates, or removes items of the source,
   each pending items hook of that source is offered once:
   - installs: `meld`, `learn` (including `learn <source> --profile`), `curate`,
-    an `upgrade` addition (LIFE-54, PROF-21), and an `auto_meld` install
-    (POL-58);
+    `absorb`, an `upgrade` addition (LIFE-54, PROF-21), and an `auto_meld`
+    install (POL-58);
   - updates: `upgrade`'s in-place swap (an `upgrade` rename is a removal plus
     an install);
   - removals: `forget` (including `forget <source> --profile`), `prune`, an
@@ -1284,16 +1285,16 @@ source hooks run as before.
   item's files belongs in that item's uninstall hook, which runs while they
   still exist.
 - `HOOK-194` An items hook is disclosed, prompted, and skipped like a source
-  hook (HOOK-20, HOOK-22, HOOK-52, HOOK-91). The unified plan (HOOK-180,
-  HOOK-186) lists it in run order (HOOK-192) with the counts of added, updated,
-  and removed items it will see. Verbs outside the plan (`forget`, `prune`,
-  `curate`) prompt it on its own. `--accept-hooks` accepts it bare or as
-  `--accept-hooks=items`, which extends CLI-250's event list. Its results go
-  into the `--json` document, the error envelope, and the hook history with
-  event `items` (HOOK-160, HOOK-163).
-- `HOOK-195` The source's registry entry records, for each declared items hook
-  (keyed by command and event, as in HOOK-124), the installed set it last
-  applied: each item's kind, effective name, and content hash. A successful run
+  hook (HOOK-20, HOOK-22, HOOK-52, HOOK-91), and prompted on its own (HOOK-185)
+  until HOOK-198 lists it in the unified plan. A required items hook's abort
+  is a skip: the command's items are already applied. A skip without a
+  terminal prints the `hooks run` remedy (HOOK-106). `--accept-hooks` accepts
+  it bare or as `--accept-hooks=items`, which extends CLI-250's event list.
+  Its results go into the `--json` document, the error envelope, and the hook
+  history with event `items` (HOOK-160, HOOK-163).
+- `HOOK-195` The source's registry entry records, for each items hook (keyed
+  by its command), the installed set it last applied: each item's entry
+  (HOOK-193) and content hash. A successful run
   replaces the record with the set in the `installed` list it was given. A skip,
   a decline, or a failure leaves the record unchanged, so the hook stays
   pending. A non-zero exit does not roll back the command's item changes,
@@ -1312,6 +1313,11 @@ source hooks run as before.
   alongside its other `[[hooks]]` examples (HOOK-57). Its comment states that
   the hook receives the full installed set in `MIND_ITEMS_FILE` and should make
   the host match it, so a re-run with the same set changes nothing.
+- `HOOK-198` (planned) The unified plan (HOOK-180, HOOK-186) lists each items
+  hook the run will offer, in run order (HOOK-192), and its answer covers it
+  (HOOK-181). An install plan lists the items hooks of the sources it installs
+  into; an `upgrade` plan also lists the pending ones in scope; an `unmeld` plan
+  lists the source's.
 
 ## Managed-policy composition (research needed)
 

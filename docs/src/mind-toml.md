@@ -153,7 +153,7 @@ run = "make build"          # the shell command (required)
 name = "build tooling"      # label shown in the disclosure (else the command)
 optional = false            # required (run/skip/abort) vs optional (run/skip)
 event = "install"           # "install" (on meld, default), "update" (on upgrade),
-                            # or "uninstall" (on unmeld)
+                            # "uninstall" (on unmeld), or "items"
 
 [[hooks]]
 run = "make upgrade"        # runs at upgrade INSTEAD of re-running the install hooks
@@ -163,7 +163,14 @@ event = "update"
 run = "make clean"
 event = "uninstall"
 optional = true
+
+[[hooks]]
+run = "make registry"       # runs once per command that changes the installed items
+event = "items"
 ```
+
+An `items` hook is valid only here, never on an item's own hooks. See
+[Items hooks](install-hooks.md#items-hooks).
 
 `[[hooks]]` is the canonical form. The legacy `[source].install` is a deprecated
 shorthand for one required install hook (still parsed); use `[[hooks]]` instead.
@@ -377,9 +384,10 @@ has no `mind.toml` of its own:
   source's own discovery, the curator-side form of `meld --add-root`.
 - **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested
   source. Each entry has the same shape as a source's own `[[hooks]]` entry: a
-  required `run` field, and optional `name`, `optional`, and `event` fields. They
-  run under the same disclosure and safety prompt as the source's own hooks
-  (including the non-TTY skip and `--accept-hooks`).
+  required `run` field, and optional `name`, `optional`, and `event` fields
+  (including `event = "items"`). They run under the same disclosure and safety
+  prompt as the source's own hooks (including the non-TTY skip and
+  `--accept-hooks`).
 
 `roots`, `add-roots`, `flat-skills`, and the hooks apply ONLY when the nested
 source ships no `mind.toml`. If the nested source has one, that file is

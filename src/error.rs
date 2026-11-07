@@ -1301,6 +1301,14 @@ pub enum MindError {
     )]
     BuildEventRequiresItemTarget,
 
+    /// HOOK-196: `--event items` is valid only for a source target; an items
+    /// hook belongs to a source, never to an item.
+    // spec: HOOK-196
+    #[error(
+        "--event items is valid only for a source target (an items hook belongs to a source); use <source> instead of <source>#<item>"
+    )]
+    ItemsEventRequiresSourceTarget,
+
     /// HOOK-100: a required hook was aborted by the user at the three-way prompt
     /// during `mind hooks run`. The command exits non-zero; any hooks that ran
     /// earlier in the same session are not rolled back.
@@ -1938,6 +1946,7 @@ impl MindError {
             MindError::SelfUpdateInvalidTarget { .. } => "self-update-invalid-target",
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
+            MindError::ItemsEventRequiresSourceTarget => "items-event-requires-source-target",
             MindError::HookAborted { .. } => "hook-aborted",
             MindError::HookInterrupted { .. } => "hook-interrupted",
             MindError::BadHistorySince { .. } => "bad-history-since",
@@ -3119,6 +3128,10 @@ mod tests {
         assert_eq!(
             MindError::BuildEventRequiresItemTarget.kind(),
             "build-event-requires-item-target"
+        );
+        assert_eq!(
+            MindError::ItemsEventRequiresSourceTarget.kind(),
+            "items-event-requires-source-target"
         );
         assert_eq!(
             MindError::HookAborted { label: "h".into() }.kind(),

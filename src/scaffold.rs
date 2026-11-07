@@ -25,7 +25,7 @@ const SCAFFOLD: &str = concat!(
     "# [[hooks]]\n",
     "# run = \"make install\"         # shell command to run\n",
     "# name = \"Build\"               # optional label shown in the prompt\n",
-    "# event = \"install\"             # \"install\" (default), \"update\", or \"uninstall\"\n",
+    "# event = \"install\"             # \"install\" (default), \"update\", \"uninstall\", or \"items\"\n",
     "# optional = false              # false = required (default). optional only lets the\n",
     "#                               # user decline running it; a failure always aborts.\n",
     "#\n",
@@ -39,6 +39,12 @@ const SCAFFOLD: &str = concat!(
     "# name = \"Cleanup\"\n",
     "# event = \"uninstall\"\n",
     "# optional = true               # the user may decline this step (its failure still aborts)\n",
+    "#\n",
+    "# [[hooks]]\n",
+    "# run = \"make registry\"         # runs once per command that changes the installed items\n",
+    "# name = \"Registry\"\n",
+    "# event = \"items\"               # $MIND_ITEMS_FILE holds the full installed set: make the\n",
+    "#                               # host match it, so a re-run with the same set changes nothing\n",
 );
 
 /// INIT-3 / INIT-13: the scaffold `init-source` writes for a new `mind.toml`,

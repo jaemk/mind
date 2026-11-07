@@ -140,7 +140,9 @@ impl RecordedEvent {
         match event {
             crate::mindfile::HookEvent::Install => Some(RecordedEvent::Install),
             crate::mindfile::HookEvent::Update => Some(RecordedEvent::Update),
-            crate::mindfile::HookEvent::Uninstall => None,
+            // The items event's run state is the applied set (HOOK-195),
+            // recorded apart from the commit-keyed records.
+            crate::mindfile::HookEvent::Uninstall | crate::mindfile::HookEvent::Items => None,
         }
     }
 }
@@ -208,6 +210,31 @@ pub struct RecordedSourceHook {
 /// `skip_serializing_if` helper: omit a `false` flag from `sources.json`.
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// A source's record for one items hook (HOOK-195), keyed by its command.
+///
+/// `applied` is the installed set the hook last ran with successfully, or
+/// `None` when it has never succeeded. A skip, decline, or failure leaves it
+/// unchanged, so the hook stays pending until a run applies the current set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedItemsHook {
+    /// The items hook command.
+    pub command: String,
+    /// The installed set this hook last applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Vec<crate::items_hook::AppliedItem>>,
+    /// A curated hook's declared `name` (HOOK-127): there is no manifest in
+    /// the clone to read it back from. `None` for a declared hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A curated hook's declared `optional` flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+    /// `Some(Curated)` for a curator's `[[discover.sources.hooks]]` entry
+    /// (HOOK-190), `None` for a hook the clone's `mind.toml` declares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<HookOrigin>,
 }
 
 impl RecordedSourceHook {
@@ -378,6 +405,10 @@ pub struct Source {
     /// the vec but not a key: the record is keyed by `(command, event)`.
     #[serde(default)]
     pub install_hooks: Vec<RecordedSourceHook>,
+    /// The items hooks' records (HOOK-195): per items hook, the installed set
+    /// it last applied, plus each curated items hook's declaration (HOOK-190).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items_hooks: Vec<RecordedItemsHook>,
     /// Legacy: the install hook command in effect for this source (HOOK-31).
     /// Load-only; migrated into `install_hooks` by `migrate_legacy_hook` and
     /// not re-emitted once migrated.
@@ -1240,6 +1271,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         origin: None,
         plugin_version: None,
         install_hooks: Vec::new(),
+        items_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
         profiles: None,
