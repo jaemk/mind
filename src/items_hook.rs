@@ -468,8 +468,9 @@ pub enum PlanWhen {
 }
 
 /// The plan entries for `sources`' items hooks (HOOK-198), each source once,
-/// in the order given. An items hook runs in the source's clone after the
-/// run's items, so there is nothing separate to inspect.
+/// in registry order, the order [`settle`] offers them in. An items hook runs
+/// in the source's clone after the run's items, so there is nothing separate
+/// to inspect.
 // spec: HOOK-198
 pub fn planned<S: AsRef<str>>(
     paths: &Paths,
@@ -483,16 +484,13 @@ pub fn planned<S: AsRef<str>>(
         PlanWhen::Touched | PlanWhen::Emptied => None,
     };
     let policy = crate::policy::Policy::load().ok().flatten();
-    let mut seen = std::collections::BTreeSet::new();
+    let wanted: std::collections::BTreeSet<String> = sources
+        .into_iter()
+        .map(|s| s.as_ref().to_string())
+        .collect();
     let mut plan = Vec::new();
-    for name in sources {
-        let name = name.as_ref();
-        if !seen.insert(name.to_string()) {
-            continue;
-        }
-        let Some(source) = registry.find(name) else {
-            continue;
-        };
+    for source in registry.sources.iter().filter(|s| wanted.contains(&s.name)) {
+        let name = source.name.as_str();
         // The settle skips it (POL-12), so the plan does not list it.
         if !policy_permits(policy.as_ref(), source) {
             continue;

@@ -621,6 +621,70 @@ fn upgrade_lists_a_pending_items_hook_in_a_hooks_only_plan() {
     assert!(!r.stdout.contains("registry"), "{}", r.stdout);
 }
 
+/// An `upgrade` across sources lists their items hooks in the order it runs
+/// them, whether a source's hook is listed for this pass's change or for an
+/// earlier skip.
+#[test]
+fn upgrade_lists_items_hooks_of_several_sources_in_run_order() {
+    // spec: HOOK-198 HOOK-192
+    let sb = Sandbox::new("ih-order-a");
+    sb.skill("alpha", "");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[hooks]]\nrun = \"{}\"\nname = \"reg-a\"\nevent = \"items\"\n",
+            sb.log("a")
+        ),
+    );
+    let other = sb.base.join("ih-order-b");
+    write(
+        &other.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\nbody\n",
+    );
+    write(
+        &other.join("mind.toml"),
+        &format!(
+            "[[hooks]]\nrun = \"{}\"\nname = \"reg-b\"\nevent = \"items\"\n",
+            sb.log("b")
+        ),
+    );
+    git(&other, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&other, &["config", "user.email", "t@t"]);
+    git(&other, &["config", "user.name", "t"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "initial"]);
+    let other_spec = other.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--register-only"])
+            .ok()
+    );
+    assert!(sb.mind(&["meld", &other_spec, "--register-only"]).ok());
+    // Off a terminal both hooks are skipped and stay pending.
+    assert!(sb.mind(&["learn", "alpha"]).ok());
+    assert!(sb.mind(&["learn", "beta"]).ok());
+    assert!(sb.order().is_empty());
+
+    // Only the second source changes; the first is caught up.
+    write(
+        &other.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\nbody v2\n",
+    );
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "v2"]);
+    let r = sb.tty(&["upgrade"], "y\n");
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    let out = &r.stdout;
+    let a = out
+        .find("] reg-a")
+        .unwrap_or_else(|| panic!("reg-a listed: {out}"));
+    let b = out
+        .find("] reg-b")
+        .unwrap_or_else(|| panic!("reg-b listed: {out}"));
+    assert!(a < b, "listed in run order: {out}");
+    assert!(!out.contains("====== hook: "), "{out}");
+    assert_eq!(sb.order(), ["a", "b"]);
+}
+
 /// A source a locked managed-policy allowlist no longer permits runs no hooks
 /// (POL-12), so the plan does not list its items hook either.
 #[test]
