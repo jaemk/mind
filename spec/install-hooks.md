@@ -1207,8 +1207,7 @@ hooks to do different setup depending on which profiles the consumer enabled.
 
 ## Items hooks
 
-Status: partial. HOOK-190..197 are done; HOOK-198 (listing the hook in the
-unified plan) is planned. A source's install and uninstall hooks run at `meld`
+Status: done. A source's install and uninstall hooks run at `meld`
 and `unmeld`, and an item's hooks run once per item. Neither fits work that depends
 on the set of a source's installed items: a registry, index, or settings
 fragment generated from the installed tools, or a resource several items share
@@ -1241,7 +1240,10 @@ source hooks run as before.
   `upgrade` also offers a pending items hook when it changed nothing, so a run
   that was skipped or failed earlier catches up. A command that touches several
   sources offers each source's items hooks once, after that source's items.
-  `unmeld --keep-items` (CLI-22) removes no items and does not offer one.
+  `unmeld --keep-items` (CLI-22) removes no items and does not offer one. A
+  `probe` action (TUI-20..23) offers them as the verb it runs does; one that
+  runs with its output captured (TUI-24) and reaches an items hook its plan did
+  not answer skips it, and the hook stays pending.
 - `HOOK-192` An items hook runs in the source's clone at the source's current
   commit, after every item install, update, and removal of the command and after
   those items' own hooks (HOOK-81, HOOK-82, HOOK-125). This extends HOOK-87:
@@ -1285,8 +1287,8 @@ source hooks run as before.
   item's files belongs in that item's uninstall hook, which runs while they
   still exist.
 - `HOOK-194` An items hook is disclosed, prompted, and skipped like a source
-  hook (HOOK-20, HOOK-22, HOOK-52, HOOK-91), and prompted on its own (HOOK-185)
-  until HOOK-198 lists it in the unified plan. A required items hook's abort
+  hook (HOOK-20, HOOK-22, HOOK-52, HOOK-91). A plan lists it (HOOK-198); one
+  no plan listed is prompted on its own (HOOK-185). A required items hook's abort
   is a skip: the command's items are already applied. A skip without a
   terminal prints the `hooks run` remedy (HOOK-106). `--accept-hooks` accepts
   it bare or as `--accept-hooks=items`, which extends CLI-250's event list.
@@ -1313,11 +1315,14 @@ source hooks run as before.
   alongside its other `[[hooks]]` examples (HOOK-57). Its comment states that
   the hook receives the full installed set in `MIND_ITEMS_FILE` and should make
   the host match it, so a re-run with the same set changes nothing.
-- `HOOK-198` (planned) The unified plan (HOOK-180, HOOK-186) lists each items
+- `HOOK-198` The unified plan (HOOK-180, HOOK-186) lists each items
   hook the run will offer, in run order (HOOK-192), and its answer covers it
   (HOOK-181). An install plan lists the items hooks of the sources it installs
   into; an `upgrade` plan also lists the pending ones in scope; an `unmeld` plan
-  lists the source's.
+  lists the source's, between the items' uninstall hooks and the source's. A
+  listed hook is offered at the end of the command under the answer even when
+  the command left its source's set unchanged, so what the plan showed is what
+  runs.
 
 ## Managed-policy composition (research needed)
 

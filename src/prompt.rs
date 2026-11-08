@@ -85,6 +85,12 @@ pub fn set_captured(on: bool) {
     CAPTURED.with(|c| c.set(on));
 }
 
+/// Whether this thread's verb runs with its stdout captured (TUI-24), so a
+/// prompt would refuse.
+pub fn captured() -> bool {
+    CAPTURED.with(Cell::get)
+}
+
 /// Whether a prompt was refused since capture began (TUI-44).
 pub fn refused() -> bool {
     REFUSED.with(Cell::get)

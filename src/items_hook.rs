@@ -324,7 +324,19 @@ pub fn offer(
             replaced: &[],
         };
         let key = crate::consent::HookKey::source_hook(&source.name, EVENT, &hook.run);
-        let act = crate::hook::decide(&key, &disclosure, hook.optional, accept.items)?;
+        // spec: TUI-44 HOOK-198 -- a captured probe action cannot prompt here:
+        // the refusal would come after the run's items changed, and the rerun
+        // on the terminal changes nothing to offer it for. A hook no plan
+        // answered stays pending instead.
+        let planned = matches!(
+            crate::consent::answer_for(&key),
+            Some(crate::consent::Answer::RunAll | crate::consent::Answer::SkipAll)
+        );
+        let act = if crate::prompt::captured() && !accept.items && !planned {
+            crate::hook::HookAct::Skip
+        } else {
+            crate::hook::decide(&key, &disclosure, hook.optional, accept.items)?
+        };
         if act != crate::hook::HookAct::Run {
             if act == crate::hook::HookAct::Abort {
                 crate::hook_log::aborted(&source.name, site, EVENT, &hook.label, &hook.run);
@@ -428,6 +440,77 @@ fn skip_note(label: &str, source_name: &str) -> String {
     )
 }
 
+/// Which of a source's items hooks a plan lists (HOOK-198).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanWhen {
+    /// Every one: the run changes the source's installed set.
+    Touched,
+    /// Only those pending now: an `upgrade` catching up an earlier skip.
+    Pending,
+    /// Those an emptied set leaves pending: an `unmeld` removing every item.
+    Emptied,
+}
+
+/// The plan entries for `sources`' items hooks (HOOK-198), each source once,
+/// in the order given. An items hook runs in the source's clone after the
+/// run's items, so there is nothing separate to inspect.
+// spec: HOOK-198
+pub fn planned<S: AsRef<str>>(
+    paths: &Paths,
+    registry: &Registry,
+    sources: impl IntoIterator<Item = S>,
+    when: PlanWhen,
+    accept: crate::hook::Accept,
+) -> Vec<crate::consent::PlannedHook> {
+    let manifest = match when {
+        PlanWhen::Pending => Manifest::load(paths).ok(),
+        PlanWhen::Touched | PlanWhen::Emptied => None,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut plan = Vec::new();
+    for name in sources {
+        let name = name.as_ref();
+        if !seen.insert(name.to_string()) {
+            continue;
+        }
+        let Some(source) = registry.find(name) else {
+            continue;
+        };
+        let current = match (when, &manifest) {
+            (PlanWhen::Pending, Some(m)) => Some(installed_set(paths, m, name)),
+            (PlanWhen::Pending, None) => continue,
+            (PlanWhen::Emptied, _) => Some(Vec::new()),
+            (PlanWhen::Touched, _) => None,
+        };
+        let commit = source.commit.clone().unwrap_or_default();
+        let dir = source.clone_dir(paths);
+        for hook in effective_hooks(paths, source) {
+            if let Some(current) = &current {
+                let applied = source
+                    .items_hooks
+                    .iter()
+                    .find(|r| r.command == hook.run)
+                    .and_then(|r| r.applied.as_deref());
+                if delta(applied, current).is_empty() {
+                    continue;
+                }
+            }
+            plan.push(crate::consent::PlannedHook {
+                key: crate::consent::HookKey::source_hook(name, EVENT, &hook.run),
+                label: hook.label,
+                optional: hook.optional,
+                commit: commit.clone(),
+                run_dir: dir.display().to_string(),
+                inspect: None,
+                browse_url: source.browse_url(&commit),
+                replaced: None,
+                accepted: accept.items,
+            });
+        }
+    }
+    plan
+}
+
 /// Which sources an end-of-command settle considers (HOOK-191).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -461,7 +544,15 @@ pub fn settle(
                 .as_deref()
                 .is_none_or(|f| crate::resolve::source_matches_glob(&source.name, f)),
         };
-        if !touched && !in_scope {
+        // spec: HOOK-198 -- a hook the plan listed is offered under its answer,
+        // so what the plan showed is what runs.
+        let listed = || {
+            effective_hooks(paths, source).iter().any(|h| {
+                let key = crate::consent::HookKey::source_hook(&source.name, EVENT, &h.run);
+                crate::consent::answer_for(&key).is_some()
+            })
+        };
+        if !touched && !in_scope && !listed() {
             continue;
         }
         if policy

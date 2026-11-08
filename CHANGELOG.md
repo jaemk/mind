@@ -15,7 +15,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installed set. A skipped or failed run stays pending and is offered again
   by the next `upgrade`, or on demand with `mind hooks run <source> --event
   items`. `--accept-hooks=items` accepts it, and `init-source` scaffolds an
-  example.
+  example. On a terminal it is listed in the command's plan with the other
+  hooks, and `probe` actions offer it too.
 
 ## [0.46.0] - 2026-11-03
 
