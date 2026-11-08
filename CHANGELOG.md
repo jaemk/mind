@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-11-08
+
 ### Added
 
 - Items hooks: a source `[[hooks]]` entry with `event = "items"` runs once per
@@ -17,6 +19,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   items`. `--accept-hooks=items` accepts it, and `init-source` scaffolds an
   example. On a terminal, `meld`, `learn`, `upgrade`, and `unmeld` list it in
   their hook plan, and `probe` actions offer it too.
+
+### Changed
+
+- Update dependencies to their latest compatible versions.
 
 ## [0.46.0] - 2026-11-03
 
@@ -2383,7 +2389,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.46.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.47.0...HEAD
+[0.47.0]: https://github.com/jaemk/mind/compare/v0.46.0...v0.47.0
 [0.46.0]: https://github.com/jaemk/mind/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/jaemk/mind/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/jaemk/mind/compare/v0.43.0...v0.44.0
