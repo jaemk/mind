@@ -572,7 +572,7 @@ pub fn settle(
                 .is_none_or(|f| crate::resolve::source_matches_glob(&source.name, f)),
         };
         // spec: HOOK-198 -- a hook the plan listed is offered under its answer,
-        // so what the plan showed is what runs.
+        // and runs if it is still pending.
         let listed = || {
             effective_hooks(paths, source).iter().any(|h| {
                 let key = crate::consent::HookKey::source_hook(&source.name, EVENT, &h.run);

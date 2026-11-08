@@ -1321,8 +1321,9 @@ source hooks run as before.
   into; an `upgrade` plan also lists the pending ones in scope; an `unmeld` plan
   lists the source's, between the items' uninstall hooks and the source's. A
   listed hook is offered at the end of the command under the answer even when
-  the command left its source's set unchanged, so what the plan showed is what
-  runs.
+  the command left its source's set unchanged, and runs if it is still pending
+  then (HOOK-191). A source the managed policy locks out (POL-12) runs no hook,
+  so the plan does not list its items hooks.
 
 ## Managed-policy composition (research needed)
 

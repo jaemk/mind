@@ -2415,7 +2415,8 @@ mod tests {
             .name
             .clone();
         // Installed outside any settle, so no items hook has been offered and
-        // none is recorded yet.
+        // none is recorded yet. Accepting items hooks keeps the learn's plan
+        // from prompting when `cargo test` runs at a terminal.
         for item in ["skill:alpha", "skill:beta"] {
             commands::learn(
                 &paths,
@@ -2424,7 +2425,10 @@ mod tests {
                 commands::InstallFlow {
                     yes: true,
                     clobber: commands::Clobber::Error,
-                    accept: crate::hook::Accept::default(),
+                    accept: crate::hook::Accept {
+                        items: true,
+                        ..Default::default()
+                    },
                 },
             )
             .expect("learn");
