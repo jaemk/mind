@@ -332,7 +332,8 @@ pub fn offer(
             crate::consent::answer_for(&key),
             Some(crate::consent::Answer::RunAll | crate::consent::Answer::SkipAll)
         );
-        let act = if crate::prompt::captured() && !accept.items && !planned {
+        let unasked = crate::prompt::captured() && !accept.items && !planned;
+        let act = if unasked {
             crate::hook::HookAct::Skip
         } else {
             crate::hook::decide(&key, &disclosure, hook.optional, accept.items)?
@@ -340,10 +341,20 @@ pub fn offer(
         if act != crate::hook::HookAct::Run {
             if act == crate::hook::HookAct::Abort {
                 crate::hook_log::aborted(&source.name, site, EVENT, &hook.label, &hook.run);
+            } else if unasked {
+                // Nobody was asked, so it is a skip, not a decline (HOOK-160).
+                crate::hook_log::file(crate::hook_log::base(
+                    &source.name,
+                    site,
+                    EVENT,
+                    &hook.label,
+                    &hook.run,
+                    crate::hook_log::Outcome::Skipped,
+                ));
             } else {
                 crate::hook_log::not_run(&source.name, site, EVENT, &hook.label, &hook.run);
             }
-            if crate::hook::is_tty() {
+            if crate::hook::is_tty() && !unasked {
                 crate::render::note(format!(
                     "note: skipped items hook '{}' for {}; it stays pending",
                     strip_ansi(&hook.label),
@@ -351,7 +362,12 @@ pub fn offer(
                 ));
             } else {
                 tally.skipped_for_consent += 1;
-                crate::render::note(skip_note(&hook.label, &source.name));
+                let why = if unasked {
+                    "probe cannot prompt"
+                } else {
+                    "not a terminal"
+                };
+                crate::render::note(skip_note(&hook.label, &source.name, why));
             }
             // The record exists from the first offer (so `recall --sources`
             // counts the hook), but its applied set is left as it was.
@@ -429,12 +445,12 @@ fn write_doc(paths: &Paths, doc: &ItemsDoc) -> Result<PathBuf> {
 
 /// The note for an items hook skipped for want of a terminal, with the
 /// remedy (HOOK-106's shape): the identity is shell-quoted in the command.
-fn skip_note(label: &str, source_name: &str) -> String {
+fn skip_note(label: &str, source_name: &str, why: &str) -> String {
     let label = strip_ansi(label);
     let source_name = strip_ansi(source_name);
     let quoted = crate::error::shell_quote(&source_name);
     format!(
-        "note: skipped items hook '{label}' for {source_name} (not a terminal); it stays \
+        "note: skipped items hook '{label}' for {source_name} ({why}); it stays \
          pending. Run it unattended with:\n  mind hooks run {quoted} --event items \
          --accept-hooks=items"
     )
@@ -466,6 +482,7 @@ pub fn planned<S: AsRef<str>>(
         PlanWhen::Pending => Manifest::load(paths).ok(),
         PlanWhen::Touched | PlanWhen::Emptied => None,
     };
+    let policy = crate::policy::Policy::load().ok().flatten();
     let mut seen = std::collections::BTreeSet::new();
     let mut plan = Vec::new();
     for name in sources {
@@ -476,6 +493,10 @@ pub fn planned<S: AsRef<str>>(
         let Some(source) = registry.find(name) else {
             continue;
         };
+        // The settle skips it (POL-12), so the plan does not list it.
+        if !policy_permits(policy.as_ref(), source) {
+            continue;
+        }
         let current = match (when, &manifest) {
             (PlanWhen::Pending, Some(m)) => Some(installed_set(paths, m, name)),
             (PlanWhen::Pending, None) => continue,
@@ -509,6 +530,12 @@ pub fn planned<S: AsRef<str>>(
         }
     }
     plan
+}
+
+/// Whether the managed policy lets `source`'s hooks run: a locked allowlist
+/// that no longer matches it does not (POL-12).
+fn policy_permits(policy: Option<&crate::policy::Policy>, source: &Source) -> bool {
+    !policy.is_some_and(|p| p.lock() && !p.allow_matches(&source.base_identity()))
 }
 
 /// Which sources an end-of-command settle considers (HOOK-191).
@@ -555,10 +582,7 @@ pub fn settle(
         if !touched && !in_scope && !listed() {
             continue;
         }
-        if policy
-            .as_ref()
-            .is_some_and(|p| p.lock() && !p.allow_matches(&source.base_identity()))
-        {
+        if !policy_permits(policy.as_ref(), source) {
             continue;
         }
         if effective_hooks(paths, source).is_empty() {
@@ -623,7 +647,8 @@ mod tests {
     // spec: HOOK-106 HOOK-196
     #[test]
     fn the_skip_note_quotes_the_identity_in_its_remedy() {
-        let note = skip_note("regen", "local/a b/c");
+        let note = skip_note("regen", "local/a b/c", "not a terminal");
+        assert!(note.contains("(not a terminal)"));
         assert!(note.contains("mind hooks run 'local/a b/c' --event items"));
         assert!(note.contains("stays pending"));
     }

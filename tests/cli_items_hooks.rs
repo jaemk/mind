@@ -76,9 +76,15 @@ impl Sandbox {
     /// Run `mind` at a simulated terminal (`MIND_TTY=1`, HOOK-109) with
     /// `stdin` as the replies.
     fn tty(&self, args: &[&str], stdin: &str) -> Run {
+        self.tty_env(args, stdin, &[])
+    }
+
+    /// [`Sandbox::tty`] with extra environment variables.
+    fn tty_env(&self, args: &[&str], stdin: &str, envs: &[(&str, &str)]) -> Run {
         use std::io::Write;
         let mut child = Command::new(env!("CARGO_BIN_EXE_mind"))
             .args(args)
+            .envs(envs.iter().copied())
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env("MIND_TTY", "1")
@@ -613,6 +619,30 @@ fn upgrade_lists_a_pending_items_hook_in_a_hooks_only_plan() {
     let r = sb.tty(&["upgrade", "--no-sync"], "");
     assert!(r.ok(), "upgrade: {}", r.stderr);
     assert!(!r.stdout.contains("registry"), "{}", r.stdout);
+}
+
+/// A source a locked managed-policy allowlist no longer permits runs no hooks
+/// (POL-12), so the plan does not list its items hook either.
+#[test]
+fn a_plan_does_not_list_the_items_hook_of_a_source_the_policy_locks_out() {
+    // spec: HOOK-198 POL-12
+    let sb = registered("ih-plan-policy");
+    assert!(sb.mind(&["learn", "alpha"]).ok());
+    assert_eq!(sb.runs(), 0, "skipped without a terminal");
+    let policy = sb.base.join("policy.toml");
+    write(
+        &policy,
+        "[sources]\nlock = true\nallow = [\"github.com/other/*\"]\n",
+    );
+    let policy = policy.to_string_lossy().into_owned();
+
+    let r = sb.tty_env(
+        &["upgrade", "--no-sync"],
+        "y\n",
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(!r.stdout.contains("registry"), "{}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs(), 0, "{}", r.stdout);
 }
 
 /// The unmeld plan lists the items hook between the items' uninstall hooks
