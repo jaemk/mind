@@ -13027,33 +13027,32 @@ fn upgrade_inner_scoped(
             paths, item, item_hooks, &commit, accept,
         ));
     }
-    // spec: HOOK-198 -- last, the items hooks: of each source this pass
-    // changes, and any in scope left pending by an earlier run.
-    let touched: Vec<&str> = pending
+    // spec: HOOK-198 -- last, the items hooks, in the order the settle offers
+    // them: every one of a source this pass changes, and the pending ones of
+    // any other source in scope.
+    let touched: HashSet<&str> = pending
         .iter()
         .map(|up| up.cat.source.as_str())
         .chain(prunes.iter().map(|it| it.source.as_str()))
         .chain(left_prunes.iter().map(|it| it.source.as_str()))
         .collect();
-    hooks.extend(crate::items_hook::planned(
-        paths,
-        &registry,
-        &touched,
-        crate::items_hook::PlanWhen::Touched,
-        accept,
-    ));
-    let listed: HashSet<crate::consent::HookKey> = hooks.iter().map(|h| h.key.clone()).collect();
-    hooks.extend(
-        crate::items_hook::planned(
+    let scoped = in_scope(&registry);
+    for source in &registry.sources {
+        let when = if touched.contains(source.name.as_str()) {
+            crate::items_hook::PlanWhen::Touched
+        } else if scoped.contains(&source.name) {
+            crate::items_hook::PlanWhen::Pending
+        } else {
+            continue;
+        };
+        hooks.extend(crate::items_hook::planned(
             paths,
             &registry,
-            in_scope(&registry),
-            crate::items_hook::PlanWhen::Pending,
+            [source.name.as_str()],
+            when,
             accept,
-        )
-        .into_iter()
-        .filter(|h| !listed.contains(&h.key)),
-    );
+        ));
+    }
     // spec: CLI-60 CLI-259 HOOK-182 -- without `--yes` the upgrades are
     // confirmed with the hooks (off a TTY that refuses); `--yes` answers the
     // items, leaving a hooks-only plan.
