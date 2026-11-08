@@ -4720,6 +4720,15 @@ fn unmeld_plan(
                     .unwrap_or_default();
             plan.extend(item_uninstall_plan(paths, item, &hooks, &commit, accept));
         }
+        // spec: HOOK-198 HOOK-192 -- the items hooks run between the items'
+        // uninstall hooks and the source's, with the emptied set.
+        plan.extend(crate::items_hook::planned(
+            paths,
+            registry,
+            [source_name],
+            crate::items_hook::PlanWhen::Emptied,
+            accept,
+        ));
     }
     plan.extend(source_uninstall_plan(
         paths,
@@ -5146,19 +5155,22 @@ impl LearnPlan {
         paths: &Paths,
         accept: crate::hook::Accept,
     ) -> Result<Vec<crate::consent::PlannedHook>> {
-        if self
-            .items
-            .iter()
-            .all(|it| it.build.is_none() && it.hooks.is_empty())
-        {
-            return Ok(Vec::new());
-        }
         let registry = Registry::load(paths)?;
-        Ok(self
+        let mut plan: Vec<crate::consent::PlannedHook> = self
             .items
             .iter()
             .flat_map(|it| item_install_plan(paths, &registry, it, false, accept))
-            .collect())
+            .collect();
+        // spec: HOOK-198 -- then the items hooks of the sources it installs into.
+        let sources: Vec<&str> = self.items.iter().map(|it| it.source.as_str()).collect();
+        plan.extend(crate::items_hook::planned(
+            paths,
+            &registry,
+            &sources,
+            crate::items_hook::PlanWhen::Touched,
+            accept,
+        ));
+        Ok(plan)
     }
 }
 
@@ -5178,6 +5190,8 @@ fn union_plan_hooks(
             }
         }
     }
+    // spec: HOOK-198 -- items hooks run after every item of the run.
+    hooks.sort_by_key(|h| h.key.item.is_none() && h.key.event == "items");
     Ok(hooks)
 }
 
@@ -5826,10 +5840,19 @@ fn learn_selected(
     // `learn` that asks nothing today (no closure question, no hook to ask
     // about) still asks nothing.
     if !out.json {
-        let hooks: Vec<crate::consent::PlannedHook> = closure
+        let mut hooks: Vec<crate::consent::PlannedHook> = closure
             .iter()
             .flat_map(|t| item_install_plan(paths, &registry, t, false, accept))
             .collect();
+        // spec: HOOK-198 -- then the items hooks of the sources it installs into.
+        let sources: Vec<&str> = closure.iter().map(|t| t.source.as_str()).collect();
+        hooks.extend(crate::items_hook::planned(
+            paths,
+            &registry,
+            &sources,
+            crate::items_hook::PlanWhen::Touched,
+            accept,
+        ));
         let question = if asks_closure {
             "install this dependency closure?".to_string()
         } else {
@@ -7299,11 +7322,20 @@ fn source_keys_plan(
         return Ok(Vec::new());
     };
     let items = catalog::scan(paths, &single(source))?;
-    Ok(keys
+    let mut plan: Vec<crate::consent::PlannedHook> = keys
         .iter()
         .filter_map(|k| items.iter().find(|it| it.key().as_str() == k))
         .flat_map(|it| item_install_plan(paths, &registry, it, false, accept))
-        .collect())
+        .collect();
+    // spec: HOOK-198
+    plan.extend(crate::items_hook::planned(
+        paths,
+        &registry,
+        [source_name],
+        crate::items_hook::PlanWhen::Touched,
+        accept,
+    ));
+    Ok(plan)
 }
 
 /// The `--json` twin of [`install_source_profiles`] (CLI-156, PROF-18):
@@ -12477,6 +12509,16 @@ fn upgrade_inner_scoped(
             .next()
             .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
     };
+    // spec: HOOK-198 -- the sources whose pending items hooks the plan lists:
+    // the HOOK-11 scope, or every source.
+    let in_scope = |registry: &Registry| -> Vec<String> {
+        registry
+            .sources
+            .iter()
+            .map(|s| s.name.clone())
+            .filter(|n| hook_scope.as_ref().is_none_or(|s| s.contains(n)))
+            .collect()
+    };
     let scope_names: Vec<String> = {
         let mut v: Vec<String> = hook_scope.iter().flatten().cloned().collect();
         v.sort();
@@ -12803,6 +12845,15 @@ fn upgrade_inner_scoped(
     {
         // spec: HOOK-182 -- no item to upgrade, but a source hook may still be
         // pending: a hooks-only plan, then the pass.
+        // spec: HOOK-198 -- an items hook left pending earlier is caught up.
+        let mut source_plan = source_plan;
+        source_plan.extend(crate::items_hook::planned(
+            paths,
+            &registry,
+            in_scope(&registry),
+            crate::items_hook::PlanWhen::Pending,
+            accept,
+        ));
         ask_plan(paths, None, source_plan)?;
         run_source_pass(&mut registry)?;
         // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
@@ -12976,6 +13027,33 @@ fn upgrade_inner_scoped(
             paths, item, item_hooks, &commit, accept,
         ));
     }
+    // spec: HOOK-198 -- last, the items hooks: of each source this pass
+    // changes, and any in scope left pending by an earlier run.
+    let touched: Vec<&str> = pending
+        .iter()
+        .map(|up| up.cat.source.as_str())
+        .chain(prunes.iter().map(|it| it.source.as_str()))
+        .chain(left_prunes.iter().map(|it| it.source.as_str()))
+        .collect();
+    hooks.extend(crate::items_hook::planned(
+        paths,
+        &registry,
+        &touched,
+        crate::items_hook::PlanWhen::Touched,
+        accept,
+    ));
+    let listed: HashSet<crate::consent::HookKey> = hooks.iter().map(|h| h.key.clone()).collect();
+    hooks.extend(
+        crate::items_hook::planned(
+            paths,
+            &registry,
+            in_scope(&registry),
+            crate::items_hook::PlanWhen::Pending,
+            accept,
+        )
+        .into_iter()
+        .filter(|h| !listed.contains(&h.key)),
+    );
     // spec: CLI-60 CLI-259 HOOK-182 -- without `--yes` the upgrades are
     // confirmed with the hooks (off a TTY that refuses); `--yes` answers the
     // items, leaving a hooks-only plan.

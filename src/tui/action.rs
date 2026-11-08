@@ -60,13 +60,13 @@ fn execute_inner(
         // spec: TUI-44 -- a prompt it reaches refuses instead of blocking on a
         // raw-mode read nobody can see; the caller reruns it unsuspended.
         crate::prompt::set_captured(true);
-        let r = with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys, false));
+        let r = with_captured_stdout(|| dispatch_settled(paths, action.kind, &action.upgrade_keys));
         crate::prompt::set_captured(false);
         r
     } else {
         // Interactive: the TUI is suspended, so let the verb own the terminal.
         (
-            dispatch(paths, action.kind, &action.upgrade_keys, false),
+            dispatch_settled(paths, action.kind, &action.upgrade_keys),
             String::new(),
         )
     };
@@ -78,6 +78,46 @@ fn execute_inner(
     drop(_guard);
     let snapshot = data::load(paths)?;
     Ok((snapshot, summary_line(&captured)))
+}
+
+/// [`dispatch`], then offer the items hooks the action made pending, as the
+/// CLI does after a verb (HOOK-191, HOOK-198). The plan answer the action got
+/// covers them; an `unmeld` offers its source's itself (HOOK-192).
+// spec: HOOK-191 HOOK-198
+fn dispatch_settled(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<()> {
+    let verb = items_verb(&kind);
+    let _answers = crate::consent::scope();
+    let before = verb.map(|_| crate::items_hook::snapshot(paths));
+    dispatch(paths, kind, upgrade_keys, false)?;
+    if let (Some(verb), Some(before)) = (verb, before) {
+        crate::items_hook::settle(
+            paths,
+            &before,
+            verb,
+            &crate::items_hook::Scope::Touched,
+            crate::hook::Accept::default(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The verb an action's items document names, or `None` for an action that
+/// changes no installed item (or, for `unmeld`, offers its own).
+fn items_verb(kind: &ActionKind) -> Option<&'static str> {
+    match kind {
+        ActionKind::Learn { .. }
+        | ActionKind::EnableProfile { .. }
+        | ActionKind::InstallProfiles { .. } => Some("learn"),
+        ActionKind::Forget { .. } | ActionKind::DisableProfile { .. } => Some("forget"),
+        ActionKind::Meld { .. } => Some("meld"),
+        ActionKind::Sync => Some("sync"),
+        ActionKind::Upgrade => Some("upgrade"),
+        ActionKind::Forced(inner) => items_verb(inner),
+        ActionKind::Unmeld { .. }
+        | ActionKind::LobeAdd { .. }
+        | ActionKind::LobeRemove { .. }
+        | ActionKind::SetNamespace { .. } => None,
+    }
 }
 
 /// Dispatch one confirmed action to its command function. No verb logic is
@@ -2314,6 +2354,137 @@ mod tests {
             .output()
             .unwrap();
         src
+    }
+
+    // spec: HOOK-191 HOOK-198 -- a probe action settles the items hooks it
+    // made pending, as the CLI does; one it cannot prompt for (captured, no
+    // plan answer) is skipped and stays pending for the next `upgrade`.
+    #[test]
+    fn execute_forget_settles_and_leaves_an_unanswered_items_hook_pending() {
+        use std::process::Command;
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+        let src = base.0.join("items-source");
+        std::fs::create_dir_all(src.join("skills/alpha")).unwrap();
+        std::fs::write(
+            src.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\n# alpha\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/beta")).unwrap();
+        std::fs::write(
+            src.join("skills/beta/SKILL.md"),
+            "---\ndescription: beta\n---\n# beta\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("mind.toml"),
+            "[[hooks]]\nrun = \"true\"\nname = \"registry\"\nevent = \"items\"\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        for args in [&["add", "-A"][..], &["commit", "-qm", "initial"][..]] {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .unwrap();
+        }
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            crate::hook::Accept::default(),
+            None,
+        )
+        .expect("meld");
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+        // Installed outside any settle, so no items hook has been offered and
+        // none is recorded yet.
+        for item in ["skill:alpha", "skill:beta"] {
+            commands::learn(
+                &paths,
+                item,
+                false,
+                commands::InstallFlow {
+                    yes: true,
+                    clobber: commands::Clobber::Error,
+                    accept: crate::hook::Accept::default(),
+                },
+            )
+            .expect("learn");
+        }
+        assert!(
+            crate::source::Registry::load(&paths).unwrap().sources[0]
+                .items_hooks
+                .is_empty()
+        );
+
+        let action = PendingAction {
+            kind: ActionKind::Forget {
+                item_key: "skill:alpha".to_string(),
+            },
+            description: "Forget skill:alpha?".to_string(),
+            dep_tree: None,
+            upgrade_keys: Vec::new(),
+        };
+        execute(&paths, action).expect("forget");
+
+        // The settle offered the hook (an offer records it) and skipped it, so
+        // it stays pending with the remaining set.
+        let registry = crate::source::Registry::load(&paths).unwrap();
+        let source = registry.find(&source_name).unwrap();
+        assert_eq!(source.items_hooks.len(), 1, "the forget offered the hook");
+        assert!(source.items_hooks[0].applied.is_none(), "and skipped it");
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert_eq!(
+            crate::items_hook::status(&paths, &manifest, source, "true"),
+            "pending (1 added, 0 updated, 0 removed; 0 items applied)"
+        );
+    }
+
+    // spec: HOOK-191 -- the verbs a probe action settles under.
+    #[test]
+    fn items_verb_names_the_verb_each_action_runs() {
+        let learn = ActionKind::Learn {
+            item_key: "skill:a".to_string(),
+            source: String::new(),
+        };
+        assert_eq!(items_verb(&learn), Some("learn"));
+        assert_eq!(
+            items_verb(&ActionKind::Forced(Box::new(learn))),
+            Some("learn")
+        );
+        assert_eq!(
+            items_verb(&ActionKind::Forget {
+                item_key: "skill:a".to_string()
+            }),
+            Some("forget")
+        );
+        assert_eq!(items_verb(&ActionKind::Upgrade), Some("upgrade"));
+        assert_eq!(
+            items_verb(&ActionKind::Unmeld {
+                name: "s".to_string(),
+                forget: true
+            }),
+            None,
+            "unmeld offers its own (HOOK-192)"
+        );
     }
 
     #[test]

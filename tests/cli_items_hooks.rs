@@ -73,6 +73,34 @@ impl Sandbox {
         }
     }
 
+    /// Run `mind` at a simulated terminal (`MIND_TTY=1`, HOOK-109) with
+    /// `stdin` as the replies.
+    fn tty(&self, args: &[&str], stdin: &str) -> Run {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &self.mind_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .env("MIND_TTY", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("spawn mind");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("run mind");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: out.status.code(),
+        }
+    }
+
     fn write_and_commit(&self, rel: &str, contents: &str) {
         write(&self.source.join(rel), contents);
         git(&self.source, &["add", "-A"]);
@@ -499,6 +527,124 @@ fn unmeld_keep_items_runs_no_items_hook() {
     ]);
     assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.runs(), 1, "only the meld's run");
+}
+
+// ---------------------------------------------------------------------------
+// The unified plan (HOOK-198)
+// ---------------------------------------------------------------------------
+
+/// The meld plan lists the items hook last, after the source and item hooks,
+/// and `y` runs it with no prompt of its own.
+#[test]
+fn the_meld_plan_lists_the_items_hook_last_and_its_answer_runs_it() {
+    // spec: HOOK-198 HOOK-181
+    let sb = Sandbox::new("ih-plan-meld");
+    sb.skill("alpha", &format!("install: {}\n", sb.log("item-alpha")));
+    sb.declare(&format!(
+        "\n[[hooks]]\nrun = \"{}\"\nname = \"setup\"\n",
+        sb.log("source")
+    ));
+
+    let r = sb.tty(&["meld", &sb.source_spec()], "y\n");
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let out = &r.stdout;
+    assert!(out.contains("====== hooks: 3 ======"), "{out}");
+    assert!(out.contains("[1] setup"), "{out}");
+    assert!(
+        out.contains("[3] registry\n    Event:   items (required)"),
+        "the items hook is listed last: {out}"
+    );
+    assert!(
+        !out.contains("====== hook: "),
+        "no prompt of its own: {out}"
+    );
+    assert_eq!(sb.order(), ["source", "item-alpha", "items"]);
+}
+
+/// `s` skips the listed items hook like the rest: it stays pending.
+#[test]
+fn skipping_the_plan_skips_the_items_hook() {
+    // spec: HOOK-198 HOOK-181 HOOK-195
+    let sb = registered("ih-plan-skip");
+    let r = sb.tty(&["learn", "alpha"], "s\n");
+    assert!(r.ok(), "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[1] registry"), "{}", r.stdout);
+    assert!(sb.claude_home.join("skills/alpha/SKILL.md").exists());
+    assert_eq!(sb.runs(), 0, "{}", r.stdout);
+    assert!(!r.stdout.contains("====== hook: "), "{}", r.stdout);
+
+    let r = sb.mind(&["hooks", "list", &sb.source_id()]);
+    assert!(r.stdout.contains("pending (1 added"), "{}", r.stdout);
+}
+
+/// `r` prompts the items hook on its own at its run point.
+#[test]
+fn reviewing_the_plan_prompts_the_items_hook_on_its_own() {
+    // spec: HOOK-198 HOOK-181
+    let sb = registered("ih-plan-review");
+    let r = sb.tty(&["learn", "alpha"], "r\ny\n");
+    assert!(r.ok(), "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("[1] registry"), "listed: {}", r.stdout);
+    assert_eq!(r.stdout.matches("====== hook: ").count(), 1, "{}", r.stdout);
+    assert_eq!(sb.runs(), 1, "{}", r.stdout);
+}
+
+/// An `upgrade` that changes nothing lists a hook an earlier run left pending
+/// in a hooks-only plan, and its answer runs it.
+#[test]
+fn upgrade_lists_a_pending_items_hook_in_a_hooks_only_plan() {
+    // spec: HOOK-198 HOOK-182
+    let sb = registered("ih-plan-upgrade");
+    assert!(sb.mind(&["learn", "alpha"]).ok());
+    assert_eq!(sb.runs(), 0, "skipped without a terminal");
+
+    let r = sb.tty(&["upgrade", "--no-sync"], "y\n");
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[1] registry") && r.stdout.contains("[Y/n/r]"),
+        "{}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("====== hook: "), "{}", r.stdout);
+    assert_eq!(sb.runs(), 1, "{}", r.stdout);
+    assert_eq!(sb.doc()["command"], "upgrade");
+
+    // Applied now: the next upgrade lists nothing and asks nothing.
+    let r = sb.tty(&["upgrade", "--no-sync"], "");
+    assert!(r.ok(), "upgrade: {}", r.stderr);
+    assert!(!r.stdout.contains("registry"), "{}", r.stdout);
+}
+
+/// The unmeld plan lists the items hook between the items' uninstall hooks
+/// and the source's, and its answer runs them in that order.
+#[test]
+fn the_unmeld_plan_lists_the_items_hook_between_the_uninstall_hooks() {
+    // spec: HOOK-198 HOOK-186 HOOK-192
+    let sb = Sandbox::new("ih-plan-unmeld");
+    sb.skill(
+        "alpha",
+        &format!("uninstall: {}\n", sb.log("item-uninstall")),
+    );
+    sb.declare(&format!(
+        "\n[[hooks]]\nrun = \"{}\"\nname = \"teardown\"\nevent = \"uninstall\"\n",
+        sb.log("source-uninstall")
+    ));
+    assert!(
+        sb.mind(&["--yes", "meld", &sb.source_spec(), "--accept-hooks"])
+            .ok()
+    );
+
+    let r = sb.tty(&["unmeld", &sb.source_id()], "y\n");
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    let out = &r.stdout;
+    assert!(out.contains("====== hooks: 3 ======"), "{out}");
+    assert!(out.contains("[2] registry"), "{out}");
+    assert!(out.contains("[3] teardown"), "{out}");
+    assert!(!out.contains("====== hook: "), "{out}");
+    assert_eq!(
+        sb.order(),
+        ["items", "item-uninstall", "items", "source-uninstall"]
+    );
 }
 
 // ---------------------------------------------------------------------------

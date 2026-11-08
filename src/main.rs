@@ -711,6 +711,9 @@ fn dispatch(mut cli: Cli, paths: &Paths) -> Result<()> {
         *source = s;
     }
     let settle = items_settle(&cli.command);
+    // spec: HOOK-198 -- the verb's plan answer covers the items hooks the
+    // settle below offers, so the answers outlive the verb's own scope.
+    let _answers = settle.as_ref().map(|_| consent::scope());
     let before = settle.as_ref().map(|_| items_hook::snapshot(paths));
     dispatch_verb(cli, paths)?;
     if let (Some((verb, scope, accept)), Some(before)) = (settle, before) {
