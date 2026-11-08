@@ -185,9 +185,9 @@ with successfully; `updated` includes a content-only change. `installed` is the
 full set after the command, so write the hook to make the host match it: a
 re-run with the same set should change nothing.
 
-On a terminal, `meld`, `learn`, `upgrade`, and `unmeld` list the hook in
-their plan with the other hooks, and the plan's answer covers it; other
-commands, such as `forget`, prompt it on its own. A skipped, declined, or failed run leaves the
+On a terminal, a command that shows a hook plan (`meld`, `learn`, `upgrade`,
+`unmeld`) lists the hook in it, and the plan's answer covers it; one that
+shows none, such as `forget`, prompts it on its own. A skipped, declined, or failed run leaves the
 hook pending, and the next `upgrade` offers it with every change since. So do
 auto-update runs, which do not offer it. A failure exits 3 but keeps the
 command's item changes. At `unmeld` it runs with an empty set, before the
