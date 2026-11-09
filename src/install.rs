@@ -96,6 +96,9 @@ pub fn install(
         .clone()
         .or_else(|| paths.default_link_rel(kind, &link_name));
     let store_root = paths.store_dir_of(&item.source);
+    // spec: HOME-6 -- a link into any allowed home's store is mind's own, so
+    // an item whose source moved homes replaces its old link.
+    let store_roots = paths.store_roots();
     // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3)
     // and whose parent directory exists (STO-56: the reachability gate). A lobe
     // that excludes the kind or whose parent is absent contributes no link and is
@@ -121,7 +124,7 @@ pub fn install(
     };
     if !force {
         for link in &planned_links {
-            ensure_unoccupied(&store_root, link)?;
+            ensure_unoccupied(&store_roots, link)?;
         }
     }
 
@@ -199,7 +202,7 @@ pub fn install(
                 .join(".tmp")
                 .join("foreign-stash")
                 .join(i.to_string());
-            match maybe_stash_foreign(&store_root, &link, &sp) {
+            match maybe_stash_foreign(&store_roots, &link, &sp) {
                 Ok(true) => Some(sp),
                 Ok(false) => None,
                 Err(e) => {
@@ -340,6 +343,22 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     Ok(())
 }
 
+/// After a re-install of `old` as `new` (same item), remove the old store copy
+/// when the new one went elsewhere: the item's source moved to another mind
+/// home (HOME-8). A path outside the old copy's store root is left alone
+/// (LIFE-44).
+// spec: HOME-8
+pub fn remove_moved_store(paths: &Paths, old: &InstalledItem, new: &InstalledItem) -> Result<()> {
+    let old_path = paths.mind_home.join(&old.store);
+    if old_path == paths.mind_home.join(&new.store) {
+        return Ok(());
+    }
+    if !is_confined_under(&old_path, &paths.store_root_of_item(&old.store)) {
+        return Ok(());
+    }
+    remove_path(&old_path)
+}
+
 /// Canonicalize `link`'s PARENT directory and rejoin the file name, rather
 /// than canonicalizing `link` itself, for the LIFE-44 confinement check.
 ///
@@ -453,7 +472,7 @@ pub fn link_into_new_lobes(
     };
 
     let store = paths.mind_home.join(&item.store);
-    let store_root = paths.store_root_of_item(&item.store);
+    let store_roots = paths.store_roots();
     for lobe in new_lobes {
         if !lobe.admits(item.kind) {
             continue;
@@ -463,7 +482,7 @@ pub fn link_into_new_lobes(
         if item.links.iter().any(|l| l == &expected_str) {
             continue;
         }
-        if !force && let Err(e) = ensure_unoccupied(&store_root, &expected) {
+        if !force && let Err(e) = ensure_unoccupied(&store_roots, &expected) {
             failed.push((expected, e));
             continue;
         }
@@ -481,21 +500,19 @@ pub fn link_into_new_lobes(
 /// is absent or is already mind's own symlink into the store (no stash needed).
 ///
 /// Uses the same "is mind's own" predicate as `ensure_unoccupied`: a symlink
-/// pointing into `store_root` is ours; everything else (regular file, directory,
-/// symlink to another location) is foreign.
+/// pointing into one of `store_roots` is ours; everything else (regular file,
+/// directory, symlink to another location) is foreign.
 ///
 /// Called only when `force` is true. The non-force path uses `ensure_unoccupied`
 /// which refuses to touch foreign targets at all.
-fn maybe_stash_foreign(store_root: &Path, link: &Path, stash: &Path) -> Result<bool> {
+fn maybe_stash_foreign(store_roots: &[PathBuf], link: &Path, stash: &Path) -> Result<bool> {
     let meta = match std::fs::symlink_metadata(link) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(MindError::io(link, e)),
         Ok(m) => m,
     };
     // Mind's own symlink: no stash needed.
-    if meta.file_type().is_symlink()
-        && std::fs::read_link(link).is_ok_and(|t| t.starts_with(store_root))
-    {
+    if meta.file_type().is_symlink() && links_into(link, store_roots) {
         return Ok(false);
     }
     // Foreign target: move it to the stash so rollback can rename it back.
@@ -536,15 +553,19 @@ fn note_unreachable_lobe_once(path: &Path) {
     }
 }
 
+/// True when the symlink at `link` points into one of `store_roots`.
+fn links_into(link: &Path, store_roots: &[PathBuf]) -> bool {
+    std::fs::read_link(link).is_ok_and(|t| store_roots.iter().any(|r| t.starts_with(r)))
+}
+
 /// Refuse to install over a link target that mind does not own. A target is
-/// "ours" only if it is a symlink pointing into the store root; a regular file,
+/// "ours" only if it is a symlink pointing into a store root; a regular file,
 /// a directory, or a symlink elsewhere is the user's and is left untouched
 /// (`LinkOccupied`). A missing target is free.
-fn ensure_unoccupied(store_root: &Path, link: &Path) -> Result<()> {
+fn ensure_unoccupied(store_roots: &[PathBuf], link: &Path) -> Result<()> {
     match std::fs::symlink_metadata(link) {
         Ok(meta) => {
-            let ours = meta.file_type().is_symlink()
-                && std::fs::read_link(link).is_ok_and(|t| t.starts_with(store_root));
+            let ours = meta.file_type().is_symlink() && links_into(link, store_roots);
             if ours {
                 Ok(())
             } else {
@@ -2158,7 +2179,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
 
-        let store_root = base.join("store");
+        let store_root = vec![base.join("store")];
         let link = base.join("link-target.md");
         let stash0 = base.join("stash").join("0");
 
@@ -2193,8 +2214,8 @@ mod tests {
         );
 
         // Case 3: mind's own symlink -> not stashed, returns false.
-        std::fs::create_dir_all(&store_root).unwrap();
-        let store_file = store_root.join("agent").join("myagent");
+        std::fs::create_dir_all(&store_root[0]).unwrap();
+        let store_file = store_root[0].join("agent").join("myagent");
         std::fs::create_dir_all(store_file.parent().unwrap()).unwrap();
         std::fs::write(&store_file, b"mind managed").unwrap();
         std::fs::remove_file(&link).unwrap();

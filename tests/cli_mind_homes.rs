@@ -69,8 +69,13 @@ impl Sandbox {
     }
 
     fn mind(&self, args: &[&str]) -> Run {
+        self.mind_in(&std::env::current_dir().unwrap(), args)
+    }
+
+    fn mind_in(&self, cwd: &Path, args: &[&str]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
+            .current_dir(cwd)
             .env("MIND_HOME", &self.default_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .env_remove("MIND_HOMES")
@@ -277,6 +282,40 @@ fn a_shadowed_entry_survives_a_save() {
     assert!(r.stdout.contains("skill:alpha"), "{}", r.stdout);
 }
 
+/// An item kept by `unmeld --unlink-only` stays where it is when its source is
+/// melded into another home, and moves there on its next upgrade: the old link
+/// into the default home's store is mind's own, so the upgrade replaces it,
+/// and the old store copy is removed.
+#[test]
+fn a_kept_item_moves_to_its_source_home_on_upgrade() {
+    // spec: HOME-6 HOME-8
+    let sb = Sandbox::new(None);
+    let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["--yes", "unmeld", &sb.identity(), "--unlink-only"]);
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.items_in(&sb.default_home), ["skill:alpha"]);
+
+    write(
+        &sb.source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\nbody 2\n",
+    );
+    git(&sb.source, &["commit", "-qam", "two"]);
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+    assert!(sb.items_in(&sb.default_home).is_empty());
+    assert!(
+        sb.alpha_target()
+            .starts_with(sb.canon(&sb.extra).join("store"))
+    );
+    assert!(!sb.default_home.join("store/skill/alpha").exists());
+}
+
 /// Without `--home`, a source's `[source] mind-home` picks its home, and
 /// `--home` outranks it.
 #[test]
@@ -444,4 +483,31 @@ fn the_config_key_lists_extra_homes() {
     assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.sources_in(&sb.extra).len(), 1);
     assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+}
+
+/// A relative `mind-homes` entry is relative to the default home, not the
+/// working directory, and an empty entry is ignored.
+#[test]
+fn a_relative_config_home_is_relative_to_the_default_home() {
+    // spec: HOME-2
+    let mut sb = Sandbox::new(None);
+    sb.env_lists_extra = false;
+    let r = sb.mind(&["config", "show"]);
+    assert!(r.ok(), "{}", r.stderr);
+    let cfg = sb.default_home.join("config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str("mind-homes = [\"../extra\", \"\"]\n");
+    std::fs::write(&cfg, text).unwrap();
+
+    let extra = sb.extra_str();
+    for cwd in [sb.base.clone(), sb.source.join("skills/alpha")] {
+        let r = sb.mind_in(&cwd, &["--json", "config", "show"]);
+        assert!(r.ok(), "{}", r.stderr);
+        let v: Value = serde_json::from_str(&r.stdout).unwrap();
+        assert_eq!(
+            v["mind_homes"],
+            serde_json::json!([extra]),
+            "from {cwd:?}: {v}"
+        );
+    }
 }

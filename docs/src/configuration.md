@@ -23,7 +23,7 @@ hook-log-keep = "all"
 | `hook-history` | how many hook results to keep (default 100; `0` for none) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log` | save hook output: `true` for `~/.mind/hooks/logs`, or a directory (relative to `~/.mind`) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log-keep` | which logs to keep when logging is on: `all` (default) or `failed` | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
-| `mind-homes` | extra mind homes a source may be melded into | [Mind homes](#mind-homes) |
+| `mind-homes` | extra mind homes a source may be melded into (relative to `~/.mind`) | [Mind homes](#mind-homes) |
 
 The legacy spelling `absorb_to` is still read.
 
