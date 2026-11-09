@@ -12,8 +12,9 @@ as one set.
   logs, the auto-update state, and the `absorb` personal source.
 - `HOME-2` The extra homes are the entries of `$MIND_HOMES` (`:`-separated),
   then the `mind-homes` config key (a list of paths), in that order. A leading
-  `~` is expanded, a relative entry is resolved against the working directory,
-  duplicates and the default home are dropped. An empty entry is ignored.
+  `~` is expanded; a relative `$MIND_HOMES` entry is resolved against the
+  working directory and a relative `mind-homes` entry against the default
+  home; duplicates and the default home are dropped. An empty entry is ignored.
   `config show` lists the resolved extra homes (`mind_homes` under `--json`).
 
 ## Layout
@@ -56,7 +57,10 @@ as one set.
   `curate` registers it.
 - `HOME-8` A source lives in one home. Re-melding it with `--home` naming a
   different home is refused (`source-in-other-home`, exit 1); moving it means
-  `unmeld` and `meld` again.
+  `unmeld` and `meld` again. An item kept by `unmeld --unlink-only` stays in
+  the old home's store until an upgrade reinstalls it in the source's new
+  home, which removes the old copy. A lobe symlink into any allowed home's
+  store is mind's own (LIFE-41).
 
 ## Locking
 

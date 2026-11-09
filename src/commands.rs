@@ -13281,6 +13281,14 @@ fn upgrade_inner_scoped(
                     return Err(e);
                 }
             }
+            // spec: HOME-8 -- an item kept by `unmeld --unlink-only` and
+            // re-melded into another home moves there on its next upgrade.
+            if let Err(e) = install::remove_moved_store(paths, &up.old, &installed) {
+                applied_keys.push(installed.key().into());
+                manifest.insert(installed);
+                save_and_warn_workflows(paths, &manifest, &applied_keys);
+                return Err(e);
+            }
             if !out.json {
                 println!(
                     "{} upgraded {}",

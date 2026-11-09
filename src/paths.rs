@@ -370,21 +370,29 @@ impl Paths {
     /// read config report the parse error themselves.
     // spec: HOME-2
     pub fn extra_homes(&self) -> Vec<PathBuf> {
-        let mut raw: Vec<String> = Vec::new();
+        let mut raw: Vec<PathBuf> = Vec::new();
         if let Some(v) = std::env::var_os("MIND_HOMES") {
             raw.extend(
                 std::env::split_paths(&v)
                     .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|s| !s.trim().is_empty()),
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| crate::commands::expand_tilde(s.trim())),
             );
         }
+        // A relative config entry is relative to the default home, where the
+        // config file lives, so it names the same home from any directory.
         if let Ok(cfg) = Config::load(self) {
-            raw.extend(cfg.mind_homes);
+            raw.extend(
+                cfg.mind_homes
+                    .iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| self.mind_home.join(crate::commands::expand_tilde(s.trim()))),
+            );
         }
         let default = normalize_home(&self.mind_home);
         let mut out: Vec<PathBuf> = Vec::new();
         for entry in raw {
-            let home = normalize_home(&crate::commands::expand_tilde(entry.trim()));
+            let home = normalize_home(&entry);
             if home != default && !out.contains(&home) {
                 out.push(home);
             }
@@ -464,6 +472,12 @@ impl Paths {
     /// HOME-7): see [`Self::home_of_item_store`].
     pub fn store_root_of_item(&self, store: &str) -> PathBuf {
         self.home_of_item_store(store).join("store")
+    }
+
+    /// The store root of every allowed home, default first. A lobe symlink
+    /// into any of them is mind's own (HOME-6).
+    pub fn store_roots(&self) -> Vec<PathBuf> {
+        self.all_homes().iter().map(|h| h.join("store")).collect()
     }
 
     /// Path to the global advisory lock file.
