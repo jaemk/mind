@@ -132,7 +132,9 @@ mind meld owner/repo --home ~/dev/project/.mind
 ```
 
 A source can name its own home in its `mind.toml`; `--home` outranks it, and a
-home that is not listed is refused:
+home that is not listed is refused. Note that without `--home` the source is
+cloned into `~/.mind` before its `mind.toml` is read, so where `~/.mind` is
+not writable pass `--home`:
 
 ```toml
 [source]
