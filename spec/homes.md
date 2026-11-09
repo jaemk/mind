@@ -14,6 +14,7 @@ as one set.
   then the `mind-homes` config key (a list of paths), in that order. A leading
   `~` is expanded, a relative entry is resolved against the working directory,
   duplicates and the default home are dropped. An empty entry is ignored.
+  `config show` lists the resolved extra homes (`mind_homes` under `--json`).
 
 ## Layout
 
@@ -47,6 +48,9 @@ as one set.
 - `HOME-5` Without `--home`, a source's `[source] mind-home = "<dir>"` in its
   `mind.toml` chooses its home. It must be an allowed home; otherwise the meld
   is refused (`home-not-allowed`) and the clone removed. `--home` outranks it.
+  The first clone, made before the `mind.toml` can be read, goes into the home
+  the meld started in (the default home, or the curator's), and moves once the
+  declared home is known.
   A curated source with no `mind-home` of its own goes into its curator's
   home, whether the curator's first meld, `sync`'s re-walk (DSC-57), or
   `curate` registers it.

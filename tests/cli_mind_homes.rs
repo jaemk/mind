@@ -429,6 +429,17 @@ fn the_config_key_lists_extra_homes() {
     std::fs::write(&cfg, text).unwrap();
 
     let extra = sb.extra_str();
+    let r = sb.mind(&["--json", "config", "show"]);
+    assert!(r.ok(), "{}", r.stderr);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["mind_homes"], serde_json::json!([extra]), "{v}");
+    let r = sb.mind(&["config", "show"]);
+    assert!(
+        r.stdout.contains(&format!("mind-homes = [{extra:?}]")),
+        "{}",
+        r.stdout
+    );
+
     let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
     assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.sources_in(&sb.extra).len(), 1);

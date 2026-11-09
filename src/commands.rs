@@ -1103,28 +1103,31 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
 
 /// Move a fresh clone at `from` to where `source` now resolves, after its
 /// `[source] mind-home` changed its home (HOME-5). A rename when both are on
-/// one filesystem, else a fresh clone at the new place.
+/// one filesystem, else a fresh clone at the new place. The clone at `from` is
+/// gone afterwards, on success or failure.
 fn relocate_clone(
     paths: &Paths,
     source: &crate::source::Source,
     from: &std::path::Path,
 ) -> Result<std::path::PathBuf> {
-    let to = clone_dir_checked(paths, source)?;
-    if to.exists() {
-        std::fs::remove_dir_all(&to).map_err(|e| MindError::io(&to, e))?;
-    }
-    if let Some(parent) = to.parent() {
-        crate::paths::mkdir_p(parent)?;
-    }
-    if std::fs::rename(from, &to).is_err() {
-        let cloned = git::clone(&source.url, &to);
-        let _ = std::fs::remove_dir_all(from);
-        if let Err(e) = cloned {
+    let moved = (|| {
+        let to = clone_dir_checked(paths, source)?;
+        if to.exists() {
+            std::fs::remove_dir_all(&to).map_err(|e| MindError::io(&to, e))?;
+        }
+        if let Some(parent) = to.parent() {
+            crate::paths::mkdir_p(parent)?;
+        }
+        if std::fs::rename(from, &to).is_err()
+            && let Err(e) = git::clone(&source.url, &to)
+        {
             let _ = std::fs::remove_dir_all(&to);
             return Err(e);
         }
-    }
-    Ok(to)
+        Ok(to)
+    })();
+    let _ = std::fs::remove_dir_all(from);
+    moved
 }
 
 /// Bring one source's clone up to date for `sync` / the `upgrade` pre-pass and
@@ -15513,6 +15516,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     let keep = flag_logging
         .as_ref()
         .map_or(config_keep, |(_, keep, _)| *keep);
+    let extra_homes = paths.extra_homes();
     if out.json {
         return print_json(&serde_json::json!({
             "config_file": file.display().to_string(),
@@ -15529,6 +15533,12 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             "hook_log": hook_log,
             // spec: HOOK-170
             "hook_log_keep": keep,
+            // spec: HOME-2 -- the extra homes in force (`MIND_HOMES` and the
+            // config key), resolved.
+            "mind_homes": extra_homes
+                .iter()
+                .map(|h| h.display().to_string())
+                .collect::<Vec<_>>(),
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -15574,6 +15584,17 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     println!(
         "  {} hook-log-keep = {keep}  (which hook logs to keep: all, or failed only)",
         out.dim("·")
+    );
+    // spec: HOME-2
+    let homes: Vec<String> = extra_homes
+        .iter()
+        .map(|h| format!("{:?}", h.display().to_string()))
+        .collect();
+    println!(
+        "  {} mind-homes = [{}]  (extra mind homes, with MIND_HOMES; {} is always allowed)",
+        out.dim("·"),
+        homes.join(", "),
+        paths.mind_home.display()
     );
     // spec: CLI-241 DSC-104 -- the value printed is the effective one, which
     // the flag and the environment can outrank, so say where it came from when
