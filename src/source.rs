@@ -1477,6 +1477,13 @@ impl Registry {
     pub fn find(&self, name: &str) -> Option<&Source> {
         self.sources.iter().find(|s| s.name == name)
     }
+
+    /// Whether `home`'s own `sources.json` lists `name`, whether or not `load`
+    /// used that entry (HOME-3: a shadowed copy is kept in its file).
+    pub fn home_lists(home: &Path, name: &str) -> bool {
+        let bytes = std::fs::read(home.join("sources.json")).ok();
+        raw_entries(bytes.as_deref()).iter().any(|(n, _)| n == name)
+    }
 }
 
 #[cfg(test)]

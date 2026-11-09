@@ -450,8 +450,8 @@ EXAMPLES:
         pin: bool,
 
         /// For a deep tree/blob URL, the mind home to register the single-item
-        /// source in, as `meld --home`. Ignored (with a note) for a non-URL
-        /// item ref.
+        /// source in, or move it to, as `meld --home`. Ignored (with a note)
+        /// for a non-URL item ref.
         // spec: HOME-12
         #[arg(long, value_name = "DIR")]
         home: Option<String>,
@@ -1234,8 +1234,9 @@ pub struct MeldArgs {
     /// registry entry), instead of `~/.mind`. Must be `~/.mind` or one of the
     /// homes listed in `MIND_HOMES` or the `mind-homes` config key. Outranks
     /// the source's own `[source] mind-home`; the sources it curates follow it
-    /// unless they name a home of their own.
-    // spec: HOME-4
+    /// unless they name a home of their own. On a source already melded in
+    /// another home, moves it and its installed items there.
+    // spec: HOME-4 HOME-8
     #[arg(long, value_name = "DIR")]
     pub home: Option<String>,
 

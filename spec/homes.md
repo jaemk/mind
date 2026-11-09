@@ -62,11 +62,23 @@ as one set.
   home, whether the curator's first meld, `sync`'s re-walk (DSC-57), or
   `curate` registers it.
 - `HOME-8` A source lives in one home. Re-melding it with `--home` naming a
-  different home is refused (`source-in-other-home`, exit 1); moving it means
-  `unmeld` and `meld` again. An item kept by `unmeld --keep-items` stays in
-  the old home's store until an upgrade reinstalls it in the source's new
-  home, which removes the old copy. A lobe symlink into any allowed home's
-  store is mind's own (LIFE-41).
+  different home moves it there, outranking its own `[source] mind-home`:
+  its clone moves (a rename, else a copy keeping symlinks; a linked local
+  source's working tree stays put), its registry entry is written to the new
+  home's `sources.json` and dropped from the old one's, and `moved <source> to
+  mind home <dir>` is printed. Every source it curates that follows it (in
+  its home, with no `mind-home` from its own `mind.toml` or the curator's
+  entry, HOME-5, HOME-10) moves with it. Then each installed item of those
+  sources whose store copy is in another home is reinstalled in the new home
+  through the upgrade pass, without fetching: it is listed with a `home old
+  -> new` line (under `N items to move:` when nothing else changed),
+  confirmed as an upgrade is, its links replaced, and its old copy removed.
+  An `upgrade` reinstalls such an item the same way, e.g. one kept by
+  `unmeld --keep-items` and melded again elsewhere. Re-melding with the home
+  the source is already in moves nothing, so the command is idempotent. A
+  move into a home whose `sources.json` already lists a shadowed copy of the
+  source (HOME-3) is refused (`source-in-other-home`, exit 1). A lobe symlink
+  into any allowed home's store is mind's own (LIFE-41).
 
 - `HOME-10` A curator's `[[discover.sources]]` entry may name a `mind-home`
   for that source. It is checked like `meld --home` (an allowed home, before
@@ -77,8 +89,8 @@ as one set.
   as `~`, so melding the dump puts each source back in its home; a source in
   the default home gets none.
 - `HOME-12` `learn <url> --home <dir>` registers an item link in `<dir>` as
-  `meld --home` does, including the HOME-8 refusal for an instance already in
-  another home. For a plain item ref, `--home` is ignored with a note.
+  `meld --home` does, and moves an instance already in another home there
+  (HOME-8). For a plain item ref, `--home` is ignored with a note.
 
 ## Showing the home
 

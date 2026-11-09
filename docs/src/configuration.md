@@ -149,8 +149,16 @@ another. `config.toml`, the hook history, the hook logs, and the auto-update sta
 in `~/.mind`. When it cannot be written, a hook record or the auto-update state
 is dropped with a warning, and `review` and the `probe` preview clone into the
 first home that can be written.
-A source stays in its home; to move it, `unmeld` it and meld it again with
-`--home`. `learn <url> --home` places an [item link](item-links.md) the same
+To move a melded source, meld it again with `--home`:
+
+```bash
+mind meld owner/repo --home ~/dev/project/.mind
+```
+
+Its clone, registry entry, and installed items move to that home, along with
+the sources it curates that have no home of their own; the items are listed
+and confirmed as an upgrade is. Running it again moves nothing.
+`learn <url> --home` places an [item link](item-links.md) the same
 way, a curator entry can name a source's `mind-home`, and `dump` records each
 source's extra home. `recall --sources` shows `home:<dir>` for a source in an
 extra home, as does its details dialog in `probe`. See [spec/homes.md](https://github.com/jaemk/mind/blob/main/spec/homes.md).

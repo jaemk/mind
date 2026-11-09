@@ -490,10 +490,10 @@ pub enum MindError {
         allowed: String,
     },
 
-    /// `meld --home` names another home than the one a melded source is in
-    /// (HOME-8).
+    /// `meld --home` would move a source into a home whose own `sources.json`
+    /// already lists a copy of it (HOME-3, HOME-8).
     #[error(
-        "source '{}' is already melded in mind home {home}; `unmeld` it and meld it again to move it",
+        "source '{}' already has a shadowed copy in mind home {home}; `unmeld` this one to use that copy instead",
         crate::sanitize::strip_ansi(name)
     )]
     SourceInOtherHome { name: String, home: String },
