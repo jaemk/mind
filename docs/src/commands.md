@@ -102,6 +102,7 @@ missing items, or shows each item's state. Alias `add`.
 | `--add-root <DIR>` | scan these directories in addition to the source's own discovery (repeatable) |
 | `--flat-skills` | skills are directories at the root, with no `skills/` container |
 | `--full-history` | clone the whole git history, not just the checked-out commit; kept by every later sync |
+| `--home <DIR>` | meld the source, and the sources it curates, into this [mind home](configuration.md#mind-homes) instead of `~/.mind` |
 | `--install-hook <CMD>` | supply or replace the source's install and update hooks |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
 | `--auto-update[=off\|compatible\|breaking]` | let `auto-update run` update this source; alone, the level the source asks for (else `compatible`); see [Auto-update](updating.md#auto-update) |
@@ -168,6 +169,7 @@ Alias `install`.
 | `--overwrite` | the same as `--force` here; shared with `meld` |
 | `--local` | install into the current project's lobe only |
 | `--pin` | for an item link, freeze the URL's branch at its current commit (takes no value) |
+| `--home <DIR>` | for an item link, the [mind home](configuration.md#mind-homes) to register it in |
 | `--kind <agent\|rule\|command>` | the kind of a file named by an item link |
 | `--accept-hooks[=EVENTS]` | run an item's install and build hooks without asking: all, or only the listed events |
 

@@ -2998,7 +2998,7 @@ fn meld_recursive(
                     }
                     skipped.push(SkippedEntry {
                         source: entry_name,
-                        reason: "clone_failure".into(),
+                        reason: nested_skip_reason(&e),
                     });
                     nested_clone_failures += 1;
                     continue;
@@ -3172,7 +3172,7 @@ fn meld_recursive(
                     }
                     skipped.push(SkippedEntry {
                         source: sub_name,
-                        reason: "clone_failure".into(),
+                        reason: nested_skip_reason(&e),
                     });
                     nested_clone_failures += 1;
                     continue;
@@ -3364,9 +3364,23 @@ fn clone_failure_lines(entry_name: &str, err: &MindError) -> Vec<String> {
     // spec: DSC-79
     let safe_name = strip_ansi(entry_name);
     let safe_err = strip_ansi(&err.to_string());
+    // spec: HOME-5 HOME-10 -- a home refusal is not a clone failure.
+    if matches!(err, MindError::HomeNotAllowed { .. }) {
+        return vec![format!("  warning: skipping '{safe_name}': {safe_err}")];
+    }
     vec![format!(
         "  warning: skipping '{safe_name}': clone failed ({safe_err}), source unavailable"
     )]
+}
+
+/// The `skipped` reason for a nested entry that failed with `err` (DSC-79):
+/// `home_not_allowed` for a home refusal (HOME-5, HOME-10), else
+/// `clone_failure`.
+fn nested_skip_reason(err: &MindError) -> String {
+    match err {
+        MindError::HomeNotAllowed { .. } => "home_not_allowed".into(),
+        _ => "clone_failure".into(),
+    }
 }
 
 /// Handle a top-level (direct, user-initiated) git clone failure for `meld`.
@@ -12064,7 +12078,7 @@ pub fn sync_with_selector(
                     }
                     sync_skipped.push(SkippedEntry {
                         source: entry_name,
-                        reason: "clone_failure".into(),
+                        reason: nested_skip_reason(&e),
                     });
                     continue;
                 }
@@ -13303,7 +13317,7 @@ fn upgrade_inner_scoped(
                     return Err(e);
                 }
             }
-            // spec: HOME-8 -- an item kept by `unmeld --unlink-only` and
+            // spec: HOME-8 -- an item kept by `unmeld --keep-items` and
             // re-melded into another home moves there on its next upgrade.
             if let Err(e) = install::remove_moved_store(paths, &up.old, &installed) {
                 applied_keys.push(installed.key().into());

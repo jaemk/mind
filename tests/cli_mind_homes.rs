@@ -282,7 +282,7 @@ fn a_shadowed_entry_survives_a_save() {
     assert!(r.stdout.contains("skill:alpha"), "{}", r.stdout);
 }
 
-/// An item kept by `unmeld --unlink-only` stays where it is when its source is
+/// An item kept by `unmeld --keep-items` stays where it is when its source is
 /// melded into another home, and moves there on its next upgrade: the old link
 /// into the default home's store is mind's own, so the upgrade replaces it,
 /// and the old store copy is removed.
@@ -292,7 +292,7 @@ fn a_kept_item_moves_to_its_source_home_on_upgrade() {
     let sb = Sandbox::new(None);
     let r = sb.mind(&["--yes", "meld", &sb.spec()]);
     assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
-    let r = sb.mind(&["--yes", "unmeld", &sb.identity(), "--unlink-only"]);
+    let r = sb.mind(&["--yes", "unmeld", &sb.identity(), "--keep-items"]);
     assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
 
     let extra = sb.extra_str();
@@ -553,12 +553,16 @@ fn a_curator_entry_naming_an_unlisted_home_is_refused() {
         nested.base.join("unlisted").to_string_lossy()
     )));
     let r = curator.mind(&["--yes", "meld", &curator.spec()]);
+    assert!(r.ok(), "{}\n{}", r.stdout, r.stderr);
     assert!(
-        r.stderr.contains("is not allowed"),
+        r.stderr.contains("is not allowed") && !r.stderr.contains("clone failed"),
         "{}\n{}",
         r.stdout,
         r.stderr
     );
+    let r = curator.mind(&["--yes", "--json", "sync"]);
+    assert!(r.ok(), "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("home_not_allowed"), "{}", r.stdout);
     assert!(
         !curator
             .sources_in(&curator.default_home)
