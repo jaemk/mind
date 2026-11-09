@@ -83,6 +83,102 @@ pub fn set_source_home(source: &str, home: Option<&Path>) {
     }
 }
 
+/// The `[source] lobe` each source declares (LOBE-1), as written in its
+/// `mind.toml`, keyed by source identity (`None`: it declares none). Filled
+/// by every catalog scan from the commit the clone is on, else read once from
+/// the clone [`set_source_clone`] recorded; resolved against the source's home
+/// by [`Paths::source_lobe`].
+type LobeMap = std::collections::BTreeMap<String, Option<String>>;
+static SOURCE_LOBES: std::sync::Mutex<LobeMap> = std::sync::Mutex::new(LobeMap::new());
+
+/// Each registered source's clone directory, for reading its `lobe` when no
+/// scan in this run has recorded it.
+static SOURCE_CLONES: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Record the `lobe` `source`'s `mind.toml` declares (`None`: none).
+// spec: LOBE-1
+pub fn set_source_lobe(source: &str, lobe: Option<&str>) {
+    let lobe = lobe
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string);
+    SOURCE_LOBES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(source.to_string(), lobe);
+}
+
+/// Record where `source`'s clone is (`Registry::load`).
+pub fn set_source_clone(source: &str, dir: &Path) {
+    SOURCE_CLONES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(source.to_string(), dir.to_path_buf());
+}
+
+fn source_lobe_decl(source: &str) -> Option<String> {
+    if let Some(known) = SOURCE_LOBES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(source)
+    {
+        return known.clone();
+    }
+    let clone = SOURCE_CLONES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(source)
+        .cloned()?;
+    // A `mind.toml` that will not load is reported by the verbs that scan it;
+    // here it declares no lobe.
+    let lobe = crate::mindfile::MindToml::load(&clone)
+        .ok()
+        .flatten()
+        .and_then(|m| m.source.lobe);
+    set_source_lobe(source, lobe.as_deref());
+    lobe
+}
+
+/// The consumer's lobe for each source (LOBE-7), from `meld --lobe`, as
+/// recorded in the registry. Filled by `Registry::load` and by `meld`.
+static CONSUMER_LOBES: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Record the consumer's lobe for `source` (`None`: none).
+// spec: LOBE-7
+pub fn set_consumer_lobe(source: &str, lobe: Option<&str>) {
+    let mut map = CONSUMER_LOBES.lock().unwrap_or_else(|e| e.into_inner());
+    match lobe.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(l) => {
+            map.insert(source.to_string(), l.to_string());
+        }
+        None => {
+            map.remove(source);
+        }
+    }
+}
+
+pub(crate) fn consumer_lobe_decl(source: &str) -> Option<String> {
+    CONSUMER_LOBES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(source)
+        .cloned()
+}
+
+/// Where a source's lobe was named, for messages (LOBE-2).
+pub fn lobe_origin(source: &str, consumer: bool) -> String {
+    if consumer {
+        "--lobe".to_string()
+    } else {
+        format!(
+            "the `lobe` in {}'s mind.toml",
+            crate::sanitize::strip_ansi(source)
+        )
+    }
+}
+
 /// The mind home a source being melded goes into, unless its own
 /// `[source] mind-home` says otherwise (HOME-4, HOME-5).
 #[derive(Debug, Clone, Default)]
@@ -448,6 +544,102 @@ impl Paths {
     // spec: HOME-6
     pub fn home_of(&self, source: &str) -> PathBuf {
         source_home(source).unwrap_or_else(|| self.mind_home.clone())
+    }
+
+    /// Resolve a source lobe (LOBE-2): a leading `~` is expanded and a
+    /// relative path is taken against the source's home. It may not be a mind
+    /// home or lie under one's `store`, `sources`, or `.tmp`. When extra mind
+    /// homes are set (`MIND_HOMES` or `mind-homes`), it must also lie under an
+    /// allowed home; otherwise it may be any directory. `origin` names where
+    /// it was given, for the `lobe-not-allowed` message.
+    // spec: LOBE-2
+    pub fn resolve_lobe(&self, source: &str, declared: &str, origin: &str) -> Result<PathBuf> {
+        let refuse = |why: String| MindError::LobeNotAllowed {
+            lobe: declared.to_string(),
+            origin: origin.to_string(),
+            why,
+        };
+        let trimmed = declared.trim();
+        if trimmed.is_empty() {
+            return Err(refuse("it is empty".to_string()));
+        }
+        let expanded = crate::commands::expand_tilde(trimmed);
+        let lobe = normalize_home(&self.home_of(source).join(expanded));
+        let homes: Vec<PathBuf> = self.all_homes().iter().map(|h| normalize_home(h)).collect();
+        let reserved = homes.iter().any(|home| {
+            lobe == *home
+                || ["store", "sources", ".tmp"]
+                    .iter()
+                    .any(|d| lobe.starts_with(home.join(d)))
+        });
+        if reserved {
+            return Err(refuse(
+                "it is a mind home, or lies under one's store, sources, or .tmp".to_string(),
+            ));
+        }
+        if !self.extra_homes().is_empty() && self.lobe_outside_homes(&lobe) {
+            return Err(refuse(format!(
+                "with MIND_HOMES or the `mind-homes` config key set, a lobe must lie under an allowed mind home ({})",
+                self.allowed_list()
+            )));
+        }
+        Ok(lobe)
+    }
+
+    /// Whether a resolved lobe lies under none of the allowed mind homes
+    /// (LOBE-8): the install confirmation calls it out.
+    pub fn lobe_outside_homes(&self, lobe: &Path) -> bool {
+        !self
+            .all_homes()
+            .iter()
+            .any(|h| lobe.starts_with(normalize_home(h)))
+    }
+
+    /// The lobe `source` installs into in place of the default lobe (LOBE-3):
+    /// the consumer's `--lobe` (LOBE-7), else the `[source] lobe` of its
+    /// last-scanned `mind.toml`, or `None` when neither names one.
+    // spec: LOBE-1 LOBE-2 LOBE-7
+    pub fn source_lobe(&self, source: &str) -> Result<Option<PathBuf>> {
+        if let Some(d) = consumer_lobe_decl(source) {
+            return self
+                .resolve_lobe(source, &d, &lobe_origin(source, true))
+                .map(Some);
+        }
+        source_lobe_decl(source)
+            .map(|d| self.resolve_lobe(source, &d, &lobe_origin(source, false)))
+            .transpose()
+    }
+
+    /// The default lobe (`~/.claude`, or the `MIND_DEFAULT_LOBE` /
+    /// `CLAUDE_HOME` override) as an absolute path.
+    pub fn default_lobe_path(&self) -> Result<PathBuf> {
+        make_absolute(self.claude_home.clone())
+    }
+
+    /// The lobes an item of `source` links into (LOBE-3): [`Self::agent_homes`]
+    /// with the default lobe replaced by the source's own `lobe`, when it
+    /// declares one. Every other lobe stays. A `--local` scope (HARN-20) and a
+    /// managed policy's lobe lock (POL-40) are left as they are.
+    // spec: LOBE-3 LOBE-4
+    pub fn agent_homes_for(&self, source: &str) -> Result<Vec<Lobe>> {
+        let homes = self.agent_homes()?;
+        if local_lobe_override().is_some() {
+            return Ok(homes);
+        }
+        let Some(root) = self.source_lobe(source)? else {
+            return Ok(homes);
+        };
+        if Policy::load()?.is_some_and(|p| p.lobes_lock()) {
+            return Ok(homes);
+        }
+        let default = normalize_home(&self.default_lobe_path()?);
+        let mut out = vec![Lobe::all_kinds(root)];
+        out.extend(
+            homes
+                .into_iter()
+                .filter(|l| normalize_home(&l.path) != default),
+        );
+        Ok(dedup_lobes(out))
     }
 
     /// The store root of a source's home.

@@ -176,6 +176,12 @@ pub struct SourceMeta {
     // spec: HOME-5
     #[serde(rename = "mind-home")]
     pub mind_home: Option<String>,
+    /// The lobe this source's items link into in place of the default lobe
+    /// (LOBE-1), e.g. `"claude"` for `<home>/claude`. Relative to the
+    /// source's mind home; it must lie under an allowed home (LOBE-2). Read
+    /// from the commit the source is on.
+    // spec: LOBE-1
+    pub lobe: Option<String>,
 }
 
 /// `[source].history` (DSC-120). Any other value is a `MindToml` error.

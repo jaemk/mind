@@ -456,6 +456,13 @@ EXAMPLES:
         #[arg(long, value_name = "DIR")]
         home: Option<String>,
 
+        /// For a deep tree/blob URL, the lobe to link the single-item source's
+        /// item into in place of the default lobe, as `meld --lobe`. Ignored
+        /// (with a note) for a non-URL item ref.
+        // spec: LOBE-7
+        #[arg(long, value_name = "DIR")]
+        lobe: Option<String>,
+
         /// Declare what kind of item a `blob` item link's file is: `agent`,
         /// `rule`, or `command`. Same rule as `meld --kind`; item links only.
         // spec: CLI-239, LNK-21
@@ -1239,6 +1246,17 @@ pub struct MeldArgs {
     // spec: HOME-4 HOME-8
     #[arg(long, value_name = "DIR")]
     pub home: Option<String>,
+
+    /// The lobe to link this source's items into in place of the default lobe
+    /// (`~/.claude`); other lobes still get links. A relative DIR is taken
+    /// against the source's mind home. Outranks the source's own `[source]
+    /// lobe`. With `MIND_HOMES` or `mind-homes` set it must lie under an
+    /// allowed home; otherwise any directory is allowed and the install
+    /// confirmation calls it out. On a source already melded, moves its links
+    /// there; `--lobe ''` clears it.
+    // spec: LOBE-7 LOBE-8
+    #[arg(long, value_name = "DIR")]
+    pub lobe: Option<String>,
 
     /// Supply or override the source's install hook: a shell command run
     /// after checkout to build the tooling its items rely on. Before it runs,

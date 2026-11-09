@@ -147,6 +147,15 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   The consumer's `mind meld --home` outranks it. An older `mind` rejects the
   key, so set `min-mind-version` alongside. See
   [Mind homes](configuration.md#mind-homes).
+- **`lobe`**: a lobe its items link into in place of the default lobe
+  (`~/.claude`), e.g. `"claude"` for `<home>/claude`; a relative path is taken
+  against the source's mind home. Other lobes, project lobes included, still
+  get links. It may not be a mind home or lie under one's `store`, `sources`,
+  or `.tmp`, and when the consumer has extra mind homes set it must lie under
+  one of them; any other value refuses the meld. The consumer's `meld --lobe`
+  outranks it. Read from the commit the source is on, so `upgrade` moves the
+  links when it changes. An older `mind` rejects the key, so set
+  `min-mind-version` alongside. See [Source lobes](configuration.md#source-lobes).
 
 ## `[[hooks]]` - lifecycle hooks
 

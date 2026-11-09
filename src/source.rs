@@ -439,6 +439,12 @@ pub struct Source {
     /// `Some(Off)` is revoked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_update: Option<crate::auto_update::Level>,
+    /// The consumer's lobe for this source's items (LOBE-7), from `meld
+    /// --lobe` / `learn <url> --lobe`, as given (a relative path is resolved
+    /// against the source's home on use). Outranks the source's own `[source]
+    /// lobe`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lobe: Option<String>,
 }
 
 impl Source {
@@ -1280,6 +1286,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         profile_snapshot: None,
         whole_snapshot: None,
         auto_update: None,
+        lobe: None,
     })
 }
 
@@ -1359,6 +1366,16 @@ impl Registry {
                 }
                 crate::paths::set_source_home(&src.name, Some(&home));
                 reg.sources.push(src);
+            }
+        }
+        // spec: LOBE-1 -- where each source's `lobe` is read from when no scan
+        // in this run has recorded it.
+        for src in &reg.sources {
+            crate::paths::set_source_clone(&src.name, &src.clone_dir(paths));
+            // spec: LOBE-7 -- only a recorded one: a `meld --lobe` in progress
+            // has set the map before the source is registered.
+            if src.lobe.is_some() {
+                crate::paths::set_consumer_lobe(&src.name, src.lobe.as_deref());
             }
         }
         Ok(reg)

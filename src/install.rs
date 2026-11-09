@@ -108,12 +108,21 @@ pub fn install(
     // multi-item `learn`/`meld` does not repeat it for every item.
     // spec: STO-56
     // spec: HARN-16
+    // spec: LOBE-3 -- a source's own `lobe` takes the default lobe's place. It
+    // is created on demand like the default lobe, so no reachability gate.
+    let source_lobe = paths.source_lobe(&item.source)?;
+    let mut planned_lobes: Vec<std::path::PathBuf> = Vec::new();
     let planned_links: Vec<std::path::PathBuf> = match &link_rel {
         Some(rel) => {
             let mut planned = Vec::new();
-            for home in paths.agent_homes()?.iter().filter(|home| home.admits(kind)) {
-                if home.reachable() {
+            for home in paths
+                .agent_homes_for(&item.source)?
+                .iter()
+                .filter(|home| home.admits(kind))
+            {
+                if home.reachable() || source_lobe.as_ref() == Some(&home.path) {
                     planned.push(home.path.join(rel));
+                    planned_lobes.push(home.path.clone());
                 } else {
                     note_unreachable_lobe_once(&home.path);
                 }
@@ -124,7 +133,12 @@ pub fn install(
     };
     if !force {
         for link in &planned_links {
-            ensure_unoccupied(&store_roots, link)?;
+            // spec: LOBE-6 -- a lobe that cannot even be read is skipped at
+            // the link step below, not refused here.
+            match ensure_unoccupied(&store_roots, link) {
+                Err(e) if !e.is_unwritable() => return Err(e),
+                _ => {}
+            }
         }
     }
 
@@ -224,7 +238,20 @@ pub fn install(
             None
         };
 
+        // spec: LOBE-6 -- a link that already points at the store copy is
+        // left as it is, so an in-place reinstall writes nothing in the lobe.
+        if stash.is_none() && std::fs::read_link(&link).is_ok_and(|t| t == store) {
+            links.push(link);
+            stashes.push(None);
+            continue;
+        }
         if let Err(e) = ensure_link(&store, &link) {
+            // spec: LOBE-6 -- a lobe that cannot be written (a sandbox denying
+            // it) is skipped with a note; the item installs without that link.
+            if e.is_unwritable() && stash.is_none() {
+                note_unwritable_lobe_once(&planned_lobes[i]);
+                continue;
+            }
             // Rollback: remove symlinks made so far, restore their stashes, then
             // restore the store. Also restore the current link's stash if any.
             for (made, s) in links.iter().zip(stashes.iter()) {
@@ -294,7 +321,11 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     // spec: HOME-7 -- the store root of the allowed home the copy was
     // installed in.
     let store_root = paths.store_root_of_item(&item.store);
-    let agent_homes = paths.agent_homes()?;
+    // spec: LOBE-3 -- the source's own lobe confines its links too.
+    let mut agent_homes = paths.agent_homes()?;
+    if let Ok(Some(root)) = paths.source_lobe(&item.source) {
+        agent_homes.push(crate::paths::Lobe::all_kinds(root));
+    }
 
     // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
     // stored as relative paths resolved against the cwd at config-load time,
@@ -328,7 +359,14 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
                 continue;
             }
         }
-        remove_path(p)?;
+        // spec: LOBE-6 -- a link in a lobe that cannot be written is left in
+        // place with a note rather than failing the removal.
+        match remove_path(p) {
+            Err(e) if e.is_unwritable() => {
+                note_unwritable_lobe_once(p.parent().unwrap_or(p));
+            }
+            other => other?,
+        }
     }
     let store_path = paths.mind_home.join(&item.store);
     if !is_confined_under(&store_path, &store_root) {
@@ -458,7 +496,8 @@ pub fn link_into_new_lobes(
     let mut created = Vec::new();
     let mut failed = Vec::new();
 
-    let agent_homes = paths.agent_homes().unwrap_or_default();
+    // spec: LOBE-3 -- strip the source's own lobe as well as the configured ones.
+    let agent_homes = paths.agent_homes_for(&item.source).unwrap_or_default();
     let link_rel = item.links.iter().find_map(|link_str| {
         let link = Path::new(link_str);
         agent_homes
@@ -549,6 +588,25 @@ fn note_unreachable_lobe_once(path: &Path) {
             "note: lobe '{}' is unreachable (its parent directory does not exist); \
              create the missing directory, or run `mind config lobes remove {quoted_path}` to drop it",
             path.display()
+        ));
+    }
+}
+
+/// Lobe paths already reported unwritable this process (LOBE-6).
+static WARNED_UNWRITABLE_LOBES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/// Print a one-time (per-process) note when a lobe is skipped because it
+/// cannot be written (LOBE-6), e.g. a sandbox denying writes to `~/.claude`.
+pub(crate) fn note_unwritable_lobe_once(path: &Path) {
+    let seen = WARNED_UNWRITABLE_LOBES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.insert(path.to_path_buf()) {
+        // spec: CLI-217 -- a note, not a bare `println!`, ahead of `--json`.
+        crate::render::note(format!(
+            "note: '{}' cannot be written; skipped its links there. Run the command again where it can be written to update them",
+            crate::sanitize::display_path(path)
         ));
     }
 }

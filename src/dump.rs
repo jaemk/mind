@@ -600,6 +600,7 @@ mod tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 
