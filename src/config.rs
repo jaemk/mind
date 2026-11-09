@@ -220,7 +220,8 @@ pub struct Config {
     pub hook_log_keep: Option<crate::hook_log::LogKeep>,
 
     /// Additional mind homes a source may be melded into (HOME-2), on top of
-    /// the default `~/.mind` and `$MIND_HOMES`. `~` is expanded at use.
+    /// the default `~/.mind` and `$MIND_HOMES`. `~` is expanded at use, and a
+    /// relative entry is relative to the default mind home.
     // spec: HOME-2
     #[serde(
         rename = "mind-homes",
