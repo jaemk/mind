@@ -1294,6 +1294,23 @@ pub struct Registry {
     pub sources: Vec<Source>,
 }
 
+/// The `(name, entry)` pairs of a `sources.json` body, verbatim. An absent or
+/// unreadable body has none.
+fn raw_entries(bytes: Option<&[u8]>) -> Vec<(String, serde_json::Value)> {
+    let Some(serde_json::Value::Object(mut root)) =
+        bytes.and_then(|b| serde_json::from_slice(b).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(serde_json::Value::Array(sources)) = root.remove("sources") else {
+        return Vec::new();
+    };
+    sources
+        .into_iter()
+        .filter_map(|s| Some((s.get("name")?.as_str()?.to_string(), s)))
+        .collect()
+}
+
 /// Private serde wrapper for schema-version detection (STO-50).
 #[derive(Deserialize)]
 struct RegistryWithVersion {
@@ -1394,7 +1411,8 @@ impl Registry {
     /// that touches only sources in one home writes nothing in another.
     // spec: HOME-3
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        let default = crate::paths::normalize_home(&paths.mind_home);
+        use crate::paths::normalize_home;
+        let default = normalize_home(&paths.mind_home);
         let mut homes = vec![paths.mind_home.clone()];
         for h in paths.extra_homes() {
             homes.push(h);
@@ -1403,21 +1421,36 @@ impl Registry {
             let h = paths.home_of(&src.name);
             if !homes
                 .iter()
-                .any(|x| crate::paths::normalize_home(x) == crate::paths::normalize_home(&h))
+                .any(|x| normalize_home(x) == normalize_home(&h))
             {
                 homes.push(h);
             }
         }
-        for home in homes {
-            let is_default = crate::paths::normalize_home(&home) == default;
-            let subset: Vec<&Source> = self
-                .sources
-                .iter()
-                .filter(|s| {
-                    crate::paths::normalize_home(&paths.home_of(&s.name))
-                        == crate::paths::normalize_home(&home)
-                })
-                .collect();
+        // spec: HOME-3 -- every home's file as it is before this save writes
+        // any. An entry `load` skipped because an earlier home holds the same
+        // name is written back unchanged, not dropped.
+        let on_disk: Vec<Option<Vec<u8>>> = homes
+            .iter()
+            .map(|h| std::fs::read(h.join("sources.json")).ok())
+            .collect();
+        let entries: Vec<Vec<(String, serde_json::Value)>> =
+            on_disk.iter().map(|b| raw_entries(b.as_deref())).collect();
+        for (i, home) in homes.iter().enumerate() {
+            let is_default = normalize_home(home) == default;
+            let in_home = |name: &str| normalize_home(&paths.home_of(name)) == normalize_home(home);
+            let mut subset: Vec<serde_json::Value> = Vec::new();
+            for s in self.sources.iter().filter(|s| in_home(&s.name)) {
+                subset
+                    .push(serde_json::to_value(s).map_err(|e| MindError::json("sources.json", e))?);
+            }
+            for (name, raw) in &entries[i] {
+                let shadowed = entries[..i]
+                    .iter()
+                    .any(|earlier| earlier.iter().any(|(n, _)| n == name));
+                if shadowed && !self.find(name).is_some_and(|s| in_home(&s.name)) {
+                    subset.push(raw.clone());
+                }
+            }
             let file = home.join("sources.json");
             // Always write the current version (STO-50).
             let versioned = serde_json::json!({
@@ -1426,17 +1459,15 @@ impl Registry {
             });
             let json = serde_json::to_vec_pretty(&versioned)
                 .map_err(|e| MindError::json("sources.json", e))?;
-            match std::fs::read(&file) {
-                Ok(existing) if existing == json => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && subset.is_empty() => {
-                    continue;
-                }
+            match &on_disk[i] {
+                Some(existing) if *existing == json => continue,
+                None if subset.is_empty() => continue,
                 _ => {}
             }
             if is_default {
                 paths.ensure_layout()?;
             } else {
-                crate::paths::mkdir_p(&home)?;
+                crate::paths::mkdir_p(home)?;
             }
             Paths::atomic_write(&file, &json)?;
         }

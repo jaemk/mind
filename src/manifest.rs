@@ -245,50 +245,68 @@ impl Manifest {
     pub fn save(&self, paths: &Paths) -> Result<()> {
         use crate::paths::normalize_home;
         let default = normalize_home(&paths.mind_home);
-        let home_of = |item: &InstalledItem| {
-            crate::paths::home_of_store(&item.store)
-                .map(|h| normalize_home(&h))
-                .unwrap_or_else(|| default.clone())
+        // An entry naming no allowed home stays in the default manifest, so a
+        // save never creates a manifest outside the allowed homes.
+        let extra = paths.extra_homes();
+        let home_of = |item: &InstalledItem| match crate::paths::home_of_store(&item.store)
+            .map(|h| normalize_home(&h))
+        {
+            Some(h) if extra.contains(&h) => h,
+            _ => default.clone(),
         };
         let mut homes = vec![default.clone()];
-        for h in paths.extra_homes() {
-            homes.push(normalize_home(&h));
-        }
-        for item in self.items.values() {
-            let h = home_of(item);
-            if !homes.contains(&h) {
-                homes.push(h);
+        homes.extend(extra.iter().cloned());
+        let file_of = |home: &std::path::Path| {
+            if *home == *default {
+                paths.manifest_file()
+            } else {
+                home.join("manifest.json")
             }
-        }
-        for home in homes {
-            let is_default = home == default;
-            let subset = Manifest {
+        };
+        // spec: HOME-3 -- every home's file as it is before this save writes
+        // any. An entry `load` skipped because an earlier home holds the same
+        // key is written back unchanged, not dropped.
+        let on_disk: Vec<Option<Vec<u8>>> = homes
+            .iter()
+            .map(|h| std::fs::read(file_of(h)).ok())
+            .collect();
+        let entries: Vec<Manifest> = on_disk
+            .iter()
+            .map(|b| {
+                b.as_deref()
+                    .and_then(|b| serde_json::from_slice(b).ok())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for (i, home) in homes.iter().enumerate() {
+            let is_default = *home == default;
+            let mut subset = Manifest {
                 version: self.version,
                 items: self
                     .items
                     .iter()
-                    .filter(|(_, it)| home_of(it) == home)
+                    .filter(|(_, it)| home_of(it) == *home)
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             };
-            let file = if is_default {
-                paths.manifest_file()
-            } else {
-                home.join("manifest.json")
-            };
+            for (key, item) in &entries[i].items {
+                let shadowed = entries[..i].iter().any(|e| e.items.contains_key(key));
+                if shadowed && !subset.items.contains_key(key) {
+                    subset.items.insert(key.clone(), item.clone());
+                }
+            }
+            let file = file_of(home);
             let json = serde_json::to_vec_pretty(&subset)
                 .map_err(|e| MindError::json("manifest.json", e))?;
-            match std::fs::read(&file) {
-                Ok(existing) if existing == json => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && subset.items.is_empty() => {
-                    continue;
-                }
+            match &on_disk[i] {
+                Some(existing) if *existing == json => continue,
+                None if subset.items.is_empty() => continue,
                 _ => {}
             }
             if is_default {
                 paths.ensure_layout()?;
             } else {
-                crate::paths::mkdir_p(&home)?;
+                crate::paths::mkdir_p(home)?;
             }
             Paths::atomic_write(&file, &json)?;
         }

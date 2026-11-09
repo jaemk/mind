@@ -24,13 +24,18 @@ as one set.
   to its own home's file, and a home whose file would not change is not
   written, so a command that touches only one home's sources writes nothing in
   another. A source or item name present in two homes is read from the first
-  and the later one is ignored with a warning.
+  and the later one is ignored with a warning; a save writes the ignored entry
+  back to its own home's file unchanged, so it comes into view once the first
+  is removed.
 - `HOME-6` A source's clone, store copies, staging and backup space, and items
   hook document all live under its home. A home that is no longer allowed is
   not read, so its sources drop out of view until it is listed again.
 - `HOME-7` A manifest entry's `store` is relative to the default home for an
   item there (unchanged), and the absolute store path for an item in an extra
-  home, which is what routes the entry back to its home on save.
+  home, which is what routes the entry back to its home on save. An absolute
+  entry under no allowed home is treated as the default home's: it is saved to
+  the default manifest, and `forget` refuses to remove a store path outside the
+  default store root (LIFE-44).
 
 ## Choosing a home
 
@@ -43,7 +48,8 @@ as one set.
   `mind.toml` chooses its home. It must be an allowed home; otherwise the meld
   is refused (`home-not-allowed`) and the clone removed. `--home` outranks it.
   A curated source with no `mind-home` of its own goes into its curator's
-  home.
+  home, whether the curator's first meld, `sync`'s re-walk (DSC-57), or
+  `curate` registers it.
 - `HOME-8` A source lives in one home. Re-melding it with `--home` naming a
   different home is refused (`source-in-other-home`, exit 1); moving it means
   `unmeld` and `meld` again.
@@ -53,4 +59,6 @@ as one set.
 - `HOME-9` Every command locks each allowed home's `.lock`, the default home
   first and then the extra homes in order, so two commands cannot deadlock. A
   lock file that cannot be opened for writing is locked through a read-only
-  handle; an extra home with no lock file that cannot be created is skipped.
+  handle. A home, the default one included, whose lock file does not exist and
+  cannot be created because writes are denied there is skipped; an extra home
+  whose lock fails to open for any other reason is skipped too.

@@ -149,7 +149,7 @@ A source stays in its home; to move it, `unmeld` it and meld it again with
 
 ## Concurrency
 
-A global advisory lock (`~/.mind/.lock`) is held by every mutating command
+A global advisory lock (`~/.mind/.lock`, plus each extra mind home's `.lock`) is held by every mutating command
 (`meld`, `unmeld`, `learn`, `forget`, `sync`, `upgrade`, `introspect --fix`,
 `config lobes add|remove`, `config auto-update`). A second concurrent `mind`
 invocation blocks until the first finishes, except `auto-update run`, which

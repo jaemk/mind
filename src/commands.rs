@@ -1941,8 +1941,16 @@ fn meld_recursive(
 
     // spec: HOME-4 HOME-6 -- a new source goes into the home `meld --home`
     // named, or its curator's home; its own `[source] mind-home` may move it
-    // once the clone is read (below).
-    let meld_home = crate::paths::meld_home();
+    // once the clone is read (below). A curated source follows its curator's
+    // home on every path that registers it: the first meld, `sync`'s DSC-57
+    // re-walk, and `curate`.
+    let meld_home = match source.curated_by.as_deref() {
+        Some(curator) => crate::paths::MeldHome {
+            home: crate::paths::source_home(curator),
+            explicit: false,
+        },
+        None => crate::paths::meld_home(),
+    };
     crate::paths::set_source_home(&source.name, meld_home.home.as_deref());
 
     // `source.pin` is still the default here, so `clone_dir` resolves a local
@@ -2845,7 +2853,13 @@ fn meld_recursive(
                      it is a relative path that only meant something in the curator's own \
                      working tree; meld that source by an absolute path or a URL instead",
                     missing.display(),
-                    paths.sources_dir().display()
+                    paths
+                        .all_homes()
+                        .iter()
+                        .map(|h| h.join("sources"))
+                        .find(|s| missing.starts_with(s))
+                        .unwrap_or_else(|| paths.sources_dir())
+                        .display()
                 );
                 skipped.push(SkippedEntry {
                     source: entry.source.clone(),
