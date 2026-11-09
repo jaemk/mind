@@ -77,7 +77,8 @@ as one set.
 ## Showing the home
 
 - `HOME-11` `recall --sources` lists `home:<dir>` in a source's bracket when
-  it is in an extra home, and `--json` gives every source's `mind_home`.
+  it is in an extra home, and `--json` gives every source's `mind_home` as an
+  absolute path.
 - `HOME-13` The `probe` TUI's meld input takes `--home` as `mind meld` does
   (TUI-77), and a source's details dialog shows `home:` for a source in an
   extra home.

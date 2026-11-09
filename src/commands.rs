@@ -14270,7 +14270,11 @@ pub fn recall(
                         // spec: HOME-11 -- the mind home the source lives in.
                         obj.insert(
                             "mind_home".into(),
-                            serde_json::Value::String(paths.home_of(&s.name).display().to_string()),
+                            serde_json::Value::String(
+                                crate::paths::normalize_home(&paths.home_of(&s.name))
+                                    .display()
+                                    .to_string(),
+                            ),
                         );
                     }
                     Ok(v)

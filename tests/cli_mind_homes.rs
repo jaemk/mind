@@ -73,8 +73,13 @@ impl Sandbox {
     }
 
     fn mind_in(&self, cwd: &Path, args: &[&str]) -> Run {
+        self.mind_env(cwd, &[], args)
+    }
+
+    fn mind_env(&self, cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
+            .envs(env.iter().copied())
             .current_dir(cwd)
             .env("MIND_HOME", &self.default_home)
             .env("CLAUDE_HOME", &self.claude_home)
@@ -501,12 +506,21 @@ fn recall_sources_shows_the_home() {
     let r = sb.mind(&["--json", "recall", "--sources"]);
     assert!(r.ok(), "{}", r.stderr);
     let v: Value = serde_json::from_str(&r.stdout).unwrap();
-    let docs = v
-        .as_array()
-        .or_else(|| v["items"].as_array())
-        .or_else(|| v["sources"].as_array())
-        .unwrap_or_else(|| panic!("no source array: {v}"));
-    assert_eq!(docs[0]["mind_home"], serde_json::json!(extra), "{v}");
+    assert_eq!(v["items"][0]["mind_home"], serde_json::json!(extra), "{v}");
+
+    // A source in the default home names the default home.
+    let other = Sandbox::new(None);
+    let r = other.mind(&["--yes", "meld", &other.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let r = other.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains("home:"), "{}", r.stdout);
+    let r = other.mind(&["--json", "recall", "--sources"]);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        v["items"][0]["mind_home"],
+        serde_json::json!(other.default_home.to_string_lossy()),
+        "{v}"
+    );
 }
 
 /// `dump` records an extra home as the entry's `mind-home`, and melding the
@@ -526,6 +540,14 @@ fn dump_records_the_home_and_remelding_restores_it() {
     assert!(r.ok(), "dump: {}", r.stderr);
     let text = std::fs::read_to_string(&dump).unwrap();
     assert!(text.contains(&format!("mind-home = {extra:?}")), "{text}");
+    // A home under the user's home directory is written with `~`.
+    let r = sb.mind_env(
+        &std::env::current_dir().unwrap(),
+        &[("HOME", &sb.base)],
+        &["dump"],
+    );
+    assert!(r.ok(), "dump: {}", r.stderr);
+    assert!(r.stdout.contains("mind-home = \"~/extra\""), "{}", r.stdout);
     git(&super_dir, &["-c", "init.defaultBranch=main", "init", "-q"]);
     git(&super_dir, &["config", "user.email", "t@t"]);
     git(&super_dir, &["config", "user.name", "t"]);
@@ -595,6 +617,16 @@ fn learn_link_takes_home() {
     let r = sb.mind(&["--yes", "learn", &url, "--home", "/nowhere"]);
     assert!(!r.ok());
     assert!(r.stderr.contains("is not allowed"), "{}", r.stderr);
+
+    // spec: HOME-8 -- the instance is in the extra home already.
+    let default = sb.default_home.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "learn", &url, "--home", &default]);
+    assert!(!r.ok());
+    assert!(
+        r.stderr.contains("already melded in mind home"),
+        "{}",
+        r.stderr
+    );
 }
 
 /// A relative `mind-homes` entry is relative to the default home, not the
