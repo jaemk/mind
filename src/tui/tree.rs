@@ -982,6 +982,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -1009,6 +1010,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         };

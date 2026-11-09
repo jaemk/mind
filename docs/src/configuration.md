@@ -147,7 +147,10 @@ own. Every command sees all homes as one set and writes each source and item
 back to its own home, so working with a source in one home writes nothing in
 another. `config.toml`, the hook history, and the hook logs stay in `~/.mind`.
 A source stays in its home; to move it, `unmeld` it and meld it again with
-`--home`. See [spec/homes.md](https://github.com/jaemk/mind/blob/main/spec/homes.md).
+`--home`. `learn <url> --home` places an [item link](item-links.md) the same
+way, a curator entry can name a source's `mind-home`, and `dump` records each
+source's extra home. `recall --sources` shows `home:<dir>` for a source in an
+extra home, as does its details dialog in `probe`. See [spec/homes.md](https://github.com/jaemk/mind/blob/main/spec/homes.md).
 
 ## Concurrency
 

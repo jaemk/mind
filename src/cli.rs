@@ -449,6 +449,13 @@ EXAMPLES:
         #[arg(long)]
         pin: bool,
 
+        /// For a deep tree/blob URL, the mind home to register the single-item
+        /// source in, as `meld --home`. Ignored (with a note) for a non-URL
+        /// item ref.
+        // spec: HOME-12
+        #[arg(long, value_name = "DIR")]
+        home: Option<String>,
+
         /// Declare what kind of item a `blob` item link's file is: `agent`,
         /// `rule`, or `command`. Same rule as `meld --kind`; item links only.
         // spec: CLI-239, LNK-21

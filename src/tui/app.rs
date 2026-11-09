@@ -1465,6 +1465,14 @@ impl App {
             format!("available: {available}"),
             format!("namespace: {effective_prefix}"),
         ];
+        // spec: HOME-13 -- a source in an extra mind home names it.
+        if let Some(home) = self
+            .last_snapshot
+            .as_ref()
+            .and_then(|s| s.source_homes.get(name))
+        {
+            detail.push(format!("home:      {}", home.display()));
+        }
         if installed > 0 {
             detail.push("  locked: forget all items to change namespace".to_string());
         }
@@ -1954,6 +1962,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -3937,6 +3946,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: ns,
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -3991,6 +4001,45 @@ mod tests {
             "dialog must offer a Set namespace action when no items are installed: {:?}",
             d.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
         );
+    }
+
+    /// A source in an extra mind home names it in its details dialog; one in
+    /// the default home does not.
+    #[test]
+    fn source_dialog_shows_an_extra_home() {
+        // spec: HOME-13
+        let open = |snap: Snapshot| {
+            let mut app = App::new(String::new(), None, None);
+            app.apply_snapshot(snap);
+            app.selected = app
+                .visible
+                .iter()
+                .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::Source(_)))
+                .expect("source node must be visible");
+            app.apply_intent(Intent::OpenDialog);
+            app.dialog.expect("source dialog must open").detail
+        };
+        let detail = open(snapshot_with_namespace(None));
+        assert!(!detail.iter().any(|l| l.starts_with("home:")), "{detail:?}");
+
+        let mut snap = snapshot_with_namespace(None);
+        snap.source_homes.insert(
+            "local/agents".to_string(),
+            std::path::PathBuf::from("/work/.mind"),
+        );
+        let detail = open(snap);
+        assert!(
+            detail.iter().any(|l| l == "home:      /work/.mind"),
+            "{detail:?}"
+        );
+    }
+
+    /// The meld input takes `--home` like `mind meld` (TUI-77).
+    #[test]
+    fn meld_line_takes_home() {
+        // spec: HOME-13
+        let args = parse_meld_line("owner/repo --home /work/.mind").unwrap();
+        assert_eq!(args.home.as_deref(), Some("/work/.mind"));
     }
 
     #[test]
@@ -4062,6 +4111,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: ns,
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         });
@@ -5424,6 +5474,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -5449,6 +5500,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -5831,6 +5883,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -6001,6 +6054,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }
@@ -6094,6 +6148,7 @@ mod tests {
             suggestions: vec![],
             lobes: vec![],
             source_namespaces: std::collections::HashMap::new(),
+            source_homes: std::collections::HashMap::new(),
             source_profiles: std::collections::HashMap::new(),
             hook_results: Vec::new(),
         }

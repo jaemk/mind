@@ -110,6 +110,10 @@ struct DumpEntry {
 
     #[serde(rename = "install-items", skip_serializing_if = "Option::is_none")]
     install_items: Option<Vec<String>>,
+
+    /// The source's mind home when it is an extra home (HOME-10).
+    #[serde(rename = "mind-home", skip_serializing_if = "Option::is_none")]
+    mind_home: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +289,7 @@ fn build_link_entry(
         default_profile: None,
         install,
         install_items,
+        mind_home: dump_home(paths, source),
     }))
 }
 
@@ -403,7 +408,23 @@ fn build_entry(
         default_profile,
         install,
         install_items,
+        mind_home: dump_home(paths, source),
     })
+}
+
+/// The `mind-home` an entry records (HOME-10): the source's home when it is
+/// an extra home, with a home-directory prefix written as `~`. A source in the
+/// default home records none, so the output melds into whatever the default
+/// home is where it is melded.
+fn dump_home(paths: &Paths, source: &Source) -> Option<String> {
+    crate::paths::source_home(&source.name)?;
+    let home = paths.home_of(&source.name);
+    if let Some(user) = dirs::home_dir()
+        && let Ok(rest) = home.strip_prefix(&user)
+    {
+        return Some(format!("~/{}", rest.display()));
+    }
+    Some(home.display().to_string())
 }
 
 /// The profile directive for a profile-tracked source (PROF-28):
@@ -624,6 +645,7 @@ mod tests {
             default_profile: None,
             install: Some(true),
             install_items: None,
+            mind_home: None,
         };
         let doc = DumpDoc {
             source: DumpSource {
@@ -663,6 +685,7 @@ mod tests {
             default_profile: None,
             install: Some(false),
             install_items: None,
+            mind_home: None,
         };
         let doc = DumpDoc {
             source: DumpSource {
@@ -707,6 +730,7 @@ mod tests {
             default_profile: None,
             install: None,
             install_items: Some(items.clone()),
+            mind_home: None,
         };
         let doc = DumpDoc {
             source: DumpSource {
@@ -756,7 +780,8 @@ mod tests {
             profiles: None,
             default_profile: None,
             install: Some(false),
-            install_items: None, // None, not Some([])
+            install_items: None,
+            mind_home: None, // None, not Some([])
         };
         let doc = DumpDoc {
             source: DumpSource {
@@ -799,6 +824,7 @@ mod tests {
                         default_profile: None,
                         install: Some(true),
                         install_items: None,
+                        mind_home: None,
                     },
                     DumpEntry {
                         source: "https://github.com/owner/repo".into(),
@@ -813,6 +839,7 @@ mod tests {
                         default_profile: None,
                         install: None,
                         install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
+                        mind_home: None,
                     },
                 ],
             },
@@ -928,6 +955,7 @@ mod tests {
             default_profile: None,
             install: Some(true),
             install_items: None,
+            mind_home: None,
         };
         let entry_no_commit = DumpEntry {
             source: "/a/b".into(),
@@ -942,6 +970,7 @@ mod tests {
             default_profile: None,
             install: Some(false),
             install_items: None,
+            mind_home: None,
         };
 
         let text_with = toml::to_string(&DumpDoc {
@@ -1036,6 +1065,7 @@ mod tests {
             default_profile: None,
             install: Some(true),
             install_items: None,
+            mind_home: None,
         };
         let text = toml::to_string(&DumpDoc {
             source: DumpSource {
@@ -1080,6 +1110,7 @@ mod tests {
             default_profile: None,
             install: Some(true),
             install_items: None,
+            mind_home: None,
         };
         let doc = DumpDoc {
             source: DumpSource {
@@ -1161,6 +1192,7 @@ mod tests {
             default_profile,
             install: None,
             install_items: extras,
+            mind_home: None,
         };
         let text = toml::to_string(&DumpDoc {
             source: DumpSource {
@@ -1268,6 +1300,7 @@ mod tests {
             default_profile: None,
             install: Some(true),
             install_items: None,
+            mind_home: None,
         };
         let text = toml::to_string(&DumpDoc {
             source: DumpSource {

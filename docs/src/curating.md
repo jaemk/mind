@@ -34,6 +34,7 @@ what you already have installed; see [Back up and reproduce your setup](dump.md)
 | `default-profile` | `false` leaves that source's `default` profile out |
 | `follow-branch`, `pin-tag`, `pin-ref`, `pin-version` | pin that source (at most one); `pin-version` takes a release range such as `"^1.2"`, or `"*"` for every tagged release |
 | `kind` | for an item link to a `.md` file: `agent`, `rule`, or `command` |
+| `mind-home` | the [mind home](configuration.md#mind-homes) to meld that source into, as `meld --home` does; it must be one the consumer allows |
 
 `install = true` cannot be combined with `install-items` or `profiles`.
 `install-items` with `profiles` installs the union. An `install = true` entry

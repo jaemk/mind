@@ -485,6 +485,114 @@ fn the_config_key_lists_extra_homes() {
     assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
 }
 
+/// `recall --sources` names an extra home in its text and gives every source's
+/// home under `--json`.
+#[test]
+fn recall_sources_shows_the_home() {
+    // spec: HOME-11
+    let sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.ok(), "{}", r.stderr);
+    assert!(r.stdout.contains(&format!("home:{extra}")), "{}", r.stdout);
+    let r = sb.mind(&["--json", "recall", "--sources"]);
+    assert!(r.ok(), "{}", r.stderr);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    let docs = v
+        .as_array()
+        .or_else(|| v["items"].as_array())
+        .or_else(|| v["sources"].as_array())
+        .unwrap_or_else(|| panic!("no source array: {v}"));
+    assert_eq!(docs[0]["mind_home"], serde_json::json!(extra), "{v}");
+}
+
+/// `dump` records an extra home as the entry's `mind-home`, and melding the
+/// dump puts the source back in that home.
+#[test]
+fn dump_records_the_home_and_remelding_restores_it() {
+    // spec: HOME-10
+    let sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+
+    let super_dir = sb.base.join("super");
+    std::fs::create_dir_all(&super_dir).unwrap();
+    let dump = super_dir.join("mind.toml");
+    let r = sb.mind(&["dump", "--output", &dump.to_string_lossy()]);
+    assert!(r.ok(), "dump: {}", r.stderr);
+    let text = std::fs::read_to_string(&dump).unwrap();
+    assert!(text.contains(&format!("mind-home = {extra:?}")), "{text}");
+    git(&super_dir, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&super_dir, &["config", "user.email", "t@t"]);
+    git(&super_dir, &["config", "user.name", "t"]);
+    git(&super_dir, &["add", "-A"]);
+    git(&super_dir, &["commit", "-qm", "dump"]);
+
+    let r = sb.mind(&["--yes", "unmeld", &sb.identity()]);
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    assert!(sb.sources_in(&sb.extra).is_empty());
+
+    let r = sb.mind(&["--yes", "meld", &super_dir.to_string_lossy()]);
+    assert!(r.ok(), "meld dump: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.extra), [sb.identity()]);
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+}
+
+/// A curator entry's `mind-home` must be an allowed home.
+#[test]
+fn a_curator_entry_naming_an_unlisted_home_is_refused() {
+    // spec: HOME-10
+    let nested = Sandbox::new(None);
+    let curator = Sandbox::new(Some(&format!(
+        "[[discover.sources]]\nsource = {:?}\ninstall = true\nmind-home = {:?}\n",
+        nested.spec(),
+        nested.base.join("unlisted").to_string_lossy()
+    )));
+    let r = curator.mind(&["--yes", "meld", &curator.spec()]);
+    assert!(
+        r.stderr.contains("is not allowed"),
+        "{}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !curator
+            .sources_in(&curator.default_home)
+            .contains(&nested.identity())
+    );
+}
+
+/// `learn <url> --home` registers the item link in that home; for a plain item
+/// ref it is ignored with a note.
+#[test]
+fn learn_link_takes_home() {
+    // spec: HOME-12
+    let sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let url = format!("file://{}/tree/main/skills/alpha", sb.spec());
+    let r = sb.mind(&["--yes", "learn", &url, "--home", &extra]);
+    assert!(r.ok(), "learn: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.sources_in(&sb.extra).len(),
+        1,
+        "{:?}",
+        sb.sources_in(&sb.extra)
+    );
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+
+    let r = sb.mind(&["--yes", "learn", "alpha", "--home", &extra]);
+    assert!(r.stderr.contains("--home is ignored"), "{}", r.stderr);
+
+    let r = sb.mind(&["--yes", "learn", &url, "--home", "/nowhere"]);
+    assert!(!r.ok());
+    assert!(r.stderr.contains("is not allowed"), "{}", r.stderr);
+}
+
 /// A relative `mind-homes` entry is relative to the default home, not the
 /// working directory, and an empty entry is ignored.
 #[test]

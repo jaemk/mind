@@ -1756,7 +1756,11 @@ fn stamp_origin(
 /// before recursing; the pin is always applied (DSC-65, authoritative); roots
 /// and hooks are gated (DSC-60) and applied only when the nested source has no
 /// `mind.toml` of its own.
+#[derive(Default)]
 pub(crate) struct CuratedConfig {
+    /// The curator's `mind-home` for this entry (HOME-10). Not gated: it picks
+    /// the home like `meld --home` does, before the clone.
+    mind_home: Option<String>,
     /// The curator pin directive (follow-branch, pin-tag, or pin-ref), if set.
     /// Authoritative: applied whether or not the nested source has a mind.toml
     /// (DSC-65). NOT included in the DSC-60 gating/warning.
@@ -1809,6 +1813,7 @@ pub(crate) fn curated_config_for(
     toml_path: &std::path::Path,
 ) -> Result<CuratedConfig> {
     Ok(CuratedConfig {
+        mind_home: entry.mind_home.clone(),
         pin: entry.pin_directive(toml_path)?,
         roots: entry.roots.clone(),
         add_roots: entry.add_roots.clone(),
@@ -1947,12 +1952,27 @@ fn meld_recursive(
     // once the clone is read (below). A curated source follows its curator's
     // home on every path that registers it: the first meld, `sync`'s DSC-57
     // re-walk, and `curate`.
-    let meld_home = match source.curated_by.as_deref() {
-        Some(curator) => crate::paths::MeldHome {
+    // spec: HOME-10 -- a curator entry's `mind-home` picks the home the way
+    // `meld --home` does: checked before the clone, outranking the source's
+    // own `[source] mind-home`.
+    let entry_home = curated.as_ref().and_then(|c| c.mind_home.as_deref());
+    let meld_home = match (entry_home, source.curated_by.as_deref()) {
+        (Some(h), curator) => {
+            let origin = format!(
+                "the `mind-home` of the entry for {} in {}'s mind.toml",
+                strip_ansi(&source.name),
+                strip_ansi(curator.unwrap_or("its curator"))
+            );
+            crate::paths::MeldHome {
+                home: paths.allowed_home(h, &origin)?,
+                explicit: true,
+            }
+        }
+        (None, Some(curator)) => crate::paths::MeldHome {
             home: crate::paths::source_home(curator),
             explicit: false,
         },
-        None => crate::paths::meld_home(),
+        (None, None) => crate::paths::meld_home(),
     };
     crate::paths::set_source_home(&source.name, meld_home.home.as_deref());
 
@@ -2086,13 +2106,7 @@ fn meld_recursive(
     // (DSC-58) are not gated. DSC-65: the curator's pin directive is NOT gated
     // -- it is authoritative regardless of whether the nested source has a
     // mind.toml of its own.
-    let curated = curated.unwrap_or(CuratedConfig {
-        pin: None,
-        roots: None,
-        add_roots: None,
-        flat_skills: false,
-        hooks: Vec::new(),
-    });
+    let curated = curated.unwrap_or_default();
     let apply_curated = mindfile.is_none();
     // The curator pin is always extracted (DSC-65: authoritative, not gated).
     let curated_pin = curated.pin.clone();
@@ -5713,6 +5727,7 @@ pub fn learn_link(
     url: &str,
     pin: bool,
     item_kind: Option<ItemKind>,
+    home: Option<&str>,
     dry_run: bool,
     flow: InstallFlow,
 ) -> Result<()> {
@@ -5723,7 +5738,27 @@ pub fn learn_link(
             name: url.to_string(),
         });
     }
-    if !is_melded(paths, url, None)? {
+    // spec: HOME-12 -- `--home` places the link instance as `meld --home`
+    // does: an allowed home, checked before the clone, and refused for an
+    // instance already melded in another home (HOME-8).
+    let home = home.map(|h| paths.allowed_home(h, "--home")).transpose()?;
+    let _home_scope = home.clone().map(|h| {
+        crate::paths::MeldHomeScope::set(crate::paths::MeldHome {
+            home: h,
+            explicit: true,
+        })
+    });
+    let melded = is_melded(paths, url, None)?;
+    if melded && let Some(requested) = &home {
+        let _ = Registry::load(paths)?;
+        if crate::paths::source_home(&spec.name) != *requested {
+            return Err(MindError::SourceInOtherHome {
+                name: spec.name.clone(),
+                home: paths.home_of(&spec.name).display().to_string(),
+            });
+        }
+    }
+    if !melded {
         // spec: CLI-200, LNK-3 -- `--pin` freezes the link's branch ref to its
         // current commit; without it the instance tracks the URL's ref.
         let pin_req = if pin {
@@ -11853,16 +11888,9 @@ pub fn sync_with_selector(
                 continue;
             };
             for ns in discover.sources {
-                let curated = CuratedConfig {
-                    pin: ns.pin_directive(&toml_path)?,
-                    roots: ns.roots.clone(),
-                    // spec: DSC-88 -- gated by DSC-60 exactly like `roots`, so a
-                    // re-walk applies the same gate a fresh meld would; it is
-                    // NOT threaded as a consumer `--add-root` override anymore.
-                    add_roots: ns.add_roots.clone(),
-                    flat_skills: ns.flat_skills,
-                    hooks: ns.resolved_hooks(&toml_path)?,
-                };
+                // spec: DSC-88 -- the same lift a fresh meld applies, so
+                // `add-roots` is gated by DSC-60 exactly like `roots`.
+                let curated = curated_config_for(&ns, &toml_path)?;
                 // spec: DSC-78 — use effective_alias() so the canonical
                 // `namespace =` key is honored (not just the legacy `as =` key).
                 // Compute before consuming fields of `ns`.
@@ -11917,13 +11945,7 @@ pub fn sync_with_selector(
                     spec: repo_spec,
                     alias: Some(entry.name),
                     // A marketplace entry carries no curator add-root override.
-                    curated: CuratedConfig {
-                        pin: None,
-                        roots: None,
-                        add_roots: None,
-                        flat_skills: false,
-                        hooks: Vec::new(),
-                    },
+                    curated: CuratedConfig::default(),
                     item_kind: None, // a marketplace entry is a repo, never an item link
                     curator: s.name.clone(), // spec: STO-82 (MKT-7)
                     on_auth_failure: None,
@@ -14231,6 +14253,11 @@ pub fn recall(
                             ))
                             .map_err(|e| MindError::json("recall sources", e))?,
                         );
+                        // spec: HOME-11 -- the mind home the source lives in.
+                        obj.insert(
+                            "mind_home".into(),
+                            serde_json::Value::String(paths.home_of(&s.name).display().to_string()),
+                        );
                     }
                     Ok(v)
                 })
@@ -14266,11 +14293,18 @@ pub fn recall(
                 let release = version_token(&s.pin);
                 // spec: AUP-11
                 let auto = auto_update_token(s, auto_update_cap(policy.as_ref(), s));
+                // spec: HOME-11 -- a source in an extra home names it.
+                let home = match crate::paths::source_home(&s.name) {
+                    Some(h) => format!(" home:{}", h.display()),
+                    None => String::new(),
+                };
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
-                    out.dim(&format!("[{commit}{release}{auto}{ns}{hook}{origin}]")),
+                    out.dim(&format!(
+                        "[{commit}{release}{auto}{ns}{hook}{origin}{home}]"
+                    )),
                     s.description.clone().unwrap_or_default(),
                 ]
             })

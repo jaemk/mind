@@ -62,6 +62,24 @@ as one set.
   home, which removes the old copy. A lobe symlink into any allowed home's
   store is mind's own (LIFE-41).
 
+- `HOME-10` A curator's `[[discover.sources]]` entry may name a `mind-home`
+  for that source. It is checked like `meld --home` (an allowed home, before
+  the clone) and outranks the source's own `[source] mind-home`. `dump` writes
+  it for every source in an extra home, with a home-directory prefix written
+  as `~`, so melding the dump puts each source back in its home; a source in
+  the default home gets none.
+- `HOME-12` `learn <url> --home <dir>` registers an item link in `<dir>` as
+  `meld --home` does, including the HOME-8 refusal for an instance already in
+  another home. For a plain item ref, `--home` is ignored with a note.
+
+## Showing the home
+
+- `HOME-11` `recall --sources` lists `home:<dir>` in a source's bracket when
+  it is in an extra home, and `--json` gives every source's `mind_home`.
+- `HOME-13` The `probe` TUI's meld input takes `--home` as `mind meld` does
+  (TUI-77), and a source's details dialog shows `home:` for a source in an
+  extra home.
+
 ## Locking
 
 - `HOME-9` Every command locks each allowed home's `.lock`, the default home
