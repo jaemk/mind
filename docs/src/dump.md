@@ -17,6 +17,9 @@ each melded source. Each entry:
 - pins the source to the commit it is at now (`pin-ref`), overriding any pin
   the source declares, so the reproduction gets exactly what you have.
 - carries the meld-time settings: namespace, scan roots, and added roots.
+- for a source in an extra [mind home](configuration.md#mind-homes), records
+  it as `mind-home`, so the reproduction melds it there. The home must be
+  allowed where the dump is melded.
 - records which items are installed:
   - every item: `install = true`
   - none: `install = false`

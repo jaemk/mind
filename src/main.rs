@@ -813,6 +813,7 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             profiles,
             no_default_profile,
             all_profiles,
+            home,
         } => {
             // spec: PROF-33 -- `--profile` with no value lists the source's
             // profiles; an empty value beside named ones is ignored.
@@ -848,7 +849,22 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
                 // spec: PROF-8 -- an item link is a single item: no profiles.
                 crate::profile::reject_on_item_link(&profile_flags)?;
                 let item_kind = commands::parse_link_kind(kind, &item)?;
-                return commands::learn_link(paths, &item, pin, item_kind, dry_run, flow);
+                return commands::learn_link(
+                    paths,
+                    &item,
+                    pin,
+                    item_kind,
+                    home.as_deref(),
+                    dry_run,
+                    flow,
+                );
+            }
+            // spec: HOME-12 -- `--home` only places a source `learn` registers.
+            if home.is_some() {
+                eprintln!(
+                    "note: --home is ignored for '{}'; it applies only to a deep tree/blob URL",
+                    crate::sanitize::strip_ansi(&item)
+                );
             }
             // spec: CLI-239 -- `--kind` describes an item link's file, so a
             // plain item ref (which names an already-melded source's item, whose

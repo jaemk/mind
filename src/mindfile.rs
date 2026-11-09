@@ -749,6 +749,11 @@ pub struct NestedSource {
     /// whether to skip or error, and `message` is shown to the user.
     #[serde(rename = "on-auth-failure", default)]
     pub on_auth_failure: Option<OnAuthFailure>,
+    /// The mind home to meld this nested source into (HOME-10). Like `meld
+    /// --home`, it must be an allowed home and outranks the nested source's
+    /// own `[source] mind-home`.
+    #[serde(rename = "mind-home", default)]
+    pub mind_home: Option<String>,
 }
 
 impl NestedSource {
@@ -3043,6 +3048,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         assert_eq!(
             ns.pin_directive(Path::new("mind.toml")).expect("no error"),
@@ -3071,6 +3077,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         assert!(
             ns.pin_directive(Path::new("mind.toml"))
@@ -3228,6 +3235,7 @@ mod tests {
             }],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
         assert_eq!(resolved.len(), 1);
@@ -3258,6 +3266,7 @@ mod tests {
                 hooks: vec![],
                 flat_skills: false,
                 on_auth_failure: None,
+                mind_home: None,
             };
             match ns.pin_directive(Path::new("mind.toml")).expect("no error") {
                 Some(Pin::FollowBranch(b)) => assert_eq!(b, branch),
@@ -3447,6 +3456,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let toml_path = Path::new("/super/mind.toml");
         let err = ns.validate(toml_path).unwrap_err();
@@ -3489,6 +3499,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         assert!(
             ns.validate(Path::new("mind.toml")).is_ok(),
@@ -3518,6 +3529,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         assert!(
             ns.validate(Path::new("mind.toml")).is_ok(),
@@ -3717,6 +3729,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -3746,6 +3759,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -3775,6 +3789,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -3804,6 +3819,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -3833,6 +3849,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -3862,6 +3879,7 @@ mod tests {
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
+            mind_home: None,
         };
         assert!(
             ns.pin_directive(Path::new("mind.toml")).is_ok(),
@@ -4093,6 +4111,7 @@ mod tests {
                 action: AuthFailureAction::Skip,
                 message: None,
             }),
+            mind_home: None,
         };
         assert!(
             ns.validate(Path::new("mind.toml")).is_ok(),

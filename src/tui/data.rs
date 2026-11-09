@@ -56,6 +56,10 @@ pub struct Snapshot {
     /// `[source].prefix` from mind.toml, then none.
     // spec: TUI-53
     pub source_namespaces: std::collections::HashMap<String, Option<String>>,
+    /// The mind home of each source in an extra home (HOME-13); a source in
+    /// the default home has no entry.
+    // spec: HOME-13
+    pub source_homes: std::collections::HashMap<String, std::path::PathBuf>,
     /// Declared and enabled profiles per melded source (TUI-78, PROF-29). A
     /// source with no `[profiles]` (or an unreadable table) has no entry.
     // spec: TUI-78
@@ -817,6 +821,11 @@ fn load_inner(paths: &Paths, refresh: Refresh<'_>) -> Result<Snapshot> {
         suggestions,
         lobes,
         source_namespaces,
+        source_homes: registry
+            .sources
+            .iter()
+            .filter_map(|s| Some((s.name.clone(), crate::paths::source_home(&s.name)?)))
+            .collect(),
         source_profiles,
         // spec: TUI-83
         hook_results: crate::hook_log::read_history(&crate::hook_log::history_file(
