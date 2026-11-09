@@ -490,6 +490,19 @@ pub enum MindError {
         allowed: String,
     },
 
+    /// A source lobe (`[source] lobe`, `meld --lobe`) is not allowed (LOBE-2):
+    /// with extra mind homes set it is under none of them, or in any case it
+    /// is a mind home itself or under its `store`, `sources`, or `.tmp`.
+    #[error(
+        "lobe '{}' ({origin}) is not allowed: {why}",
+        crate::sanitize::strip_ansi(lobe)
+    )]
+    LobeNotAllowed {
+        lobe: String,
+        origin: String,
+        why: String,
+    },
+
     /// `meld --home` would move a source into a home whose own `sources.json`
     /// already lists a copy of it (HOME-3, HOME-8).
     #[error(
@@ -1852,6 +1865,19 @@ impl MindError {
         }
     }
 
+    /// Whether this is an I/O failure because the path cannot be written
+    /// (permission denied, a read-only filesystem): a sandbox denying writes
+    /// to a lobe (LOBE-6).
+    pub fn is_unwritable(&self) -> bool {
+        match self {
+            MindError::Io { source, .. } => matches!(
+                source.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether this error is a hook stopping the run (HOOK-30, HOOK-21,
     /// HOOK-171): a failure, an abort, or a Ctrl-C. A loop that skips a
     /// failing entry and carries on must pass these through instead, so the
@@ -1882,6 +1908,7 @@ impl MindError {
             MindError::UnknownKind { .. } => "unknown-kind",
             MindError::UnknownPreset { .. } => "unknown-preset",
             MindError::HomeNotAllowed { .. } => "home-not-allowed",
+            MindError::LobeNotAllowed { .. } => "lobe-not-allowed",
             MindError::SourceInOtherHome { .. } => "source-in-other-home",
             MindError::LobeTargetRequired => "lobe-target-required",
             MindError::BrokenSymlinkPath { .. } => "broken-symlink-path",

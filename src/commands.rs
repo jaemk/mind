@@ -2244,6 +2244,22 @@ fn meld_recursive(
             }
         }
     }
+    // spec: LOBE-2 -- a `lobe` that is not allowed refuses the meld before
+    // anything is registered or installed, and the clone is removed. A
+    // consumer `--lobe` outranks it (LOBE-7), so it is not checked then.
+    if let Some(declared) = mindfile.as_ref().and_then(|m| m.source.lobe.as_deref())
+        && crate::paths::consumer_lobe_decl(&source.name).is_none()
+        && let Err(e) = paths.resolve_lobe(
+            &source.name,
+            declared,
+            &crate::paths::lobe_origin(&source.name, false),
+        )
+    {
+        if !is_local {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        return Err(e);
+    }
     // spec: HOME-6 -- the sources this one curates default to its home.
     let _home_scope = crate::paths::MeldHomeScope::set(crate::paths::MeldHome {
         home: crate::paths::source_home(&source.name),
@@ -3727,14 +3743,14 @@ fn warn_agent_collisions(paths: &Paths, items: &[CatalogItem]) {
         Ok(m) => m,
         Err(_) => return, // manifest unavailable; skip advisory rather than propagate
     };
-    let agent_homes = match paths.agent_homes() {
-        Ok(h) => h,
-        Err(_) => return,
-    };
     for item in items {
         if item.kind != ItemKind::Agent {
             continue;
         }
+        // spec: LOBE-3 -- the lobes this item would actually link into.
+        let Ok(agent_homes) = paths.agent_homes_for(&item.source) else {
+            return;
+        };
         let harness_name = item
             .agent_harness_name()
             .unwrap_or_else(|| item.name.clone());
@@ -3805,8 +3821,9 @@ fn agent_collision(
     else {
         return Ok(None);
     };
+    // spec: LOBE-3
     let planned: Vec<std::path::PathBuf> = paths
-        .agent_homes()?
+        .agent_homes_for(&target.source)?
         .iter()
         .filter(|h| h.admits(ItemKind::Agent))
         .map(|h| h.path.join(&rel))
@@ -5895,12 +5912,14 @@ fn require_link_platform(paths: &Paths) -> Result<()> {
 /// the link instance when it is not yet melded, exactly as `meld <url>` would
 /// (clone, hook consent, prompts), then installs its skill through the
 /// standard learn path (the source-qualified `<instance>#*` selector).
+#[allow(clippy::too_many_arguments)]
 pub fn learn_link(
     paths: &Paths,
     url: &str,
     pin: bool,
     item_kind: Option<ItemKind>,
     home: Option<&str>,
+    lobe: Option<&str>,
     dry_run: bool,
     flow: InstallFlow,
 ) -> Result<()> {
@@ -5921,6 +5940,14 @@ pub fn learn_link(
             explicit: true,
         })
     });
+    // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
+    // the clone; recorded now so the meld below already honors it.
+    if let Some(l) = lobe.map(str::trim).filter(|l| !l.is_empty()) {
+        paths.resolve_lobe(&spec.name, l, "--lobe")?;
+        if !dry_run {
+            crate::paths::set_consumer_lobe(&spec.name, Some(l));
+        }
+    }
     let melded = is_melded(paths, url, None)?;
     if melded
         && !dry_run
@@ -5978,7 +6005,108 @@ pub fn learn_link(
             }
         }
     }
+    // spec: LOBE-7 -- `--lobe` names the instance's lobe, as `meld --lobe`.
+    if let Some(lobe) = lobe
+        && !dry_run
+    {
+        set_lobe(paths, &spec.name, lobe, flow.yes, flow.accept)?;
+    }
     learn(paths, &format!("{}#*", spec.name), dry_run, flow)
+}
+
+/// Record the consumer's lobe for melded source `name` (LOBE-7), from `meld
+/// --lobe` / `learn <url> --lobe`: an empty `lobe` clears it. The lobe is
+/// checked first (LOBE-2); then every installed item of the source whose
+/// links are not where the lobe now puts them is relinked through the
+/// upgrade pass (LOBE-5). Running it again changes nothing.
+// spec: LOBE-7
+pub(crate) fn set_lobe(
+    paths: &Paths,
+    name: &str,
+    lobe: &str,
+    yes: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let lobe = lobe.trim();
+    let mut registry = Registry::load(paths)?;
+    let Some(entry) = registry.sources.iter_mut().find(|s| s.name == name) else {
+        return Ok(());
+    };
+    let wanted = if lobe.is_empty() {
+        None
+    } else {
+        paths.resolve_lobe(name, lobe, "--lobe")?;
+        Some(lobe.to_string())
+    };
+    crate::paths::set_consumer_lobe(name, wanted.as_deref());
+    if entry.lobe != wanted {
+        entry.lobe = wanted;
+        registry.save(paths)?;
+    }
+    let keys: Vec<String> = Manifest::load(paths)?
+        .items
+        .values()
+        .filter(|it| it.source == name)
+        .map(|it| it.key().as_str().to_string())
+        .collect();
+    if !keys.is_empty() {
+        let family = vec![name.to_string()];
+        // The verb's own result is the one `--json` document (CLI-217).
+        upgrade_inner_scoped(
+            paths,
+            yes,
+            None,
+            true,
+            SourceScope::Names(&family, None),
+            Some(&keys),
+            accept,
+        )?;
+    }
+    Ok(())
+}
+
+/// Sources whose lobe was already called out this run (LOBE-8).
+static CALLED_OUT_LOBES: std::sync::Mutex<BTreeSet<String>> =
+    std::sync::Mutex::new(BTreeSet::new());
+
+/// Call out, once per source per run, a source lobe the items about to be
+/// installed link into in place of the default lobe (LOBE-8). It is printed
+/// with the install preview, ahead of the confirmation, in bold, and names a
+/// lobe outside every mind home as such.
+// spec: LOBE-8
+fn call_out_lobes<'a>(paths: &Paths, items: impl IntoIterator<Item = &'a CatalogItem>) {
+    let out = crate::render::ctx();
+    let Ok(default) = paths.default_lobe_path() else {
+        return;
+    };
+    for item in items {
+        let fresh = CALLED_OUT_LOBES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(item.source.clone());
+        if !fresh {
+            continue;
+        }
+        let Ok(Some(root)) = paths.source_lobe(&item.source) else {
+            continue;
+        };
+        let in_effect = paths
+            .agent_homes_for(&item.source)
+            .is_ok_and(|ls| ls.iter().any(|l| l.path == root));
+        if !in_effect {
+            continue;
+        }
+        let mut line = format!(
+            "{} links its items into {} in place of {}",
+            strip_ansi(&item.source),
+            crate::sanitize::display_path(&root),
+            crate::sanitize::display_path(&default)
+        );
+        if paths.lobe_outside_homes(&root) {
+            line.push_str(", a directory outside every mind home");
+        }
+        crate::render::note(format!("{} {}", out.warn(), out.bold(&line)));
+    }
 }
 
 pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
@@ -6086,6 +6214,8 @@ fn learn_selected(
     // dry-run report as well as the install, so it reaches the user while the
     // decision to install is still theirs.
     warn_forged_namespaces(closure.iter().copied());
+    // spec: LOBE-8 -- likewise a source lobe in place of the default lobe.
+    call_out_lobes(paths, closure.iter().copied());
 
     // DEP-32: --dry-run renders the dependency tree (when deps were added) and
     // lists the full closure, installing nothing.
@@ -13087,7 +13217,9 @@ fn upgrade_inner_scoped(
                 paths.home_of(&installed.source),
             )
         });
-        if new_hash != installed.hash || renamed || home_move.is_some() {
+        // spec: LOBE-5 -- links not where the source's lobe puts them.
+        let relink = links_misplaced(paths, installed, cat)?;
+        if new_hash != installed.hash || renamed || home_move.is_some() || relink.is_some() {
             pending.push(Upgrade {
                 cat: cat.clone(),
                 old: installed.clone(),
@@ -13095,6 +13227,7 @@ fn upgrade_inner_scoped(
                 new_hash,
                 new_name,
                 home_move,
+                relink,
             });
         }
     }
@@ -13176,7 +13309,7 @@ fn upgrade_inner_scoped(
     }
 
     if !out.json {
-        print_upgrade_report(&registry, &pending, &tracking);
+        print_upgrade_report(paths, &registry, &pending, &tracking);
         print_whole_additions(&whole);
         print_prunes(&prunes);
         print_left_prunes(&left_prunes);
@@ -13400,7 +13533,7 @@ fn upgrade_inner_scoped(
         // hooks. A rename (a prefix change) is not: the old item is removed
         // with its uninstall hooks and the new name is a first install.
         let is_update = up.new_name == up.old.name;
-        let installed = match install_item(
+        let mut installed = match install_item(
             paths,
             &cat,
             &up.new_commit,
@@ -13479,17 +13612,32 @@ fn upgrade_inner_scoped(
             // `name`, NS-40) changed: the new copy links under the new bare name,
             // so remove any old link the new install no longer owns, leaving no
             // orphaned symlink behind.
+            let mut kept: Vec<String> = Vec::new();
             for old_link in &up.old.links {
-                if !installed.links.contains(old_link)
-                    && let Err(e) = install::remove_path(std::path::Path::new(old_link))
-                {
-                    applied_keys.push(installed.key().into());
-                    manifest.insert(installed);
-                    // spec: LIFE-48 -- a save failure here must not mask `e`.
-                    save_and_warn_workflows(paths, &manifest, &applied_keys);
-                    return Err(e);
+                if installed.links.contains(old_link) {
+                    continue;
+                }
+                let old_path = std::path::Path::new(old_link);
+                match install::remove_path(old_path) {
+                    Ok(()) => continue,
+                    // spec: LOBE-6 -- a stale link in a lobe that cannot be
+                    // written stays recorded, so a run that can write there
+                    // removes it.
+                    Err(e) if e.is_unwritable() => {
+                        install::note_unwritable_lobe_once(old_path.parent().unwrap_or(old_path));
+                        kept.push(old_link.clone());
+                        continue;
+                    }
+                    Err(e) => {
+                        applied_keys.push(installed.key().into());
+                        manifest.insert(installed);
+                        // spec: LIFE-48 -- a save failure here must not mask `e`.
+                        save_and_warn_workflows(paths, &manifest, &applied_keys);
+                        return Err(e);
+                    }
                 }
             }
+            installed.links.extend(kept);
             // spec: HOME-8 -- an item kept by `unmeld --keep-items` and
             // re-melded into another home moves there on its next upgrade.
             if let Err(e) = install::remove_moved_store(paths, &up.old, &installed) {
@@ -14235,9 +14383,60 @@ struct Upgrade {
     new_name: String,
     /// The homes the store copy moves between, when its source moved (HOME-8).
     home_move: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Where the item's links move (LOBE-5): the source's own lobe, or `None`
+    /// inside for the configured lobes. `None` outside when they stay put.
+    relink: Option<Option<std::path::PathBuf>>,
 }
 
-fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &ProfileTracking) {
+/// Whether `item`'s links are not where its source's `lobe` puts them
+/// (LOBE-5), and if so where they go: `Some(Some(root))` for the source's
+/// lobe, `Some(None)` back to the configured lobes. With a lobe, a linkable
+/// item with no link under it, or one with a link under the default lobe, is
+/// misplaced. Without one, a link under no configured lobe (nor the default
+/// lobe) is left from a lobe the source has since dropped.
+// spec: LOBE-5
+fn links_misplaced(
+    paths: &Paths,
+    item: &crate::manifest::InstalledItem,
+    cat: &CatalogItem,
+) -> Result<Option<Option<std::path::PathBuf>>> {
+    use std::path::Path;
+    let linkable = cat.link_rel.is_some() || paths.default_link_rel(cat.kind, &cat.name).is_some();
+    if !linkable {
+        return Ok(None);
+    }
+    let under = |root: &Path| item.links.iter().any(|l| Path::new(l).starts_with(root));
+    // Only a lobe actually in effect (not overridden by a policy lock, LOBE-4).
+    let effective = paths.agent_homes_for(&item.source)?;
+    let root = paths
+        .source_lobe(&item.source)?
+        .filter(|r| effective.iter().any(|l| &l.path == r));
+    match root {
+        Some(root) => {
+            let default = paths.default_lobe_path()?;
+            let moved = !under(&root) || (default != root && under(&default));
+            Ok(moved.then_some(Some(root)))
+        }
+        None => {
+            let mut lobes: Vec<std::path::PathBuf> =
+                paths.agent_homes()?.into_iter().map(|l| l.path).collect();
+            lobes.push(paths.default_lobe_path()?);
+            let stray = item
+                .links
+                .iter()
+                .map(Path::new)
+                .any(|l| !lobes.iter().any(|lobe| l.starts_with(lobe)));
+            Ok(stray.then_some(None))
+        }
+    }
+}
+
+fn print_upgrade_report(
+    paths: &Paths,
+    registry: &Registry,
+    pending: &[Upgrade],
+    tracking: &ProfileTracking,
+) {
     let out = crate::render::ctx();
     // spec: PROF-21 -- additions are listed with the profile they joined.
     print_profile_additions(tracking);
@@ -14250,12 +14449,18 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
     } else {
         ("items", "have")
     };
-    // spec: HOME-8 -- a batch of moves alone is not an upstream change.
-    let only_moves = pending.iter().all(|up| {
-        up.home_move.is_some() && up.new_hash == up.old.hash && up.new_name == up.old.name
+    // spec: HOME-8 LOBE-5 -- a batch of home moves and relinks alone is not
+    // an upstream change: it is headed "to move" when any item changes home,
+    // else "to relink".
+    let unchanged = pending.iter().all(|up| {
+        (up.home_move.is_some() || up.relink.is_some())
+            && up.new_hash == up.old.hash
+            && up.new_name == up.old.name
     });
-    if only_moves {
+    if unchanged && pending.iter().any(|up| up.home_move.is_some()) {
         println!("{n} {noun} to move:\n");
+    } else if unchanged {
+        println!("{n} {noun} to relink:\n");
     } else {
         println!("{n} {noun} {verb} upstream changes:\n");
     }
@@ -14306,6 +14511,18 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
                 crate::sanitize::display_path(from),
                 crate::sanitize::display_path(to)
             );
+        }
+        // spec: LOBE-5 LOBE-8
+        if let Some(to) = &up.relink {
+            let to = match to {
+                Some(root) if paths.lobe_outside_homes(root) => out.bold(&format!(
+                    "{}, a directory outside every mind home",
+                    crate::sanitize::display_path(root)
+                )),
+                Some(root) => crate::sanitize::display_path(root),
+                None => "the configured lobes".to_string(),
+            };
+            println!("    {}    -> {to}", out.dim("lobe"));
         }
         // spec: VER-60 -- a version-pinned source shows the release delta too.
         if let Some(src) = registry.find(&up.cat.source)
@@ -15338,11 +15555,18 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         }
     }
 
-    let all_lobes = paths.agent_homes()?;
     // For HARN-8 checks, only consider lobes whose parent dir still exists (skip
     // vanished lobes so they don't generate spurious missing-lobe-link findings).
-    let live_lobes: Vec<crate::paths::Lobe> =
-        all_lobes.into_iter().filter(|l| l.reachable()).collect();
+    // spec: LOBE-3 -- per source: one with its own `lobe` is checked against
+    // that lobe in place of the default one.
+    let live_lobes_for = |source: &str| -> Result<Vec<crate::paths::Lobe>> {
+        let own = paths.source_lobe(source)?;
+        Ok(paths
+            .agent_homes_for(source)?
+            .into_iter()
+            .filter(|l| l.reachable() || own.as_ref() == Some(&l.path))
+            .collect())
+    };
 
     for s in &registry.sources {
         if !s.clone_dir(paths).join(".git").is_dir() {
@@ -15393,6 +15617,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         // added after the item was installed -- the link would be absent from
         // both the manifest and disk. Use live_lobes so vanished lobes don't
         // generate spurious missing-lobe-link findings (HARN-13).
+        let live_lobes = live_lobes_for(&it.source)?;
         let link_rel = it
             .links
             .iter()
@@ -17228,6 +17453,7 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         local,
         auto_update,
         home,
+        lobe,
     } = args;
     let accept = accept.accept();
     // spec: HOME-4 -- `--home` must name an allowed home; it is checked before
@@ -17311,12 +17537,24 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     // CLI-12: re-melding an already-melded source is not an error; it
     // ensures the items are installed, else reports their status.
     let already_melded = is_melded(paths, &repo, alias.as_deref())?;
+    // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
+    // the clone; recorded now so the meld below already honors it.
+    if let Some(l) = lobe.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        paths.resolve_lobe(&source_ident, l, "--lobe")?;
+        if !already_melded {
+            crate::paths::set_consumer_lobe(&source_ident, Some(l));
+        }
+    }
     if already_melded {
         // spec: HOME-8 -- `--home` on a melded source moves it, and the
         // sources and items that follow it, into that home.
         if home.is_some() {
             let requested = crate::paths::meld_home().home;
             move_to_home(paths, &source_ident, requested.as_deref(), yes, accept)?;
+        }
+        // spec: LOBE-7 -- `--lobe` on a melded source moves its links.
+        if let Some(l) = lobe.as_deref() {
+            set_lobe(paths, &source_ident, l, yes, accept)?;
         }
         // spec: CLI-206 -- name every discovery flag this invocation
         // carries; remeld() cannot apply any of them (it never
@@ -17385,6 +17623,11 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
             yes, // spec: DSC-116
             full_history,
         )?;
+        // spec: LOBE-7 -- record the consumer's lobe on the new source before
+        // anything installs.
+        if let Some(l) = lobe.as_deref().filter(|l| !l.trim().is_empty()) {
+            set_lobe(paths, &source_ident, l, yes, accept)?;
+        }
         // CLI-23: by default, offer to install the melded source's items
         // right away (preview + prompt). `--register-only` stops at registering.
         //
@@ -18505,6 +18748,7 @@ mod tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 
@@ -20834,6 +21078,7 @@ mod tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 

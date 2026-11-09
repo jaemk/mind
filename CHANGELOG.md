@@ -6,12 +6,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Source lobes: a source's `[source] lobe = "<dir>"`, or the consumer's `meld
+  --lobe <dir>` / `learn <url> --lobe <dir>`, names a lobe its items link into
+  in place of the default lobe (`~/.claude`); other lobes, project lobes
+  included, still get links. A relative lobe is taken against the source's
+  mind home. With `MIND_HOMES` or `mind-homes` set it must lie under an
+  allowed home; otherwise any directory is allowed. The install confirmation
+  names the lobe in bold, and marks one outside every mind home. `upgrade`
+  moves the links when a new commit adds, changes, or drops it, and `meld
+  --lobe` on a melded source moves them at once.
+
 ### Changed
 
 - `meld --home <dir>` (and `learn <url> --home`) on a source already melded in
   another mind home moves it there, with its installed items and the curated
   sources that follow it, instead of refusing. `upgrade` reinstalls an item
   whose store copy is in another home than its source's.
+- A lobe that cannot be written (permission denied, a read-only filesystem)
+  is skipped with a note instead of failing `learn`, `meld`, `upgrade`, or
+  `forget`. A link already pointing at the store copy is left alone, so an
+  in-place upgrade writes nothing in the lobe.
 
 ## [0.48.0] - 2026-11-09
 

@@ -325,6 +325,7 @@ and verified.
 | Items hooks: a source `[[hooks]]` entry with `event = "items"` runs once per command after the source's installed set changes, getting the added/updated/removed items and the full installed set in `MIND_ITEMS_FILE`; pending until a run applies the current set; `hooks run --event items`; listed in the unified plan | done | [install-hooks.md](install-hooks.md) (HOOK-190..198) |
 | Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
 | Multiple mind homes: extra homes from `MIND_HOMES` / the `mind-homes` config key; `meld --home`, `learn <url> --home`, a curator entry's `mind-home`, or a source's `[source] mind-home` picks a source's home; each home keeps its own registry, manifest, clones, and store, and commands see the union; `dump`, `recall --sources`, and the TUI carry the home; scratch space falls back to a writable home | done | [homes.md](homes.md) (HOME-1..14) |
+| Source lobes: a source's `[source] lobe` or the consumer's `meld/learn --lobe` replaces the default lobe for its items, other lobes still linked; restricted to the mind homes once extra homes are set, otherwise any directory, called out at install; `upgrade` relinks items when it changes; an unwritable lobe is skipped with a note instead of failing | done | [source-lobes.md](source-lobes.md) (LOBE-1..8) |
 
 ## Documents
 
@@ -402,6 +403,8 @@ and verified.
   notes, prompts, hooks, and git.
 - [homes.md](homes.md) - mind homes: extra `~/.mind`-style trees a source can
   be melded into, and how commands see and write them.
+- [source-lobes.md](source-lobes.md) - a lobe a source or its consumer names
+  in place of the default lobe, and how an unwritable lobe is skipped.
 
 ## Conventions
 

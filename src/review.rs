@@ -1701,6 +1701,7 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         profile_snapshot: None,
         whole_snapshot: None,
         auto_update: None,
+        lobe: None,
     }
 }
 
@@ -2000,6 +2001,7 @@ mod tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 

@@ -163,6 +163,41 @@ way, a curator entry can name a source's `mind-home`, and `dump` records each
 source's extra home. `recall --sources` shows `home:<dir>` for a source in an
 extra home, as does its details dialog in `probe`. See [spec/homes.md](https://github.com/jaemk/mind/blob/main/spec/homes.md).
 
+## Source lobes
+
+A source can link its items into a lobe of its own instead of `~/.claude`, so
+`mind upgrade` can keep it current from a sandbox that cannot write
+`~/.claude`. The source declares it in its `mind.toml`, or the consumer names
+it with `--lobe`, which outranks the source's:
+
+```toml
+[source]
+mind-home = "~/dev/project/.mind"
+lobe = "claude"                     # ~/dev/project/.mind/claude
+```
+
+```bash
+mind meld owner/repo --home ~/dev/project/.mind --lobe claude
+```
+
+Its items link into `~/dev/project/.mind/claude/skills/<name>` and so on;
+every other lobe, project lobes included, still gets its links. Point the
+agent at that directory yourself, e.g. from your `CLAUDE.md`. A relative lobe
+is taken against the source's mind home and moves with it. When extra mind
+homes are set (`MIND_HOMES` or `mind-homes`), the lobe must lie under one of
+them; with none set it may be any directory. Either way the install
+confirmation names the lobe in bold, and says so when it is outside every
+mind home. `upgrade` moves the links when a new commit adds, changes, or
+drops the source's lobe; `meld --lobe <dir>` on a melded source moves them
+at once, and `--lobe ''` clears the consumer's lobe. `learn <url> --lobe`
+does the same for an [item link](item-links.md).
+
+For every source, a lobe that cannot be written (permission denied, a
+read-only filesystem) is skipped with a note instead of failing the command.
+A link already in place there is left alone, and a run that can write there
+later brings it up to date (`upgrade`, or `introspect --fix` for a missing
+link). See [spec/source-lobes.md](https://github.com/jaemk/mind/blob/main/spec/source-lobes.md).
+
 ## Concurrency
 
 A global advisory lock (`~/.mind/.lock`, plus each extra mind home's `.lock`) is held by every mutating command

@@ -487,6 +487,12 @@ pub(crate) fn scan_source_reporting(
     // `ReservedPrefix` message is written for a meld that has not happened yet.
     // Re-point it at the one thing an already-melded user can do.
     let mindfile = MindToml::load(clone_root).map_err(|e| melded_prefix_error(source, e))?;
+    // spec: LOBE-1 -- the lobe the checked-out `mind.toml` declares, for the
+    // installs that follow this scan.
+    crate::paths::set_source_lobe(
+        &source.name,
+        mindfile.as_ref().and_then(|m| m.source.lobe.as_deref()),
+    );
 
     // spec: DSC-40 -- a source that wants a newer `mind` is scanned anyway,
     // with a warning: meld already asked before registering it (DSC-116), and
@@ -2902,6 +2908,7 @@ mod tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 
@@ -5479,6 +5486,7 @@ mod plugin_tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 
@@ -6811,6 +6819,7 @@ mod lifecycle_tests {
             profile_snapshot: None,
             whole_snapshot: None,
             auto_update: None,
+            lobe: None,
         }
     }
 
