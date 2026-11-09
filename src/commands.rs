@@ -17733,7 +17733,15 @@ pub fn auto_update_run(
     if !report.is_empty() {
         state.unshown.push(report.clone());
     }
-    state.save(paths)?;
+    // spec: HOME-1 -- the state lives in the default home, which a sandbox
+    // that allows writes only to an extra home cannot write. It throttles and
+    // reports; losing it must not fail a run whose updates already applied.
+    if let Err(e) = state.save(paths) {
+        eprintln!(
+            "warning: auto-update state not saved: {}",
+            strip_ansi(&e.to_string())
+        );
+    }
 
     if json {
         return print_json(&AutoUpdateJson {

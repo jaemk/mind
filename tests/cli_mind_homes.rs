@@ -230,6 +230,31 @@ fn meld_into_an_extra_home_writes_nothing_in_the_default_home() {
     assert!(sb.sources_in(&sb.extra).is_empty());
 }
 
+/// `auto-update run` with a read-only default home warns that its state was
+/// not saved instead of failing.
+#[test]
+fn auto_update_runs_with_a_read_only_default_home() {
+    // spec: HOME-1
+    let sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    std::fs::write(sb.default_home.join(".lock"), "").unwrap();
+    chmod("a-w", &sb.default_home);
+    if std::fs::write(sb.default_home.join("probe"), "").is_ok() {
+        // Running as root: permissions are not enforced, nothing to check.
+        return;
+    }
+    let r = sb.mind(&["auto-update", "run"]);
+    chmod("u+w", &sb.default_home);
+    assert!(r.ok(), "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("auto-update state not saved"),
+        "{}",
+        r.stderr
+    );
+}
+
 /// A default home that does not exist and cannot be created (its parent is
 /// read-only) does not stop a meld into an extra home: its lock is skipped and
 /// nothing is written there.

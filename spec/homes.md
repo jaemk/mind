@@ -9,7 +9,9 @@ as one set.
 
 - `HOME-1` The default home is `$MIND_HOME` if set, else `~/.mind` (STO-1). It
   is always allowed, and it alone holds `config.toml`, the hook history and
-  logs, the auto-update state, and the `absorb` personal source.
+  logs, the auto-update state, and the `absorb` personal source. When the
+  default home cannot be written, a hook record or the auto-update state is
+  dropped with a warning and the command carries on.
 - `HOME-2` The extra homes are the entries of `$MIND_HOMES` (`:`-separated),
   then the `mind-homes` config key (a list of paths), in that order. A leading
   `~` is expanded; a relative `$MIND_HOMES` entry is resolved against the
