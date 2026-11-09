@@ -5763,14 +5763,15 @@ pub fn learn_link(
         })
     });
     let melded = is_melded(paths, url, None)?;
-    if melded && let Some(requested) = &home {
-        let _ = Registry::load(paths)?;
-        if crate::paths::source_home(&spec.name) != *requested {
-            return Err(MindError::SourceInOtherHome {
-                name: spec.name.clone(),
-                home: paths.home_of(&spec.name).display().to_string(),
-            });
-        }
+    // `is_melded` loaded the registry, which recorded each source's home.
+    if melded
+        && let Some(requested) = &home
+        && crate::paths::source_home(&spec.name) != *requested
+    {
+        return Err(MindError::SourceInOtherHome {
+            name: spec.name.clone(),
+            home: paths.home_of(&spec.name).display().to_string(),
+        });
     }
     if !melded {
         // spec: CLI-200, LNK-3 -- `--pin` freezes the link's branch ref to its
@@ -17123,8 +17124,8 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     if already_melded {
         // spec: HOME-8 -- a source lives in one home; `--home` naming another
         // is refused rather than ignored, since nothing would move.
+        // `is_melded` loaded the registry, which recorded each source's home.
         if home.is_some() {
-            let _ = Registry::load(paths)?;
             let current = crate::paths::source_home(&source_ident);
             let requested = crate::paths::meld_home().home;
             if current != requested {
