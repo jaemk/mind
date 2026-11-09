@@ -58,6 +58,9 @@ The URL's ref sets the version:
 mind learn https://github.com/owner/repo/tree/main/skills/foo --pin
 ```
 
+`--home <dir>` registers the link in another
+[mind home](configuration.md#mind-homes), with `learn` or `meld`.
+
 `mind meld <url>` accepts the same URLs and runs the normal meld flow
 (`--register-only`, `--namespace`, `--kind`, `--pin <value>`). A local repo is
 reachable as `file:///path/to/repo/tree/<branch>/<path>`.
