@@ -10734,9 +10734,14 @@ pub fn absorb(
     }
 
     // 4. Backup the source lobe item before removing it.
-    //    Use a tmp path under MIND_HOME so it survives an in-repo rename.
+    //    Use a tmp path under the destination source's mind home (HOME-14),
+    //    where its install writes anyway, so it survives an in-repo rename.
+    let dest_source_name = parse_spec(&dest_spec)
+        .map(|s| s.name)
+        .unwrap_or_else(|_| dest_spec.clone());
     let backup = paths
-        .tmp_dir()
+        .home_of(&dest_source_name)
+        .join(".tmp")
         .join("absorb-backup")
         .join(item.kind.as_str())
         .join(&item.name);
@@ -10763,9 +10768,6 @@ pub fn absorb(
     // When `--json` is in effect use `learn_collecting` (no JSON emitted by
     // learn itself) so that absorb can emit its own single result (ABS-11).
     // In human mode the regular `learn()` path prints the "learned ..." line.
-    let dest_source_name = parse_spec(&dest_spec)
-        .map(|s| s.name)
-        .unwrap_or_else(|_| dest_spec.clone());
     let learn_ref = format!("{}:{}", item.kind.as_str(), effective_name);
     let qualified_ref = format!("{dest_source_name}#{learn_ref}");
     let learn_flow = InstallFlow {

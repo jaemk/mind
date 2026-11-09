@@ -553,9 +553,29 @@ impl Paths {
             .join(name)
     }
 
-    /// Scratch root for transactional installs (staging + backup).
-    pub fn tmp_dir(&self) -> PathBuf {
-        self.mind_home.join(".tmp")
+    /// A `.tmp` directory for throwaway work tied to no source (`review`'s
+    /// clone, the TUI preview): the first allowed home, default first, whose
+    /// `.tmp` can be created and written (HOME-14). When none can, the
+    /// default home's error is returned.
+    // spec: HOME-14
+    pub fn scratch_dir(&self) -> Result<PathBuf> {
+        let mut first_err = None;
+        for home in self.all_homes() {
+            let tmp = home.join(".tmp");
+            let probe = tmp.join(format!(".probe-{}", std::process::id()));
+            let ok = mkdir_p(&tmp)
+                .and_then(|()| std::fs::write(&probe, b"").map_err(|e| MindError::io(&probe, e)));
+            match ok {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&probe);
+                    return Ok(tmp);
+                }
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        Err(first_err.expect("the default home is always listed"))
     }
 
     /// The default link target for an item, relative to an agent home, or `None`
@@ -2983,6 +3003,49 @@ mod tests {
             mind_home.join("store")
         );
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Scratch space is the default home's `.tmp` when it is writable, else
+    /// the first writable extra home's.
+    #[cfg(unix)]
+    #[test]
+    fn scratch_dir_falls_back_to_a_writable_extra_home() {
+        // spec: HOME-14
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-home-scratch-{}-{n}", std::process::id()));
+        let mind_home = base.join("mind");
+        let extra = base.join("extra");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::write(
+            mind_home.join("config.toml"),
+            format!("mind-homes = [{:?}]\n", extra.display().to_string()),
+        )
+        .unwrap();
+        let paths = Paths {
+            mind_home: mind_home.clone(),
+            claude_home: base.join("claude"),
+        };
+        assert_eq!(paths.scratch_dir().unwrap(), mind_home.join(".tmp"));
+        assert!(
+            std::fs::read_dir(mind_home.join(".tmp"))
+                .unwrap()
+                .next()
+                .is_none(),
+            "the probe file is removed"
+        );
+
+        let ro = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(mind_home.join(".tmp"), ro).unwrap();
+        let read_only = std::fs::write(mind_home.join(".tmp/x"), b"").is_err();
+        if read_only {
+            assert_eq!(paths.scratch_dir().unwrap(), extra.join(".tmp"));
+        }
+        let rw = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(mind_home.join(".tmp"), rw).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 }
