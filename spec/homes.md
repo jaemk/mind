@@ -57,14 +57,16 @@ as one set.
   `curate` registers it.
 - `HOME-8` A source lives in one home. Re-melding it with `--home` naming a
   different home is refused (`source-in-other-home`, exit 1); moving it means
-  `unmeld` and `meld` again. An item kept by `unmeld --unlink-only` stays in
+  `unmeld` and `meld` again. An item kept by `unmeld --keep-items` stays in
   the old home's store until an upgrade reinstalls it in the source's new
   home, which removes the old copy. A lobe symlink into any allowed home's
   store is mind's own (LIFE-41).
 
 - `HOME-10` A curator's `[[discover.sources]]` entry may name a `mind-home`
   for that source. It is checked like `meld --home` (an allowed home, before
-  the clone) and outranks the source's own `[source] mind-home`. `dump` writes
+  the clone) and outranks the source's own `[source] mind-home`. A nested
+  source refused for its home, by either key, is skipped with a warning like
+  an unreachable one (DSC-79), with the skip reason `home_not_allowed`. `dump` writes
   it for every source in an extra home, with a home-directory prefix written
   as `~`, so melding the dump puts each source back in its home; a source in
   the default home gets none.
