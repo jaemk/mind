@@ -288,11 +288,9 @@ pub fn install(
 /// Paths that contain `..` components or fail the `starts_with` check are
 /// skipped with a warning rather than removed (LIFE-44).
 pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
-    // spec: HOME-7 -- the store root of the home the copy was installed in.
-    let store_root = match crate::paths::home_of_store(&item.store) {
-        Some(home) => home.join("store"),
-        None => paths.store_dir(),
-    };
+    // spec: HOME-7 -- the store root of the allowed home the copy was
+    // installed in.
+    let store_root = paths.store_root_of_item(&item.store);
     let agent_homes = paths.agent_homes()?;
 
     // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
@@ -455,10 +453,7 @@ pub fn link_into_new_lobes(
     };
 
     let store = paths.mind_home.join(&item.store);
-    let store_root = match crate::paths::home_of_store(&item.store) {
-        Some(home) => home.join("store"),
-        None => paths.store_dir(),
-    };
+    let store_root = paths.store_root_of_item(&item.store);
     for lobe in new_lobes {
         if !lobe.admits(item.kind) {
             continue;

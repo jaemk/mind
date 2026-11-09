@@ -373,10 +373,9 @@ impl Paths {
         let mut raw: Vec<String> = Vec::new();
         if let Some(v) = std::env::var_os("MIND_HOMES") {
             raw.extend(
-                v.to_string_lossy()
-                    .split(':')
-                    .filter(|s| !s.trim().is_empty())
-                    .map(str::to_string),
+                std::env::split_paths(&v)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .filter(|s| !s.trim().is_empty()),
             );
         }
         if let Ok(cfg) = Config::load(self) {
@@ -446,6 +445,25 @@ impl Paths {
     /// The store root of a source's home.
     pub fn store_dir_of(&self, source: &str) -> PathBuf {
         self.home_of(source).join("store")
+    }
+
+    /// The allowed mind home a manifest `store` entry lives in: the extra home
+    /// an absolute entry names when that home is allowed (HOME-7), else the
+    /// default home. An absolute entry under no allowed home therefore stays
+    /// confined to the default store root, so `uninstall` (LIFE-44) refuses to
+    /// remove it rather than trusting whatever root the entry itself implies.
+    // spec: HOME-7
+    pub fn home_of_item_store(&self, store: &str) -> PathBuf {
+        match home_of_store(store).map(|h| normalize_home(&h)) {
+            Some(home) if self.extra_homes().contains(&home) => home,
+            _ => self.mind_home.clone(),
+        }
+    }
+
+    /// The store root a manifest `store` entry is confined to (LIFE-44,
+    /// HOME-7): see [`Self::home_of_item_store`].
+    pub fn store_root_of_item(&self, store: &str) -> PathBuf {
+        self.home_of_item_store(store).join("store")
     }
 
     /// Path to the global advisory lock file.
@@ -2911,5 +2929,46 @@ mod tests {
         assert_eq!(lookup_preset("devin-cli").unwrap().scope, Scope::Global);
         assert_eq!(lookup_preset("devin").unwrap().scope, Scope::Project);
         assert_eq!(lookup_preset("windsurf").unwrap().scope, Scope::Project);
+    }
+
+    // HOME-7: an absolute manifest `store` routes to its extra home only when
+    // that home is allowed; any other absolute entry stays confined to the
+    // default store root, so uninstall's LIFE-44 check refuses it.
+    #[test]
+    fn item_store_root_is_an_allowed_home_or_the_default() {
+        // spec: HOME-7
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-home-store-{}-{n}", std::process::id()));
+        let mind_home = base.join("mind");
+        let extra = base.join("extra");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::write(
+            mind_home.join("config.toml"),
+            format!("mind-homes = [{:?}]\n", extra.display().to_string()),
+        )
+        .unwrap();
+        let paths = Paths {
+            mind_home: mind_home.clone(),
+            claude_home: base.join("claude"),
+        };
+
+        let listed = extra.join("store/skill/alpha");
+        assert_eq!(
+            paths.store_root_of_item(&listed.display().to_string()),
+            extra.join("store")
+        );
+        let unlisted = base.join("elsewhere/store/skill/alpha");
+        assert_eq!(
+            paths.store_root_of_item(&unlisted.display().to_string()),
+            mind_home.join("store"),
+            "an absolute store under no allowed home must not pick its own root"
+        );
+        assert_eq!(
+            paths.store_root_of_item("store/skill/alpha"),
+            mind_home.join("store")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -57,11 +57,14 @@ pub struct ReadGuard<'a> {
 /// order (the default home, then `extra_homes` order) so two commands cannot
 /// deadlock. A home whose lock file cannot be opened for writing (a sandbox
 /// that allows only reads there) is locked through a read-only handle, and one
-/// with no lock file that cannot be created is skipped: nothing will be
-/// written there. The default home's lock is required as before.
+/// with no lock file that cannot be created because writes are denied is
+/// skipped: nothing will be written there. Any other failure to open the
+/// default home's lock is an error, as before.
 pub fn open(paths: &Paths) -> Result<MindLock> {
-    let mut files =
-        vec![open_one(&paths.mind_home, paths.lock_file(), true)?.expect("required lock")];
+    let mut files = Vec::new();
+    if let Some(lock) = open_one(&paths.mind_home, paths.lock_file(), true)? {
+        files.push(lock);
+    }
     for home in paths.extra_homes() {
         if let Some(lock) = open_one(&home, home.join(".lock"), false)? {
             files.push(lock);
@@ -91,16 +94,19 @@ fn open_one(
             std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
         )
     };
+    // A home that could not be created because writes are denied there is
+    // read-only in the same sense as one whose lock file cannot be opened.
+    let home_denied = matches!(&made, Err(MindError::Io { source, .. }) if denied(source));
     let file = match rw {
         Ok(f) => f,
-        Err(e) if denied(&e) => match OpenOptions::new().read(true).open(&lock_path) {
-            Ok(f) => f,
-            Err(_) if !required => return Ok(None),
-            Err(_) => {
-                made?;
-                return Err(MindError::io(&lock_path, e));
+        Err(e) if denied(&e) || home_denied => {
+            match OpenOptions::new().read(true).open(&lock_path) {
+                Ok(f) => f,
+                // Nothing can be written in this home, so there is nothing
+                // for its lock to guard.
+                Err(_) => return Ok(None),
             }
-        },
+        }
         Err(_) if !required => return Ok(None),
         Err(e) => {
             made?;

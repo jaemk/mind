@@ -220,6 +220,63 @@ fn meld_into_an_extra_home_writes_nothing_in_the_default_home() {
     assert!(sb.sources_in(&sb.extra).is_empty());
 }
 
+/// A default home that does not exist and cannot be created (its parent is
+/// read-only) does not stop a meld into an extra home: its lock is skipped and
+/// nothing is written there.
+#[test]
+fn an_uncreatable_default_home_does_not_block_an_extra_home() {
+    // spec: HOME-9
+    let mut sb = Sandbox::new(None);
+    let parent = sb.base.join("ro");
+    std::fs::create_dir_all(&parent).unwrap();
+    sb.default_home = parent.join("default");
+    chmod("a-w", &parent);
+    if std::fs::create_dir(parent.join("probe")).is_ok() {
+        // Running as root: permissions are not enforced, nothing to check.
+        return;
+    }
+
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+    assert!(!sb.default_home.exists());
+    let r = sb.mind(&["recall", "--json"]);
+    assert!(r.ok(), "recall: {}", r.stderr);
+    assert!(r.stdout.contains("skill:alpha"), "{}", r.stdout);
+}
+
+/// A source and item present in two homes are read from the first, and a save
+/// keeps the shadowed copies in the later home's files rather than dropping
+/// them: forgetting the first copy brings the later one into view.
+#[test]
+fn a_shadowed_entry_survives_a_save() {
+    // spec: HOME-3
+    let mut sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    // The same source melded into the default home while the extra one is
+    // not listed.
+    sb.env_lists_extra = false;
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--overwrite"]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    sb.env_lists_extra = true;
+
+    let r = sb.mind(&["--yes", "sync"]);
+    assert!(r.ok(), "sync: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("is melded in both"), "{}", r.stderr);
+    assert_eq!(sb.sources_in(&sb.extra), [sb.identity()]);
+
+    let r = sb.mind(&["--yes", "forget", "alpha"]);
+    assert!(r.ok(), "forget: {}\n{}", r.stdout, r.stderr);
+    assert!(sb.items_in(&sb.default_home).is_empty());
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+    let r = sb.mind(&["recall", "--json"]);
+    assert!(r.ok(), "recall: {}", r.stderr);
+    assert!(r.stdout.contains("skill:alpha"), "{}", r.stdout);
+}
+
 /// Without `--home`, a source's `[source] mind-home` picks its home, and
 /// `--home` outranks it.
 #[test]
@@ -310,6 +367,52 @@ fn curated_sources_follow_the_curator_home() {
     assert_eq!(in_extra.len(), 2, "{in_extra:?}");
     assert!(in_extra.contains(&nested.identity()), "{in_extra:?}");
     assert!(curator.sources_in(&curator.default_home).is_empty());
+}
+
+/// A source a curator in an extra home lists only after its meld still lands
+/// in the curator's home, whether `sync`'s re-walk or `curate` registers it.
+#[test]
+fn later_curated_sources_follow_the_curator_home() {
+    // spec: HOME-5 HOME-6
+    let by_sync = Sandbox::new(None);
+    let by_curate = Sandbox::new(None);
+    let curator = Sandbox::new(Some("[source]\ndescription = \"curator\"\n"));
+    let extra = curator.extra_str();
+    let r = curator.mind(&["--yes", "meld", &curator.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(curator.sources_in(&curator.extra).len(), 1);
+
+    let list = |specs: &[String]| {
+        let entries: Vec<String> = specs
+            .iter()
+            .map(|s| format!("{{ source = \"{s}\" }}"))
+            .collect();
+        write(
+            &curator.source.join("mind.toml"),
+            &format!(
+                "[source]\ndescription = \"curator\"\n[discover]\nsources = [{}]\n",
+                entries.join(", ")
+            ),
+        );
+        git(&curator.source, &["commit", "-qam", "list"]);
+    };
+
+    list(&[by_sync.spec()]);
+    let r = curator.mind(&["--yes", "sync"]);
+    assert!(r.ok(), "sync: {}\n{}", r.stdout, r.stderr);
+    let in_extra = curator.sources_in(&curator.extra);
+    assert!(in_extra.contains(&by_sync.identity()), "{in_extra:?}");
+
+    list(&[by_sync.spec(), by_curate.spec()]);
+    let r = curator.mind(&["--yes", "curate"]);
+    assert!(r.ok(), "curate: {}\n{}", r.stdout, r.stderr);
+    let in_extra = curator.sources_in(&curator.extra);
+    assert!(in_extra.contains(&by_curate.identity()), "{in_extra:?}");
+    assert!(
+        curator.sources_in(&curator.default_home).is_empty(),
+        "{:?}",
+        curator.sources_in(&curator.default_home)
+    );
 }
 
 /// The `mind-homes` config key lists extra homes like `MIND_HOMES`.
