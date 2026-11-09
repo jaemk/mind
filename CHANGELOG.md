@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-09
+
 ### Added
 
 - Mind homes: extra `~/.mind`-style trees listed in `MIND_HOMES` or the
@@ -14,7 +16,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manifest, clones, and store, and every command sees all homes as one set
   while writing each source back to its own home. `learn <url> --home` and a
   curator entry's `mind-home` pick a home too; `dump` records it, and `recall
-  --sources` and the `probe` source dialog show it.
+  --sources` and the `probe` source dialog show it. With `~/.mind` read-only,
+  `absorb` into an extra-home source, `review`, and the `probe` preview still
+  work.
+
+### Changed
+
+- `auto-update run` warns instead of failing when it cannot save its state.
 
 ## [0.47.0] - 2026-11-08
 
@@ -2399,7 +2407,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.47.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.48.0...HEAD
+[0.48.0]: https://github.com/jaemk/mind/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/jaemk/mind/compare/v0.46.0...v0.47.0
 [0.46.0]: https://github.com/jaemk/mind/compare/v0.45.0...v0.46.0
 [0.45.0]: https://github.com/jaemk/mind/compare/v0.44.0...v0.45.0
