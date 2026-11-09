@@ -51,6 +51,107 @@ thread_local! {
     static LOCAL_LOBE: RefCell<Option<Lobe>> = const { RefCell::new(None) };
 }
 
+/// The extra mind home each registered source lives in (HOME-6), keyed by
+/// source identity. A source absent from the map lives in the default home.
+/// Filled by `Registry::load` (from the file a source was read from) and by
+/// `meld` (from `--home` / `[source] mind-home`), and read wherever a source's
+/// clone, store copy, or scratch space is placed. Process-global rather than a
+/// `Source` field so the many places that only hold a source *name* (a
+/// catalog item, a manifest entry) resolve the same home.
+static SOURCE_HOMES: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The extra home `source` lives in, or `None` for the default home.
+pub fn source_home(source: &str) -> Option<PathBuf> {
+    SOURCE_HOMES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(source)
+        .cloned()
+}
+
+/// Record that `source` lives in `home` (`None`: the default home).
+pub fn set_source_home(source: &str, home: Option<&Path>) {
+    let mut map = SOURCE_HOMES.lock().unwrap_or_else(|e| e.into_inner());
+    match home {
+        Some(h) => {
+            map.insert(source.to_string(), h.to_path_buf());
+        }
+        None => {
+            map.remove(source);
+        }
+    }
+}
+
+/// The mind home a source being melded goes into, unless its own
+/// `[source] mind-home` says otherwise (HOME-4, HOME-5).
+#[derive(Debug, Clone, Default)]
+pub struct MeldHome {
+    /// `None` is the default home.
+    pub home: Option<PathBuf>,
+    /// `meld --home` named it, so it outranks the source's `mind-home`.
+    pub explicit: bool,
+}
+
+thread_local! {
+    /// The home new sources are melded into on this thread: `meld --home` for
+    /// the named source, then the curator's home for the sources it curates.
+    static MELD_HOME: RefCell<MeldHome> = RefCell::new(MeldHome::default());
+}
+
+/// The home a source melded now goes into, absent its own `mind-home`.
+pub fn meld_home() -> MeldHome {
+    MELD_HOME.with(|c| c.borrow().clone())
+}
+
+/// RAII scope for [`meld_home`]; the previous value is restored on drop.
+pub struct MeldHomeScope {
+    prev: MeldHome,
+}
+
+impl MeldHomeScope {
+    pub fn set(next: MeldHome) -> MeldHomeScope {
+        let prev = MELD_HOME.with(|c| c.replace(next));
+        MeldHomeScope { prev }
+    }
+}
+
+impl Drop for MeldHomeScope {
+    fn drop(&mut self) {
+        let prev = std::mem::take(&mut self.prev);
+        MELD_HOME.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// The mind home a manifest `store` entry lives in: an absolute entry is
+/// `<home>/store/<kind>/<name>` (HOME-7), a relative one is in the default
+/// home (`None`).
+pub fn home_of_store(store: &str) -> Option<PathBuf> {
+    let p = Path::new(store);
+    if !p.is_absolute() {
+        return None;
+    }
+    p.ancestors().nth(3).map(Path::to_path_buf)
+}
+
+/// A home path in canonical comparable form: absolute, without `.`/`..` or a
+/// trailing separator. Lexical only, so a home that does not exist yet still
+/// compares equal to its later self.
+pub(crate) fn normalize_home(path: &Path) -> PathBuf {
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn local_lobe_override() -> Option<Lobe> {
     LOCAL_LOBE.with(|c| c.borrow().clone())
 }
@@ -262,6 +363,91 @@ impl Paths {
         })
     }
 
+    /// The additional mind homes (HOME-2): `$MIND_HOMES` (a `:`-separated list)
+    /// followed by the `mind-homes` config key, each with a leading `~`
+    /// expanded and made absolute, deduplicated, and never the default home.
+    /// A config that will not parse contributes nothing here; the verbs that
+    /// read config report the parse error themselves.
+    // spec: HOME-2
+    pub fn extra_homes(&self) -> Vec<PathBuf> {
+        let mut raw: Vec<String> = Vec::new();
+        if let Some(v) = std::env::var_os("MIND_HOMES") {
+            raw.extend(
+                v.to_string_lossy()
+                    .split(':')
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string),
+            );
+        }
+        if let Ok(cfg) = Config::load(self) {
+            raw.extend(cfg.mind_homes);
+        }
+        let default = normalize_home(&self.mind_home);
+        let mut out: Vec<PathBuf> = Vec::new();
+        for entry in raw {
+            let home = normalize_home(&crate::commands::expand_tilde(entry.trim()));
+            if home != default && !out.contains(&home) {
+                out.push(home);
+            }
+        }
+        out
+    }
+
+    /// Every allowed mind home: the default first, then [`Self::extra_homes`].
+    // spec: HOME-1 HOME-2
+    pub fn all_homes(&self) -> Vec<PathBuf> {
+        let mut homes = vec![self.mind_home.clone()];
+        homes.extend(self.extra_homes());
+        homes
+    }
+
+    /// Resolve a requested mind home (`meld --home`, a `[source] mind-home`)
+    /// against the allowed set (HOME-4). `None` when it is the default home,
+    /// `Some(home)` for an allowed extra home, and an error naming the allowed
+    /// homes otherwise.
+    // spec: HOME-4 HOME-5
+    pub fn allowed_home(&self, requested: &str, origin: &str) -> Result<Option<PathBuf>> {
+        let home = normalize_home(&crate::commands::expand_tilde(requested.trim()));
+        if requested.trim().is_empty() || !home.is_absolute() {
+            return Err(MindError::HomeNotAllowed {
+                home: requested.to_string(),
+                origin: origin.to_string(),
+                allowed: self.allowed_list(),
+            });
+        }
+        if home == normalize_home(&self.mind_home) {
+            return Ok(None);
+        }
+        if self.extra_homes().contains(&home) {
+            return Ok(Some(home));
+        }
+        Err(MindError::HomeNotAllowed {
+            home: home.display().to_string(),
+            origin: origin.to_string(),
+            allowed: self.allowed_list(),
+        })
+    }
+
+    fn allowed_list(&self) -> String {
+        self.all_homes()
+            .iter()
+            .map(|h| h.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The root a source's clone and store copies live under: its recorded
+    /// extra home (HOME-6), else the default home.
+    // spec: HOME-6
+    pub fn home_of(&self, source: &str) -> PathBuf {
+        source_home(source).unwrap_or_else(|| self.mind_home.clone())
+    }
+
+    /// The store root of a source's home.
+    pub fn store_dir_of(&self, source: &str) -> PathBuf {
+        self.home_of(source).join("store")
+    }
+
     /// Path to the global advisory lock file.
     // spec: STO-40
     pub fn lock_file(&self) -> PathBuf {
@@ -291,33 +477,53 @@ impl Paths {
         self.mind_home.join("store")
     }
 
-    /// The store location for one installed item.
-    pub fn store_item(&self, kind: ItemKind, name: &str) -> PathBuf {
-        self.mind_home.join(self.store_rel(kind, name))
-    }
-
     /// The store location for one item, relative to `mind_home` (recorded in the
     /// manifest so uninstall removes exactly what was installed).
     pub fn store_rel(&self, kind: ItemKind, name: &str) -> String {
         format!("store/{}/{}", kind.as_str(), name)
     }
 
-    /// Scratch root for transactional installs (staging + backup).
-    pub fn tmp_dir(&self) -> PathBuf {
-        self.mind_home.join(".tmp")
+    /// The store location for one item of `source`: the relative form in the
+    /// default home, the absolute path in an extra home (HOME-7), so
+    /// `mind_home.join(store)` resolves either way.
+    // spec: HOME-7
+    pub fn store_rel_of(&self, source: &str, kind: ItemKind, name: &str) -> String {
+        match source_home(source) {
+            Some(home) => home
+                .join(self.store_rel(kind, name))
+                .to_string_lossy()
+                .into_owned(),
+            None => self.store_rel(kind, name),
+        }
     }
 
-    /// Where a new item copy is built before it is swapped into the store.
-    pub fn staging_path(&self, kind: ItemKind, name: &str) -> PathBuf {
-        self.tmp_dir()
+    /// The store location for one installed item of `source`.
+    pub fn store_item_of(&self, source: &str, kind: ItemKind, name: &str) -> PathBuf {
+        self.mind_home.join(self.store_rel_of(source, kind, name))
+    }
+
+    /// Where a new item copy of `source` is built before it is swapped into the
+    /// store: in the source's home, so the swap is a rename within one tree.
+    pub fn staging_path_of(&self, source: &str, kind: ItemKind, name: &str) -> PathBuf {
+        self.home_of(source)
+            .join(".tmp")
             .join("staging")
             .join(kind.as_str())
             .join(name)
     }
 
     /// Where the previous store copy is held during a swap, for rollback.
-    pub fn backup_path(&self, kind: ItemKind, name: &str) -> PathBuf {
-        self.tmp_dir().join("backup").join(kind.as_str()).join(name)
+    pub fn backup_path_of(&self, source: &str, kind: ItemKind, name: &str) -> PathBuf {
+        self.home_of(source)
+            .join(".tmp")
+            .join("backup")
+            .join(kind.as_str())
+            .join(name)
+    }
+
+    /// Scratch root for transactional installs (staging + backup).
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.mind_home.join(".tmp")
     }
 
     /// The default link target for an item, relative to an agent home, or `None`

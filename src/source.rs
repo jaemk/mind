@@ -522,8 +522,10 @@ impl Source {
             self.item_path.as_deref(),
             self.as_alias.as_deref(),
         );
+        // spec: HOME-6 -- under the source's own mind home.
         paths
-            .sources_dir()
+            .home_of(&self.name)
+            .join("sources")
             .join(&self.host)
             .join(&self.owner)
             .join(leaf)
@@ -1317,7 +1319,36 @@ impl Registry {
     /// identity/prefix/pin fields, dropping (and warning about) any that fail
     /// under the current, possibly-tightened rules (STO-68).
     pub fn load(paths: &Paths) -> Result<Self> {
-        let file = paths.sources_file();
+        // spec: HOME-3 HOME-6 -- the registry is the union of every allowed
+        // home's `sources.json`, the default home first. Each source remembers
+        // the home it was read from, so a save writes it back there.
+        let mut reg = Self::load_file(&paths.sources_file())?;
+        for src in &reg.sources {
+            crate::paths::set_source_home(&src.name, None);
+        }
+        for home in paths.extra_homes() {
+            let extra = Self::load_file(&home.join("sources.json"))?;
+            for src in extra.sources {
+                if let Some(first) = reg.find(&src.name) {
+                    let first_home = paths.home_of(&first.name);
+                    crate::render::scan_warn(format!(
+                        "warning: source '{}' is melded in both {} and {}; using the one in {}",
+                        crate::sanitize::strip_ansi(&src.name),
+                        first_home.display(),
+                        home.display(),
+                        first_home.display()
+                    ));
+                    continue;
+                }
+                crate::paths::set_source_home(&src.name, Some(&home));
+                reg.sources.push(src);
+            }
+        }
+        Ok(reg)
+    }
+
+    fn load_file(file: &Path) -> Result<Self> {
+        let file = file.to_path_buf();
         match std::fs::read(&file) {
             Ok(bytes) => {
                 let raw: RegistryWithVersion = serde_json::from_slice(&bytes)
@@ -1358,17 +1389,58 @@ impl Registry {
         }
     }
 
+    /// Write each source back to its own home's `sources.json` (HOME-3). A
+    /// home whose file would not change is not written at all, so a command
+    /// that touches only sources in one home writes nothing in another.
+    // spec: HOME-3
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        paths.ensure_layout()?;
-        let file = paths.sources_file();
-        // Always write the current version (STO-50).
-        let versioned = serde_json::json!({
-            "version": REGISTRY_VERSION,
-            "sources": self.sources,
-        });
-        let json = serde_json::to_vec_pretty(&versioned)
-            .map_err(|e| MindError::json("sources.json", e))?;
-        Paths::atomic_write(&file, &json)
+        let default = crate::paths::normalize_home(&paths.mind_home);
+        let mut homes = vec![paths.mind_home.clone()];
+        for h in paths.extra_homes() {
+            homes.push(h);
+        }
+        for src in &self.sources {
+            let h = paths.home_of(&src.name);
+            if !homes
+                .iter()
+                .any(|x| crate::paths::normalize_home(x) == crate::paths::normalize_home(&h))
+            {
+                homes.push(h);
+            }
+        }
+        for home in homes {
+            let is_default = crate::paths::normalize_home(&home) == default;
+            let subset: Vec<&Source> = self
+                .sources
+                .iter()
+                .filter(|s| {
+                    crate::paths::normalize_home(&paths.home_of(&s.name))
+                        == crate::paths::normalize_home(&home)
+                })
+                .collect();
+            let file = home.join("sources.json");
+            // Always write the current version (STO-50).
+            let versioned = serde_json::json!({
+                "version": REGISTRY_VERSION,
+                "sources": subset,
+            });
+            let json = serde_json::to_vec_pretty(&versioned)
+                .map_err(|e| MindError::json("sources.json", e))?;
+            match std::fs::read(&file) {
+                Ok(existing) if existing == json => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && subset.is_empty() => {
+                    continue;
+                }
+                _ => {}
+            }
+            if is_default {
+                paths.ensure_layout()?;
+            } else {
+                crate::paths::mkdir_p(&home)?;
+            }
+            Paths::atomic_write(&file, &json)?;
+        }
+        Ok(())
     }
 
     pub fn find(&self, name: &str) -> Option<&Source> {

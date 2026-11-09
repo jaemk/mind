@@ -479,6 +479,25 @@ pub enum MindError {
     )]
     UnknownPreset { name: String },
 
+    /// A requested mind home is not one of the allowed homes (HOME-4, HOME-5).
+    #[error(
+        "mind home '{}' ({origin}) is not allowed; the allowed homes are {allowed} (add it to MIND_HOMES or the `mind-homes` config key)",
+        crate::sanitize::strip_ansi(home)
+    )]
+    HomeNotAllowed {
+        home: String,
+        origin: String,
+        allowed: String,
+    },
+
+    /// `meld --home` names another home than the one a melded source is in
+    /// (HOME-8).
+    #[error(
+        "source '{}' is already melded in mind home {home}; `unmeld` it and meld it again to move it",
+        crate::sanitize::strip_ansi(name)
+    )]
+    SourceInOtherHome { name: String, home: String },
+
     #[error("`config lobes add` needs a path or `--preset <name>`")]
     LobeTargetRequired,
 
@@ -1862,6 +1881,8 @@ impl MindError {
             MindError::UnknownLobe { .. } => "unknown-lobe",
             MindError::UnknownKind { .. } => "unknown-kind",
             MindError::UnknownPreset { .. } => "unknown-preset",
+            MindError::HomeNotAllowed { .. } => "home-not-allowed",
+            MindError::SourceInOtherHome { .. } => "source-in-other-home",
             MindError::LobeTargetRequired => "lobe-target-required",
             MindError::BrokenSymlinkPath { .. } => "broken-symlink-path",
             MindError::MindToml { .. } => "mind-toml",

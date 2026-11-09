@@ -170,6 +170,12 @@ pub struct SourceMeta {
     /// upgrade pass (LIFE-57). Read from the commit the source is on.
     #[serde(default)]
     pub prune: bool,
+    /// The mind home this source is melded into (HOME-5), e.g. `"~/.mind"`.
+    /// It must be one of the consumer's allowed homes, else the meld is
+    /// refused; `meld --home` outranks it.
+    // spec: HOME-5
+    #[serde(rename = "mind-home")]
+    pub mind_home: Option<String>,
 }
 
 /// `[source].history` (DSC-120). Any other value is a `MindToml` error.

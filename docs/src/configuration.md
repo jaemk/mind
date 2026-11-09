@@ -23,6 +23,7 @@ hook-log-keep = "all"
 | `hook-history` | how many hook results to keep (default 100; `0` for none) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log` | save hook output: `true` for `~/.mind/hooks/logs`, or a directory (relative to `~/.mind`) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log-keep` | which logs to keep when logging is on: `all` (default) or `failed` | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
+| `mind-homes` | extra mind homes a source may be melded into | [Mind homes](#mind-homes) |
 
 The legacy spelling `absorb_to` is still read.
 
@@ -31,6 +32,7 @@ The legacy spelling `absorb_to` is still read.
 | variable | effect |
 |----------|--------|
 | `MIND_HOME` | root of the `~/.mind` tree |
+| `MIND_HOMES` | a `:`-separated list of extra mind homes, before `mind-homes` |
 | `MIND_DEFAULT_LOBE` | the default lobe instead of `~/.claude` (`CLAUDE_HOME` is a legacy alias) |
 | `MIND_AGENT_HOMES` | a `:`-separated list of lobes for this command, replacing `lobes` |
 | `MIND_ABSORB_TO` | destination for `mind absorb`, above `absorb-to` |
@@ -117,6 +119,33 @@ every other kind an over-cap file fails the scan of its source.
 Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
 (the default lobe). `CLAUDE_HOME` is a legacy alias for `MIND_DEFAULT_LOBE`;
 `MIND_DEFAULT_LOBE` takes precedence when both are set.
+
+## Mind homes
+
+A source can live in a mind home other than `~/.mind`, e.g. a directory a
+sandbox allows writes to. List the extra homes in `MIND_HOMES` or the
+`mind-homes` config key; `~/.mind` is always allowed:
+
+```bash
+export MIND_HOMES=~/dev/project/.mind
+mind meld owner/repo --home ~/dev/project/.mind
+```
+
+A source can name its own home in its `mind.toml`; `--home` outranks it, and a
+home that is not listed is refused:
+
+```toml
+[source]
+mind-home = "~/dev/project/.mind"
+```
+
+Each home is a full tree (`sources.json`, `manifest.json`, `sources/`,
+`store/`), and the sources a curator lists follow it unless they name their
+own. Every command sees all homes as one set and writes each source and item
+back to its own home, so working with a source in one home writes nothing in
+another. `config.toml`, the hook history, and the hook logs stay in `~/.mind`.
+A source stays in its home; to move it, `unmeld` it and meld it again with
+`--home`. See [spec/homes.md](https://github.com/jaemk/mind/blob/main/spec/homes.md).
 
 ## Concurrency
 

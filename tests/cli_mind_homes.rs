@@ -1,0 +1,333 @@
+//! Integration tests for multiple mind homes (spec/homes.md): extra homes
+//! listed in `MIND_HOMES` or the `mind-homes` config key, chosen per source by
+//! `meld --home` or the source's `[source] mind-home`.
+//!
+//! Each test drives the real `mind` binary against a hermetic, network-free
+//! fixture: a local git repo melded by path, with `MIND_HOME`/`CLAUDE_HOME`
+//! pointed at temp dirs.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use serde_json::Value;
+
+static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+struct Sandbox {
+    base: PathBuf,
+    source: PathBuf,
+    /// The default home (`MIND_HOME`).
+    default_home: PathBuf,
+    /// An extra home, listed in `MIND_HOMES` unless a test says otherwise.
+    extra: PathBuf,
+    claude_home: PathBuf,
+    /// Whether `MIND_HOMES` lists `extra`.
+    env_lists_extra: bool,
+}
+
+struct Run {
+    stdout: String,
+    stderr: String,
+    code: Option<i32>,
+}
+
+impl Run {
+    fn ok(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+impl Sandbox {
+    fn new(mind_toml: Option<&str>) -> Sandbox {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-homes-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let sb = Sandbox {
+            source: base.join("src"),
+            default_home: base.join("default"),
+            extra: base.join("extra"),
+            claude_home: base.join("claude"),
+            env_lists_extra: true,
+            base,
+        };
+        std::fs::create_dir_all(&sb.claude_home).unwrap();
+        // The skill's install hook records the root its store copy is in.
+        write(
+            &sb.source.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\nbody\n",
+        );
+        if let Some(toml) = mind_toml {
+            write(&sb.source.join("mind.toml"), toml);
+        }
+        git(&sb.source, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&sb.source, &["config", "user.email", "t@t"]);
+        git(&sb.source, &["config", "user.name", "t"]);
+        git(&sb.source, &["add", "-A"]);
+        git(&sb.source, &["commit", "-qm", "initial"]);
+        sb
+    }
+
+    fn mind(&self, args: &[&str]) -> Run {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
+        cmd.args(args)
+            .env("MIND_HOME", &self.default_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .env_remove("MIND_HOMES")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        if self.env_lists_extra {
+            cmd.env("MIND_HOMES", &self.extra);
+        }
+        let out = cmd.output().expect("run mind");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: out.status.code(),
+        }
+    }
+
+    fn spec(&self) -> String {
+        self.source.to_string_lossy().into_owned()
+    }
+
+    /// The registry identity a local-path meld gives this fixture (STO-13).
+    fn identity(&self) -> String {
+        let owner = self.base.file_name().unwrap().to_string_lossy();
+        format!("local/{owner}/src")
+    }
+
+    fn extra_str(&self) -> String {
+        self.extra.to_string_lossy().into_owned()
+    }
+
+    fn sources_in(&self, home: &Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(home.join("sources.json")) else {
+            return Vec::new();
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        v["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn items_in(&self, home: &Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(home.join("manifest.json")) else {
+            return Vec::new();
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        v["items"].as_object().unwrap().keys().cloned().collect()
+    }
+
+    /// Where `skills/alpha` in the lobe resolves to.
+    fn alpha_target(&self) -> PathBuf {
+        std::fs::canonicalize(self.claude_home.join("skills/alpha")).expect("alpha is linked")
+    }
+
+    fn canon(&self, p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap()
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // Undo any read-only bits a test set, so the tree can be removed.
+        let _ = Command::new("chmod")
+            .args(["-R", "u+w"])
+            .arg(&self.base)
+            .status();
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+fn write(path: &Path, contents: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {args:?} failed in {dir:?}");
+}
+
+fn chmod(mode: &str, path: &Path) {
+    let status = Command::new("chmod")
+        .arg(mode)
+        .arg(path)
+        .status()
+        .expect("run chmod");
+    assert!(status.success());
+}
+
+/// `meld --home` into an extra home keeps the source's registry entry, item
+/// manifest, and store copy there, and the default home is never written:
+/// the meld works with the default home read-only. Every later verb sees the
+/// union and writes back to the extra home.
+#[test]
+fn meld_into_an_extra_home_writes_nothing_in_the_default_home() {
+    // spec: HOME-1 HOME-2 HOME-3 HOME-4 HOME-6 HOME-7 HOME-9
+    let sb = Sandbox::new(None);
+    // An existing, read-only default home (the managed-sandbox case).
+    let r = sb.mind(&["config", "show"]);
+    assert!(r.ok(), "config show: {}", r.stderr);
+    std::fs::create_dir_all(&sb.default_home).unwrap();
+    std::fs::write(sb.default_home.join(".lock"), "").unwrap();
+    chmod("a-w", &sb.default_home.join(".lock"));
+    chmod("a-w", &sb.default_home);
+    let read_only = std::fs::write(sb.default_home.join("probe"), "").is_err();
+
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    chmod("u+w", &sb.default_home);
+
+    assert_eq!(sb.sources_in(&sb.extra).len(), 1);
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+    assert!(sb.items_in(&sb.default_home).is_empty());
+    assert!(
+        sb.alpha_target()
+            .starts_with(sb.canon(&sb.extra).join("store")),
+        "the link resolves into the extra home's store"
+    );
+    if read_only {
+        assert!(!sb.default_home.join("sources.json").exists());
+        assert!(!sb.default_home.join("store").exists());
+    }
+
+    // The union view and a write-back to the extra home.
+    let r = sb.mind(&["recall", "--json"]);
+    assert!(r.ok(), "recall: {}", r.stderr);
+    assert!(r.stdout.contains("skill:alpha"), "{}", r.stdout);
+    let r = sb.mind(&["--yes", "forget", "alpha"]);
+    assert!(r.ok(), "forget: {}\n{}", r.stdout, r.stderr);
+    assert!(sb.items_in(&sb.extra).is_empty());
+    assert!(!sb.claude_home.join("skills/alpha").exists());
+    assert!(!sb.extra.join("store/skill/alpha").exists());
+
+    let r = sb.mind(&["--yes", "unmeld", &sb.identity()]);
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    assert!(sb.sources_in(&sb.extra).is_empty());
+}
+
+/// Without `--home`, a source's `[source] mind-home` picks its home, and
+/// `--home` outranks it.
+#[test]
+fn the_source_names_its_home_and_the_flag_outranks_it() {
+    // spec: HOME-4 HOME-5 HOME-8
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let extra = std::env::temp_dir().join(format!("mind-homes-x-{}-{n}", std::process::id()));
+    let toml = format!("[source]\nmind-home = \"{}\"\n", extra.to_string_lossy());
+    let mut sb = Sandbox::new(Some(&toml));
+    let _ = std::fs::remove_dir_all(&sb.extra);
+    sb.extra = extra;
+
+    let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.extra).len(), 1);
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert!(
+        sb.alpha_target()
+            .starts_with(sb.canon(&sb.extra).join("store"))
+    );
+
+    // `--home` naming the same home on a re-meld is fine; another is refused.
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "re-meld: {}\n{}", r.stdout, r.stderr);
+    let default = sb.default_home.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &default]);
+    assert_eq!(r.code, Some(1), "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("already melded in mind home"),
+        "{}",
+        r.stderr
+    );
+
+    let r = sb.mind(&["--yes", "unmeld", &sb.identity()]);
+    assert!(r.ok(), "unmeld: {}", r.stderr);
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &default]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.default_home).len(), 1);
+    assert!(sb.sources_in(&sb.extra).is_empty());
+    let _ = std::fs::remove_dir_all(&sb.extra);
+}
+
+/// A home that is not `~/.mind` or a listed extra is refused, from the flag
+/// or from the source, and the refused meld registers nothing.
+#[test]
+fn an_unlisted_home_is_refused() {
+    // spec: HOME-4 HOME-5
+    let sb = Sandbox::new(Some("[source]\nmind-home = \"/nowhere/listed\"\n"));
+    let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+    assert_eq!(r.code, Some(1), "{}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("mind home '/nowhere/listed'")
+            && r.stderr.contains("is not allowed")
+            && r.stderr.contains("MIND_HOMES"),
+        "{}",
+        r.stderr
+    );
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+
+    let r = sb.mind(&[
+        "--json",
+        "--yes",
+        "meld",
+        &sb.spec(),
+        "--home",
+        "/also/unlisted",
+    ]);
+    assert_eq!(r.code, Some(1));
+    let v: Value = serde_json::from_str(&r.stdout).expect("a JSON error envelope");
+    assert_eq!(v["error"]["kind"], "home-not-allowed", "{v}");
+}
+
+/// A curated source with no `mind-home` of its own goes into its curator's
+/// home.
+#[test]
+fn curated_sources_follow_the_curator_home() {
+    // spec: HOME-5 HOME-6
+    let nested = Sandbox::new(None);
+    let curator = Sandbox::new(Some(&format!(
+        "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+        nested.spec()
+    )));
+    let extra = curator.extra_str();
+    let r = curator.mind(&["--yes", "meld", &curator.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let in_extra = curator.sources_in(&curator.extra);
+    assert_eq!(in_extra.len(), 2, "{in_extra:?}");
+    assert!(in_extra.contains(&nested.identity()), "{in_extra:?}");
+    assert!(curator.sources_in(&curator.default_home).is_empty());
+}
+
+/// The `mind-homes` config key lists extra homes like `MIND_HOMES`.
+#[test]
+fn the_config_key_lists_extra_homes() {
+    // spec: HOME-2
+    let mut sb = Sandbox::new(None);
+    sb.env_lists_extra = false;
+    let r = sb.mind(&["config", "show"]);
+    assert!(r.ok(), "{}", r.stderr);
+    let cfg = sb.default_home.join("config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!("mind-homes = [\"{}\"]\n", sb.extra_str()));
+    std::fs::write(&cfg, text).unwrap();
+
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.extra).len(), 1);
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+}

@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Mind homes: extra `~/.mind`-style trees listed in `MIND_HOMES` or the
+  `mind-homes` config key. `meld --home <dir>` or a source's `[source]
+  mind-home` melds a source into one; each home keeps its own registry,
+  manifest, clones, and store, and every command sees all homes as one set
+  while writing each source back to its own home.
+
 ## [0.47.0] - 2026-11-08
 
 ### Added

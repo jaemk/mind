@@ -1413,6 +1413,13 @@ fn forget_double_failure_reports_hook_error_not_the_save_error() {
         .success
     );
 
+    // A save skips a manifest whose bytes would not change (HOME-3), so first
+    // rewrite it compactly: same content, different bytes, so the
+    // failure-path save has to write.
+    let manifest = sb.mind_home.join("manifest.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    std::fs::write(&manifest, serde_json::to_string(&doc).unwrap()).unwrap();
     // A read-only MIND_HOME root blocks the manifest's same-directory atomic
     // temp write, so the failure-path `manifest.save` fails too.
     std::fs::set_permissions(&sb.mind_home, std::fs::Permissions::from_mode(0o555)).unwrap();
