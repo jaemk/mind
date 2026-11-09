@@ -271,6 +271,18 @@ fn main() -> std::process::ExitCode {
         }
         Err(e) => e.exit(),
     };
+    // spec: CLI-263 -- `--mind-home` becomes `MIND_HOME` for this process, so
+    // `Paths::resolve` (here and in `evolve`) and every spawned hook or build
+    // command see one root.
+    if let Some(dir) = &cli.mind_home {
+        // Absolute, so links into the store do not depend on the working
+        // directory of a later run.
+        let dir = commands::expand_tilde(&dir.to_string_lossy());
+        let dir = std::path::absolute(&dir).unwrap_or(dir);
+        // SAFETY: no other thread exists yet; this runs straight after parsing,
+        // before anything spawns.
+        unsafe { std::env::set_var("MIND_HOME", dir) };
+    }
     // Capture the json flag before `cli` is moved into `run`. Clap's parse
     // succeeded at this point, so cli.json is trustworthy.
     let json = cli.json;

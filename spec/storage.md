@@ -20,7 +20,8 @@ The on-disk layout and the two persisted JSON files.
   commands/<name>.md -> store/command/<name>
 ```
 
-- `STO-1` The mind root is `$MIND_HOME` if set, else `~/.mind`. The claude root is
+- `STO-1` The mind root is the `--mind-home` flag if given (CLI-263), else
+  `$MIND_HOME` if set, else `~/.mind`. The claude root is
   `$MIND_DEFAULT_LOBE` if set, else `$CLAUDE_HOME` if set, else `~/.claude`
   (`$MIND_DEFAULT_LOBE` takes precedence over `$CLAUDE_HOME`, CLI-170). All
   overrides are honored everywhere.

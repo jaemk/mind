@@ -6,6 +6,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Global `--mind-home <dir>` flag: sets the `~/.mind` root for one command,
+  outranking `MIND_HOME`. Hooks and build commands see it as `MIND_HOME`.
+
 ## [0.47.0] - 2026-11-08
 
 ### Added

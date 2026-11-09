@@ -30,7 +30,7 @@ The legacy spelling `absorb_to` is still read.
 
 | variable | effect |
 |----------|--------|
-| `MIND_HOME` | root of the `~/.mind` tree |
+| `MIND_HOME` | root of the `~/.mind` tree (`--mind-home` outranks it) |
 | `MIND_DEFAULT_LOBE` | the default lobe instead of `~/.claude` (`CLAUDE_HOME` is a legacy alias) |
 | `MIND_AGENT_HOMES` | a `:`-separated list of lobes for this command, replacing `lobes` |
 | `MIND_ABSORB_TO` | destination for `mind absorb`, above `absorb-to` |
@@ -117,6 +117,18 @@ every other kind an over-cap file fails the scan of its source.
 Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
 (the default lobe). `CLAUDE_HOME` is a legacy alias for `MIND_DEFAULT_LOBE`;
 `MIND_DEFAULT_LOBE` takes precedence when both are set.
+
+The global `--mind-home <dir>` flag sets the `~/.mind` root for one command and
+outranks `MIND_HOME`, e.g. where a sandbox allows writes only under a project
+directory:
+
+```bash
+mind --mind-home ./.mind recall
+```
+
+Hooks and build commands see that root as `MIND_HOME`. The links in each lobe
+point into `<root>/store`, so pointing an existing install at a new root leaves
+them dangling: move the old tree there, or meld and learn again under it.
 
 ## Concurrency
 

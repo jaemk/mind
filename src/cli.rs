@@ -274,6 +274,21 @@ pub struct Cli {
     )]
     pub hook_log_keep: Option<crate::hook_log::LogKeep>,
 
+    /// Use DIR as the mind root (store, clones, config, state) instead of
+    /// `~/.mind`.
+    ///
+    /// Outranks `MIND_HOME`. A leading `~` is expanded and a relative path is
+    /// resolved against the working directory. Hooks and build commands see
+    /// the same root as `MIND_HOME`.
+    // spec: CLI-263 STO-1
+    #[arg(
+        long,
+        global = true,
+        value_name = "DIR",
+        help_heading = "Global options"
+    )]
+    pub mind_home: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }

@@ -1823,6 +1823,12 @@ HOOK-109, CLI-60, CLI-141, CLI-247, CUR-9, DEP-31, and LIFE-45 point here.
   for that invocation, whatever the `hook-log` config key says (HOOK-165).
   Given with `--hook-log` or `--hook-log-keep`, it is a usage error.
 
+- `CLI-263` `--mind-home <DIR>` is a global flag that sets the mind root for
+  that invocation, outranking `MIND_HOME` (STO-1). A leading `~` is expanded
+  and a relative path is resolved against the working directory; an empty value (`--mind-home=`) is a usage error. The value is exported to
+  every process mind spawns (hooks, build commands) as `MIND_HOME`, so a hook
+  that runs `mind` sees the same root.
+
 - `CLI-242` Every integer mind emits in `--json` fits a signed 64-bit integer,
   so a consumer that parses numbers as `i64` never overflows. The one value that
   could exceed it, the unlimited metadata cap (held as `u64::MAX`), is emitted
