@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `meld --home <dir>` (and `learn <url> --home`) on a source already melded in
+  another mind home moves it there, with its installed items and the curated
+  sources that follow it, instead of refusing. `upgrade` reinstalls an item
+  whose store copy is in another home than its source's.
+
 ## [0.48.0] - 2026-11-09
 
 ### Added

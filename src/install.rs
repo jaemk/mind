@@ -1291,6 +1291,27 @@ fn copy_recursive_at(
     Ok(())
 }
 
+/// Copy a whole tree (a source clone) to `dst`, recreating each symlink as a
+/// symlink rather than following it. For moving a clone between mind homes
+/// on different filesystems (HOME-8), where a rename fails.
+pub(crate) fn copy_tree_keeping_links(src: &Path, dst: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(src).map_err(|e| MindError::io(src, e))?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(src).map_err(|e| MindError::io(src, e))?;
+        return symlink(&target, dst);
+    }
+    if meta.is_dir() {
+        mkdir_p(dst)?;
+        for entry in std::fs::read_dir(src).map_err(|e| MindError::io(src, e))? {
+            let entry = entry.map_err(|e| MindError::io(src, e))?;
+            copy_tree_keeping_links(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    std::fs::copy(src, dst).map_err(|e| MindError::io(dst, e))?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn symlink(target: &Path, link: &Path) -> Result<()> {
     std::os::unix::fs::symlink(target, link).map_err(|e| MindError::io(link, e))

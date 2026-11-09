@@ -397,26 +397,112 @@ fn the_source_names_its_home_and_the_flag_outranks_it() {
             .starts_with(sb.canon(&sb.extra).join("store"))
     );
 
-    // `--home` naming the same home on a re-meld is fine; another is refused.
+    // `--home` naming the same home on a re-meld is fine; another moves it,
+    // even against the source's own `mind-home`.
     let extra = sb.extra_str();
     let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
     assert!(r.ok(), "re-meld: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("moved"), "{}", r.stdout);
     let default = sb.default_home.to_string_lossy().into_owned();
     let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &default]);
-    assert_eq!(r.code, Some(1), "{}\n{}", r.stdout, r.stderr);
-    assert!(
-        r.stderr.contains("already melded in mind home"),
-        "{}",
-        r.stderr
-    );
-
-    let r = sb.mind(&["--yes", "unmeld", &sb.identity()]);
-    assert!(r.ok(), "unmeld: {}", r.stderr);
-    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &default]);
-    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert!(r.ok(), "move: {}\n{}", r.stdout, r.stderr);
     assert_eq!(sb.sources_in(&sb.default_home).len(), 1);
     assert!(sb.sources_in(&sb.extra).is_empty());
     let _ = std::fs::remove_dir_all(&sb.extra);
+}
+
+/// `meld --home` on a melded source moves its clone, registry entry, store
+/// copies, and links to that home, and back again; running it again changes
+/// nothing.
+#[test]
+fn meld_home_moves_a_melded_source() {
+    // spec: HOME-8
+    let sb = Sandbox::new(None);
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--pin", "HEAD"]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let clone_rel = PathBuf::from("sources/local")
+        .join(sb.base.file_name().unwrap())
+        .join("src");
+    assert!(sb.default_home.join(&clone_rel).is_dir());
+
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "move: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("moved"), "{}", r.stdout);
+    assert!(r.stdout.contains("1 item to move"), "{}", r.stdout);
+    assert_eq!(sb.sources_in(&sb.extra), [sb.identity()]);
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+    assert!(sb.items_in(&sb.default_home).is_empty());
+    assert!(sb.extra.join(&clone_rel).is_dir());
+    assert!(!sb.default_home.join(&clone_rel).exists());
+    assert!(!sb.default_home.join("store/skill/alpha").exists());
+    assert!(
+        sb.alpha_target()
+            .starts_with(sb.canon(&sb.extra).join("store"))
+    );
+
+    // Idempotent.
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "again: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("moved"), "{}", r.stdout);
+    assert!(!r.stdout.contains("to move"), "{}", r.stdout);
+    assert_eq!(sb.items_in(&sb.extra), ["skill:alpha"]);
+
+    // And back.
+    let default = sb.default_home.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &default]);
+    assert!(r.ok(), "back: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.default_home), [sb.identity()]);
+    assert!(sb.sources_in(&sb.extra).is_empty());
+    assert_eq!(sb.items_in(&sb.default_home), ["skill:alpha"]);
+    assert!(sb.items_in(&sb.extra).is_empty());
+    assert!(sb.default_home.join(&clone_rel).is_dir());
+    assert!(!sb.extra.join(&clone_rel).exists());
+    assert!(
+        sb.alpha_target()
+            .starts_with(sb.canon(&sb.default_home).join("store"))
+    );
+    let r = sb.mind(&["introspect"]);
+    assert!(r.ok(), "introspect: {}\n{}", r.stdout, r.stderr);
+}
+
+/// Moving a curator moves the sources it curates that follow its home, and
+/// leaves one that names its own home where it is.
+#[test]
+fn moving_a_curator_moves_the_sources_that_follow_it() {
+    // spec: HOME-8
+    let follows = Sandbox::new(None);
+    let pinned = Sandbox::new(None);
+    let curator = Sandbox::new(None);
+    let default = curator.default_home.to_string_lossy().into_owned();
+    write(
+        &curator.source.join("mind.toml"),
+        &format!(
+            "[[discover.sources]]\nsource = {:?}\ninstall = true\n\n[[discover.sources]]\nsource = {:?}\ninstall = true\nmind-home = {:?}\n",
+            follows.spec(),
+            pinned.spec(),
+            default
+        ),
+    );
+    git(&curator.source, &["add", "-A"]);
+    git(&curator.source, &["commit", "-qm", "curate"]);
+    let r = curator.mind(&["--yes", "meld", &curator.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(curator.sources_in(&curator.default_home).len(), 3);
+
+    let extra = curator.extra_str();
+    let r = curator.mind(&["--yes", "meld", &curator.spec(), "--home", &extra]);
+    assert!(r.ok(), "move: {}\n{}", r.stdout, r.stderr);
+    let mut in_extra = curator.sources_in(&curator.extra);
+    in_extra.sort();
+    let mut want = vec![curator.identity(), follows.identity()];
+    want.sort();
+    assert_eq!(in_extra, want);
+    assert_eq!(
+        curator.sources_in(&curator.default_home),
+        [pinned.identity()]
+    );
 }
 
 /// A home that is not `~/.mind` or a listed extra is refused, from the flag
@@ -673,15 +759,13 @@ fn learn_link_takes_home() {
     assert!(!r.ok());
     assert!(r.stderr.contains("is not allowed"), "{}", r.stderr);
 
-    // spec: HOME-8 -- the instance is in the extra home already.
+    // spec: HOME-8 -- naming another home moves the instance there.
     let default = sb.default_home.to_string_lossy().into_owned();
     let r = sb.mind(&["--yes", "learn", &url, "--home", &default]);
-    assert!(!r.ok());
-    assert!(
-        r.stderr.contains("already melded in mind home"),
-        "{}",
-        r.stderr
-    );
+    assert!(r.ok(), "move: {}\n{}", r.stdout, r.stderr);
+    assert!(sb.sources_in(&sb.extra).is_empty());
+    assert_eq!(sb.sources_in(&sb.default_home).len(), 1);
+    assert_eq!(sb.items_in(&sb.default_home), ["skill:alpha"]);
 }
 
 /// A relative `mind-homes` entry is relative to the default home, not the

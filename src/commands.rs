@@ -1130,6 +1130,165 @@ fn relocate_clone(
     moved
 }
 
+/// Put melded source `name` in mind home `to` (`None`: the default home), for
+/// `meld --home` and `learn <url> --home` on a source already melded (HOME-8).
+/// The source moves with every source it curates that follows it (one in the
+/// curator's home that names no home of its own, HOME-5): each clone moves (a
+/// rename, else a copy) and each registry entry is written to `to`'s file.
+/// Then every installed item of those sources whose store copy is in another
+/// home is reinstalled in `to` through the upgrade pass, which replaces its
+/// links and removes the old copy. Running it again changes nothing.
+// spec: HOME-8
+pub(crate) fn move_to_home(
+    paths: &Paths,
+    name: &str,
+    to: Option<&std::path::Path>,
+    yes: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    use crate::paths::{normalize_home, set_source_home, source_home};
+    let out = crate::render::ctx();
+    let home_key = |h: Option<&std::path::Path>| normalize_home(h.unwrap_or(&paths.mind_home));
+    let target = home_key(to);
+    let registry = Registry::load(paths)?;
+    if registry.find(name).is_none() {
+        return Ok(());
+    }
+    // The source and, transitively, the curated sources that follow it.
+    let mut family = vec![name.to_string()];
+    let mut i = 0;
+    while i < family.len() {
+        let curator = family[i].clone();
+        for child in home_followers(paths, &registry, &curator) {
+            if !family.contains(&child) {
+                family.push(child);
+            }
+        }
+        i += 1;
+    }
+    let mut moved = 0;
+    for member in &family {
+        let from = source_home(member);
+        if home_key(from.as_deref()) == target {
+            continue;
+        }
+        let Some(src) = registry.find(member).cloned() else {
+            continue;
+        };
+        if Registry::home_lists(&target, member) {
+            return Err(MindError::SourceInOtherHome {
+                name: member.clone(),
+                home: target.display().to_string(),
+            });
+        }
+        let old_dir = clone_dir_checked(paths, &src)?;
+        set_source_home(member, to);
+        let relocated = if src.is_linked() || !old_dir.exists() {
+            Ok(())
+        } else {
+            clone_dir_checked(paths, &src).and_then(|new_dir| move_tree(&old_dir, &new_dir))
+        };
+        if let Err(e) = relocated {
+            set_source_home(member, from.as_deref());
+            registry.save(paths)?;
+            return Err(e);
+        }
+        moved += 1;
+        if !out.json {
+            println!(
+                "{} moved {} to mind home {}",
+                out.ok(),
+                strip_ansi(member),
+                target.display()
+            );
+        }
+    }
+    if moved > 0 {
+        registry.save(paths)?;
+    }
+    let keys: Vec<String> = Manifest::load(paths)?
+        .items
+        .values()
+        .filter(|it| family.contains(&it.source) && item_in_other_home(paths, it))
+        .map(|it| it.key().as_str().to_string())
+        .collect();
+    if !keys.is_empty() {
+        // The meld's own result is the one `--json` document (CLI-217).
+        upgrade_inner_scoped(
+            paths,
+            yes,
+            None,
+            true,
+            SourceScope::Names(&family, None),
+            Some(&keys),
+            accept,
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether an installed item's store copy is in another home than its
+/// source's (HOME-8): the upgrade pass reinstalls it there.
+fn item_in_other_home(paths: &Paths, item: &crate::manifest::InstalledItem) -> bool {
+    use crate::paths::normalize_home;
+    normalize_home(&paths.home_of_item_store(&item.store))
+        != normalize_home(&paths.home_of(&item.source))
+}
+
+/// The sources `curator` curates that follow its home (HOME-5): in the same
+/// home, with no `mind-home` of their own in their `mind.toml` or in the
+/// curator's entry for them (HOME-10).
+fn home_followers(paths: &Paths, registry: &Registry, curator: &str) -> Vec<String> {
+    use crate::paths::source_home;
+    let Some(cur) = registry.find(curator) else {
+        return Vec::new();
+    };
+    let entries = MindToml::load(&cur.clone_dir(paths))
+        .ok()
+        .flatten()
+        .and_then(|m| m.discover)
+        .map(|d| d.sources)
+        .unwrap_or_default();
+    registry
+        .sources
+        .iter()
+        .filter(|s| s.curated_by.as_deref() == Some(curator))
+        .filter(|s| source_home(&s.name) == source_home(curator))
+        .filter(|s| {
+            !entries.iter().any(|e| {
+                e.mind_home.is_some()
+                    && instance_name(&e.source, e.effective_alias().as_deref())
+                        .is_ok_and(|n| n == s.name)
+            })
+        })
+        .filter(|s| {
+            !MindToml::load(&s.clone_dir(paths))
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.source.mind_home.is_some())
+        })
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+/// Move a directory tree to `to`: a rename, else (another filesystem) a copy
+/// that keeps symlinks, then removal of the original. A leftover at `to` is
+/// replaced.
+fn move_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    install::remove_path(to)?;
+    if let Some(parent) = to.parent() {
+        crate::paths::mkdir_p(parent)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    if let Err(e) = install::copy_tree_keeping_links(from, to) {
+        let _ = install::remove_path(to);
+        return Err(e);
+    }
+    install::remove_path(from)
+}
+
 /// Bring one source's clone up to date for `sync` / the `upgrade` pre-pass and
 /// return its new HEAD with the pin to record. A linked (no-pin) local source
 /// is its live working tree (CLI-27): nothing is fetched or touched, its HEAD
@@ -5753,7 +5912,7 @@ pub fn learn_link(
         });
     }
     // spec: HOME-12 -- `--home` places the link instance as `meld --home`
-    // does: an allowed home, checked before the clone, and refused for an
+    // does: an allowed home, checked before the clone, and moving an
     // instance already melded in another home (HOME-8).
     let home = home.map(|h| paths.allowed_home(h, "--home")).transpose()?;
     let _home_scope = home.clone().map(|h| {
@@ -5763,15 +5922,17 @@ pub fn learn_link(
         })
     });
     let melded = is_melded(paths, url, None)?;
-    // `is_melded` loaded the registry, which recorded each source's home.
     if melded
+        && !dry_run
         && let Some(requested) = &home
-        && crate::paths::source_home(&spec.name) != *requested
     {
-        return Err(MindError::SourceInOtherHome {
-            name: spec.name.clone(),
-            home: paths.home_of(&spec.name).display().to_string(),
-        });
+        move_to_home(
+            paths,
+            &spec.name,
+            requested.as_deref(),
+            flow.yes,
+            flow.accept,
+        )?;
     }
     if !melded {
         // spec: CLI-200, LNK-3 -- `--pin` freezes the link's branch ref to its
@@ -12918,13 +13079,22 @@ fn upgrade_inner_scoped(
             .and_then(|s| s.commit.clone())
             .unwrap_or_default();
         let renamed = new_name != installed.name;
-        if new_hash != installed.hash || renamed {
+        // spec: HOME-8 -- an item whose source moved homes is reinstalled in
+        // the new one even when its content is unchanged.
+        let home_move = item_in_other_home(paths, installed).then(|| {
+            (
+                paths.home_of_item_store(&installed.store),
+                paths.home_of(&installed.source),
+            )
+        });
+        if new_hash != installed.hash || renamed || home_move.is_some() {
             pending.push(Upgrade {
                 cat: cat.clone(),
                 old: installed.clone(),
                 new_commit,
                 new_hash,
                 new_name,
+                home_move,
             });
         }
     }
@@ -14063,6 +14233,8 @@ struct Upgrade {
     new_commit: String,
     new_hash: String,
     new_name: String,
+    /// The homes the store copy moves between, when its source moved (HOME-8).
+    home_move: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &ProfileTracking) {
@@ -14078,7 +14250,15 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
     } else {
         ("items", "have")
     };
-    println!("{n} {noun} {verb} upstream changes:\n");
+    // spec: HOME-8 -- a batch of moves alone is not an upstream change.
+    let only_moves = pending.iter().all(|up| {
+        up.home_move.is_some() && up.new_hash == up.old.hash && up.new_name == up.old.name
+    });
+    if only_moves {
+        println!("{n} {noun} to move:\n");
+    } else {
+        println!("{n} {noun} {verb} upstream changes:\n");
+    }
     for up in pending {
         // spec: DSC-95 -- sanitize every source-controlled field before
         // composing the line (not the composed line after): this report
@@ -14119,6 +14299,14 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade], tracking: &Pro
             short(&up.old.commit),
             short(&up.new_commit)
         );
+        if let Some((from, to)) = &up.home_move {
+            println!(
+                "    {}    {} -> {}",
+                out.dim("home"),
+                crate::sanitize::display_path(from),
+                crate::sanitize::display_path(to)
+            );
+        }
         // spec: VER-60 -- a version-pinned source shows the release delta too.
         if let Some(src) = registry.find(&up.cat.source)
             && let Pin::Version(vp) = &src.pin
@@ -17124,18 +17312,11 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     // ensures the items are installed, else reports their status.
     let already_melded = is_melded(paths, &repo, alias.as_deref())?;
     if already_melded {
-        // spec: HOME-8 -- a source lives in one home; `--home` naming another
-        // is refused rather than ignored, since nothing would move.
-        // `is_melded` loaded the registry, which recorded each source's home.
+        // spec: HOME-8 -- `--home` on a melded source moves it, and the
+        // sources and items that follow it, into that home.
         if home.is_some() {
-            let current = crate::paths::source_home(&source_ident);
             let requested = crate::paths::meld_home().home;
-            if current != requested {
-                return Err(MindError::SourceInOtherHome {
-                    name: source_ident.clone(),
-                    home: paths.home_of(&source_ident).display().to_string(),
-                });
-            }
+            move_to_home(paths, &source_ident, requested.as_deref(), yes, accept)?;
         }
         // spec: CLI-206 -- name every discovery flag this invocation
         // carries; remeld() cannot apply any of them (it never
