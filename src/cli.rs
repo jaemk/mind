@@ -1223,6 +1223,15 @@ pub struct MeldArgs {
     #[arg(long)]
     pub full_history: bool,
 
+    /// The mind home to meld the source into (its clone, store copies, and
+    /// registry entry), instead of `~/.mind`. Must be `~/.mind` or one of the
+    /// homes listed in `MIND_HOMES` or the `mind-homes` config key. Outranks
+    /// the source's own `[source] mind-home`; the sources it curates follow it
+    /// unless they name a home of their own.
+    // spec: HOME-4
+    #[arg(long, value_name = "DIR")]
+    pub home: Option<String>,
+
     /// Supply or override the source's install hook: a shell command run
     /// after checkout to build the tooling its items rely on. Before it runs,
     /// a prompt offers three choices: run it (the default, a bare Enter),

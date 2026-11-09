@@ -85,7 +85,11 @@ pub(crate) fn meld_with_profiles(
     accept_newer_mind: bool,
     full_history: bool,
 ) -> Result<MeldSummary> {
-    paths.ensure_layout()?;
+    // spec: HOME-3 -- a meld into another home scaffolds that home only.
+    match crate::paths::meld_home().home {
+        Some(home) => crate::paths::mkdir_p(&home)?,
+        None => paths.ensure_layout()?,
+    }
     // POL-3: the managed policy is authoritative over user intent. Load it once
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
     let policy = Policy::load()?;
@@ -1087,7 +1091,7 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
     if source.is_linked() {
         return Ok(dir);
     }
-    if install::is_confined_under(&dir, &paths.sources_dir()) {
+    if install::is_confined_under(&dir, &paths.home_of(&source.name).join("sources")) {
         Ok(dir)
     } else {
         Err(MindError::UnsafeClonePath {
@@ -1095,6 +1099,32 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
             identity: source.name.clone(),
         })
     }
+}
+
+/// Move a fresh clone at `from` to where `source` now resolves, after its
+/// `[source] mind-home` changed its home (HOME-5). A rename when both are on
+/// one filesystem, else a fresh clone at the new place.
+fn relocate_clone(
+    paths: &Paths,
+    source: &crate::source::Source,
+    from: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let to = clone_dir_checked(paths, source)?;
+    if to.exists() {
+        std::fs::remove_dir_all(&to).map_err(|e| MindError::io(&to, e))?;
+    }
+    if let Some(parent) = to.parent() {
+        crate::paths::mkdir_p(parent)?;
+    }
+    if std::fs::rename(from, &to).is_err() {
+        let cloned = git::clone(&source.url, &to);
+        let _ = std::fs::remove_dir_all(from);
+        if let Err(e) = cloned {
+            let _ = std::fs::remove_dir_all(&to);
+            return Err(e);
+        }
+    }
+    Ok(to)
 }
 
 /// Bring one source's clone up to date for `sync` / the `upgrade` pre-pass and
@@ -1909,6 +1939,12 @@ fn meld_recursive(
         return Ok(0);
     }
 
+    // spec: HOME-4 HOME-6 -- a new source goes into the home `meld --home`
+    // named, or its curator's home; its own `[source] mind-home` may move it
+    // once the clone is read (below).
+    let meld_home = crate::paths::meld_home();
+    crate::paths::set_source_home(&source.name, meld_home.home.as_deref());
+
     // `source.pin` is still the default here, so `clone_dir` resolves a local
     // source to its working tree. A consumer/directive pin (resolved below) can
     // still switch a local source to a cloned snapshot.
@@ -1993,6 +2029,36 @@ fn meld_recursive(
         })?;
     }
     let mut mindfile = MindToml::load(&dir)?;
+    // spec: HOME-5 -- the source's own `[source] mind-home`, unless `meld
+    // --home` named one. It must be an allowed home; otherwise the meld is
+    // refused and the clone removed.
+    let declared_home = mindfile.as_ref().and_then(|m| m.source.mind_home.clone());
+    if let Some(declared) = declared_home.filter(|_| !meld_home.explicit) {
+        let origin = format!(
+            "the `mind-home` in {}'s mind.toml",
+            strip_ansi(&source.name)
+        );
+        let target = match paths.allowed_home(&declared, &origin) {
+            Ok(t) => t,
+            Err(e) => {
+                if !is_local {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                return Err(e);
+            }
+        };
+        if target != meld_home.home {
+            crate::paths::set_source_home(&source.name, target.as_deref());
+            if !is_local {
+                dir = relocate_clone(paths, &source, &dir)?;
+            }
+        }
+    }
+    // spec: HOME-6 -- the sources this one curates default to its home.
+    let _home_scope = crate::paths::MeldHomeScope::set(crate::paths::MeldHome {
+        home: crate::paths::source_home(&source.name),
+        explicit: false,
+    });
     // spec: DSC-94 -- B4: a `mind.toml [source].description` is source-
     // controlled text, sanitized here at the store point exactly like the
     // plugin-manifest path above (line ~1181), closing the frontmatter-path
@@ -16354,7 +16420,12 @@ fn unresolvable_managed_local_entry(paths: &Paths, spec: &str) -> Option<std::pa
         return None;
     }
     let path = std::path::PathBuf::from(&parsed.url);
-    (!path.exists() && path.starts_with(paths.sources_dir())).then_some(path)
+    (!path.exists()
+        && paths
+            .all_homes()
+            .iter()
+            .any(|h| path.starts_with(h.join("sources"))))
+    .then_some(path)
 }
 
 /// Scan exactly ONE source, hard-failing on any scan error.
@@ -16742,7 +16813,10 @@ fn item_install_plan(
             // A build hook offers run or skip, never abort (HOOK-72).
             optional: true,
             commit: commit.clone(),
-            run_dir: paths.staging_path(item.kind, &name).display().to_string(),
+            run_dir: paths
+                .staging_path_of(&item.source, item.kind, &name)
+                .display()
+                .to_string(),
             inspect: inspect.clone(),
             browse_url: None,
             replaced: None,
@@ -16751,7 +16825,7 @@ fn item_install_plan(
     }
     // The install hook's working directory (HOOK-81): the store directory of a
     // directory-backed item, else the kind directory holding its file.
-    let store = paths.store_item(item.kind, &name);
+    let store = paths.store_item_of(&item.source, item.kind, &name);
     let run_dir = if item.path.is_dir() {
         store
     } else {
@@ -16867,8 +16941,18 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
         overwrite,
         local,
         auto_update,
+        home,
     } = args;
     let accept = accept.accept();
+    // spec: HOME-4 -- `--home` must name an allowed home; it is checked before
+    // anything is cloned, and governs every source this meld registers.
+    let _home_scope = match home.as_deref() {
+        Some(h) => Some(crate::paths::MeldHomeScope::set(crate::paths::MeldHome {
+            home: paths.allowed_home(h, "--home")?,
+            explicit: true,
+        })),
+        None => None,
+    };
     // spec: HOOK-180 HOOK-183 -- an interactive meld holds its source install
     // hooks back for the one plan it asks before installing.
     let _plan = MeldPlanScope::enter(!json && crate::hook::is_tty());
@@ -16942,6 +17026,19 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     // ensures the items are installed, else reports their status.
     let already_melded = is_melded(paths, &repo, alias.as_deref())?;
     if already_melded {
+        // spec: HOME-8 -- a source lives in one home; `--home` naming another
+        // is refused rather than ignored, since nothing would move.
+        if home.is_some() {
+            let _ = Registry::load(paths)?;
+            let current = crate::paths::source_home(&source_ident);
+            let requested = crate::paths::meld_home().home;
+            if current != requested {
+                return Err(MindError::SourceInOtherHome {
+                    name: source_ident.clone(),
+                    home: paths.home_of(&source_ident).display().to_string(),
+                });
+            }
+        }
         // spec: CLI-206 -- name every discovery flag this invocation
         // carries; remeld() cannot apply any of them (it never
         // re-clones or re-registers) and reports so explicitly.

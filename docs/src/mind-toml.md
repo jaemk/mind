@@ -141,6 +141,12 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   sees only the items it recorded; remove anything else in an update hook. An
   older `mind` rejects the key, so set `min-mind-version` alongside. See
   [Remove the items you drop](releasing.md#remove-the-items-you-drop).
+- **`mind-home`**: the mind home to meld the source into, e.g.
+  `"~/dev/project/.mind"`. It must be `~/.mind` or a home the consumer lists in
+  `MIND_HOMES` or the `mind-homes` config key; any other value refuses the meld.
+  The consumer's `mind meld --home` outranks it. An older `mind` rejects the
+  key, so set `min-mind-version` alongside. See
+  [Mind homes](configuration.md#mind-homes).
 
 ## `[[hooks]]` - lifecycle hooks
 

@@ -324,6 +324,7 @@ and verified.
 | Every fixed-choice prompt rejects an unrecognized reply and asks again, and EOF takes the prompt's default; prompts appear only on a TTY, and without one a run that would prompt needs `--yes` | done | CLI-257, CLI-258, CLI-259 |
 | Items hooks: a source `[[hooks]]` entry with `event = "items"` runs once per command after the source's installed set changes, getting the added/updated/removed items and the full installed set in `MIND_ITEMS_FILE`; pending until a run applies the current set; `hooks run --event items`; listed in the unified plan | done | [install-hooks.md](install-hooks.md) (HOOK-190..198) |
 | Auto-update: a session-start trigger syncs and upgrades version-pinned sources at the level the consumer grants per source (`meld --auto-update`; the maintainer's `[source].auto-update` sets the default and the first-meld prompt), capped by policy: compatible releases, or breaking ones within the source's recommended range | done | [auto-update.md](auto-update.md) (AUP-1..30) |
+| Multiple mind homes: extra homes from `MIND_HOMES` / the `mind-homes` config key; `meld --home` or a source's `[source] mind-home` picks a source's home; each home keeps its own registry, manifest, clones, and store, and commands see the union | done | [homes.md](homes.md) (HOME-1..9) |
 
 ## Documents
 
@@ -399,6 +400,8 @@ and verified.
 - [progress.md](progress.md) - progress: the transient stderr spinner shown
   while a slow step runs, when it is on, and how it shares the terminal with
   notes, prompts, hooks, and git.
+- [homes.md](homes.md) - mind homes: extra `~/.mind`-style trees a source can
+  be melded into, and how commands see and write them.
 
 ## Conventions
 

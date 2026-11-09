@@ -28,40 +28,89 @@ use crate::paths::{Paths, mkdir_p};
 /// guard via [`MindLock::write`] or [`MindLock::read`] and drop the guard to
 /// release the OS lock.
 pub struct MindLock {
+    /// One lock file per mind home, the default home first (HOME-9).
+    files: Vec<OneLock>,
+}
+
+struct OneLock {
     inner: RwLock<File>,
     /// Remembered so error messages carry the path.
     path: std::path::PathBuf,
 }
 
-/// RAII exclusive guard. Holds the OS write lock until dropped.
+/// RAII exclusive guard. Holds the OS write locks until dropped.
 pub struct WriteGuard<'a> {
-    _guard: fd_lock::RwLockWriteGuard<'a, File>,
+    _guards: Vec<fd_lock::RwLockWriteGuard<'a, File>>,
 }
 
-/// RAII shared guard. Holds the OS read lock until dropped.
+/// RAII shared guard. Holds the OS read locks until dropped.
 pub struct ReadGuard<'a> {
-    _guard: fd_lock::RwLockReadGuard<'a, File>,
+    _guards: Vec<fd_lock::RwLockReadGuard<'a, File>>,
 }
 
-/// Open (creating if necessary) the lock file for the given paths.
+/// Open (creating if necessary) the lock file of every mind home.
 ///
 /// This does not acquire the lock yet; call [`MindLock::write`] or
 /// [`MindLock::read`] on the returned value to block until the lock is held.
+///
+/// spec: HOME-9 -- every allowed home has its own `.lock`, taken in a fixed
+/// order (the default home, then `extra_homes` order) so two commands cannot
+/// deadlock. A home whose lock file cannot be opened for writing (a sandbox
+/// that allows only reads there) is locked through a read-only handle, and one
+/// with no lock file that cannot be created is skipped: nothing will be
+/// written there. The default home's lock is required as before.
 pub fn open(paths: &Paths) -> Result<MindLock> {
+    let mut files =
+        vec![open_one(&paths.mind_home, paths.lock_file(), true)?.expect("required lock")];
+    for home in paths.extra_homes() {
+        if let Some(lock) = open_one(&home, home.join(".lock"), false)? {
+            files.push(lock);
+        }
+    }
+    Ok(MindLock { files })
+}
+
+fn open_one(
+    home: &std::path::Path,
+    lock_path: std::path::PathBuf,
+    required: bool,
+) -> Result<Option<OneLock>> {
     // The mind home must exist before we can create the lock file.
-    mkdir_p(&paths.mind_home)?;
-    let lock_path = paths.lock_file();
-    let file = OpenOptions::new()
+    let made = mkdir_p(home);
+    let rw = OpenOptions::new()
         .create(true)
         .truncate(false) // lock token only; preserve existing content
         .read(true)
         .write(true)
-        .open(&lock_path)
-        .map_err(|e| MindError::io(&lock_path, e))?;
-    Ok(MindLock {
+        .open(&lock_path);
+    // Only a home we may not write gets the read-only fallback; any other
+    // failure (e.g. the lock path is a directory) is reported as before.
+    let denied = |e: &std::io::Error| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+        )
+    };
+    let file = match rw {
+        Ok(f) => f,
+        Err(e) if denied(&e) => match OpenOptions::new().read(true).open(&lock_path) {
+            Ok(f) => f,
+            Err(_) if !required => return Ok(None),
+            Err(_) => {
+                made?;
+                return Err(MindError::io(&lock_path, e));
+            }
+        },
+        Err(_) if !required => return Ok(None),
+        Err(e) => {
+            made?;
+            return Err(MindError::io(&lock_path, e));
+        }
+    };
+    Ok(Some(OneLock {
         inner: RwLock::new(file),
         path: lock_path,
-    })
+    }))
 }
 
 /// A progress step while another process holds the lock, so a blocked command
@@ -89,27 +138,28 @@ impl MindLock {
     /// Acquire the lock exclusively (mutating commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn write(&mut self) -> Result<WriteGuard<'_>> {
-        let busy = self.inner.try_write().is_err();
+        let busy = self.files.iter_mut().any(|l| l.inner.try_write().is_err());
         refuse_nested(busy)?;
         let _step = wait_step(busy);
-        let guard = self
-            .inner
-            .write()
-            .map_err(|e| MindError::io(&self.path, e))?;
-        Ok(WriteGuard { _guard: guard })
+        let mut guards = Vec::new();
+        for l in self.files.iter_mut() {
+            let path = l.path.clone();
+            guards.push(l.inner.write().map_err(|e| MindError::io(&path, e))?);
+        }
+        Ok(WriteGuard { _guards: guards })
     }
 
     /// Acquire the lock shared (read-only commands). Blocks until available.
     // spec: STO-40 STO-41 STO-42
     pub fn read(&self) -> Result<ReadGuard<'_>> {
-        let busy = self.inner.try_read().is_err();
+        let busy = self.files.iter().any(|l| l.inner.try_read().is_err());
         refuse_nested(busy)?;
         let _step = wait_step(busy);
-        let guard = self
-            .inner
-            .read()
-            .map_err(|e| MindError::io(&self.path, e))?;
-        Ok(ReadGuard { _guard: guard })
+        let mut guards = Vec::new();
+        for l in &self.files {
+            guards.push(l.inner.read().map_err(|e| MindError::io(&l.path, e))?);
+        }
+        Ok(ReadGuard { _guards: guards })
     }
 
     /// Try to acquire a shared lock without blocking. Returns `None` if the
@@ -118,7 +168,11 @@ impl MindLock {
     /// ~1s refresh poll so it never freezes behind a writer (TUI-15, TUI-25).
     // spec: TUI-25
     pub fn try_read(&self) -> Option<ReadGuard<'_>> {
-        self.inner.try_read().ok().map(|g| ReadGuard { _guard: g })
+        let mut guards = Vec::new();
+        for l in &self.files {
+            guards.push(l.inner.try_read().ok()?);
+        }
+        Some(ReadGuard { _guards: guards })
     }
 
     /// Try to acquire the lock exclusively without blocking. Returns `None`
@@ -126,10 +180,11 @@ impl MindLock {
     /// steps aside instead of queueing behind the user (AUP-18).
     // spec: AUP-18
     pub fn try_write(&mut self) -> Option<WriteGuard<'_>> {
-        self.inner
-            .try_write()
-            .ok()
-            .map(|g| WriteGuard { _guard: g })
+        let mut guards = Vec::new();
+        for l in self.files.iter_mut() {
+            guards.push(l.inner.try_write().ok()?);
+        }
+        Some(WriteGuard { _guards: guards })
     }
 }
 

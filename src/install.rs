@@ -67,9 +67,11 @@ pub fn install(
         }
     }
 
-    let store = paths.store_item(kind, &name);
-    let staging = paths.staging_path(kind, &name);
-    let backup = paths.backup_path(kind, &name);
+    // spec: HOME-6 HOME-7 -- the store copy, staging, and backup all live in
+    // the item's source's mind home, so the swap is a rename within one tree.
+    let store = paths.store_item_of(&item.source, kind, &name);
+    let staging = paths.staging_path_of(&item.source, kind, &name);
+    let backup = paths.backup_path_of(&item.source, kind, &name);
 
     // 0. Resolve where this item will link, and refuse up front to overwrite any
     //    target that is not mind's own symlink (a user's file/dir/foreign link).
@@ -93,7 +95,7 @@ pub fn install(
         .link_rel
         .clone()
         .or_else(|| paths.default_link_rel(kind, &link_name));
-    let store_root = paths.store_dir();
+    let store_root = paths.store_dir_of(&item.source);
     // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3)
     // and whose parent directory exists (STO-56: the reachability gate). A lobe
     // that excludes the kind or whose parent is absent contributes no link and is
@@ -192,7 +194,11 @@ pub fn install(
         // can be restored on rollback. A missing target or mind's own symlink
         // needs no stash. (LIFE-43)
         let stash = if force {
-            let sp = paths.tmp_dir().join("foreign-stash").join(i.to_string());
+            let sp = paths
+                .home_of(&item.source)
+                .join(".tmp")
+                .join("foreign-stash")
+                .join(i.to_string());
             match maybe_stash_foreign(&store_root, &link, &sp) {
                 Ok(true) => Some(sp),
                 Ok(false) => None,
@@ -253,7 +259,7 @@ pub fn install(
         source: item.source.clone(),
         commit: commit.to_string(),
         hash,
-        store: paths.store_rel(kind, &item.effective_name()),
+        store: paths.store_rel_of(&item.source, kind, &item.effective_name()),
         links: links
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
@@ -282,7 +288,11 @@ pub fn install(
 /// Paths that contain `..` components or fail the `starts_with` check are
 /// skipped with a warning rather than removed (LIFE-44).
 pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
-    let store_root = paths.store_dir();
+    // spec: HOME-7 -- the store root of the home the copy was installed in.
+    let store_root = match crate::paths::home_of_store(&item.store) {
+        Some(home) => home.join("store"),
+        None => paths.store_dir(),
+    };
     let agent_homes = paths.agent_homes()?;
 
     // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
@@ -445,7 +455,10 @@ pub fn link_into_new_lobes(
     };
 
     let store = paths.mind_home.join(&item.store);
-    let store_root = paths.store_dir();
+    let store_root = match crate::paths::home_of_store(&item.store) {
+        Some(home) => home.join("store"),
+        None => paths.store_dir(),
+    };
     for lobe in new_lobes {
         if !lobe.admits(item.kind) {
             continue;

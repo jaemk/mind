@@ -431,7 +431,8 @@ pub fn offer(
 fn write_doc(paths: &Paths, doc: &ItemsDoc) -> Result<PathBuf> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static SEQ: AtomicU32 = AtomicU32::new(0);
-    let dir = paths.tmp_dir().join("items-hooks");
+    // spec: HOME-6 -- in the source's own mind home.
+    let dir = paths.home_of(doc.source).join(".tmp").join("items-hooks");
     std::fs::create_dir_all(&dir).map_err(|e| crate::error::MindError::io(&dir, e))?;
     let file = dir.join(format!(
         "{}-{}.json",

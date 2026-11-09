@@ -195,8 +195,31 @@ impl Default for Manifest {
 }
 
 impl Manifest {
+    /// Load the union of every allowed home's `manifest.json`, the default
+    /// home first (HOME-3). An item in an extra home records its `store` as an
+    /// absolute path (HOME-7), which is how `save` routes it back.
+    // spec: HOME-3 HOME-7
     pub fn load(paths: &Paths) -> Result<Self> {
-        let file = paths.manifest_file();
+        let mut m = Self::load_file(&paths.manifest_file())?;
+        for home in paths.extra_homes() {
+            let extra = Self::load_file(&home.join("manifest.json"))?;
+            for (key, item) in extra.items {
+                if m.items.contains_key(&key) {
+                    crate::render::scan_warn(format!(
+                        "warning: {} is installed from more than one mind home; ignoring the one in {}",
+                        crate::sanitize::strip_ansi(&key),
+                        home.display()
+                    ));
+                    continue;
+                }
+                m.items.insert(key, item);
+            }
+        }
+        Ok(m)
+    }
+
+    fn load_file(file: &std::path::Path) -> Result<Self> {
+        let file = file.to_path_buf();
         match std::fs::read(&file) {
             Ok(bytes) => {
                 let m: Manifest = serde_json::from_slice(&bytes)
@@ -216,12 +239,60 @@ impl Manifest {
         }
     }
 
+    /// Write each item back to the manifest of the home its store copy lives
+    /// in (HOME-3, HOME-7). A home whose file would not change is not written.
+    // spec: HOME-3 HOME-7
     pub fn save(&self, paths: &Paths) -> Result<()> {
-        paths.ensure_layout()?;
-        let file = paths.manifest_file();
-        let json =
-            serde_json::to_vec_pretty(self).map_err(|e| MindError::json("manifest.json", e))?;
-        Paths::atomic_write(&file, &json)
+        use crate::paths::normalize_home;
+        let default = normalize_home(&paths.mind_home);
+        let home_of = |item: &InstalledItem| {
+            crate::paths::home_of_store(&item.store)
+                .map(|h| normalize_home(&h))
+                .unwrap_or_else(|| default.clone())
+        };
+        let mut homes = vec![default.clone()];
+        for h in paths.extra_homes() {
+            homes.push(normalize_home(&h));
+        }
+        for item in self.items.values() {
+            let h = home_of(item);
+            if !homes.contains(&h) {
+                homes.push(h);
+            }
+        }
+        for home in homes {
+            let is_default = home == default;
+            let subset = Manifest {
+                version: self.version,
+                items: self
+                    .items
+                    .iter()
+                    .filter(|(_, it)| home_of(it) == home)
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
+            let file = if is_default {
+                paths.manifest_file()
+            } else {
+                home.join("manifest.json")
+            };
+            let json = serde_json::to_vec_pretty(&subset)
+                .map_err(|e| MindError::json("manifest.json", e))?;
+            match std::fs::read(&file) {
+                Ok(existing) if existing == json => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && subset.items.is_empty() => {
+                    continue;
+                }
+                _ => {}
+            }
+            if is_default {
+                paths.ensure_layout()?;
+            } else {
+                crate::paths::mkdir_p(&home)?;
+            }
+            Paths::atomic_write(&file, &json)?;
+        }
+        Ok(())
     }
 
     pub fn insert(&mut self, item: InstalledItem) {
