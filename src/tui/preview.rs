@@ -63,11 +63,11 @@ fn preview_temp_name(repo: &str, pid: u32, nonce: u64) -> String {
 pub fn preview(paths: &Paths, spec: &str) -> Result<SourcePreview> {
     let source = parse_spec(spec)?;
     let nonce = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
-    let temp_dir = paths.mind_home.join(".tmp").join(preview_temp_name(
-        &source.repo,
-        std::process::id(),
-        nonce,
-    ));
+    // spec: HOME-14
+    let temp_dir =
+        paths
+            .scratch_dir()?
+            .join(preview_temp_name(&source.repo, std::process::id(), nonce));
     if temp_dir.exists() {
         std::fs::remove_dir_all(&temp_dir)
             .map_err(|e| crate::error::MindError::io(&temp_dir, e))?;

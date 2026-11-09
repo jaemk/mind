@@ -255,6 +255,36 @@ fn auto_update_runs_with_a_read_only_default_home() {
     );
 }
 
+/// `absorb` into a source in an extra home keeps its backup in that home, so it
+/// works with a read-only default home.
+#[test]
+fn absorb_into_an_extra_home_source_with_a_read_only_default_home() {
+    // spec: HOME-14
+    let sb = Sandbox::new(None);
+    let extra = sb.extra_str();
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    // An item placed by hand in the lobe.
+    write(
+        &sb.claude_home.join("skills/handmade/SKILL.md"),
+        "---\ndescription: handmade\n---\nbody\n",
+    );
+    std::fs::write(sb.default_home.join(".lock"), "").unwrap();
+    chmod("a-w", &sb.default_home);
+    if std::fs::write(sb.default_home.join("probe"), "").is_ok() {
+        // Running as root: permissions are not enforced, nothing to check.
+        return;
+    }
+    let r = sb.mind(&["--yes", "absorb", "skill:handmade", "--to", &sb.spec()]);
+    chmod("u+w", &sb.default_home);
+    assert!(r.ok(), "absorb: {}\n{}", r.stdout, r.stderr);
+    let mut items = sb.items_in(&sb.extra);
+    items.sort();
+    assert_eq!(items, ["skill:alpha", "skill:handmade"]);
+    assert!(sb.source.join("skills/handmade/SKILL.md").is_file());
+    assert!(!sb.default_home.join(".tmp").exists());
+}
+
 /// A default home that does not exist and cannot be created (its parent is
 /// read-only) does not stop a meld into an extra home: its lock is skipped and
 /// nothing is written there.

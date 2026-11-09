@@ -145,7 +145,9 @@ Each home is a full tree (`sources.json`, `manifest.json`, `sources/`,
 `store/`), and the sources a curator lists follow it unless they name their
 own. Every command sees all homes as one set and writes each source and item
 back to its own home, so working with a source in one home writes nothing in
-another. `config.toml`, the hook history, and the hook logs stay in `~/.mind`.
+another. `config.toml`, the hook history, and the hook logs stay in `~/.mind`; when it
+cannot be written, a hook record is dropped with a warning, and `review` and
+the `probe` preview clone into the first home that can be written.
 A source stays in its home; to move it, `unmeld` it and meld it again with
 `--home`. `learn <url> --home` places an [item link](item-links.md) the same
 way, a curator entry can name a source's `mind-home`, and `dump` records each

@@ -164,8 +164,8 @@ fn release_tag_checks(
     };
 
     // The highest release's catalog, from a throwaway clone at its tag.
-    paths.ensure_layout()?;
-    let tmp = paths.tmp_dir().join(format!(
+    // spec: HOME-14
+    let tmp = paths.scratch_dir()?.join(format!(
         "review-release-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -365,8 +365,8 @@ fn resolve_target(
     }
 
     // Remote spec: shallow-clone to a temp dir, register a drop guard.
-    paths.ensure_layout()?;
-    let tmp = paths.tmp_dir().join(format!(
+    // spec: HOME-14
+    let tmp = paths.scratch_dir()?.join(format!(
         "review-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -3293,8 +3293,7 @@ mod tests {
     /// must be empty (CLI-130: clone removed after the check). Mirrors the
     /// production sequence at review.rs resolve_target lines 96-109.
     fn review_via_clone(paths: &Paths, bare: &Path, alias: Option<String>) -> ReviewResult {
-        paths.ensure_layout().unwrap();
-        let tmp = paths.tmp_dir().join(format!(
+        let tmp = paths.scratch_dir().unwrap().join(format!(
             "review-{}-{}",
             std::process::id(),
             UNIT_COUNTER.fetch_add(1, Ordering::SeqCst)
@@ -4558,7 +4557,7 @@ mod tests {
 
     /// Assert no `review-*` scratch dir survives under MIND_HOME/.tmp.
     fn assert_no_review_temp(paths: &Paths) {
-        let tdir = paths.tmp_dir();
+        let tdir = paths.mind_home.join(".tmp");
         if !tdir.exists() {
             return;
         }

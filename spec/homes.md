@@ -34,6 +34,10 @@ as one set.
 - `HOME-6` A source's clone, store copies, staging and backup space, and items
   hook document all live under its home. A home that is no longer allowed is
   not read, so its sources drop out of view until it is listed again.
+- `HOME-14` Throwaway work goes where it can be written. `absorb` keeps its
+  backup of the lobe item in the destination source's home. `review`'s clone
+  and the `probe` TUI's preview clone, tied to no source, go in the `.tmp` of
+  the first allowed home (the default first) that can be written.
 - `HOME-7` A manifest entry's `store` is relative to the default home for an
   item there (unchanged), and the absolute store path for an item in an extra
   home, which is what routes the entry back to its home on save. An absolute
