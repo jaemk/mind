@@ -204,7 +204,12 @@ pub fn install(
     //    is stashed before ensure_link removes it so rollback can restore it
     //    (LIFE-43). On any failure, undo the links made so far (restoring their
     //    stashes) and roll the store back.
+    // `links` is every link the item records; `made` (with `stashes`) only
+    // those this install created, which a rollback removes. A link that
+    // already pointed at the store copy is recorded but never made, so a
+    // rollback leaves it, valid again once the store is restored.
     let mut links: Vec<std::path::PathBuf> = Vec::new();
+    let mut made: Vec<std::path::PathBuf> = Vec::new();
     let mut stashes: Vec<Option<std::path::PathBuf>> = Vec::new();
     for (i, link) in planned_links.into_iter().enumerate() {
         // Under force, move any pre-existing foreign target to a stash so it
@@ -221,7 +226,7 @@ pub fn install(
                 Ok(false) => None,
                 Err(e) => {
                     // Stashing failed: roll back links and store made so far.
-                    for (made, s) in links.iter().zip(stashes.iter()) {
+                    for (made, s) in made.iter().zip(stashes.iter()) {
                         let _ = remove_path(made);
                         if let Some(s) = s {
                             let _ = rename(s, made);
@@ -242,7 +247,6 @@ pub fn install(
         // left as it is, so an in-place reinstall writes nothing in the lobe.
         if stash.is_none() && std::fs::read_link(&link).is_ok_and(|t| t == store) {
             links.push(link);
-            stashes.push(None);
             continue;
         }
         if let Err(e) = ensure_link(&store, &link) {
@@ -254,7 +258,7 @@ pub fn install(
             }
             // Rollback: remove symlinks made so far, restore their stashes, then
             // restore the store. Also restore the current link's stash if any.
-            for (made, s) in links.iter().zip(stashes.iter()) {
+            for (made, s) in made.iter().zip(stashes.iter()) {
                 let _ = remove_path(made);
                 if let Some(s) = s {
                     let _ = rename(s, made);
@@ -269,6 +273,7 @@ pub fn install(
             }
             return Err(e);
         }
+        made.push(link.clone());
         links.push(link);
         stashes.push(stash);
     }
@@ -307,6 +312,10 @@ pub fn install(
         explicit: false,
         // spec: VER-60 -- stamped by the caller, which knows the source's pin.
         version: None,
+        // spec: LOBE-5 -- the lobe the item belongs in, for `upgrade`.
+        lobe: paths
+            .effective_source_lobe(&item.source)?
+            .map(|r| r.to_string_lossy().into_owned()),
     })
 }
 
@@ -325,6 +334,9 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     let mut agent_homes = paths.agent_homes()?;
     if let Ok(Some(root)) = paths.source_lobe(&item.source) {
         agent_homes.push(crate::paths::Lobe::all_kinds(root));
+    }
+    if let Some(recorded) = &item.lobe {
+        agent_homes.push(crate::paths::Lobe::all_kinds(PathBuf::from(recorded)));
     }
 
     // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
@@ -1505,6 +1517,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         };
 
         let fixed = relink(&paths, &item).unwrap();

@@ -53,10 +53,13 @@ their `CLAUDE.md`).
   (POL-40) are unchanged by a source's `lobe`: they link into exactly the
   lobes they name.
 - `LOBE-5` `upgrade` reinstalls an item whose links are not where its
-  source's lobe puts them, with or without a content change: a source with a
-  lobe whose linkable item has no link under it, or has one under the
-  default lobe; or a source with none whose item has a link under no
-  configured lobe nor the default lobe (left from a dropped lobe). The report
+  source's lobe puts them, with or without a content change. Each installed
+  item records the lobe it was linked with (`lobe` in `manifest.json`, an
+  absolute path; absent for none); a linkable item is relinked when that
+  differs from the source's lobe now (LOBE-4: a policy lock means none), or
+  when, with a lobe, it still records a link under the default lobe that is
+  not under that lobe. An item of a source that never had a lobe is never
+  relinked, whatever the configured lobes are at the time. The report
   shows `lobe    -> <dir>` (or `-> the configured lobes`), and a pass that
   only moves links or homes is headed `N items to move:` when any item
   changes home (HOME-8), else `N items to relink:`. The old links are
@@ -67,8 +70,9 @@ their `CLAUDE.md`).
 - `LOBE-6` For every source, a lobe that cannot be written (permission denied,
   a read-only filesystem) does not fail an install, upgrade, or removal. A
   link already pointing at the item's store copy is left as it is and stays
-  recorded, so an in-place upgrade writes nothing in the lobe. A link that
-  cannot be made is skipped and not recorded; a stale link that cannot be
-  removed is left and stays recorded, so a later run that can write there
-  removes it. Each such directory is named once per run in a note (stdout,
+  recorded, so an in-place upgrade writes nothing in the lobe, and an install
+  that fails and rolls back leaves it in place. A link that cannot be made is
+  skipped and not recorded; a stale link an upgrade cannot remove is left and
+  stays recorded, so a later run that can write there removes it. `forget`
+  leaves a link it cannot remove in place, no longer recorded. Each such directory is named once per run in a note (stdout,
   stderr under `--json`, CLI-217).

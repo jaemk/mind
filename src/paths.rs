@@ -159,12 +159,54 @@ pub fn set_consumer_lobe(source: &str, lobe: Option<&str>) {
     }
 }
 
-pub(crate) fn consumer_lobe_decl(source: &str) -> Option<String> {
+/// Forget every recorded consumer lobe (`Registry::load`, before it records
+/// the registry's own), so the map never outlives the registry entry.
+pub fn clear_consumer_lobes() {
     CONSUMER_LOBES
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(source)
-        .cloned()
+        .clear();
+}
+
+thread_local! {
+    /// The `--lobe` of a meld or item-link learn in progress (LOBE-7), for
+    /// the source it names, before that source's registry entry records it.
+    static PENDING_LOBE: RefCell<Option<(String, String)>> = const { RefCell::new(None) };
+}
+
+/// RAII scope for a pending `--lobe`; the previous value is restored on drop.
+pub struct PendingLobeScope {
+    prev: Option<(String, String)>,
+}
+
+impl PendingLobeScope {
+    pub fn set(source: &str, lobe: &str) -> PendingLobeScope {
+        let prev = PENDING_LOBE.with(|c| c.replace(Some((source.to_string(), lobe.to_string()))));
+        PendingLobeScope { prev }
+    }
+}
+
+impl Drop for PendingLobeScope {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        PENDING_LOBE.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+pub(crate) fn consumer_lobe_decl(source: &str) -> Option<String> {
+    let pending = PENDING_LOBE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(s, _)| s == source)
+            .map(|(_, l)| l.clone())
+    });
+    pending.or_else(|| {
+        CONSUMER_LOBES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(source)
+            .cloned()
+    })
 }
 
 /// Where a source's lobe was named, for messages (LOBE-2).
@@ -610,6 +652,19 @@ impl Paths {
             .transpose()
     }
 
+    /// [`Self::source_lobe`], unless a managed policy's lobe lock (POL-40)
+    /// overrides it (LOBE-4): the lobe the source's items belong in.
+    // spec: LOBE-4
+    pub fn effective_source_lobe(&self, source: &str) -> Result<Option<PathBuf>> {
+        let Some(root) = self.source_lobe(source)? else {
+            return Ok(None);
+        };
+        if Policy::load()?.is_some_and(|p| p.lobes_lock()) {
+            return Ok(None);
+        }
+        Ok(Some(root))
+    }
+
     /// The default lobe (`~/.claude`, or the `MIND_DEFAULT_LOBE` /
     /// `CLAUDE_HOME` override) as an absolute path.
     pub fn default_lobe_path(&self) -> Result<PathBuf> {
@@ -626,12 +681,9 @@ impl Paths {
         if local_lobe_override().is_some() {
             return Ok(homes);
         }
-        let Some(root) = self.source_lobe(source)? else {
+        let Some(root) = self.effective_source_lobe(source)? else {
             return Ok(homes);
         };
-        if Policy::load()?.is_some_and(|p| p.lobes_lock()) {
-            return Ok(homes);
-        }
         let default = normalize_home(&self.default_lobe_path()?);
         let mut out = vec![Lobe::all_kinds(root)];
         out.extend(
@@ -1423,6 +1475,25 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A pending `--lobe` applies to the source it names only, and ends with
+    /// its scope, restoring an outer one.
+    #[test]
+    fn pending_lobe_is_scoped_to_its_source() {
+        // spec: LOBE-7
+        let src = "test/pending/lobe-scope";
+        assert_eq!(consumer_lobe_decl(src), None);
+        {
+            let _outer = PendingLobeScope::set(src, "outer");
+            {
+                let _inner = PendingLobeScope::set(src, "inner");
+                assert_eq!(consumer_lobe_decl(src).as_deref(), Some("inner"));
+                assert_eq!(consumer_lobe_decl("test/pending/other"), None);
+            }
+            assert_eq!(consumer_lobe_decl(src).as_deref(), Some("outer"));
+        }
+        assert_eq!(consumer_lobe_decl(src), None);
+    }
 
     /// A command links like an agent or rule (one `.md` under the kind
     /// directory), under its EFFECTIVE name, so a prefixed command reads as
@@ -3092,6 +3163,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         };
 
         // A lobe whose PARENT directory does not exist -- freshly added, not yet

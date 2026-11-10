@@ -76,6 +76,10 @@ impl Sandbox {
     }
 
     fn mind_in(&self, cwd: &Path, args: &[&str]) -> Run {
+        self.mind_env(cwd, &[], args)
+    }
+
+    fn mind_env(&self, cwd: &Path, env: &[(&str, &Path)], args: &[&str]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
             .current_dir(cwd)
@@ -90,6 +94,7 @@ impl Sandbox {
         if self.extra_homes {
             cmd.env("MIND_HOMES", &self.extra);
         }
+        cmd.envs(env.iter().copied());
         let out = cmd.output().expect("run mind");
         Run {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -537,4 +542,141 @@ fn source_lobe_is_called_out_once() {
         "{}",
         r.stdout
     );
+}
+
+/// The sandbox case end to end: with the default home and the default lobe
+/// both read-only, `upgrade <source>` updates a source in an extra home that
+/// links into its own lobe there, writing nothing in either.
+#[test]
+fn sandboxed_upgrade_of_a_source_with_its_own_lobe() {
+    // spec: LOBE-3 LOBE-6 HOME-1 HOME-3
+    let sb = Sandbox::new(Some("[source]\nlobe = \"claude\"\n"));
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    // A second source in the default home, linked into the default lobe.
+    let other_src = sb.base.join("other-src");
+    write(
+        &other_src.join("skills/gamma/SKILL.md"),
+        "---\ndescription: gamma\n---\nbody\n",
+    );
+    git(&other_src, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&other_src, &["config", "user.email", "t@t"]);
+    git(&other_src, &["config", "user.name", "t"]);
+    git(&other_src, &["add", "-A"]);
+    git(&other_src, &["commit", "-qm", "initial"]);
+    let r = sb.mind(&["--yes", "meld", &other_src.to_string_lossy()]);
+    assert!(r.ok(), "meld other: {}\n{}", r.stdout, r.stderr);
+
+    write(
+        &sb.source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\nsandboxed\n",
+    );
+    sb.commit("change alpha");
+    std::fs::write(sb.default_home.join(".lock"), "").ok();
+    let lock_ro = Command::new("chmod")
+        .args(["-R", "a-w"])
+        .arg(&sb.default_home)
+        .arg(&sb.claude_home)
+        .status()
+        .expect("chmod");
+    assert!(lock_ro.success());
+    if !enforced(&sb.claude_home) {
+        return;
+    }
+    let owner = sb.base.file_name().unwrap().to_string_lossy().into_owned();
+    let ident = format!("local/{owner}/src");
+    let r = sb.mind(&["--yes", "upgrade", &ident]);
+    let _ = Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(&sb.default_home)
+        .arg(&sb.claude_home)
+        .status();
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    let alpha = sb.own_lobe().join("skills/alpha/SKILL.md");
+    assert!(
+        std::fs::read_to_string(&alpha)
+            .unwrap()
+            .contains("sandboxed"),
+        "the upgraded copy is linked from the source's own lobe"
+    );
+    assert!(sb.claude_home.join("skills/gamma").exists());
+}
+
+/// A lobe inside the default lobe (allowed with no extra homes) is not
+/// mistaken for a link left in the default lobe: once linked, `upgrade` has
+/// nothing to relink.
+#[test]
+fn a_lobe_inside_the_default_lobe_settles() {
+    // spec: LOBE-5
+    let mut sb = Sandbox::new(None);
+    sb.extra_homes = false;
+    let spec = sb.source.to_string_lossy().into_owned();
+    let inner = sb.claude_home.join("sandbox");
+    let inner_str = inner.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &spec, "--lobe", &inner_str]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert!(is_link_into(
+        &inner.join("skills/alpha"),
+        &sb.default_home.join("store")
+    ));
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("relink"), "{}", r.stdout);
+}
+
+/// Without a source lobe, where the configured lobes point does not move
+/// links: an `upgrade` run with `$MIND_AGENT_HOMES` naming another lobe
+/// leaves the installed links alone.
+#[test]
+fn upgrade_does_not_move_links_of_a_source_without_a_lobe() {
+    // spec: LOBE-5
+    let sb = Sandbox::new(None);
+    let project = sb.base.join("project/.devin");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let r = sb.mind(&["config", "lobes", "add", &project.to_string_lossy()]);
+    assert!(r.ok(), "lobes add: {}", r.stderr);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let project_link = project.join("skills/alpha");
+    assert!(is_link_into(&project_link, &sb.extra.join("store")));
+    let other = sb.base.join("other");
+    let cwd = std::env::current_dir().unwrap();
+    let r = sb.mind_env(&cwd, &[("MIND_AGENT_HOMES", &other)], &["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("relink"), "{}", r.stdout);
+    assert!(is_link_into(&project_link, &sb.extra.join("store")));
+}
+
+/// An upgrade that fails linking into a later lobe rolls back without
+/// removing a link in an earlier lobe that already pointed at the store copy:
+/// the item is left as it was, still linked.
+#[test]
+fn a_failed_reinstall_keeps_the_links_it_did_not_make() {
+    // spec: LOBE-6
+    let sb = Sandbox::new(None);
+    let project = sb.base.join("project/.devin");
+    std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+    let r = sb.mind(&["config", "lobes", "add", &project.to_string_lossy()]);
+    assert!(r.ok(), "lobes add: {}", r.stderr);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let claude_link = sb.claude_home.join("skills/alpha");
+    assert!(is_link_into(&claude_link, &sb.extra.join("store")));
+
+    // The project lobe's `skills` becomes a dangling symlink, so linking
+    // there fails (not as an unwritable lobe) and the upgrade rolls back.
+    std::fs::remove_dir_all(project.join("skills")).unwrap();
+    std::os::unix::fs::symlink(sb.base.join("gone"), project.join("skills")).unwrap();
+    write(
+        &sb.source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\nchanged\n",
+    );
+    sb.commit("change alpha");
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(!r.ok(), "upgrade should fail: {}", r.stdout);
+    assert!(
+        is_link_into(&claude_link, &sb.extra.join("store")),
+        "the earlier lobe's link survives the rollback"
+    );
+    assert!(claude_link.join("SKILL.md").exists());
 }
