@@ -22,7 +22,6 @@ their `CLAUDE.md`).
   exit 1): a `--lobe` before anything is cloned, a source's own `lobe` at
   `meld` before the source is registered (the clone is removed), and one from
   a later commit when an item of the source installs.
-
 - `LOBE-7` `meld --lobe <dir>` (and `learn <url> --lobe <dir>` for an item
   link) names the consumer's lobe for the source and outranks its `[source]
   lobe`; a source's own `lobe` is then not checked. It is recorded on the
@@ -33,20 +32,29 @@ their `CLAUDE.md`).
   sources it curates. For a plain item ref, `learn --lobe` is ignored with a
   note.
 - `LOBE-8` Before a source's items install, a lobe that takes the default
-  lobe's place is called out once per source per run, in bold, with the
-  install preview ahead of the confirmation (or before the install under
-  `--yes`): `<source> links its items into <dir> in place of <default lobe>`,
-  ending `, a directory outside every mind home` when it lies under none.
-  `upgrade`'s `lobe` line (LOBE-5) marks such a lobe the same way.
+  lobe's place is called out in bold, once per source and lobe per run:
+  `<source> links its items into <dir> in place of <default lobe>`, ending
+  `, a directory outside every mind home` when it lies under none. An
+  interactive install shows it with the preview, ahead of the confirmation;
+  every other install path (`--yes`, `--json`, profiles, the curated chain,
+  `upgrade`) shows it before the first link, on stderr under `--json`
+  (CLI-217). `upgrade`'s `lobe` line (LOBE-5) marks such a lobe the same way.
+
+## Showing it
+
+- `LOBE-9` `recall --sources` lists `lobe:<dir>` in a source's bracket when a
+  lobe is in effect for it (the consumer's or its own), and `--json` gives
+  every source's `lobe_path`: that absolute path, or `null`. The registry's
+  own `lobe` key stays the consumer's `--lobe` as given.
 
 ## Linking
 
 - `LOBE-3` The lobes an item of a source with a lobe links into are the
   configured lobes (`Paths::agent_homes`) with the default lobe (`~/.claude`,
   or the `MIND_DEFAULT_LOBE` / `CLAUDE_HOME` override) replaced by the source's
-  lobe (the consumer's, LOBE-7, else its own). Every other lobe, a project lobe included, still gets its link. The
-  source's lobe admits every kind and is created on first link, so it is
-  never skipped as unreachable (STO-56). `introspect` checks and `--fix`
+  lobe (the consumer's, LOBE-7, else its own). Every other lobe, a project
+  lobe included, still gets its link. The source's lobe admits every kind and
+  is created on first link, so it is never skipped as unreachable (STO-56). `introspect` checks and `--fix`
   repairs an item's links against the same set, and `forget` confines its
   removals to it (LIFE-44).
 - `LOBE-4` A `--local` install (HARN-20) and a managed policy's lobe lock
@@ -74,5 +82,6 @@ their `CLAUDE.md`).
   that fails and rolls back leaves it in place. A link that cannot be made is
   skipped and not recorded; a stale link an upgrade cannot remove is left and
   stays recorded, so a later run that can write there removes it. `forget`
-  leaves a link it cannot remove in place, no longer recorded. Each such directory is named once per run in a note (stdout,
-  stderr under `--json`, CLI-217).
+  leaves a link it cannot remove in place, no longer recorded. Each such
+  directory is named once per run in a note (stdout, stderr under `--json`,
+  CLI-217).

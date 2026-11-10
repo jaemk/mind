@@ -1166,6 +1166,18 @@ pub(crate) fn move_to_home(
         }
         i += 1;
     }
+    // Refuse before anything moves, so a refused follower does not leave the
+    // family split across homes.
+    for member in &family {
+        if home_key(source_home(member).as_deref()) != target
+            && Registry::home_lists(&target, member)
+        {
+            return Err(MindError::SourceInOtherHome {
+                name: member.clone(),
+                home: target.display().to_string(),
+            });
+        }
+    }
     let mut moved = 0;
     for member in &family {
         let from = source_home(member);
@@ -1175,12 +1187,6 @@ pub(crate) fn move_to_home(
         let Some(src) = registry.find(member).cloned() else {
             continue;
         };
-        if Registry::home_lists(&target, member) {
-            return Err(MindError::SourceInOtherHome {
-                name: member.clone(),
-                home: target.display().to_string(),
-            });
-        }
         let old_dir = clone_dir_checked(paths, &src)?;
         set_source_home(member, to);
         let relocated = if src.is_linked() || !old_dir.exists() {
@@ -1273,7 +1279,9 @@ fn home_followers(paths: &Paths, registry: &Registry, curator: &str) -> Vec<Stri
 
 /// Move a directory tree to `to`: a rename, else (another filesystem) a copy
 /// that keeps symlinks, then removal of the original. A leftover at `to` is
-/// replaced.
+/// replaced. Once the copy is complete the move has happened: an original
+/// that cannot be removed is left with a warning, not reported as a failure
+/// that would send the source back to a partly removed tree.
 fn move_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     install::remove_path(to)?;
     if let Some(parent) = to.parent() {
@@ -1286,7 +1294,16 @@ fn move_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
         let _ = install::remove_path(to);
         return Err(e);
     }
-    install::remove_path(from)
+    if let Err(e) = install::remove_path(from) {
+        let msg = format!(
+            "warning: moved {} to {} but could not remove the original: {}",
+            crate::sanitize::display_path(from),
+            crate::sanitize::display_path(to),
+            strip_ansi(&e.to_string())
+        );
+        crate::progress::suspend(|| eprintln!("{msg}"));
+    }
+    Ok(())
 }
 
 /// Bring one source's clone up to date for `sync` / the `upgrade` pre-pass and
@@ -10552,6 +10569,10 @@ fn install_item(
     // spec: LIFE-50 -- refuse cleanly on a platform mind's symlink model does not
     // support, before creating (or reusing) any link.
     require_link_platform(paths)?;
+    // spec: LOBE-8 -- every install path (the `--json` and profile installs
+    // do not pass through the `learn` preview) names the lobe before the
+    // first link; once per source and lobe, so a preview's callout stands.
+    call_out_lobes(paths, std::iter::once(item));
     // spec: HOOK-125 -- on a re-install the item's update hooks replace them.
     let install_hooks = item.install_time_hooks(is_update);
     let hook_env = if item.build.is_some() || !install_hooks.is_empty() {
@@ -14680,6 +14701,17 @@ pub fn recall(
                                     .to_string(),
                             ),
                         );
+                        // spec: LOBE-9 -- the lobe in effect, the consumer's or
+                        // the source's own; `lobe` stays the consumer's as given.
+                        obj.insert(
+                            "lobe_path".into(),
+                            match paths.effective_source_lobe(&s.name).ok().flatten() {
+                                Some(root) => {
+                                    serde_json::Value::String(crate::sanitize::display_path(&root))
+                                }
+                                None => serde_json::Value::Null,
+                            },
+                        );
                     }
                     Ok(v)
                 })
@@ -14720,12 +14752,17 @@ pub fn recall(
                     Some(h) => format!(" home:{}", h.display()),
                     None => String::new(),
                 };
+                // spec: LOBE-9 -- a source with a lobe in effect names it.
+                let lobe = match paths.effective_source_lobe(&s.name).ok().flatten() {
+                    Some(root) => format!(" lobe:{}", crate::sanitize::display_path(&root)),
+                    None => String::new(),
+                };
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
                     out.dim(&format!(
-                        "[{commit}{release}{auto}{ns}{hook}{origin}{home}]"
+                        "[{commit}{release}{auto}{ns}{hook}{origin}{home}{lobe}]"
                     )),
                     s.description.clone().unwrap_or_default(),
                 ]

@@ -602,6 +602,74 @@ fn sandboxed_upgrade_of_a_source_with_its_own_lobe() {
     assert!(sb.claude_home.join("skills/gamma").exists());
 }
 
+/// `recall --sources` names the lobe in effect, the source's own or the
+/// consumer's, and `--json` gives it as `lobe_path`.
+#[test]
+fn recall_sources_shows_the_lobe() {
+    // spec: LOBE-9
+    let sb = Sandbox::new(Some("[source]\nlobe = \"claude\"\n"));
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let own = sb.own_lobe().to_string_lossy().into_owned();
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.ok(), "{}", r.stderr);
+    assert!(r.stdout.contains(&format!("lobe:{own}")), "{}", r.stdout);
+    let r = sb.mind(&["--json", "recall", "--sources"]);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["items"][0]["lobe_path"], serde_json::json!(own), "{v}");
+    assert!(v["items"][0].get("lobe").is_none(), "{v}");
+
+    let spec = sb.source.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &spec, "--lobe", "mine"]);
+    assert!(r.ok(), "re-meld: {}\n{}", r.stdout, r.stderr);
+    let mine = sb.extra.join("mine").to_string_lossy().into_owned();
+    let r = sb.mind(&["--json", "recall", "--sources"]);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(v["items"][0]["lobe_path"], serde_json::json!(mine), "{v}");
+    assert_eq!(v["items"][0]["lobe"], "mine", "{v}");
+
+    // No lobe: no token, a null path.
+    let plain = Sandbox::new(None);
+    let r = plain.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let r = plain.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains("lobe:"), "{}", r.stdout);
+    let r = plain.mind(&["--json", "recall", "--sources"]);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert!(v["items"][0]["lobe_path"].is_null(), "{v}");
+}
+
+/// `meld --json --lobe` on a melded source relinks and still prints exactly
+/// one JSON document, with the callout and notes on stderr.
+#[test]
+fn meld_lobe_under_json_is_one_document() {
+    // spec: LOBE-7 LOBE-8
+    let sb = Sandbox::new(None);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let spec = sb.source.to_string_lossy().into_owned();
+    let r = sb.mind(&["--json", "--yes", "meld", &spec, "--lobe", "mine"]);
+    assert!(r.ok(), "meld --lobe: {}\n{}", r.stdout, r.stderr);
+    let v: Result<Value, _> = serde_json::from_str(&r.stdout);
+    assert!(v.is_ok(), "stdout is one JSON document: {}", r.stdout);
+    assert!(
+        is_link_into(&sb.extra.join("mine/skills/alpha"), &sb.extra.join("store")),
+        "relinked under --json:\n{}\n{}",
+        r.stdout,
+        r.stderr
+    );
+
+    // A fresh meld under --json: the callout goes to stderr.
+    let fresh = Sandbox::new(Some("[source]\nlobe = \"claude\"\n"));
+    let extra = fresh.extra.to_string_lossy().into_owned();
+    let spec = fresh.source.to_string_lossy().into_owned();
+    let r = fresh.mind(&["--json", "--yes", "meld", &spec, "--home", &extra]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let v: Result<Value, _> = serde_json::from_str(&r.stdout);
+    assert!(v.is_ok(), "stdout is one JSON document: {}", r.stdout);
+    assert!(r.stderr.contains("links its items into"), "{}", r.stderr);
+}
+
 /// A lobe inside the default lobe (allowed with no extra homes) is not
 /// mistaken for a link left in the default lobe: once linked, `upgrade` has
 /// nothing to relink.

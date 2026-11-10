@@ -505,6 +505,46 @@ fn moving_a_curator_moves_the_sources_that_follow_it() {
     );
 }
 
+/// A move refused for one family member (a shadowed copy of a follower in the
+/// target home) moves nothing: the curator stays where it was too.
+#[test]
+fn a_refused_follower_moves_no_one() {
+    // spec: HOME-8
+    let follows = Sandbox::new(None);
+    let curator = Sandbox::new(None);
+    write(
+        &curator.source.join("mind.toml"),
+        &format!(
+            "[[discover.sources]]\nsource = {:?}\ninstall = true\n",
+            follows.spec()
+        ),
+    );
+    git(&curator.source, &["add", "-A"]);
+    git(&curator.source, &["commit", "-qm", "curate"]);
+    let r = curator.mind(&["--yes", "meld", &curator.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+
+    // A shadowed copy of the follower's entry in the extra home.
+    let text = std::fs::read_to_string(curator.default_home.join("sources.json")).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    let follower = follows.identity();
+    v["sources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|s| s["name"] == serde_json::json!(follower));
+    write(
+        &curator.extra.join("sources.json"),
+        &serde_json::to_string(&v).unwrap(),
+    );
+
+    let extra = curator.extra_str();
+    let r = curator.mind(&["--yes", "meld", &curator.spec(), "--home", &extra]);
+    assert!(!r.ok(), "move should be refused: {}", r.stdout);
+    assert!(r.stderr.contains("shadowed copy"), "{}", r.stderr);
+    assert_eq!(curator.sources_in(&curator.extra), [follower]);
+    assert_eq!(curator.sources_in(&curator.default_home).len(), 2);
+}
+
 /// A home that is not `~/.mind` or a listed extra is refused, from the flag
 /// or from the source, and the refused meld registers nothing.
 #[test]
