@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-10
+
+### Changed
+
+- With no `MIND_HOMES` and no `mind-homes` config key, `meld --home`, a
+  source's `[source] mind-home`, and a curator entry's `mind-home` take any
+  directory that is missing, empty, or already a mind home, not only
+  `~/.mind`. The home is recorded under the new `source-homes` config key so
+  later runs read it, and called out in bold the first time. Setting
+  `MIND_HOMES` or `mind-homes` restricts homes and lobes to that list as
+  before, and `source-homes` is then not read. `config show` lists
+  `source-homes`, and `--json` adds `source_homes` and `homes_restricted`.
+- `home-not-allowed` errors name the reason a home was refused.
+
 ## [0.49.0] - 2026-11-09
 
 ### Added
@@ -2443,7 +2457,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.49.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.50.0...HEAD
+[0.50.0]: https://github.com/jaemk/mind/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/jaemk/mind/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/jaemk/mind/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/jaemk/mind/compare/v0.46.0...v0.47.0

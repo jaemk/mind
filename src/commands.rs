@@ -16337,6 +16337,10 @@ pub fn config_show(paths: &Paths) -> Result<()> {
                 .iter()
                 .map(|h| h.display().to_string())
                 .collect::<Vec<_>>(),
+            // spec: HOME-17 -- the homes mind recorded for sources, and
+            // whether the user's own list restricts homes and lobes.
+            "source_homes": cfg.source_homes,
+            "homes_restricted": paths.homes_restricted(),
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -16384,16 +16388,37 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         out.dim("·")
     );
     // spec: HOME-2
-    let homes: Vec<String> = extra_homes
-        .iter()
-        .map(|h| format!("{:?}", h.display().to_string()))
-        .collect();
+    let quoted = |hs: &[std::path::PathBuf]| -> String {
+        hs.iter()
+            .map(|h| format!("{:?}", h.display().to_string()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let user_homes = paths.user_homes();
     println!(
         "  {} mind-homes = [{}]  (extra mind homes, with MIND_HOMES; {} is always allowed)",
         out.dim("·"),
-        homes.join(", "),
+        quoted(&user_homes),
         paths.mind_home.display()
     );
+    // spec: HOME-17
+    if !cfg.source_homes.is_empty() {
+        let note = if user_homes.is_empty() {
+            "homes sources were melded into"
+        } else {
+            "not read while mind-homes or MIND_HOMES is set"
+        };
+        let recorded: Vec<std::path::PathBuf> = cfg
+            .source_homes
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        println!(
+            "  {} source-homes = [{}]  ({note})",
+            out.dim("·"),
+            quoted(&recorded)
+        );
+    }
     // spec: CLI-241 DSC-104 -- the value printed is the effective one, which
     // the flag and the environment can outrank, so say where it came from when
     // it is not what the config key says. Without this the line reads as a

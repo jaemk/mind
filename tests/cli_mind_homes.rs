@@ -958,3 +958,167 @@ fn a_move_that_would_skip_a_build_does_not_happen() {
         assert!(!sb.default_home.join("store/tool/mytool").exists());
     }
 }
+
+fn config_json(sb: &Sandbox) -> Value {
+    let r = sb.mind(&["--json", "config", "show"]);
+    assert!(r.ok(), "{}", r.stderr);
+    serde_json::from_str(&r.stdout).unwrap()
+}
+
+/// With no extra homes set, a source's own `mind-home` is taken, recorded under
+/// `source-homes` so later runs read it, and called out; its lobe stays
+/// unrestricted. Once the user sets `mind-homes`, only that list is read.
+#[test]
+fn a_source_home_is_taken_and_recorded_with_no_extra_homes_set() {
+    // spec: HOME-17 HOME-5 LOBE-2
+    let home = std::env::temp_dir().join(format!(
+        "mind-homes-{}-{}-own",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let mut sb = Sandbox::new(Some(&format!(
+        "[source]\nmind-home = {:?}\nlobe = {:?}\n",
+        home.join("mind").to_string_lossy(),
+        home.join("lobe").to_string_lossy()
+    )));
+    sb.env_lists_extra = false;
+    let own = home.join("mind");
+    let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+    let _cleanup = Cleanup(home.clone());
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(r.ok(), "meld: {all}");
+    assert!(
+        all.contains("a new mind home, recorded under source-homes"),
+        "{all}"
+    );
+    assert_eq!(sb.sources_in(&own), [sb.identity()]);
+    assert_eq!(sb.items_in(&own), ["skill:alpha"]);
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert!(home.join("lobe/skills/alpha").exists());
+    let v = config_json(&sb);
+    assert_eq!(
+        v["source_homes"],
+        serde_json::json!([own.to_string_lossy()]),
+        "{v}"
+    );
+    assert_eq!(v["mind_homes"], v["source_homes"], "{v}");
+    assert_eq!(v["homes_restricted"], false, "{v}");
+
+    // A later run reads the recorded home, and records it once.
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.stdout.contains(&sb.identity()), "{}", r.stdout);
+    let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+    assert!(r.ok(), "re-meld: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stderr.contains("a new mind home"), "{}", r.stderr);
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        config_json(&sb)["source_homes"].as_array().unwrap().len(),
+        1
+    );
+
+    // The user's own list replaces the recorded homes: the source drops out
+    // of view, and an unlisted home or lobe is refused again.
+    sb.env_lists_extra = true;
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(!r.stdout.contains(&sb.identity()), "{}", r.stdout);
+    let r = sb.mind(&["config", "show"]);
+    assert!(
+        r.stdout
+            .contains("not read while mind-homes or MIND_HOMES is set"),
+        "{}",
+        r.stdout
+    );
+    let other = Sandbox::new(Some(&format!(
+        "[source]\nmind-home = {:?}\n",
+        home.join("other").to_string_lossy()
+    )));
+    let r = other.mind(&["--yes", "meld", &other.spec()]);
+    assert_eq!(r.code, Some(1), "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("MIND_HOMES"), "{}", r.stderr);
+}
+
+/// `meld --home` takes an unlisted home with none set, and `upgrade` follows a
+/// `mind-home` a new commit adds into a home not yet recorded.
+#[test]
+fn an_unlisted_home_is_taken_by_the_flag_and_by_upgrade() {
+    // spec: HOME-17 HOME-4 HOME-15
+    let mut sb = Sandbox::new(None);
+    sb.env_lists_extra = false;
+    let flag_home = sb.base.join("flag-home");
+    let r = sb.mind(&[
+        "--yes",
+        "meld",
+        &sb.spec(),
+        "--home",
+        &flag_home.to_string_lossy(),
+    ]);
+    assert!(r.ok(), "meld --home: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&flag_home), [sb.identity()]);
+
+    let mut moved = Sandbox::new(None);
+    moved.env_lists_extra = false;
+    let r = moved.mind(&["--yes", "meld", &moved.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let declared = moved.base.join("declared");
+    write(
+        &moved.source.join("mind.toml"),
+        &format!("[source]\nmind-home = {:?}\n", declared.to_string_lossy()),
+    );
+    git(&moved.source, &["add", "-A"]);
+    git(&moved.source, &["commit", "-qm", "own home"]);
+    let r = moved.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(moved.sources_in(&declared), [moved.identity()]);
+    assert_eq!(moved.items_in(&declared), ["skill:alpha"]);
+    assert!(moved.sources_in(&moved.default_home).is_empty());
+    let r = moved.mind(&["recall"]);
+    assert!(r.stdout.contains("alpha"), "{}", r.stdout);
+}
+
+/// An unlisted home is still refused when it is inside a home's store,
+/// sources, or .tmp, is under a lobe, or is a directory holding something
+/// other than a mind tree.
+#[test]
+fn a_new_home_must_be_free() {
+    // spec: HOME-17
+    let mut sb = Sandbox::new(None);
+    sb.env_lists_extra = false;
+    let store = sb.default_home.join("store/x");
+    for (home, why) in [
+        (sb.base.clone(), "not a mind home"),
+        (store, "store, sources, or .tmp"),
+        // The default lobe is empty here, so only the lobe rule refuses it.
+        (sb.claude_home.join("sub"), "is a lobe or lies under one"),
+    ] {
+        let r = sb.mind(&[
+            "--yes",
+            "meld",
+            &sb.spec(),
+            "--home",
+            &home.to_string_lossy(),
+        ]);
+        assert_eq!(r.code, Some(1), "{}\n{}", r.stdout, r.stderr);
+        assert!(
+            r.stderr.contains("is not allowed") && r.stderr.contains(why),
+            "{}",
+            r.stderr
+        );
+    }
+    assert!(sb.sources_in(&sb.default_home).is_empty());
+    assert!(
+        config_json(&sb)["source_homes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Removes a directory outside the sandbox base when the test ends.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

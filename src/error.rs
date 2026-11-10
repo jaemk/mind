@@ -479,15 +479,15 @@ pub enum MindError {
     )]
     UnknownPreset { name: String },
 
-    /// A requested mind home is not one of the allowed homes (HOME-4, HOME-5).
+    /// A requested mind home is not allowed (HOME-4, HOME-5, HOME-17).
     #[error(
-        "mind home '{}' ({origin}) is not allowed; the allowed homes are {allowed} (add it to MIND_HOMES or the `mind-homes` config key)",
+        "mind home '{}' ({origin}) is not allowed: {why}",
         crate::sanitize::strip_ansi(home)
     )]
     HomeNotAllowed {
         home: String,
         origin: String,
-        allowed: String,
+        why: String,
     },
 
     /// A source lobe (`[source] lobe`, `meld --lobe`) is not allowed (LOBE-2):

@@ -506,8 +506,32 @@ impl Paths {
     /// expanded and made absolute, deduplicated, and never the default home.
     /// A config that will not parse contributes nothing here; the verbs that
     /// read config report the parse error themselves.
-    // spec: HOME-2
+    /// With none set, the homes mind recorded for sources (`source-homes`,
+    /// HOME-17) take their place.
+    // spec: HOME-2 HOME-17
     pub fn extra_homes(&self) -> Vec<PathBuf> {
+        let cfg = Config::load(self).ok();
+        let user = self.user_homes_in(cfg.as_ref());
+        if !user.is_empty() {
+            return user;
+        }
+        let recorded = cfg.map(|c| c.source_homes).unwrap_or_default();
+        self.dedup_homes(
+            recorded
+                .iter()
+                .map(|s| PathBuf::from(s.trim()))
+                .filter(|p| p.is_absolute())
+                .collect(),
+        )
+    }
+
+    /// The extra homes the user set (HOME-2): `$MIND_HOMES`, then the
+    /// `mind-homes` config key.
+    pub fn user_homes(&self) -> Vec<PathBuf> {
+        self.user_homes_in(Config::load(self).ok().as_ref())
+    }
+
+    fn user_homes_in(&self, cfg: Option<&Config>) -> Vec<PathBuf> {
         let mut raw: Vec<PathBuf> = Vec::new();
         if let Some(v) = std::env::var_os("MIND_HOMES") {
             raw.extend(
@@ -519,7 +543,7 @@ impl Paths {
         }
         // A relative config entry is relative to the default home, where the
         // config file lives, so it names the same home from any directory.
-        if let Ok(cfg) = Config::load(self) {
+        if let Some(cfg) = cfg {
             raw.extend(
                 cfg.mind_homes
                     .iter()
@@ -527,6 +551,10 @@ impl Paths {
                     .map(|s| self.mind_home.join(crate::commands::expand_tilde(s.trim()))),
             );
         }
+        self.dedup_homes(raw)
+    }
+
+    fn dedup_homes(&self, raw: Vec<PathBuf>) -> Vec<PathBuf> {
         let default = normalize_home(&self.mind_home);
         let mut out: Vec<PathBuf> = Vec::new();
         for entry in raw {
@@ -538,6 +566,50 @@ impl Paths {
         out
     }
 
+    /// Whether the user set extra homes (`MIND_HOMES` or `mind-homes`,
+    /// HOME-2). Then a home and a lobe must be among the allowed homes
+    /// (HOME-17, LOBE-2); otherwise any home and lobe directory may be used.
+    pub fn homes_restricted(&self) -> bool {
+        !self.user_homes().is_empty()
+    }
+
+    /// Record `home`, where `source` is being written, in the `source-homes`
+    /// config key (HOME-17) so every later run reads it, and call it out. A
+    /// home already allowed is left alone.
+    // spec: HOME-17
+    pub fn record_source_home(&self, source: &str, home: &Path) -> Result<()> {
+        let home = normalize_home(home);
+        if home == normalize_home(&self.mind_home) || self.extra_homes().contains(&home) {
+            return Ok(());
+        }
+        if self.homes_restricted() {
+            return Err(MindError::HomeNotAllowed {
+                home: home.display().to_string(),
+                origin: format!("the home of {}", crate::sanitize::strip_ansi(source)),
+                why: self.restricted_why(),
+            });
+        }
+        let mut cfg = Config::load(self)?;
+        cfg.source_homes.push(home.display().to_string());
+        cfg.save(self)?;
+        let out = crate::render::ctx();
+        let line = format!(
+            "{} is melded into {}, a new mind home, recorded under source-homes in {}",
+            crate::sanitize::strip_ansi(source),
+            crate::sanitize::display_path(&home),
+            crate::sanitize::display_path(&self.config_file())
+        );
+        crate::render::note(format!("{} {}", out.warn(), out.bold(&line)));
+        Ok(())
+    }
+
+    fn restricted_why(&self) -> String {
+        format!(
+            "with MIND_HOMES or the `mind-homes` config key set, the allowed homes are {} (add it to MIND_HOMES or the `mind-homes` config key)",
+            self.allowed_list()
+        )
+    }
+
     /// Every allowed mind home: the default first, then [`Self::extra_homes`].
     // spec: HOME-1 HOME-2
     pub fn all_homes(&self) -> Vec<PathBuf> {
@@ -547,18 +619,22 @@ impl Paths {
     }
 
     /// Resolve a requested mind home (`meld --home`, a `[source] mind-home`)
-    /// against the allowed set (HOME-4). `None` when it is the default home,
-    /// `Some(home)` for an allowed extra home, and an error naming the allowed
-    /// homes otherwise.
-    // spec: HOME-4 HOME-5
+    /// (HOME-4, HOME-17). `None` when it is the default home, `Some(home)`
+    /// for an extra home or, with no extra homes set by the user, any other
+    /// free directory (HOME-17); an error naming the reason otherwise.
+    // spec: HOME-4 HOME-5 HOME-17
     pub fn allowed_home(&self, requested: &str, origin: &str) -> Result<Option<PathBuf>> {
+        let refuse = |home: String, why: String| MindError::HomeNotAllowed {
+            home,
+            origin: origin.to_string(),
+            why,
+        };
         let home = normalize_home(&crate::commands::expand_tilde(requested.trim()));
         if requested.trim().is_empty() || !home.is_absolute() {
-            return Err(MindError::HomeNotAllowed {
-                home: requested.to_string(),
-                origin: origin.to_string(),
-                allowed: self.allowed_list(),
-            });
+            return Err(refuse(
+                requested.to_string(),
+                "it is not an absolute path or one starting with ~".to_string(),
+            ));
         }
         if home == normalize_home(&self.mind_home) {
             return Ok(None);
@@ -566,11 +642,45 @@ impl Paths {
         if self.extra_homes().contains(&home) {
             return Ok(Some(home));
         }
-        Err(MindError::HomeNotAllowed {
-            home: home.display().to_string(),
-            origin: origin.to_string(),
-            allowed: self.allowed_list(),
-        })
+        if self.homes_restricted() {
+            return Err(refuse(home.display().to_string(), self.restricted_why()));
+        }
+        let reserved = self.all_homes().iter().any(|h| {
+            let h = normalize_home(h);
+            ["store", "sources", ".tmp"]
+                .iter()
+                .any(|d| home.starts_with(h.join(d)))
+        });
+        if reserved {
+            return Err(refuse(
+                home.display().to_string(),
+                "it lies under a mind home's store, sources, or .tmp".to_string(),
+            ));
+        }
+        let mut lobes: Vec<PathBuf> = self
+            .agent_homes()
+            .map(|ls| ls.into_iter().map(|l| l.path).collect())
+            .unwrap_or_default();
+        lobes.extend(self.default_lobe_path().ok());
+        if lobes.iter().any(|l| home.starts_with(normalize_home(l))) {
+            return Err(refuse(
+                home.display().to_string(),
+                "it is a lobe or lies under one".to_string(),
+            ));
+        }
+        // A directory holding something else (`~`, a project) is not taken
+        // over: a new home is missing, empty, or already a mind tree.
+        if let Ok(mut entries) = std::fs::read_dir(&home)
+            && entries.next().is_some()
+            && !home.join("sources.json").exists()
+            && !home.join("manifest.json").exists()
+        {
+            return Err(refuse(
+                home.display().to_string(),
+                "it is a directory with other contents, not a mind home".to_string(),
+            ));
+        }
+        Ok(Some(home))
     }
 
     fn allowed_list(&self) -> String {
@@ -591,9 +701,10 @@ impl Paths {
     /// Resolve a source lobe (LOBE-2): a leading `~` is expanded and a
     /// relative path is taken against the source's home. It may not be a mind
     /// home or lie under one's `store`, `sources`, or `.tmp`. When extra mind
-    /// homes are set (`MIND_HOMES` or `mind-homes`), it must also lie under an
-    /// allowed home; otherwise it may be any directory. `origin` names where
-    /// it was given, for the `lobe-not-allowed` message.
+    /// homes are set (`MIND_HOMES` or `mind-homes`, not `source-homes`), it
+    /// must also lie under an allowed home; otherwise it may be any
+    /// directory. `origin` names where it was given, for the
+    /// `lobe-not-allowed` message.
     // spec: LOBE-2
     pub fn resolve_lobe(&self, source: &str, declared: &str, origin: &str) -> Result<PathBuf> {
         self.resolve_lobe_in(&self.home_of(source), declared, origin)
@@ -613,7 +724,9 @@ impl Paths {
         }
         let expanded = crate::commands::expand_tilde(trimmed);
         let lobe = normalize_home(&home.join(expanded));
-        let homes: Vec<PathBuf> = self.all_homes().iter().map(|h| normalize_home(h)).collect();
+        // The source's own home counts even before it is recorded (HOME-17).
+        let mut homes: Vec<PathBuf> = self.all_homes().iter().map(|h| normalize_home(h)).collect();
+        homes.push(normalize_home(home));
         let reserved = homes.iter().any(|home| {
             lobe == *home
                 || ["store", "sources", ".tmp"]
@@ -625,7 +738,7 @@ impl Paths {
                 "it is a mind home, or lies under one's store, sources, or .tmp".to_string(),
             ));
         }
-        if !self.extra_homes().is_empty() && self.lobe_outside_homes(&lobe) {
+        if self.homes_restricted() && self.lobe_outside_homes(&lobe) {
             return Err(refuse(format!(
                 "with MIND_HOMES or the `mind-homes` config key set, a lobe must lie under an allowed mind home ({})",
                 self.allowed_list()

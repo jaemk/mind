@@ -1238,8 +1238,9 @@ pub struct MeldArgs {
     pub full_history: bool,
 
     /// The mind home to meld the source into (its clone, store copies, and
-    /// registry entry), instead of `~/.mind`. Must be `~/.mind` or one of the
-    /// homes listed in `MIND_HOMES` or the `mind-homes` config key. Outranks
+    /// registry entry), instead of `~/.mind`. With `MIND_HOMES` or `mind-homes`
+    /// set it must be `~/.mind` or one of those homes; otherwise any new or
+    /// existing mind home is allowed and recorded under `source-homes`. Outranks
     /// the source's own `[source] mind-home`; the sources it curates follow it
     /// unless they name a home of their own. On a source already melded in
     /// another home, moves it and its installed items there.

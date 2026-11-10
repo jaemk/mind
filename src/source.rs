@@ -1445,6 +1445,9 @@ impl Registry {
                 .iter()
                 .any(|x| normalize_home(x) == normalize_home(&h))
             {
+                // spec: HOME-17 -- a home new to this run is recorded before
+                // anything is written there, so the next run reads it.
+                paths.record_source_home(&src.name, &h)?;
                 homes.push(h);
             }
         }

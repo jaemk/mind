@@ -142,8 +142,10 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   older `mind` rejects the key, so set `min-mind-version` alongside. See
   [Remove the items you drop](releasing.md#remove-the-items-you-drop).
 - **`mind-home`**: the mind home to meld the source into, e.g.
-  `"~/dev/project/.mind"`. It must be `~/.mind` or a home the consumer lists in
-  `MIND_HOMES` or the `mind-homes` config key; any other value refuses the meld.
+  `"~/dev/project/.mind"`. When the consumer lists homes in `MIND_HOMES` or the
+  `mind-homes` config key, it must be `~/.mind` or one of them, and any other
+  value refuses the meld; with none listed, any directory that is missing,
+  empty, or already a mind home is taken and recorded.
   The consumer's `mind meld --home` outranks it. An older `mind` rejects the
   key, so set `min-mind-version` alongside. See
   [Mind homes](configuration.md#mind-homes).

@@ -23,7 +23,8 @@ hook-log-keep = "all"
 | `hook-history` | how many hook results to keep (default 100; `0` for none) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log` | save hook output: `true` for `~/.mind/hooks/logs`, or a directory (relative to `~/.mind`) | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `hook-log-keep` | which logs to keep when logging is on: `all` (default) or `failed` | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
-| `mind-homes` | extra mind homes a source may be melded into (relative to `~/.mind`) | [Mind homes](#mind-homes) |
+| `mind-homes` | extra mind homes a source may be melded into (relative to `~/.mind`); setting it restricts homes and lobes to this list | [Mind homes](#mind-homes) |
+| `source-homes` | mind homes `mind` recorded for sources while `mind-homes` and `MIND_HOMES` are unset | [Mind homes](#mind-homes) |
 
 The legacy spelling `absorb_to` is still read.
 
@@ -123,23 +124,34 @@ Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
 ## Mind homes
 
 A source can live in a mind home other than `~/.mind`, e.g. a directory a
-sandbox allows writes to. List the extra homes in `MIND_HOMES` or the
-`mind-homes` config key; `~/.mind` is always allowed:
+sandbox allows writes to. `meld --home` names it, or the source names its own
+in its `mind.toml`; `--home` outranks it:
 
 ```bash
-export MIND_HOMES=~/dev/project/.mind
 mind meld owner/repo --home ~/dev/project/.mind
 ```
-
-A source can name its own home in its `mind.toml`; `--home` outranks it, and a
-home that is not listed is refused. Note that without `--home` the source is
-cloned into `~/.mind` before its `mind.toml` is read, so where `~/.mind` is
-not writable pass `--home`:
 
 ```toml
 [source]
 mind-home = "~/dev/project/.mind"
 ```
+
+With no `MIND_HOMES` and no `mind-homes` config key, any directory that is
+missing, empty, or already a mind home is allowed. The first time a source
+is melded into one, `mind` records it under `source-homes` in
+`~/.mind/config.toml`, so later runs read it, and says so in bold.
+
+To restrict homes, list them in `MIND_HOMES` or the `mind-homes` config key.
+Then only `~/.mind` and the listed homes are allowed, any other is refused,
+`source-homes` is not read, and a source's lobe must lie under an allowed
+home:
+
+```bash
+export MIND_HOMES=~/dev/project/.mind
+```
+
+Note that without `--home` the source is cloned into `~/.mind` before its
+`mind.toml` is read, so where `~/.mind` is not writable pass `--home`.
 
 Each home is a full tree (`sources.json`, `manifest.json`, `sources/`,
 `store/`), and the sources a curator lists follow it unless they name their
