@@ -5942,10 +5942,11 @@ pub fn learn_link(
     });
     // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
     // the clone; recorded now so the meld below already honors it.
+    let mut _lobe_scope = None;
     if let Some(l) = lobe.map(str::trim).filter(|l| !l.is_empty()) {
         paths.resolve_lobe(&spec.name, l, "--lobe")?;
         if !dry_run {
-            crate::paths::set_consumer_lobe(&spec.name, Some(l));
+            _lobe_scope = Some(crate::paths::PendingLobeScope::set(&spec.name, l));
         }
     }
     let melded = is_melded(paths, url, None)?;
@@ -6080,20 +6081,21 @@ fn call_out_lobes<'a>(paths: &Paths, items: impl IntoIterator<Item = &'a Catalog
         return;
     };
     for item in items {
-        let fresh = CALLED_OUT_LOBES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(item.source.clone());
-        if !fresh {
-            continue;
-        }
         let Ok(Some(root)) = paths.source_lobe(&item.source) else {
             continue;
         };
         let in_effect = paths
             .agent_homes_for(&item.source)
             .is_ok_and(|ls| ls.iter().any(|l| l.path == root));
-        if !in_effect {
+        // Keyed by source and lobe: a lobe that changes within the run (the
+        // `probe` TUI) is called out again.
+        let key = format!("{}\0{}", item.source, root.display());
+        if !in_effect
+            || !CALLED_OUT_LOBES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key)
+        {
             continue;
         }
         let mut line = format!(
@@ -14388,12 +14390,14 @@ struct Upgrade {
     relink: Option<Option<std::path::PathBuf>>,
 }
 
-/// Whether `item`'s links are not where its source's `lobe` puts them
-/// (LOBE-5), and if so where they go: `Some(Some(root))` for the source's
-/// lobe, `Some(None)` back to the configured lobes. With a lobe, a linkable
-/// item with no link under it, or one with a link under the default lobe, is
-/// misplaced. Without one, a link under no configured lobe (nor the default
-/// lobe) is left from a lobe the source has since dropped.
+/// Whether `item`'s links are not where its source's lobe puts them (LOBE-5),
+/// and if so where they go: `Some(Some(root))` for the source's lobe,
+/// `Some(None)` back to the configured lobes. A linkable item is misplaced
+/// when the lobe it recorded at install differs from the one in effect now,
+/// or, with a lobe in effect, when it still records a link under the default
+/// lobe that is not under that lobe (one an earlier run could not remove).
+/// An item from a source that never had a lobe is never misplaced, so where
+/// the configured lobes point does not matter here.
 // spec: LOBE-5
 fn links_misplaced(
     paths: &Paths,
@@ -14405,30 +14409,22 @@ fn links_misplaced(
     if !linkable {
         return Ok(None);
     }
-    let under = |root: &Path| item.links.iter().any(|l| Path::new(l).starts_with(root));
-    // Only a lobe actually in effect (not overridden by a policy lock, LOBE-4).
-    let effective = paths.agent_homes_for(&item.source)?;
-    let root = paths
-        .source_lobe(&item.source)?
-        .filter(|r| effective.iter().any(|l| &l.path == r));
-    match root {
-        Some(root) => {
-            let default = paths.default_lobe_path()?;
-            let moved = !under(&root) || (default != root && under(&default));
-            Ok(moved.then_some(Some(root)))
-        }
-        None => {
-            let mut lobes: Vec<std::path::PathBuf> =
-                paths.agent_homes()?.into_iter().map(|l| l.path).collect();
-            lobes.push(paths.default_lobe_path()?);
-            let stray = item
-                .links
-                .iter()
-                .map(Path::new)
-                .any(|l| !lobes.iter().any(|lobe| l.starts_with(lobe)));
-            Ok(stray.then_some(None))
+    let root = paths.effective_source_lobe(&item.source)?;
+    if item.lobe.as_deref().map(Path::new) != root.as_deref() {
+        return Ok(Some(root));
+    }
+    if let Some(root) = root {
+        let default = paths.default_lobe_path()?;
+        let stale = item
+            .links
+            .iter()
+            .map(Path::new)
+            .any(|l| l.starts_with(&default) && !l.starts_with(&root));
+        if stale {
+            return Ok(Some(Some(root)));
         }
     }
+    Ok(None)
 }
 
 fn print_upgrade_report(
@@ -17539,10 +17535,11 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     let already_melded = is_melded(paths, &repo, alias.as_deref())?;
     // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
     // the clone; recorded now so the meld below already honors it.
+    let mut _lobe_scope = None;
     if let Some(l) = lobe.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
         paths.resolve_lobe(&source_ident, l, "--lobe")?;
         if !already_melded {
-            crate::paths::set_consumer_lobe(&source_ident, Some(l));
+            _lobe_scope = Some(crate::paths::PendingLobeScope::set(&source_ident, l));
         }
     }
     if already_melded {
@@ -19283,6 +19280,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         }
     }
 
@@ -20506,6 +20504,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         });
         manifest.save(paths).expect("save manifest");
     }

@@ -85,6 +85,13 @@ pub struct InstalledItem {
     /// Omitted for any other pin, and for items installed before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+
+    /// The source lobe this item was linked into in place of the default lobe
+    /// (LOBE-5), as an absolute path; `None` when its source had none. What
+    /// `upgrade` compares against the source's lobe now to tell the links
+    /// moved. Omitted when `None`, and absent for items installed before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lobe: Option<String>,
 }
 
 /// `skip_serializing_if` helper: omit a `false` flag from `manifest.json`.
@@ -160,6 +167,7 @@ impl InstalledItem {
             profiles: self.profiles.clone(),
             explicit: self.explicit,
             version: self.version.as_deref().map(s),
+            lobe: self.lobe.as_deref().map(s),
         }
     }
 }
@@ -417,6 +425,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         }
     }
 

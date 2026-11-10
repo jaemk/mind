@@ -1370,13 +1370,12 @@ impl Registry {
         }
         // spec: LOBE-1 -- where each source's `lobe` is read from when no scan
         // in this run has recorded it.
+        // spec: LOBE-7 -- the consumer lobes are exactly the registry's (a
+        // `--lobe` in progress lives in its own scope until recorded).
+        crate::paths::clear_consumer_lobes();
         for src in &reg.sources {
             crate::paths::set_source_clone(&src.name, &src.clone_dir(paths));
-            // spec: LOBE-7 -- only a recorded one: a `meld --lobe` in progress
-            // has set the map before the source is registered.
-            if src.lobe.is_some() {
-                crate::paths::set_consumer_lobe(&src.name, src.lobe.as_deref());
-            }
+            crate::paths::set_consumer_lobe(&src.name, src.lobe.as_deref());
         }
         Ok(reg)
     }

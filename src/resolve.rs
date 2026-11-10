@@ -790,6 +790,7 @@ mod tests {
             profiles: Vec::new(),
             explicit: false,
             version: None,
+            lobe: None,
         }
     }
 
