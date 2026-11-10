@@ -166,6 +166,13 @@ source whose home you chose with `--home` stays where you put it. A move
 that cannot happen, e.g. from a home the sandbox cannot write, leaves the
 source in place with a warning; run `mind upgrade` again where it can be
 written.
+
+A move reinstalls each item from the source's clone, so its path tokens
+(`{{tools:}}`, `{{resources:}}`, `{{self}}`, `{{path:}}`) name the new store,
+and a tool with a build hook is built again there. When that build hook
+cannot run (no terminal to ask, and no `--accept-hooks=build`), the move
+waits: `meld --home` is refused, `upgrade` leaves the source in place, and
+`auto-update run` holds the release.
 `learn <url> --home` places an [item link](item-links.md) the same
 way, a curator entry can name a source's `mind-home`, and `dump` records each
 source's extra home. `recall --sources` shows `home:<dir>` for a source in an

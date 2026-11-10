@@ -31,6 +31,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   curator entry's `mind-home`. A source melded with `--home` before this
   release has no record of that choice, so it follows its own `mind-home`;
   run `meld --home` again to keep it where it is.
+- A move rebuilds a tool with a build hook in its new home. Where the build
+  hook cannot run (no terminal, no `--accept-hooks=build`), the move does not
+  happen: `meld --home` is refused (`move-needs-build`), `upgrade` keeps the
+  source in place, and `auto-update run` holds the release.
 - A lobe that cannot be written (permission denied, a read-only filesystem)
   is skipped with a note instead of failing `learn`, `meld`, `upgrade`,
   `forget`, or `introspect --fix`. A link already pointing at the store copy is left alone, so an

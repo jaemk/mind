@@ -511,6 +511,14 @@ pub enum MindError {
     )]
     SourceInOtherHome { name: String, home: String },
 
+    /// A home move would reinstall an item with a build hook where the hook
+    /// cannot run, leaving it unbuilt (HOME-16).
+    #[error(
+        "moving '{}' would rebuild {item} without its build hook (nothing to ask in a non-interactive run); run it from a terminal, or pass --accept-hooks=build",
+        crate::sanitize::strip_ansi(name)
+    )]
+    MoveNeedsBuild { name: String, item: String },
+
     #[error("`config lobes add` needs a path or `--preset <name>`")]
     LobeTargetRequired,
 
@@ -1910,6 +1918,7 @@ impl MindError {
             MindError::HomeNotAllowed { .. } => "home-not-allowed",
             MindError::LobeNotAllowed { .. } => "lobe-not-allowed",
             MindError::SourceInOtherHome { .. } => "source-in-other-home",
+            MindError::MoveNeedsBuild { .. } => "move-needs-build",
             MindError::LobeTargetRequired => "lobe-target-required",
             MindError::BrokenSymlinkPath { .. } => "broken-symlink-path",
             MindError::MindToml { .. } => "mind-toml",

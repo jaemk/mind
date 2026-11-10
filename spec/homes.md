@@ -91,6 +91,14 @@ as one set.
   A declared home that is not allowed, or a move that fails (e.g. a home that
   cannot be written), leaves the source where it is, with a warning on
   stderr. `upgrade <item>` moves no source.
+- `HOME-16` A move reinstalls each item from the source's clone, so an item
+  with a build hook (HOOK-70) is built again in the new home. When that hook
+  cannot run (no terminal to ask, and `--accept-hooks` does not name
+  `build`, HOOK-72), the move does not happen rather than leave the item
+  unbuilt: `meld --home` and `learn <url> --home` are refused
+  (`move-needs-build`, exit 1) before anything moves, an `upgrade` (HOME-15)
+  leaves the source where it is with a warning on stderr, and `auto-update
+  run` holds the release that would move it (AUP-17).
 
 - `HOME-10` A curator's `[[discover.sources]]` entry may name a `mind-home`
   for that source. It is checked like `meld --home` (an allowed home, before

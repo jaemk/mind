@@ -834,3 +834,127 @@ fn a_relative_config_home_is_relative_to_the_default_home() {
         );
     }
 }
+
+/// A move reinstalls every item of the source in the new home, so the path
+/// tokens in its markdown (`{{tools:}}`, `{{path:}}`, `{{self}}`,
+/// `{{resources:}}`) name the new store, and the shared tool and resource
+/// they reach are there. Both moves: `meld --home`, and `upgrade` following
+/// a new `[source] mind-home`.
+#[test]
+fn a_move_rewrites_path_tokens_to_the_new_store() {
+    // spec: HOME-8 HOME-15
+    for by_upgrade in [false, true] {
+        let sb = Sandbox::new(None);
+        write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+        write(&sb.source.join("resources/shared.md"), "shared\n");
+        write(
+            &sb.source.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\nrun {{tools:detect}}\nlib {{path:tool:detect}}/x\nself {{self}}\nread {{resources:shared.md}}\n",
+        );
+        git(&sb.source, &["add", "-A"]);
+        git(&sb.source, &["commit", "-qm", "tokens"]);
+        let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+        assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+        let old = sb.default_home.join("store");
+        let skill = std::fs::read_to_string(old.join("skill/alpha/SKILL.md")).unwrap();
+        assert!(
+            skill.contains(&old.to_string_lossy().into_owned()),
+            "{skill}"
+        );
+
+        if by_upgrade {
+            write(
+                &sb.source.join("mind.toml"),
+                &format!("[source]\nmind-home = {:?}\n", sb.extra_str()),
+            );
+            git(&sb.source, &["add", "-A"]);
+            git(&sb.source, &["commit", "-qm", "own home"]);
+            let r = sb.mind(&["--yes", "upgrade"]);
+            assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+        } else {
+            let extra = sb.extra_str();
+            let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &extra]);
+            assert!(r.ok(), "move: {}\n{}", r.stdout, r.stderr);
+        }
+
+        let new = sb.extra.join("store");
+        let skill = std::fs::read_to_string(new.join("skill/alpha/SKILL.md")).unwrap();
+        let new_str = new.to_string_lossy().into_owned();
+        for line in [
+            format!("run {new_str}/tool/detect/detect"),
+            format!("lib {new_str}/tool/detect/x"),
+            format!("self {new_str}/skill/alpha"),
+            format!("read {new_str}/resource/shared.md"),
+        ] {
+            assert!(
+                skill.contains(&line),
+                "by upgrade: {by_upgrade}: {line}\n{skill}"
+            );
+        }
+        assert!(
+            !skill.contains(&old.to_string_lossy().into_owned()),
+            "by upgrade: {by_upgrade}: {skill}"
+        );
+        assert!(new.join("tool/detect/detect").exists());
+        assert!(new.join("resource/shared.md").exists());
+        assert!(!old.join("tool/detect").exists());
+        assert!(!old.join("resource/shared.md").exists());
+        let mut items = sb.items_in(&sb.extra);
+        items.sort();
+        assert_eq!(items, ["resource:shared.md", "skill:alpha", "tool:detect"]);
+    }
+}
+
+/// A tool with a build hook is built again by a move; where that hook cannot
+/// run, `meld --home` is refused and `upgrade` leaves the source in place,
+/// and `--accept-hooks=build` lets either move it with the tool built.
+#[test]
+fn a_move_that_would_skip_a_build_does_not_happen() {
+    // spec: HOME-16
+    let items = "[[items]]\nkind = \"skill\"\nname = \"alpha\"\npath = \"skills/alpha\"\n\n[[items]]\nkind = \"tool\"\nname = \"mytool\"\npath = \"tools/mytool\"\nbuild = \"touch built.txt\"\n";
+    for by_upgrade in [false, true] {
+        let sb = Sandbox::new(Some(items));
+        write(
+            &sb.source.join("tools/mytool/TOOL.md"),
+            "---\ndescription: t\n---\n",
+        );
+        git(&sb.source, &["add", "-A"]);
+        git(&sb.source, &["commit", "-qm", "tool"]);
+        let r = sb.mind(&["--yes", "meld", &sb.spec(), "--accept-hooks=build"]);
+        assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+        assert!(sb.default_home.join("store/tool/mytool/built.txt").exists());
+
+        let extra = sb.extra_str();
+        let move_args: Vec<&str> = if by_upgrade {
+            write(
+                &sb.source.join("mind.toml"),
+                &format!("[source]\nmind-home = {extra:?}\n\n{items}"),
+            );
+            git(&sb.source, &["add", "-A"]);
+            git(&sb.source, &["commit", "-qm", "own home"]);
+            vec!["--yes", "upgrade"]
+        } else {
+            vec![
+                "--yes",
+                "meld",
+                &sb.source.to_str().unwrap(),
+                "--home",
+                &extra,
+            ]
+        };
+        let r = sb.mind(&move_args);
+        let all = format!("{}{}", r.stdout, r.stderr);
+        assert_eq!(r.ok(), by_upgrade, "by upgrade: {by_upgrade}: {all}");
+        assert!(all.contains("without its build hook"), "{all}");
+        assert_eq!(sb.sources_in(&sb.default_home), [sb.identity()]);
+        assert!(sb.default_home.join("store/tool/mytool/built.txt").exists());
+
+        let mut accepted = move_args.clone();
+        accepted.push("--accept-hooks=build");
+        let r = sb.mind(&accepted);
+        assert!(r.ok(), "accepted: {}\n{}", r.stdout, r.stderr);
+        assert_eq!(sb.sources_in(&sb.extra), [sb.identity()]);
+        assert!(sb.extra.join("store/tool/mytool/built.txt").exists());
+        assert!(!sb.default_home.join("store/tool/mytool").exists());
+    }
+}

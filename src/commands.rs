@@ -1146,6 +1146,17 @@ pub(crate) fn move_to_home(
     yes: bool,
     accept: crate::hook::Accept,
 ) -> Result<()> {
+    // spec: HOME-16 -- refuse a move that would leave a tool unbuilt.
+    let registry = Registry::load(paths)?;
+    if registry.find(name).is_some() {
+        let family = home_family(paths, &registry, name);
+        if let Some(item) = move_would_skip_build(paths, &registry, &family, to, accept)? {
+            return Err(MindError::MoveNeedsBuild {
+                name: name.to_string(),
+                item,
+            });
+        }
+    }
     let family = relocate_family(paths, name, to)?;
     if family.is_empty() {
         return Ok(());
@@ -1172,6 +1183,7 @@ fn follow_declared_homes(
     paths: &Paths,
     registry: &Registry,
     in_scope: &dyn Fn(&crate::source::Source) -> bool,
+    accept: crate::hook::Accept,
 ) -> Result<bool> {
     use crate::paths::normalize_home;
     let out = crate::render::ctx();
@@ -1210,6 +1222,26 @@ fn follow_declared_homes(
         };
         let to = normalize_home(target.as_deref().unwrap_or(&paths.mind_home));
         if to == normalize_home(&paths.home_of(&name)) {
+            continue;
+        }
+        // spec: HOME-16 -- a move that would leave a tool unbuilt waits for a
+        // run that can build it.
+        let family = home_family(paths, &current, &name);
+        if let Some(item) =
+            move_would_skip_build(paths, &current, &family, target.as_deref(), accept)?
+        {
+            eprintln!(
+                "{} {shown} stays in {}: {}",
+                out.warn(),
+                paths.home_of(&name).display(),
+                strip_ansi(
+                    &MindError::MoveNeedsBuild {
+                        name: name.clone(),
+                        item
+                    }
+                    .to_string()
+                )
+            );
             continue;
         }
         if !saved {
@@ -1278,18 +1310,7 @@ fn relocate_family(paths: &Paths, name: &str, to: Option<&std::path::Path>) -> R
     if registry.find(name).is_none() {
         return Ok(Vec::new());
     }
-    // The source and, transitively, the curated sources that follow it.
-    let mut family = vec![name.to_string()];
-    let mut i = 0;
-    while i < family.len() {
-        let curator = family[i].clone();
-        for child in home_followers(paths, &registry, &curator) {
-            if !family.contains(&child) {
-                family.push(child);
-            }
-        }
-        i += 1;
-    }
+    let family = home_family(paths, &registry, name);
     // Refuse before anything moves, so a refused follower does not leave the
     // family split across homes.
     for member in &family {
@@ -1370,6 +1391,66 @@ fn relocate_family(paths: &Paths, name: &str, to: Option<&std::path::Path>) -> R
         }
     }
     Ok(family)
+}
+
+/// `name` and, transitively, the curated sources that follow its home (HOME-8).
+fn home_family(paths: &Paths, registry: &Registry, name: &str) -> Vec<String> {
+    let mut family = vec![name.to_string()];
+    let mut i = 0;
+    while i < family.len() {
+        let curator = family[i].clone();
+        for child in home_followers(paths, registry, &curator) {
+            if !family.contains(&child) {
+                family.push(child);
+            }
+        }
+        i += 1;
+    }
+    family
+}
+
+/// An installed item of `family`, not yet in home `to`, whose build hook a
+/// move there would have to run again (the move reinstalls it from the clone),
+/// when that hook cannot run here: no terminal to ask and `--accept-hooks`
+/// does not name `build` (HOOK-72). `None` when the move rebuilds nothing it
+/// cannot. A source that cannot be scanned is left to the move to report.
+// spec: HOME-16
+fn move_would_skip_build(
+    paths: &Paths,
+    registry: &Registry,
+    family: &[String],
+    to: Option<&std::path::Path>,
+    accept: crate::hook::Accept,
+) -> Result<Option<String>> {
+    use crate::paths::normalize_home;
+    if accept.build || crate::hook::is_tty() {
+        return Ok(None);
+    }
+    let target = normalize_home(to.unwrap_or(&paths.mind_home));
+    let manifest = Manifest::load(paths)?;
+    for member in family {
+        let Some(src) = registry.find(member) else {
+            continue;
+        };
+        let mut catalog: Vec<CatalogItem> = Vec::new();
+        if catalog::scan_source(paths, src, &mut catalog).is_err() {
+            continue;
+        }
+        for it in manifest.items.values().filter(|i| i.source == *member) {
+            if normalize_home(&paths.home_of_item_store(&it.store)) == target {
+                continue;
+            }
+            if catalog.iter().any(|c| {
+                c.kind == it.kind
+                    && c.name == it.bare_name
+                    && c.source == it.source
+                    && c.build.is_some()
+            }) {
+                return Ok(Some(it.display_key()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Whether an installed item's store copy is in another home than its
@@ -13084,7 +13165,7 @@ fn upgrade_inner_scoped(
                     .as_ref()
                     .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
         };
-        if follow_declared_homes(paths, &registry, &admits)? {
+        if follow_declared_homes(paths, &registry, &admits, accept)? {
             registry = Registry::load(paths)?;
         }
     }
@@ -18139,6 +18220,34 @@ fn auto_update_hold_reason(
                 "{} has a hook that needs consent",
                 installed.display_key()
             )));
+        }
+    }
+    // spec: HOME-16 -- a release whose `mind-home` moves the source would
+    // rebuild its built items, and a run cannot consent to their build hooks.
+    if !source.chosen_home
+        && let Some(declared) = MindToml::load(dir)
+            .ok()
+            .flatten()
+            .and_then(|m| m.source.mind_home)
+        && let Ok(target) = paths.allowed_home(&declared, "the `mind-home`")
+    {
+        use crate::paths::normalize_home;
+        let to = normalize_home(target.as_deref().unwrap_or(&paths.mind_home));
+        if to != normalize_home(&paths.home_of(&source.name)) {
+            let registry = Registry::load(paths)?;
+            let family = home_family(paths, &registry, &source.name);
+            if let Some(item) = move_would_skip_build(
+                paths,
+                &registry,
+                &family,
+                target.as_deref(),
+                crate::hook::Accept::default(),
+            )? {
+                return Ok(Some(format!(
+                    "moving it to {} would rebuild {item}, whose build hook needs consent",
+                    to.display()
+                )));
+            }
         }
     }
     Ok(None)
