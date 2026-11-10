@@ -1702,6 +1702,7 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         whole_snapshot: None,
         auto_update: None,
         lobe: None,
+        chosen_home: false,
     }
 }
 
@@ -2002,6 +2003,7 @@ mod tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 

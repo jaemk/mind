@@ -596,6 +596,12 @@ impl Paths {
     /// it was given, for the `lobe-not-allowed` message.
     // spec: LOBE-2
     pub fn resolve_lobe(&self, source: &str, declared: &str, origin: &str) -> Result<PathBuf> {
+        self.resolve_lobe_in(&self.home_of(source), declared, origin)
+    }
+
+    /// [`Self::resolve_lobe`] against mind home `home`: for a `--lobe` checked
+    /// before the source is in the home given with it (`--home`).
+    pub fn resolve_lobe_in(&self, home: &Path, declared: &str, origin: &str) -> Result<PathBuf> {
         let refuse = |why: String| MindError::LobeNotAllowed {
             lobe: declared.to_string(),
             origin: origin.to_string(),
@@ -606,7 +612,7 @@ impl Paths {
             return Err(refuse("it is empty".to_string()));
         }
         let expanded = crate::commands::expand_tilde(trimmed);
-        let lobe = normalize_home(&self.home_of(source).join(expanded));
+        let lobe = normalize_home(&home.join(expanded));
         let homes: Vec<PathBuf> = self.all_homes().iter().map(|h| normalize_home(h)).collect();
         let reserved = homes.iter().any(|home| {
             lobe == *home

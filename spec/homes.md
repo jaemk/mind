@@ -78,7 +78,19 @@ as one set.
   the source is already in moves nothing, so the command is idempotent. A
   move into a home whose `sources.json` already lists a shadowed copy of the
   source (HOME-3) is refused (`source-in-other-home`, exit 1). A lobe symlink
-  into any allowed home's store is mind's own (LIFE-41).
+  into any allowed home's store is mind's own (LIFE-41). A move that fails
+  partway puts back the clones it moved, and the registry with them.
+- `HOME-15` An `upgrade` pass that is not limited to items (unscoped,
+  `--source`, `sync --upgrade`, `curate`, `auto-update run`) moves a source
+  whose own `[source] mind-home`, at the commit its clone is now on, names an
+  allowed home it is not in. It moves as HOME-8 describes, with the curated
+  sources that follow it, and the same pass reinstalls its installed items
+  there, linked into the lobe now in effect (LOBE-5). A source whose home the
+  consumer chose (`meld --home`, `learn <url> --home`, or a curator entry's
+  `mind-home`, recorded as `chosen_home` on its registry entry) is not moved.
+  A declared home that is not allowed, or a move that fails (e.g. a home that
+  cannot be written), leaves the source where it is, with a warning on
+  stderr. `upgrade <item>` moves no source.
 
 - `HOME-10` A curator's `[[discover.sources]]` entry may name a `mind-home`
   for that source. It is checked like `meld --home` (an allowed home, before

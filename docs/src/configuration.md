@@ -158,6 +158,14 @@ mind meld owner/repo --home ~/dev/project/.mind
 Its clone, registry entry, and installed items move to that home, along with
 the sources it curates that have no home of their own; the items are listed
 and confirmed as an upgrade is. Running it again moves nothing.
+
+`mind upgrade` does the same when a source's own `mind-home` names another
+home in a new commit, so an existing install follows it: the source, its
+items, and their links (into its `lobe`, if it has one) move in one pass. A
+source whose home you chose with `--home` stays where you put it. A move
+that cannot happen, e.g. from a home the sandbox cannot write, leaves the
+source in place with a warning; run `mind upgrade` again where it can be
+written.
 `learn <url> --home` places an [item link](item-links.md) the same
 way, a curator entry can name a source's `mind-home`, and `dump` records each
 source's extra home. `recall --sources` shows `home:<dir>` for a source in an
