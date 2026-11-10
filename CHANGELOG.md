@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-09
+
 ### Added
 
 - Source lobes: a source's `[source] lobe = "<dir>"`, or the consumer's `meld
@@ -37,8 +39,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   source in place, and `auto-update run` holds the release.
 - A lobe that cannot be written (permission denied, a read-only filesystem)
   is skipped with a note instead of failing `learn`, `meld`, `upgrade`,
-  `forget`, or `introspect --fix`. A link already pointing at the store copy is left alone, so an
-  in-place upgrade writes nothing in the lobe.
+  `forget`, or `introspect --fix`. A link already pointing at the store copy
+  is left alone, so an in-place upgrade writes nothing in the lobe.
 
 ## [0.48.0] - 2026-11-09
 
@@ -2441,7 +2443,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.48.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.49.0...HEAD
+[0.49.0]: https://github.com/jaemk/mind/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/jaemk/mind/compare/v0.47.0...v0.48.0
 [0.47.0]: https://github.com/jaemk/mind/compare/v0.46.0...v0.47.0
 [0.46.0]: https://github.com/jaemk/mind/compare/v0.45.0...v0.46.0
