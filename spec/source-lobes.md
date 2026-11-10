@@ -16,9 +16,10 @@ their `CLAUDE.md`).
   against the source's mind home (HOME-6), so `lobe = "claude"` is
   `<home>/claude` and moves with the source when it changes home (HOME-8).
   The result must not be a mind home or lie under one's `store`, `sources`,
-  or `.tmp`. When extra mind homes are set (`MIND_HOMES` or the `mind-homes`
-  config key, HOME-2), it must also lie under an allowed home; with none set,
-  any directory is allowed. Otherwise the lobe is refused (`lobe-not-allowed`,
+  or `.tmp`. When the user sets extra mind homes (`MIND_HOMES` or the
+  `mind-homes` config key, HOME-2), it must also lie under an allowed home;
+  with none set, any directory is allowed, whatever homes `source-homes`
+  records (HOME-17). Otherwise the lobe is refused (`lobe-not-allowed`,
   exit 1): a `--lobe` before anything is cloned, a source's own `lobe` at
   `meld` before the source is registered (the clone is removed), and one from
   a later commit when an item of the source installs. `upgrade` holds such a

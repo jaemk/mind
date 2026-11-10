@@ -230,6 +230,18 @@ pub struct Config {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub mind_homes: Vec<String>,
+
+    /// Mind homes mind recorded for sources melded into a home of their own
+    /// while no extra homes were set (HOME-17), as absolute paths. Read only
+    /// while `MIND_HOMES` and `mind-homes` are both unset.
+    // spec: HOME-17
+    #[serde(
+        rename = "source-homes",
+        alias = "source_homes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub source_homes: Vec<String>,
 }
 
 /// The `hook-log` config value (HOOK-165): on/off, or a directory.

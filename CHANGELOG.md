@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- With no `MIND_HOMES` and no `mind-homes` config key, `meld --home`, a
+  source's `[source] mind-home`, and a curator entry's `mind-home` take any
+  directory that is missing, empty, or already a mind home, not only
+  `~/.mind`. The home is recorded under the new `source-homes` config key so
+  later runs read it, and called out in bold the first time. Setting
+  `MIND_HOMES` or `mind-homes` restricts homes and lobes to that list as
+  before, and `source-homes` is then not read. `config show` lists
+  `source-homes`, and `--json` adds `source_homes` and `homes_restricted`.
+- `home-not-allowed` errors name the reason a home was refused.
+
 ## [0.49.0] - 2026-11-09
 
 ### Added
