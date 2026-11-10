@@ -190,7 +190,8 @@ confirmation names the lobe in bold, and says so when it is outside every
 mind home. `upgrade` moves the links when a new commit adds, changes, or
 drops the source's lobe; `meld --lobe <dir>` on a melded source moves them
 at once, and `--lobe ''` clears the consumer's lobe. `learn <url> --lobe`
-does the same for an [item link](item-links.md).
+does the same for an [item link](item-links.md). `recall --sources` shows
+`lobe:<dir>` for a source with a lobe in effect (`lobe_path` under `--json`).
 
 For every source, a lobe that cannot be written (permission denied, a
 read-only filesystem) is skipped with a note instead of failing the command.
