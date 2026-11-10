@@ -2909,6 +2909,7 @@ mod tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 
@@ -5487,6 +5488,7 @@ mod plugin_tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 
@@ -6820,6 +6822,7 @@ mod lifecycle_tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 

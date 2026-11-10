@@ -601,6 +601,7 @@ mod tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 

@@ -26,6 +26,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   another mind home moves it there, with its installed items and the curated
   sources that follow it, instead of refusing. `upgrade` reinstalls an item
   whose store copy is in another home than its source's.
+- `upgrade` moves a source whose `[source] mind-home` names another home in
+  a new commit, with its items, unless its home was chosen with `--home` or a
+  curator entry's `mind-home`. A source melded with `--home` before this
+  release has no record of that choice, so it follows its own `mind-home`;
+  run `meld --home` again to keep it where it is.
 - A lobe that cannot be written (permission denied, a read-only filesystem)
   is skipped with a note instead of failing `learn`, `meld`, `upgrade`,
   `forget`, or `introspect --fix`. A link already pointing at the store copy is left alone, so an

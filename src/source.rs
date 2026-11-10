@@ -445,6 +445,11 @@ pub struct Source {
     /// lobe`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lobe: Option<String>,
+    /// The consumer chose this source's home (`meld --home`, `learn <url>
+    /// --home`, a curator entry's `mind-home`), so its own `[source]
+    /// mind-home` does not move it on `upgrade` (HOME-15).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chosen_home: bool,
 }
 
 impl Source {
@@ -1287,6 +1292,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         whole_snapshot: None,
         auto_update: None,
         lobe: None,
+        chosen_home: false,
     })
 }
 

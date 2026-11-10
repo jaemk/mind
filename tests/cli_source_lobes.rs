@@ -885,3 +885,170 @@ fn kept_item_is_checked_against_its_recorded_lobe() {
         "the default lobe stays unlinked"
     );
 }
+
+/// A relative `--lobe` is taken against the `--home` given with it, whether
+/// the source is new or already melded elsewhere; an empty `lobe` in a
+/// source's `mind.toml` declares none.
+#[test]
+fn lobe_is_checked_against_the_home_given_with_it() {
+    // spec: LOBE-2 LOBE-7
+    let sb = Sandbox::new(None);
+    // Deeper than the default home, so `../../default/lobe` lies under the
+    // default home from here and outside every home from the default home.
+    let deep = sb.base.join("deep/extra");
+    let deep_str = deep.to_string_lossy().into_owned();
+    let spec = sb.source.to_string_lossy().into_owned();
+    let cwd = std::env::current_dir().unwrap();
+    let env = [("MIND_HOMES", deep.as_path())];
+    let lobe = sb.default_home.join("lobe");
+    for already_melded in [false, true] {
+        if already_melded {
+            let r = sb.mind_env(&cwd, &env, &["--yes", "meld", &spec]);
+            assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+        }
+        let r = sb.mind_env(
+            &cwd,
+            &env,
+            &[
+                "--yes",
+                "meld",
+                &spec,
+                "--home",
+                &deep_str,
+                "--lobe",
+                "../../default/lobe",
+            ],
+        );
+        assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+        assert!(
+            is_link_into(&lobe.join("skills/alpha"), &deep.join("store")),
+            "already melded: {already_melded}"
+        );
+        let r = sb.mind_env(
+            &cwd,
+            &env,
+            &[
+                "--yes",
+                "unmeld",
+                &format!(
+                    "local/{}/src",
+                    sb.base.file_name().unwrap().to_string_lossy()
+                ),
+            ],
+        );
+        assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    }
+
+    let sb = Sandbox::new(Some("[source]\nlobe = \"\"\n"));
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert!(is_link_into(
+        &sb.claude_home.join("skills/alpha"),
+        &sb.extra.join("store")
+    ));
+}
+
+/// A `--lobe` that passed the check against the default home is checked again
+/// once the source's own `mind-home` has placed it, and refused before
+/// anything is registered when it is not allowed from there.
+#[test]
+fn lobe_is_rechecked_after_the_source_picks_its_home() {
+    // spec: LOBE-2 LOBE-7
+    let sb = Sandbox::new(None);
+    let deep = sb.base.join("deep/extra");
+    write(
+        &sb.source.join("mind.toml"),
+        &format!("[source]\nmind-home = {:?}\n", deep.to_string_lossy()),
+    );
+    sb.commit("own home");
+    let spec = sb.source.to_string_lossy().into_owned();
+    let cwd = std::env::current_dir().unwrap();
+    let env = [("MIND_HOMES", deep.as_path())];
+    let r = sb.mind_env(
+        &cwd,
+        &env,
+        &["--yes", "meld", &spec, "--lobe", "../default/lobe"],
+    );
+    assert!(!r.ok(), "meld: {}", r.stdout);
+    assert!(r.stderr.contains("is not allowed"), "{}", r.stderr);
+    assert_eq!(sb.sources_in(&deep), 0);
+    assert_eq!(sb.sources_in(&sb.default_home), 0);
+}
+
+/// The full sandbox path: a source melded into the default home gains a
+/// `mind-home` and a `lobe` in a new commit, and one `upgrade` moves it to
+/// that home and its item's store copy and links with it.
+#[test]
+fn upgrade_follows_a_new_mind_home_and_lobe() {
+    // spec: HOME-15 LOBE-5
+    let sb = Sandbox::new(None);
+    let spec = sb.source.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &spec]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.default_home), 1);
+    write(
+        &sb.source.join("mind.toml"),
+        &format!(
+            "[source]\nmind-home = {:?}\nlobe = \"claude\"\n",
+            sb.extra.to_string_lossy()
+        ),
+    );
+    sb.commit("own home and lobe");
+
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stdout.contains("moved"), "{}", r.stdout);
+    assert_eq!(sb.sources_in(&sb.default_home), 0);
+    assert_eq!(sb.sources_in(&sb.extra), 1);
+    assert!(is_link_into(
+        &sb.own_lobe().join("skills/alpha"),
+        &sb.extra.join("store")
+    ));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/alpha")).is_err());
+    assert!(!sb.default_home.join("store/skill/alpha").exists());
+
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(!r.stdout.contains("moved"), "{}", r.stdout);
+}
+
+/// A home the consumer chose with `--home` is kept when the source later
+/// names another; a declared home that is not allowed leaves the source in
+/// place with a warning.
+#[test]
+fn upgrade_keeps_a_chosen_or_refused_home() {
+    // spec: HOME-15
+    let sb = Sandbox::new(None);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let entry = std::fs::read_to_string(sb.extra.join("sources.json")).unwrap();
+    assert!(entry.contains("\"chosen_home\": true"), "{entry}");
+    write(
+        &sb.source.join("mind.toml"),
+        &format!(
+            "[source]\nmind-home = {:?}\n",
+            sb.default_home.to_string_lossy()
+        ),
+    );
+    sb.commit("own home");
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.sources_in(&sb.extra), 1);
+
+    let sb = Sandbox::new(None);
+    let spec = sb.source.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &spec]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    write(
+        &sb.source.join("mind.toml"),
+        &format!(
+            "[source]\nmind-home = {:?}\n",
+            sb.base.join("nowhere").to_string_lossy()
+        ),
+    );
+    sb.commit("bad home");
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("stays in"), "{}", r.stderr);
+    assert_eq!(sb.sources_in(&sb.default_home), 1);
+}

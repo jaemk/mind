@@ -1146,13 +1146,137 @@ pub(crate) fn move_to_home(
     yes: bool,
     accept: crate::hook::Accept,
 ) -> Result<()> {
+    let family = relocate_family(paths, name, to)?;
+    if family.is_empty() {
+        return Ok(());
+    }
+    // spec: HOME-15 -- the consumer chose this home; `upgrade` keeps it.
+    let mut registry = Registry::load(paths)?;
+    if let Some(entry) = registry.sources.iter_mut().find(|s| s.name == name)
+        && !entry.chosen_home
+    {
+        entry.chosen_home = true;
+        registry.save(paths)?;
+    }
+    reinstall_moved_items(paths, &family, yes, accept)
+}
+
+/// Move each source `in_scope` admits whose own `[source] mind-home`, as its
+/// clone now has it, names an allowed home it is not in, unless the consumer
+/// chose its home (HOME-15). The curated sources that follow it move with it
+/// (HOME-8); the upgrade pass then reinstalls their items there. A home that
+/// is not allowed, or a move that fails, leaves the source where it is with a
+/// warning. Returns whether any source moved.
+// spec: HOME-15
+fn follow_declared_homes(
+    paths: &Paths,
+    registry: &Registry,
+    in_scope: &dyn Fn(&crate::source::Source) -> bool,
+) -> Result<bool> {
+    use crate::paths::normalize_home;
+    let out = crate::render::ctx();
+    let mut saved = false;
+    let mut any = false;
+    let names: Vec<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
+    for name in names {
+        // Re-read: an earlier move may have taken this source along.
+        let current = Registry::load(paths)?;
+        let Some(src) = current
+            .find(&name)
+            .filter(|s| !s.chosen_home && in_scope(s))
+        else {
+            continue;
+        };
+        let Some(declared) = MindToml::load(&src.clone_dir(paths))
+            .ok()
+            .flatten()
+            .and_then(|m| m.source.mind_home)
+        else {
+            continue;
+        };
+        let shown = strip_ansi(&name);
+        let origin = format!("the `mind-home` in {shown}'s mind.toml");
+        let target = match paths.allowed_home(&declared, &origin) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "{} {shown} stays in {}: {}",
+                    out.warn(),
+                    paths.home_of(&name).display(),
+                    strip_ansi(&e.to_string())
+                );
+                continue;
+            }
+        };
+        let to = normalize_home(target.as_deref().unwrap_or(&paths.mind_home));
+        if to == normalize_home(&paths.home_of(&name)) {
+            continue;
+        }
+        if !saved {
+            // What the pass changed so far (sync, breaking moves) is on disk
+            // before a move reads the registry back.
+            registry.save(paths)?;
+            saved = true;
+        }
+        match relocate_family(paths, &name, target.as_deref()) {
+            Ok(_) => any = true,
+            Err(e) => eprintln!(
+                "{} {shown} stays in {}: could not move it to {}: {}",
+                out.warn(),
+                paths.home_of(&name).display(),
+                to.display(),
+                strip_ansi(&e.to_string())
+            ),
+        }
+    }
+    Ok(any)
+}
+
+/// Reinstall, through the upgrade pass and without fetching, every installed
+/// item of `family` whose store copy is in another home than its source's
+/// (HOME-8).
+fn reinstall_moved_items(
+    paths: &Paths,
+    family: &[String],
+    yes: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let keys: Vec<String> = Manifest::load(paths)?
+        .items
+        .values()
+        .filter(|it| family.contains(&it.source) && item_in_other_home(paths, it))
+        .map(|it| it.key().as_str().to_string())
+        .collect();
+    if !keys.is_empty() {
+        // The meld's own result is the one `--json` document (CLI-217).
+        upgrade_inner_scoped(
+            paths,
+            yes,
+            None,
+            true,
+            SourceScope::Names(family, None),
+            Some(&keys),
+            accept,
+        )?;
+    }
+    Ok(())
+}
+
+/// Move melded source `name`, with the curated sources that follow it, into
+/// home `to` (`None`: the default home), HOME-8: each clone moves (a rename,
+/// else a copy) and each registry entry is written to `to`'s file. Returns
+/// the family (empty when `name` is not melded); its items are left for the
+/// upgrade pass to reinstall. Refuses before anything moves when `to` lists a
+/// shadowed copy of a member, and puts the clones back when the registry
+/// cannot be saved.
+fn relocate_family(paths: &Paths, name: &str, to: Option<&std::path::Path>) -> Result<Vec<String>> {
     use crate::paths::{normalize_home, set_source_home, source_home};
     let out = crate::render::ctx();
     let home_key = |h: Option<&std::path::Path>| normalize_home(h.unwrap_or(&paths.mind_home));
     let target = home_key(to);
     let registry = Registry::load(paths)?;
     if registry.find(name).is_none() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // The source and, transitively, the curated sources that follow it.
     let mut family = vec![name.to_string()];
@@ -1178,7 +1302,27 @@ pub(crate) fn move_to_home(
             });
         }
     }
-    let mut moved = 0;
+    // Each member moved so far: its name, old home, and (old, new) clone dirs
+    // when its clone moved.
+    type Moved = (
+        String,
+        Option<std::path::PathBuf>,
+        Option<(std::path::PathBuf, std::path::PathBuf)>,
+    );
+    let mut moved: Vec<Moved> = Vec::new();
+    // Put every moved member back, so a failure leaves no one split off.
+    let undo = |moved: &[Moved]| {
+        for (member, from, dirs) in moved.iter().rev() {
+            if let Some((old, new)) = dirs {
+                if old.exists() {
+                    let _ = install::remove_path(new);
+                } else {
+                    let _ = move_tree(new, old);
+                }
+            }
+            set_source_home(member, from.as_deref());
+        }
+    };
     for member in &family {
         let from = source_home(member);
         if home_key(from.as_deref()) == target {
@@ -1187,20 +1331,36 @@ pub(crate) fn move_to_home(
         let Some(src) = registry.find(member).cloned() else {
             continue;
         };
-        let old_dir = clone_dir_checked(paths, &src)?;
-        set_source_home(member, to);
-        let relocated = if src.is_linked() || !old_dir.exists() {
-            Ok(())
-        } else {
-            clone_dir_checked(paths, &src).and_then(|new_dir| move_tree(&old_dir, &new_dir))
-        };
-        if let Err(e) = relocated {
-            set_source_home(member, from.as_deref());
-            registry.save(paths)?;
-            return Err(e);
+        let relocated = (|| {
+            let old_dir = clone_dir_checked(paths, &src)?;
+            set_source_home(member, to);
+            if src.is_linked() || !old_dir.exists() {
+                return Ok(None);
+            }
+            let new_dir = clone_dir_checked(paths, &src)?;
+            move_tree(&old_dir, &new_dir)?;
+            Ok(Some((old_dir, new_dir)))
+        })();
+        match relocated {
+            Ok(dirs) => moved.push((member.clone(), from, dirs)),
+            Err(e) => {
+                set_source_home(member, from.as_deref());
+                undo(&moved);
+                return Err(e);
+            }
         }
-        moved += 1;
-        if !out.json {
+    }
+    if moved.is_empty() {
+        return Ok(family);
+    }
+    if let Err(e) = registry.save(paths) {
+        undo(&moved);
+        // A save that wrote some homes before failing is written back.
+        let _ = registry.save(paths);
+        return Err(e);
+    }
+    if !out.json {
+        for (member, _, _) in &moved {
             println!(
                 "{} moved {} to mind home {}",
                 out.ok(),
@@ -1209,28 +1369,7 @@ pub(crate) fn move_to_home(
             );
         }
     }
-    if moved > 0 {
-        registry.save(paths)?;
-    }
-    let keys: Vec<String> = Manifest::load(paths)?
-        .items
-        .values()
-        .filter(|it| family.contains(&it.source) && item_in_other_home(paths, it))
-        .map(|it| it.key().as_str().to_string())
-        .collect();
-    if !keys.is_empty() {
-        // The meld's own result is the one `--json` document (CLI-217).
-        upgrade_inner_scoped(
-            paths,
-            yes,
-            None,
-            true,
-            SourceScope::Names(&family, None),
-            Some(&keys),
-            accept,
-        )?;
-    }
-    Ok(())
+    Ok(family)
 }
 
 /// Whether an installed item's store copy is in another home than its
@@ -2151,6 +2290,8 @@ fn meld_recursive(
         (None, None) => crate::paths::meld_home(),
     };
     crate::paths::set_source_home(&source.name, meld_home.home.as_deref());
+    // spec: HOME-15 -- a home the consumer chose is kept on `upgrade`.
+    source.chosen_home = meld_home.explicit;
 
     // `source.pin` is still the default here, so `clone_dir` resolves a local
     // source to its working tree. A consumer/directive pin (resolved below) can
@@ -2261,15 +2402,25 @@ fn meld_recursive(
             }
         }
     }
-    // spec: LOBE-2 -- a `lobe` that is not allowed refuses the meld before
-    // anything is registered or installed, and the clone is removed. A
-    // consumer `--lobe` outranks it (LOBE-7), so it is not checked then.
-    if let Some(declared) = mindfile.as_ref().and_then(|m| m.source.lobe.as_deref())
-        && crate::paths::consumer_lobe_decl(&source.name).is_none()
+    // spec: LOBE-2 -- a lobe that is not allowed refuses the meld before
+    // anything is registered or installed, and the clone is removed. It is
+    // checked against the home just settled: the consumer's `--lobe`, which
+    // outranks the source's own (LOBE-7), else the source's `lobe`.
+    let consumer_lobe = crate::paths::consumer_lobe_decl(&source.name);
+    let in_effect = match consumer_lobe.as_deref() {
+        Some(l) => Some((l, true)),
+        None => mindfile
+            .as_ref()
+            .and_then(|m| m.source.lobe.as_deref())
+            // An empty `lobe` declares none, as everywhere else (LOBE-1).
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| (l, false)),
+    };
+    if let Some((declared, consumer)) = in_effect
         && let Err(e) = paths.resolve_lobe(
             &source.name,
             declared,
-            &crate::paths::lobe_origin(&source.name, false),
+            &crate::paths::lobe_origin(&source.name, consumer),
         )
     {
         if !is_local {
@@ -5959,9 +6110,14 @@ pub fn learn_link(
     });
     // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
     // the clone; recorded now so the meld below already honors it.
+    // A relative one is taken against the `--home` given with it.
     let mut _lobe_scope = None;
     if let Some(l) = lobe.map(str::trim).filter(|l| !l.is_empty()) {
-        paths.resolve_lobe(&spec.name, l, "--lobe")?;
+        let lobe_home = match &home {
+            Some(h) => h.clone().unwrap_or_else(|| paths.mind_home.clone()),
+            None => paths.home_of(&spec.name),
+        };
+        paths.resolve_lobe_in(&lobe_home, l, "--lobe")?;
         if !dry_run {
             _lobe_scope = Some(crate::paths::PendingLobeScope::set(&spec.name, l));
         }
@@ -12916,6 +13072,22 @@ fn upgrade_inner_scoped(
             .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
     };
     let breaking_moves = settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    // spec: HOME-15 -- with each clone at its new commit, a source whose own
+    // `mind-home` now names another home moves there, and the pass below
+    // reinstalls its items in that home (HOME-8) and links them into the lobe
+    // now in effect (LOBE-5). Only an unscoped or source-scoped pass moves a
+    // source; an `upgrade <item>` names items.
+    if filter.is_none() && key_scope.is_none() {
+        let admits = |s: &crate::source::Source| {
+            source_scope.as_ref().is_none_or(|sc| sc.contains(&s.name))
+                && policy
+                    .as_ref()
+                    .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
+        };
+        if follow_declared_homes(paths, &registry, &admits)? {
+            registry = Registry::load(paths)?;
+        }
+    }
     // spec: VER-91 -- the `--json` result carries each in-scope version-pinned
     // source's release state, and the breaking moves apart from the applied
     // changes.
@@ -17608,9 +17780,17 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
     let already_melded = is_melded(paths, &repo, alias.as_deref())?;
     // spec: LOBE-2 LOBE-7 -- a `--lobe` that is not allowed is refused before
     // the clone; recorded now so the meld below already honors it.
+    // A relative one is taken against the `--home` given with it.
     let mut _lobe_scope = None;
     if let Some(l) = lobe.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-        paths.resolve_lobe(&source_ident, l, "--lobe")?;
+        let lobe_home = if home.is_some() {
+            crate::paths::meld_home()
+                .home
+                .unwrap_or_else(|| paths.mind_home.clone())
+        } else {
+            paths.home_of(&source_ident)
+        };
+        paths.resolve_lobe_in(&lobe_home, l, "--lobe")?;
         if !already_melded {
             _lobe_scope = Some(crate::paths::PendingLobeScope::set(&source_ident, l));
         }
@@ -18823,6 +19003,7 @@ mod tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 
@@ -21155,6 +21336,7 @@ mod tests {
             whole_snapshot: None,
             auto_update: None,
             lobe: None,
+            chosen_home: false,
         }
     }
 
