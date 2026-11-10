@@ -188,7 +188,8 @@ homes are set (`MIND_HOMES` or `mind-homes`), the lobe must lie under one of
 them; with none set it may be any directory. Either way the install
 confirmation names the lobe in bold, and says so when it is outside every
 mind home. `upgrade` moves the links when a new commit adds, changes, or
-drops the source's lobe; `meld --lobe <dir>` on a melded source moves them
+drops the source's lobe, and holds back a source whose new lobe is not
+allowed while upgrading the rest; `meld --lobe <dir>` on a melded source moves them
 at once, and `--lobe ''` clears the consumer's lobe. `learn <url> --lobe`
 does the same for an [item link](item-links.md). `recall --sources` shows
 `lobe:<dir>` for a source with a lobe in effect (`lobe_path` under `--json`).

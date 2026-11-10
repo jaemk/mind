@@ -748,3 +748,140 @@ fn a_failed_reinstall_keeps_the_links_it_did_not_make() {
     );
     assert!(claude_link.join("SKILL.md").exists());
 }
+
+/// A new commit naming a lobe that is refused holds back only its own
+/// source: `upgrade` names it as unchecked and upgrades the other source, and
+/// `introspect` reports it as an issue instead of failing.
+#[test]
+fn a_refused_lobe_holds_back_only_its_source() {
+    // spec: LOBE-2
+    let sb = Sandbox::new(None);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let other = sb.base.join("other");
+    write(
+        &other.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\nbody\n",
+    );
+    git(&other, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&other, &["config", "user.email", "t@t"]);
+    git(&other, &["config", "user.name", "t"]);
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "initial"]);
+    let extra = sb.extra.to_string_lossy().into_owned();
+    let r = sb.mind(&["--yes", "meld", &other.to_string_lossy(), "--home", &extra]);
+    assert!(r.ok(), "meld other: {}\n{}", r.stdout, r.stderr);
+
+    let outside = sb.base.join("outside");
+    write(
+        &sb.source.join("mind.toml"),
+        &format!("[source]\nlobe = {:?}\n", outside.to_string_lossy()),
+    );
+    write(
+        &sb.source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\nchanged\n",
+    );
+    sb.commit("refused lobe");
+    write(
+        &other.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\nchanged\n",
+    );
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-qm", "change beta"]);
+
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("could not check"), "{}", r.stderr);
+    assert!(r.stderr.contains("lobe"), "{}", r.stderr);
+    let store = sb.extra.join("store/skill");
+    let beta = std::fs::read_to_string(store.join("beta/SKILL.md")).unwrap();
+    assert!(beta.contains("changed"), "the other source upgrades");
+    let alpha = std::fs::read_to_string(store.join("alpha/SKILL.md")).unwrap();
+    assert!(!alpha.contains("changed"), "the held source does not");
+    assert!(is_link_into(
+        &sb.claude_home.join("skills/alpha"),
+        &sb.extra.join("store")
+    ));
+    assert!(!outside.exists());
+
+    let r = sb.mind(&["introspect", "--json"]);
+    let v: Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("introspect json: {e}\n{}\n{}", r.stdout, r.stderr));
+    let refused: Vec<&Value> = v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["kind"] == "lobe-not-allowed")
+        .collect();
+    assert_eq!(refused.len(), 1, "{}", r.stdout);
+}
+
+/// `introspect --fix` leaves a missing link in a lobe it cannot write
+/// missing, with a note, and still reports it.
+#[test]
+fn introspect_fix_skips_an_unwritable_lobe() {
+    // spec: LOBE-6
+    let sb = Sandbox::new(None);
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let skills = sb.claude_home.join("skills");
+    std::fs::remove_file(skills.join("alpha")).unwrap();
+    chmod("a-w", &skills);
+    if !enforced(&skills) {
+        return;
+    }
+    let r = sb.mind(&["introspect", "--fix", "--json"]);
+    chmod("u+w", &skills);
+    assert!(r.stderr.contains("cannot be written"), "{}", r.stderr);
+    let v: Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("introspect json: {e}\n{}\n{}", r.stdout, r.stderr));
+    assert!(
+        v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "missing-link"),
+        "{}",
+        r.stdout
+    );
+
+    let r = sb.mind(&["introspect", "--fix"]);
+    assert!(r.ok(), "introspect --fix: {}\n{}", r.stdout, r.stderr);
+    assert!(is_link_into(&skills.join("alpha"), &sb.extra.join("store")));
+}
+
+/// An item kept after its source is unmelded stays checked against the lobe
+/// it recorded: `introspect` finds no missing link in the default lobe, and
+/// `--fix` does not make one.
+#[test]
+fn kept_item_is_checked_against_its_recorded_lobe() {
+    // spec: LOBE-3
+    let sb = Sandbox::new(Some("[source]\nlobe = \"claude\"\n"));
+    let r = sb.meld();
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    let owner = sb.base.file_name().unwrap().to_string_lossy().into_owned();
+    let identity = format!("local/{owner}/src");
+    let r = sb.mind(&["--yes", "unmeld", &identity, "--keep-items"]);
+    assert!(r.ok(), "unmeld: {}\n{}", r.stdout, r.stderr);
+    assert!(is_link_into(
+        &sb.own_lobe().join("skills/alpha"),
+        &sb.extra.join("store")
+    ));
+
+    let r = sb.mind(&["introspect", "--fix", "--json"]);
+    let v: Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("introspect json: {e}\n{}\n{}", r.stdout, r.stderr));
+    assert!(
+        !v["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "missing-lobe-link"),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/alpha")).is_err(),
+        "the default lobe stays unlinked"
+    );
+}

@@ -13028,7 +13028,12 @@ fn upgrade_inner_scoped(
     let mut catalog: Vec<CatalogItem> = Vec::new();
     let mut unscannable: Vec<String> = Vec::new();
     for s in &registry.sources {
-        if let Err(e) = catalog::scan_source(paths, s, &mut catalog) {
+        // spec: LOBE-2 -- a lobe that is refused holds its source back like a
+        // scan failure, so one source's lobe cannot stop the others' upgrades.
+        let checked = catalog::scan_source(paths, s, &mut catalog)
+            .and_then(|()| paths.source_lobe(&s.name).map(drop));
+        if let Err(e) = checked {
+            catalog.retain(|c| c.source != s.name);
             unscannable.push(s.name.clone());
             if !out.json {
                 let safe_e = strip_ansi(&e.to_string());
@@ -15592,10 +15597,22 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // vanished lobes so they don't generate spurious missing-lobe-link findings).
     // spec: LOBE-3 -- per source: one with its own `lobe` is checked against
     // that lobe in place of the default one.
-    let live_lobes_for = |source: &str| -> Result<Vec<crate::paths::Lobe>> {
-        let own = paths.source_lobe(source)?;
-        Ok(paths
-            .agent_homes_for(source)?
+    // An item kept after its source was unmelded (`--keep-items`) is checked
+    // against the lobe it recorded, unless a policy lobe lock rules (LOBE-4).
+    let lobes_locked = crate::policy::Policy::load()?.is_some_and(|p| p.lobes_lock());
+    let live_lobes_for = |it: &crate::manifest::InstalledItem| -> Result<Vec<crate::paths::Lobe>> {
+        let (own, lobes) = match (registry.find(&it.source), &it.lobe) {
+            (None, Some(recorded)) if !lobes_locked => {
+                let root = std::path::PathBuf::from(recorded);
+                let lobes = paths.agent_homes_with_lobe(paths.agent_homes()?, root.clone())?;
+                (Some(root), lobes)
+            }
+            _ => (
+                paths.effective_source_lobe(&it.source)?,
+                paths.agent_homes_for(&it.source)?,
+            ),
+        };
+        Ok(lobes
             .into_iter()
             .filter(|l| l.reachable() || own.as_ref() == Some(&l.path))
             .collect())
@@ -15650,7 +15667,26 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         // added after the item was installed -- the link would be absent from
         // both the manifest and disk. Use live_lobes so vanished lobes don't
         // generate spurious missing-lobe-link findings (HARN-13).
-        let live_lobes = live_lobes_for(&it.source)?;
+        // spec: LOBE-2 -- a refused lobe is reported, once per source, and
+        // leaves the source's items unchecked against the lobes rather than
+        // failing the whole report.
+        let live_lobes = match live_lobes_for(it) {
+            Ok(lobes) => lobes,
+            Err(e @ MindError::LobeNotAllowed { .. }) => {
+                if !issues
+                    .iter()
+                    .any(|i| i.kind == "lobe-not-allowed" && i.target == it.source)
+                {
+                    issues.push(Issue {
+                        kind: "lobe-not-allowed",
+                        target: it.source.clone(),
+                        message: strip_ansi(&e.to_string()),
+                    });
+                }
+                Vec::new()
+            }
+            Err(e) => return Err(e),
+        };
         let link_rel = it
             .links
             .iter()
@@ -18125,6 +18161,10 @@ pub fn auto_update_run(
                     auto_update_restore_clone(current, &dir)?;
                     return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
                 }
+                // spec: LOBE-2 -- a lobe the new commit names that is refused
+                // fails the move (the hold scan above read it), so the clone
+                // goes back and the run reports it.
+                paths.source_lobe(&next.name)?;
                 Ok(Step::Moved(commit, Box::new(pin), took_breaking))
             };
             let step = moving();

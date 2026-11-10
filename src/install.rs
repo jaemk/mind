@@ -478,8 +478,14 @@ pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
             continue;
         }
         if std::fs::symlink_metadata(link).is_err() {
-            ensure_link(&store, link)?;
-            fixed += 1;
+            match ensure_link(&store, link) {
+                Ok(()) => fixed += 1,
+                // spec: LOBE-6 -- left missing (and reported so) with a note.
+                Err(e) if e.is_unwritable() => {
+                    note_unwritable_lobe_once(link.parent().unwrap_or(link));
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
     Ok(fixed)

@@ -458,6 +458,27 @@ fn a_run_reports_and_logs_the_items_a_pruning_source_dropped() {
     );
 }
 
+/// A release whose `lobe` is refused is not moved to: the source stays at its
+/// commit, its items are untouched, and the run reports the failure.
+#[test]
+fn a_run_reports_a_release_whose_lobe_is_refused() {
+    // spec: LOBE-2
+    let sb = melded("auto-lobe", "", "--auto-update");
+    let before = sb.entry()["commit"].clone();
+    sb.commit(
+        &agent("one-one"),
+        &toml("lobe = \"store/x\"\n"),
+        Some("v1.1.0"),
+    );
+    let r = sb.mind(&["auto-update", "run"]);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(all.contains("is not allowed"), "{all}");
+    assert_eq!(sb.entry()["commit"], before, "the source stays put");
+    assert!(sb.installed_agent().contains("one-zero"));
+    let log = std::fs::read_to_string(sb.mind_home.join("auto-update.log")).unwrap();
+    assert!(log.contains("is not allowed"), "{log}");
+}
+
 #[test]
 fn a_run_leaves_ungranted_sources_alone() {
     // spec: AUP-1 AUP-10
