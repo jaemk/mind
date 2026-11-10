@@ -479,6 +479,57 @@ fn a_run_reports_a_release_whose_lobe_is_refused() {
     assert!(log.contains("is not allowed"), "{log}");
 }
 
+/// A release whose `mind-home` moves the source would rebuild its built tool,
+/// so the run holds it rather than install the tool unbuilt.
+#[test]
+fn a_run_holds_a_release_that_moves_a_built_tool() {
+    // spec: HOME-16 AUP-17
+    let sb = Sandbox::new("auto-move-build");
+    let extra = sb.base.join("extra");
+    let extra_str = extra.to_string_lossy().into_owned();
+    let items = "[[items]]\nkind = \"agent\"\nname = \"dev\"\npath = \"agents/dev.md\"\n\n\
+                 [[items]]\nkind = \"tool\"\nname = \"mytool\"\npath = \"tools/mytool\"\n\
+                 build = \"touch built.txt\"\n";
+    write_file(
+        &sb.source.join("tools/mytool/TOOL.md"),
+        "---\ndescription: t\n---\n",
+    );
+    sb.commit(
+        &agent("one-zero"),
+        &format!("{}\n{items}", toml("")),
+        Some("v1.0.0"),
+    );
+    let env = [("MIND_HOMES", extra_str.as_str())];
+    let spec = sb.spec();
+    let r = sb.mind_env(
+        &[
+            "meld",
+            &spec,
+            "--pin",
+            "version=^1",
+            "--yes",
+            "--auto-update",
+            "--accept-hooks=build",
+        ],
+        &env,
+        None,
+    );
+    assert!(r.success, "meld: {}{}", r.stdout, r.stderr);
+    let before = sb.entry()["commit"].clone();
+
+    sb.commit(
+        &agent("one-zero"),
+        &format!("{}\n{items}", toml(&format!("mind-home = {extra_str:?}\n"))),
+        Some("v1.1.0"),
+    );
+    let r = sb.mind_env(&["auto-update", "run"], &env, None);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(all.contains("whose build hook needs consent"), "{all}");
+    assert_eq!(sb.entry()["commit"], before, "the source stays put");
+    assert!(sb.mind_home.join("store/tool/mytool/built.txt").exists());
+    assert!(!extra.join("sources.json").exists());
+}
+
 #[test]
 fn a_run_leaves_ungranted_sources_alone() {
     // spec: AUP-1 AUP-10
