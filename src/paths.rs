@@ -684,6 +684,12 @@ impl Paths {
         let Some(root) = self.effective_source_lobe(source)? else {
             return Ok(homes);
         };
+        self.agent_homes_with_lobe(homes, root)
+    }
+
+    /// `homes` with the default lobe replaced by `root` (LOBE-3), which
+    /// admits every kind and comes first.
+    pub fn agent_homes_with_lobe(&self, homes: Vec<Lobe>, root: PathBuf) -> Result<Vec<Lobe>> {
         let default = normalize_home(&self.default_lobe_path()?);
         let mut out = vec![Lobe::all_kinds(root)];
         out.extend(

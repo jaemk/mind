@@ -21,7 +21,11 @@ their `CLAUDE.md`).
   any directory is allowed. Otherwise the lobe is refused (`lobe-not-allowed`,
   exit 1): a `--lobe` before anything is cloned, a source's own `lobe` at
   `meld` before the source is registered (the clone is removed), and one from
-  a later commit when an item of the source installs.
+  a later commit when an item of the source installs. `upgrade` holds such a
+  source back and names it among the sources it could not check (CLI-211),
+  upgrading the others; `auto-update run` does not move it to that commit and
+  reports a failure; `introspect` reports it as a `lobe-not-allowed` issue
+  and checks the rest.
 - `LOBE-7` `meld --lobe <dir>` (and `learn <url> --lobe <dir>` for an item
   link) names the consumer's lobe for the source and outranks its `[source]
   lobe`; a source's own `lobe` is then not checked. It is recorded on the
@@ -56,7 +60,8 @@ their `CLAUDE.md`).
   lobe included, still gets its link. The source's lobe admits every kind and
   is created on first link, so it is never skipped as unreachable (STO-56). `introspect` checks and `--fix`
   repairs an item's links against the same set, and `forget` confines its
-  removals to it (LIFE-44).
+  removals to it (LIFE-44). An item kept after its source is unmelded
+  (`unmeld --keep-items`) is checked against the lobe it recorded (LOBE-5).
 - `LOBE-4` A `--local` install (HARN-20) and a managed policy's lobe lock
   (POL-40) are unchanged by a source's `lobe`: they link into exactly the
   lobes they name.
@@ -82,6 +87,8 @@ their `CLAUDE.md`).
   that fails and rolls back leaves it in place. A link that cannot be made is
   skipped and not recorded; a stale link an upgrade cannot remove is left and
   stays recorded, so a later run that can write there removes it. `forget`
-  leaves a link it cannot remove in place, no longer recorded. Each such
+  leaves a link it cannot remove in place, no longer recorded, and
+  `introspect --fix` leaves a missing link it cannot make missing (still
+  reported). Each such
   directory is named once per run in a note (stdout, stderr under `--json`,
   CLI-217).

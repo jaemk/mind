@@ -16,7 +16,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   allowed home; otherwise any directory is allowed. The install confirmation
   names the lobe in bold, and marks one outside every mind home. `upgrade`
   moves the links when a new commit adds, changes, or drops it, and `meld
-  --lobe` on a melded source moves them at once.
+  --lobe` on a melded source moves them at once. A lobe a new commit names
+  that is not allowed holds back only that source's upgrade, and `introspect`
+  reports it.
 
 ### Changed
 
@@ -25,8 +27,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sources that follow it, instead of refusing. `upgrade` reinstalls an item
   whose store copy is in another home than its source's.
 - A lobe that cannot be written (permission denied, a read-only filesystem)
-  is skipped with a note instead of failing `learn`, `meld`, `upgrade`, or
-  `forget`. A link already pointing at the store copy is left alone, so an
+  is skipped with a note instead of failing `learn`, `meld`, `upgrade`,
+  `forget`, or `introspect --fix`. A link already pointing at the store copy is left alone, so an
   in-place upgrade writes nothing in the lobe.
 
 ## [0.48.0] - 2026-11-09
