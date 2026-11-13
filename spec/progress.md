@@ -54,7 +54,9 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
     not already under another step;
   - waiting on another `mind` process's state lock (STO-40), labeled
     `waiting for another mind command to finish`, only when the lock is
-    already held;
+    already held. When the holder recorded itself (STO-84, STO-85) the label
+    goes on with `: <command> (pid <pid>, running <elapsed>)`, the elapsed
+    time as `12s`, `3m04s`, or `1h02m`;
   - `evolve`'s latest-release lookup, labeled
     `checking for the latest mind release`, and its download (checksum,
     archive, extraction, and swap), labeled `downloading mind <version>`,
