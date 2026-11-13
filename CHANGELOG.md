@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-13
+
 ### Changed
 
 - `config lobes detect` offers the global `devin-cli` lobe (`~/.config/devin`)
@@ -2480,7 +2482,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.51.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.52.0...HEAD
+[0.52.0]: https://github.com/jaemk/mind/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/jaemk/mind/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/jaemk/mind/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/jaemk/mind/compare/v0.48.0...v0.49.0
