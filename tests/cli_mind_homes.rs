@@ -1114,6 +1114,102 @@ fn a_new_home_must_be_free() {
     );
 }
 
+/// Every configured lobe gets a source's links whatever home the source is in:
+/// melded into its own `mind-home`, listed or not, and moved there by
+/// `upgrade`.
+#[test]
+fn configured_lobes_are_linked_for_a_source_in_another_home() {
+    // spec: HOME-6
+    for (listed, via_upgrade) in [(true, false), (false, false), (false, true)] {
+        let home = std::env::temp_dir().join(format!(
+            "mind-homes-{}-{}-lobes",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _cleanup = Cleanup(home.clone());
+        let own = if listed {
+            None
+        } else {
+            Some(home.join("mind"))
+        };
+        let toml = own
+            .as_ref()
+            .map(|h| format!("[source]\nmind-home = {:?}\n", h.to_string_lossy()));
+        let mut sb = Sandbox::new(if via_upgrade { None } else { toml.as_deref() });
+        sb.env_lists_extra = listed;
+        let second = sb.base.join("second-lobe");
+        write(
+            &sb.default_home.join("config.toml"),
+            &format!(
+                "lobes = [{:?}, {:?}]\n",
+                sb.claude_home.to_string_lossy(),
+                second.to_string_lossy()
+            ),
+        );
+        let target = own.clone().unwrap_or_else(|| sb.extra.clone());
+        let r = if listed {
+            sb.mind(&["--yes", "meld", &sb.spec(), "--home", &sb.extra_str()])
+        } else if via_upgrade {
+            let r = sb.mind(&["--yes", "meld", &sb.spec()]);
+            assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+            write(&sb.source.join("mind.toml"), toml.as_deref().unwrap());
+            git(&sb.source, &["add", "-A"]);
+            git(&sb.source, &["commit", "-qm", "own home"]);
+            sb.mind(&["--yes", "upgrade"])
+        } else {
+            sb.mind(&["--yes", "meld", &sb.spec()])
+        };
+        let case = format!("listed={listed} via_upgrade={via_upgrade}");
+        assert!(r.ok(), "{case}: {}\n{}", r.stdout, r.stderr);
+        assert_eq!(sb.items_in(&target), ["skill:alpha"], "{case}");
+        for lobe in [&sb.claude_home, &second] {
+            let link = lobe.join("skills/alpha");
+            let resolved = std::fs::canonicalize(&link)
+                .unwrap_or_else(|_| panic!("{case}: {} is not linked", link.display()));
+            assert!(
+                resolved.starts_with(sb.canon(&target).join("store")),
+                "{case}: {} -> {}",
+                link.display(),
+                resolved.display()
+            );
+        }
+
+        // A lobe added later is backfilled, a removed link is repaired, and
+        // forget removes every link.
+        let third = sb.base.join("third-lobe");
+        let r = sb.mind(&["config", "lobes", "add", "--yes", &third.to_string_lossy()]);
+        assert!(r.ok(), "{case}: lobes add: {}\n{}", r.stdout, r.stderr);
+        assert!(
+            third.join("skills/alpha").exists(),
+            "{case}: backfill: {}\n{}",
+            r.stdout,
+            r.stderr
+        );
+        std::fs::remove_file(second.join("skills/alpha")).unwrap();
+        let r = sb.mind(&["introspect", "--fix"]);
+        assert!(r.ok(), "{case}: fix: {}\n{}", r.stdout, r.stderr);
+        assert!(second.join("skills/alpha").exists(), "{case}: fix");
+        let r = sb.mind(&["--yes", "forget", "alpha"]);
+        assert!(r.ok(), "{case}: forget: {}\n{}", r.stdout, r.stderr);
+        for lobe in [&sb.claude_home, &second, &third] {
+            assert!(
+                std::fs::symlink_metadata(lobe.join("skills/alpha")).is_err(),
+                "{case}: forget left {}",
+                lobe.display()
+            );
+        }
+        let r = sb.mind(&["--yes", "learn", "alpha"]);
+        assert!(r.ok(), "{case}: learn: {}\n{}", r.stdout, r.stderr);
+        for lobe in [&sb.claude_home, &second, &third] {
+            assert!(
+                lobe.join("skills/alpha").exists(),
+                "{case}: learn missed {}",
+                lobe.display()
+            );
+        }
+    }
+}
+
 /// Removes a directory outside the sandbox base when the test ends.
 struct Cleanup(PathBuf);
 
