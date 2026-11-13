@@ -24,20 +24,20 @@ mind links a skill as `<lobe>/skills/<name>` and an agent as
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` (native user path; `$CODEX_HOME` toggles, not discovery) | (subagents) | `~/.agents` |
-| Devin Desktop (formerly Windsurf) | `<project>/.devin/skills/` (falls back to `<project>/.windsurf/skills/`) | - | `<project>/.devin` |
-| Devin CLI | `~/.config/devin/skills/` (also `~/.agents/skills/`) | - | `~/.config/devin` |
+| Devin Desktop (formerly Windsurf) and Devin CLI, global | `~/.config/devin/skills/` (also `~/.agents/skills/`) | - | `~/.config/devin` |
+| Devin Desktop, one project | `<project>/.devin/skills/` (falls back to `<project>/.windsurf/skills/`) | - | `<project>/.devin` |
 
 `~/.agents/` is the emerging vendor-neutral alias: Codex reads it as its user
 skills path and the standard installer targets it.
 
-Windsurf was renamed Devin Desktop on 2026-06-02. Devin prefers a project's
-`.devin/skills/` and still reads `.windsurf/skills/` as a fallback, so the
-project lobe moved to `<project>/.devin` (the `devin` preset, the `link-project`
-default) and the `windsurf` preset remains for the legacy directory (HARN-24).
-Devin Desktop's global skills dir is still the Windsurf-era
-`~/.codeium/windsurf/skills/`; mind does not link there and uses that dir only
-as a detection marker. The Devin CLI reads `~/.config/devin/skills/`, which the
-global `devin-cli` preset targets (HARN-25). Devin's `.devin/rules/` and
+Windsurf was renamed Devin Desktop on 2026-06-02. Devin Desktop and the Devin
+CLI both read global skills from `~/.config/devin/skills/` for every
+workspace, which the global `devin-cli` preset targets and detection offers
+(HARN-25). A project's own skills go in `.devin/skills/` (Devin still reads
+`.windsurf/skills/` as a fallback): the opt-in `devin` preset, the
+`link-project` default, with the `windsurf` preset kept for the legacy
+directory (HARN-24). The Windsurf-era `~/.codeium/windsurf` is only a
+detection marker; mind does not link there. Devin's `.devin/rules/` and
 `.devin/workflows/` use Devin's own frontmatter and formats, not Claude rules or
 mind's `.js` workflows, so both presets are skill-only.
 
@@ -75,14 +75,13 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   of the default root.
 - `HARN-5` Adding non-Claude lobes is opt-in by auto-detect-and-prompt: a setup
   path detects which known harness dirs exist on the machine and offers to add the
-  matching presets. For global presets (`gemini`, `codex`, `universal`,
-  `devin-cli`), the
-  detected lobe is added after confirmation (or immediately with `--yes`). For
-  project-scoped presets (`devin`), detection never auto-adds a lobe because the
-  project directory is not known at detect time; instead, guidance is printed to run
-  `mind link-project [--preset devin]` inside a project directory. The default
-  lobe set is unchanged (`~/.claude` only, STO-14/STO-15); detection never mutates
-  config for project-scoped presets.
+  matching presets. Only global presets (`gemini`, `codex`, `universal`,
+  `devin-cli`) are detected, and the detected lobe is added after confirmation
+  (or immediately with `--yes`). A project preset (`devin`, `windsurf`) has no
+  detection marker, since the project directory is not known at detect time, so
+  detection neither offers nor mentions it. Under `--json` the result keeps its
+  `guidance` array for compatibility, always empty. The default lobe set is
+  unchanged (`~/.claude` only, STO-14/STO-15).
 - `HARN-6` mind links the skill/agent files verbatim. Frontmatter portability
   across harnesses (e.g. Gemini's `mcp_*` tool-permission wildcards vs Claude's
   `tools:` schema) is the author's responsibility; mind does not rewrite
@@ -276,17 +275,19 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   lobes add` as the fix, or dropping `--local`) rather than silently falling back
   to the global fan-out.
 
-- `HARN-24` The `devin` preset is the project lobe for Devin Desktop (formerly
-  Windsurf): `<project>/.devin`, skill-only, project-scoped, and the
-  `link-project` default (HARN-11). It is detected (HARN-5) when any of
-  `~/.config/devin`, `~/.devin`, or `~/.codeium/windsurf` exists. The
-  `windsurf` preset keeps the legacy `<project>/.windsurf` lobe, which Devin
-  still reads as a fallback, so an existing windsurf lobe keeps working and
-  `--preset windsurf` still adds one; it has no detection marker, so detection
-  never offers it (the same machines are offered `devin` instead).
-- `HARN-25` The `devin-cli` preset is the Devin CLI's global skills home:
-  `~/.config/devin`, skill-only, global, detected when `~/.config/devin` exists
-  and so auto-added by `config lobes detect` like any other global preset.
+- `HARN-24` The `devin` preset is the opt-in project lobe for Devin Desktop
+  (formerly Windsurf): `<project>/.devin`, skill-only, project-scoped, and the
+  `link-project` default (HARN-11), for skills only that project should see.
+  It has no detection marker (HARN-5): the global `devin-cli` lobe already
+  reaches every Devin workspace. The `windsurf` preset keeps the legacy
+  `<project>/.windsurf` lobe, which Devin still reads as a fallback, so an
+  existing windsurf lobe keeps working and `--preset windsurf` still adds one;
+  it has no detection marker either.
+- `HARN-25` The `devin-cli` preset is Devin's global skills home, read by both
+  Devin Desktop and the Devin CLI for every workspace: `~/.config/devin`,
+  skill-only, global. It is detected (HARN-5) when any of `~/.config/devin`,
+  `~/.devin`, or `~/.codeium/windsurf` exists, and so auto-added by `config
+  lobes detect` like any other global preset.
 - `HARN-26` `introspect` prints a note for each configured lobe whose directory
   is named `.windsurf`: Devin reads `.devin/skills` first, and the note gives the
   move (`mind config lobes remove <project>/.windsurf`, then `mind link-project

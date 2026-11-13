@@ -2489,88 +2489,61 @@ fn harn18_fixed_vanished_lobe_is_not_also_an_outstanding_issue() {
     );
 }
 
-// HARN-5: when a project-scoped preset (devin) is detected, `config lobes
-// detect` prints guidance to run `mind link-project` but does NOT add a lobe
-// (even with --yes). The JSON output includes a `guidance` field.
+// HARN-5/HARN-25: a Devin install is detected as the global devin-cli lobe
+// (~/.config/devin), which Devin Desktop and the CLI read for every
+// workspace. Detection offers no project lobe and prints no link-project
+// advice; under --json, `guidance` stays and is empty.
 #[test]
-fn detect_project_scoped_preset_prints_guidance_not_add() {
-    // spec: HARN-5
+fn detect_devin_offers_the_global_lobe_and_no_project_advice() {
+    // spec: HARN-5 HARN-24 HARN-25
     let sb = Sandbox::new();
     let detect_home = sb.base.join("detect-ws");
-    // Devin Desktop's Windsurf-era global home is one of devin's markers.
+    // Only the Windsurf-era home exists: still a Devin install.
     std::fs::create_dir_all(detect_home.join(".codeium/windsurf")).unwrap();
     let detect_str = detect_home.to_string_lossy().into_owned();
+    let global = detect_home.join(".config/devin");
 
-    // Non-TTY without --yes: no mutation, guidance printed.
-    let r = sb.mind_env(
-        &["config", "lobes", "detect"],
-        &[("MIND_DETECT_HOME", &detect_str)],
-    );
-    assert!(r.success, "detect failed: {}", r.stderr);
-    assert!(
-        r.stdout.contains("link-project"),
-        "detect of devin must print link-project guidance: {}",
-        r.stdout
-    );
-
-    // Config must still be empty (no devin lobe added).
-    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
-    let v = parse_json(&listed.stdout);
-    let has_devin = v["lobes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".devin")));
-    assert!(
-        !has_devin,
-        "detect must NOT add a project-scoped devin lobe: {}",
-        listed.stdout
-    );
-
-    // --yes must also NOT add the devin lobe (project-scoped).
-    let r_yes = sb.mind_env(
-        &["config", "lobes", "detect", "--yes"],
-        &[("MIND_DETECT_HOME", &detect_str)],
-    );
-    assert!(r_yes.success, "detect --yes failed: {}", r_yes.stderr);
-    let listed2 = sb.mind(&["config", "lobes", "list", "--json"]);
-    let v2 = parse_json(&listed2.stdout);
-    let has_devin2 = v2["lobes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".devin")));
-    assert!(
-        !has_devin2,
-        "detect --yes must NOT auto-add a project-scoped preset: {}",
-        listed2.stdout
-    );
-
-    // JSON output must include devin in `detected` with scope=project and a
-    // non-empty `guidance` array.
     let r_json = sb.mind_env(
         &["config", "lobes", "detect", "--json"],
         &[("MIND_DETECT_HOME", &detect_str)],
     );
     assert!(r_json.success, "detect --json failed: {}", r_json.stderr);
     let jv = parse_json(&r_json.stdout);
-    assert!(
-        jv["detected"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["preset"] == "devin" && d["scope"] == "project"),
-        "JSON detected must include devin with scope=project: {}",
-        r_json.stdout
+    let detected = jv["detected"].as_array().unwrap();
+    assert_eq!(detected.len(), 1, "{}", r_json.stdout);
+    assert_eq!(detected[0]["preset"], "devin-cli");
+    assert_eq!(detected[0]["scope"], "global");
+    assert_eq!(detected[0]["path"], global.to_string_lossy().as_ref());
+    assert_eq!(jv["guidance"], serde_json::json!([]), "{}", r_json.stdout);
+
+    // Non-TTY without --yes: reported, not added, and no project advice.
+    let r = sb.mind_env(
+        &["config", "lobes", "detect"],
+        &[("MIND_DETECT_HOME", &detect_str)],
     );
-    assert!(
-        jv["guidance"]
-            .as_array()
-            .map(|a| !a.is_empty())
-            .unwrap_or(false),
-        "JSON must include a non-empty guidance array for project-scoped presets: {}",
-        r_json.stdout
+    assert!(r.success, "detect failed: {}", r.stderr);
+    assert!(r.stdout.contains("devin-cli"), "{}", r.stdout);
+    assert!(!r.stdout.contains("link-project"), "{}", r.stdout);
+
+    // --yes adds the global lobe and never a project one.
+    let r_yes = sb.mind_env(
+        &["config", "lobes", "detect", "--yes"],
+        &[("MIND_DETECT_HOME", &detect_str)],
     );
+    assert!(r_yes.success, "detect --yes failed: {}", r_yes.stderr);
+    assert!(!r_yes.stdout.contains("link-project"), "{}", r_yes.stdout);
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let paths: Vec<String> = parse_json(&listed.stdout)["lobes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|l| l["path"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        paths.contains(&global.to_string_lossy().into_owned()),
+        "{paths:?}"
+    );
+    assert!(!paths.iter().any(|p| p.ends_with(".devin")), "{paths:?}");
 }
 
 // HARN-12: `--snapshot` refuses to clobber a pre-existing FOREIGN target (one mind

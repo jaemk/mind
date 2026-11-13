@@ -6,6 +6,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `config lobes detect` offers the global `devin-cli` lobe (`~/.config/devin`)
+  for any Devin install: Devin Desktop and the Devin CLI both read its
+  `skills/` for every workspace. It no longer offers the `devin` project lobe
+  or prints `link-project` advice; `devin` and `link-project` remain for
+  skills only one project should see. Under `--json`, `guidance` is now
+  always empty.
+
 ## [0.51.0] - 2026-11-12
 
 ### Added
