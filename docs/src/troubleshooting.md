@@ -155,6 +155,41 @@ mind config lobes add --preset gemini
 Adding a lobe creates its directory and links installed items into it. For an
 older config whose lobe is unreachable, `mind introspect --fix` prunes it.
 
+### A skill appears twice in Devin (or another harness)
+
+The harness reads more than one lobe that holds it. Devin reads both
+`~/.config/devin/skills` (the `devin-cli` lobe) and `~/.agents/skills` (the
+`codex` and `universal` lobe). Keep one of them. `lobes remove` unregisters a
+lobe but leaves its links, so delete those as well:
+
+```
+mind config lobes remove ~/.config/devin
+ls -l ~/.config/devin/skills        # the links point into ~/.mind/store
+rm ~/.config/devin/skills/<name>    # for each one mind placed
+```
+
+A project lobe (`link-project`) on top of a global one has the same effect in
+that project. See [Use more than one agent](lobes.md).
+
+## Running commands
+
+### A command sits waiting
+
+Another `mind` holds the lock. On a terminal the progress line names it, e.g.
+`waiting for another mind command to finish: mind upgrade --yes (pid 4242,
+running 1m15s)`; in a script there is no progress line, so read
+`~/.mind/.lock.holder`, which names the holder's pid, command, and start time.
+The wait ends when that command finishes, or when you stop it. A holder that
+crashed releases the lock as it exits, so a stale `.lock.holder` never blocks
+anything. `mind auto-update run` never waits: it exits and tries next time. See
+[Concurrency](configuration.md#concurrency).
+
+### A hook fails with `nested-in-hook`
+
+The hook ran `mind`, which cannot run while the `mind` that started the hook
+holds the lock. Move that step out of the hook, or read what it needs from the
+hook's environment. See [Hook environment](install-hooks.md#hook-environment).
+
 ## Where things live
 
 `~/.mind` holds the config, store, and source clones; see

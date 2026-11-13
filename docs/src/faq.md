@@ -54,7 +54,19 @@ before you meld it. See [Run setup with hooks](install-hooks.md).
 ## Does it make network calls on its own?
 
 Only `git` operations against the sources you meld, and `evolve` against GitHub
-releases. There is no telemetry. See [Restricted networks](enterprise.md).
+releases, each when you run a command. The one exception is opt-in:
+`mind config auto-update on` makes a Claude session start run
+`mind auto-update run` in the background, which fetches the sources you
+granted auto-update. It is off until you turn it on; see
+[Auto-update](updating.md#auto-update). There is no telemetry. See
+[Restricted networks](enterprise.md).
+
+## Can a hook run `mind`?
+
+No. The `mind` command running a hook holds its lock until the hook exits, so a
+`mind` started from the hook fails at once with `nested-in-hook` instead of
+waiting forever. A hook gets what it needs from its environment instead; see
+[Hook environment](install-hooks.md#hook-environment).
 
 ## Can my organization restrict what gets installed?
 

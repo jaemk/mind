@@ -37,10 +37,14 @@ installed yet still works.
 
 `~/.agents` is a vendor-neutral path: Codex reads it for user skills, and so
 does any harness following the same convention, so one lobe serves them all.
+Devin reads it too, alongside `~/.config/devin`. Note that with both a
+`codex` (or `universal`) and a `devin-cli` lobe, Devin sees every skill twice;
+keep only the `~/.agents` lobe if it serves all your harnesses.
 
 `mind config lobes detect` reports which known harness homes exist on this
-machine and offers to add them (`--yes` adds without asking, `--json` reports
-only). It never changes config without one of those.
+machine and offers to add them: `--yes` adds without asking, a terminal is
+asked, and otherwise it only reports. It never changes config without one of
+those.
 
 | harness | skills directory | agents directory | lobe |
 |---------|------------------|------------------|------|
@@ -147,5 +151,8 @@ Adapting frontmatter for another harness is up to the item's author.
 - `MIND_AGENT_HOMES` (a `:`-separated list) replaces the configured lobes for
   one command. It wins over `lobes` in `config.toml`, which wins over the
   default `~/.claude`.
+- A source can name a lobe of its own (`[source] lobe`, or `meld --lobe`),
+  which replaces `~/.claude` for that source's items while every other lobe
+  still gets them. See [Source lobes](configuration.md#source-lobes).
 - A [managed policy](policy.md#lobe-lock) can lock the lobes so users cannot
   change them.
