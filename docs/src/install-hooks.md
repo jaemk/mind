@@ -109,9 +109,8 @@ An update hook is also where a source removes what `mind` never recorded, such
 as files an older install script wrote. Items `mind` installed are removed by
 `[source] prune = true` instead (see
 [Remove the items you drop](releasing.md#remove-the-items-you-drop)). A hook
-runs while `upgrade` holds mind's lock, so it cannot call `mind` itself: every
-hook runs with `MIND_IN_HOOK=1`, and a `mind` command started with it fails
-with `nested-in-hook` rather than wait for a lock that is never released.
+runs while `upgrade` holds mind's lock, so it cannot call `mind` itself (see
+[Hook environment](#hook-environment)).
 
 A source that declares no update hook is unaffected: its install hooks re-run as
 before. An update hook never runs at `meld` or on a re-meld, is recorded against
@@ -319,7 +318,26 @@ the hook caught the signal and finished. A second Ctrl-C while the hook still
 runs ends `mind` at once, without a record, and leaves the hook to exit on its
 own.
 
-## Profile variables
+## Hook environment
+
+`mind` sets these variables for every hook it runs:
+
+| variable | value |
+|----------|-------|
+| `MIND_IN_HOOK` | `1` |
+| `MIND_PROFILES` | the profiles enabled for the hook's source (see below) |
+| `MIND_ITEM_PROFILES` | for an item or build hook, the profiles the item is installed for; empty for a source hook |
+| `MIND_ITEMS_FILE` | for an [items hook](#items-hooks), a JSON document of what changed and the installed set; empty for every other hook |
+
+A hook cannot run `mind`. The `mind` command running the hook holds its lock
+until the hook exits, so a `mind` the hook starts would wait forever. With
+`MIND_IN_HOOK=1` set and the lock held, `mind` fails at once with
+`nested-in-hook`, which fails the hook. Read what the hook needs from these
+variables, the source's clone, or the item's store copy instead. A process
+the hook leaves running in the background can run `mind` once the parent
+`mind` exits.
+
+### Profile variables
 
 Every hook runs with two environment variables describing the source's
 [install profiles](authoring-profiles.md). Each holds a sorted, comma-separated

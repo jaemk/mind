@@ -103,8 +103,9 @@ mind meld owner/repo --add-root community --add-root experimental
 ```
 
 Lobes (install targets) can be global agent homes (Claude Code, Gemini CLI
-(shared with Antigravity), Codex CLI, Devin CLI) or project directories (Devin
-Desktop reads skills from `<project>/.devin/skills/`). See
+(shared with Antigravity), Codex CLI, Devin Desktop and Devin CLI) or project
+directories (Devin reads a project's own skills from
+`<project>/.devin/skills/`). See
 [configuration](https://jaemk.github.io/mind/guide/lobes.html)
 for details.
 

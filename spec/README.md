@@ -122,7 +122,7 @@ and verified.
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 | Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Devin/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..9) |
-| Devin (formerly Windsurf): `devin` project preset as the `link-project` default, global `devin-cli` preset, legacy `windsurf` preset, `introspect` note for `.windsurf` lobes | done | HARN-24, HARN-25, HARN-26 |
+| Devin (formerly Windsurf): global `devin-cli` preset (Desktop and CLI, the one detection offers), opt-in `devin` project preset as the `link-project` default, legacy `windsurf` preset, `introspect` note for `.windsurf` lobes | done | HARN-24, HARN-25, HARN-26 |
 | Project lobes: `link-project`, `--preset`+base, `--subdir`, `--snapshot` freeze, `remove --snapshot`, `introspect` vanished-lobe prune | done | [harness-lobes.md](harness-lobes.md) (HARN-10..13), CLI-198, CLI-199 |
 | Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
 | Marketplace + curator compose: a co-present `mind.toml` `[discover].sources` layers on a `.claude-plugin/` manifest; `roots`/`flat-skills`/`[[items]]`/`[discover]` globs suppress the manifest's own-item layer | done | MKT-15, MKT-16 |

@@ -19,16 +19,16 @@ A preset knows a harness's directory and which item kinds it understands:
 | `gemini` | `~/.gemini/config` (Gemini CLI and Antigravity) | skill |
 | `codex` | `~/.agents` | skill |
 | `universal` | `~/.agents` | skill |
-| `devin` | `<dir>/.devin` (Devin Desktop, formerly Windsurf), default the current directory | skill |
-| `devin-cli` | `~/.config/devin` (Devin CLI) | skill |
+| `devin-cli` | `~/.config/devin` (Devin Desktop, formerly Windsurf, and Devin CLI; every workspace) | skill |
+| `devin` | `<dir>/.devin` (one Devin project), default the current directory | skill |
 | `windsurf` | `<dir>/.windsurf` (legacy; Devin still reads it), default the current directory | skill |
 
 ```
 mind config lobes add --preset gemini
 # + added gemini lobe ~/.gemini/config [skill]
 
-mind config lobes add . --preset devin
-# + added devin lobe ./.devin [skill]
+mind config lobes add --preset devin-cli
+# + added devin-cli lobe ~/.config/devin [skill]
 ```
 
 Adding a lobe creates its directory and links every already-installed item of
@@ -37,22 +37,26 @@ installed yet still works.
 
 `~/.agents` is a vendor-neutral path: Codex reads it for user skills, and so
 does any harness following the same convention, so one lobe serves them all.
+Devin reads it too, alongside `~/.config/devin`. Note that with both a
+`codex` (or `universal`) and a `devin-cli` lobe, Devin sees every skill twice;
+keep only the `~/.agents` lobe if it serves all your harnesses.
 
 `mind config lobes detect` reports which known harness homes exist on this
-machine and offers to add them (`--yes` adds without asking, `--json` reports
-only). It never changes config without one of those.
+machine and offers to add them: `--yes` adds without asking, a terminal is
+asked, and otherwise it only reports. It never changes config without one of
+those.
 
 | harness | skills directory | agents directory | lobe |
 |---------|------------------|------------------|------|
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
-| Devin Desktop | `<project>/.devin/skills/` (falls back to `.windsurf/skills/`) | - | `<project>/.devin` |
-| Devin CLI | `~/.config/devin/skills/` | - | `~/.config/devin` |
+| Devin Desktop and Devin CLI | `~/.config/devin/skills/` | - | `~/.config/devin` |
 
-Detection offers `devin` when `~/.config/devin`, `~/.devin`, or the
-Windsurf-era `~/.codeium/windsurf` exists, and `devin-cli` when
-`~/.config/devin` exists. It never offers `windsurf`.
+Detection offers `devin-cli` when `~/.config/devin`, `~/.devin`, or the
+Windsurf-era `~/.codeium/windsurf` exists. It never offers a project lobe
+(`devin`, `windsurf`); add one with `link-project` when a project needs its
+own skills.
 
 ## Which kinds link where
 
@@ -84,8 +88,9 @@ to expect the link.
 
 ## Project lobes
 
-A lobe can live inside a project instead of your home directory. Devin Desktop
-reads project skills from `.devin/skills/`:
+A lobe can live inside a project instead of your home directory, for skills
+only that project should see. Devin Desktop reads project skills from
+`.devin/skills/` (the global `devin-cli` lobe already reaches every project):
 
 ```
 cd ~/projects/myapp
@@ -146,5 +151,8 @@ Adapting frontmatter for another harness is up to the item's author.
 - `MIND_AGENT_HOMES` (a `:`-separated list) replaces the configured lobes for
   one command. It wins over `lobes` in `config.toml`, which wins over the
   default `~/.claude`.
+- A source can name a lobe of its own (`[source] lobe`, or `meld --lobe`),
+  which replaces `~/.claude` for that source's items while every other lobe
+  still gets them. See [Source lobes](configuration.md#source-lobes).
 - A [managed policy](policy.md#lobe-lock) can lock the lobes so users cannot
   change them.

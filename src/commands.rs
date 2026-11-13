@@ -16852,14 +16852,11 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
 }
 
 /// `mind config lobes detect` — detect installed agent homes (lobes) and offer
-/// to add their presets (HARN-5). Global presets (gemini, codex, universal,
-/// devin-cli) are offered for auto-add with confirmation or `--yes`.
-/// Project-scoped presets (devin) are never auto-added; detection prints guidance to run
-/// `mind link-project [--preset <name>]` inside a project directory instead.
+/// to add their presets (HARN-5). Only global presets (gemini, codex,
+/// universal, devin-cli) carry markers, and each is offered for auto-add with
+/// confirmation or `--yes`; a project preset is never offered.
 /// Honors the POL-40 lobe lock and dedups against the already-configured lobes.
 pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
-    use crate::paths::{Scope, lookup_preset};
-
     let out = crate::render::ctx();
     // POL-40: refuse under a lobe lock before reporting or writing anything.
     if let Some(policy) = Policy::load()?
@@ -16875,13 +16872,15 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     // (codex and universal can both point at ~/.agents).
     let detected = Paths::detect_homes()?;
     let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
-    let mut candidates: Vec<(&'static str, crate::config::LobeEntry)> = Vec::new();
+    // spec: HARN-5 -- only global presets carry markers, so every candidate
+    // is a global lobe.
+    let mut global_candidates: Vec<(&'static str, crate::config::LobeEntry)> = Vec::new();
     for (name, lobe) in detected {
         let path = lobe.path.to_string_lossy().into_owned();
         if configured.contains(&path) || !seen.insert(lobe.path.clone()) {
             continue;
         }
-        candidates.push((
+        global_candidates.push((
             name,
             crate::config::LobeEntry {
                 path,
@@ -16889,17 +16888,6 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             },
         ));
     }
-
-    // Split candidates: global presets are offered for auto-add; project-scoped
-    // presets (devin) get guidance only -- the project dir is not known here.
-    // spec: HARN-5
-    type LobePair = (&'static str, crate::config::LobeEntry);
-    let (global_candidates, project_candidates): (Vec<LobePair>, Vec<LobePair>) =
-        candidates.into_iter().partition(|(name, _)| {
-            lookup_preset(name)
-                .ok()
-                .is_none_or(|p| p.scope == Scope::Global)
-        });
 
     // Decide whether to mutate global candidates. With --yes, add
     // unconditionally. Without it, a TTY gets a confirm prompt; a non-TTY
@@ -16921,34 +16909,19 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     if out.json {
         let detected_json: Vec<serde_json::Value> = global_candidates
             .iter()
-            .chain(project_candidates.iter())
             .map(|(name, entry)| {
-                let scope = lookup_preset(name)
-                    .ok()
-                    .map(|p| match p.scope {
-                        Scope::Global => "global",
-                        Scope::Project => "project",
-                    })
-                    .unwrap_or("global");
                 serde_json::json!({
                     "preset": name,
                     "path": entry.path(),
                     "kinds": entry.kinds().map(|ks| {
                         ks.iter().map(|k| k.as_str()).collect::<Vec<_>>()
                     }),
-                    "scope": scope,
+                    "scope": "global",
                 })
             })
             .collect();
-        let guidance: Vec<String> = project_candidates
-            .iter()
-            .map(|(name, _)| {
-                format!(
-                    "run `mind link-project --preset {name}` inside a project \
-                     directory to link skills there"
-                )
-            })
-            .collect();
+        // spec: HARN-5 -- kept, always empty, for scripts that read it.
+        let guidance: Vec<String> = Vec::new();
         if do_add {
             // spec: HARN-9
             if cfg.lobes.is_empty() {
@@ -16977,7 +16950,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
         }));
     }
 
-    if global_candidates.is_empty() && project_candidates.is_empty() {
+    if global_candidates.is_empty() {
         println!("{} no new agent homes (lobes) detected", out.bullet());
         return Ok(());
     }
@@ -17008,15 +16981,6 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             println!("  {} {name}: {}", out.dim("·"), format_lobe(entry));
         }
         println!("re-run with --yes to add them");
-    }
-
-    // Project-scoped presets: always print guidance, never auto-add.
-    for (name, _) in &project_candidates {
-        println!(
-            "{} detected {name}: run `mind link-project --preset {name}` \
-             inside a project directory to link skills there",
-            out.bullet()
-        );
     }
     Ok(())
 }

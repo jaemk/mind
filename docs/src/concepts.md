@@ -140,7 +140,9 @@ source can declare its own; you can impose one with `meld --namespace`. See
 | introspect | check for drift and broken links |
 | evolve | update the `mind` binary |
 | lobe | an agent home `mind` links into |
+| source lobe | a lobe a source names for its items, in place of `~/.claude` ([Source lobes](configuration.md#source-lobes)) |
 | store | `~/.mind/store`, the installed copies |
+| mind home | a tree holding sources, the manifest, and the store; `~/.mind` by default, and a source can live in another ([Mind homes](configuration.md#mind-homes)) |
 | curator | a source that lists other sources (a super-source or a Claude marketplace) |
 | profile | a named set of a source's items, chosen at meld time |
 | unmanaged item | something in a lobe that `mind` did not install |

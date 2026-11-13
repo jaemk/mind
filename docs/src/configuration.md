@@ -42,8 +42,13 @@ The legacy spelling `absorb_to` is still read.
 | `MIND_HTTP_TIMEOUT_SECS` | request budget for `mind evolve` (default 15) |
 | `MIND_MAX_PARALLEL_FETCHES` | most sources `sync`/`upgrade` fetch at once (default 8; `1` fetches one at a time) |
 | `MIND_PROGRESS` | `never` hides the stderr progress spinner, `always` draws it even off a terminal or in CI |
+| `MIND_TTY` | decides whether hook prompts see a terminal: `0`, `false`, `no`, `off`, or empty means not a terminal, anything else means one; unset, stdin decides |
+| `MIND_DETECT_HOME` | the directory `config lobes detect` scans for harness homes, instead of `~` |
 | `GH_TOKEN`, `GITHUB_TOKEN` | token `evolve` sends to `api.github.com` |
 | `NO_COLOR` | plain output |
+
+`mind` sets `MIND_IN_HOOK` and the other [hook variables](install-hooks.md#hook-environment)
+for the hooks it runs; they are not settings.
 
 ## SSH cloning
 
@@ -115,6 +120,7 @@ every other kind an over-cap file fails the scan of its source.
   .tmp/staging/                 scratch for new copies during transactional installs
   .tmp/backup/                  previous copy held during a swap, for rollback
   .lock                         global advisory lock
+  .lock.holder                  the command holding .lock exclusively, while it runs
 ```
 
 Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
@@ -237,6 +243,22 @@ exits without doing anything when the lock is held. The lock is released when th
 crash, so an aborted run never wedges the next one. Read-only commands (`recall`,
 `probe`, `introspect`, `config show`) take a shared lock and proceed concurrently
 with each other, but never observe a writer mid-update.
+
+A command holding the lock exclusively records itself in `.lock.holder` next
+to the lock (pid, command line with any URL credentials removed, working
+directory, start time) and removes it before letting go. A blocked command
+names it in its progress line:
+
+```
+waiting for another mind command to finish: mind upgrade --yes (pid 4242, running 1m15s)
+```
+
+The progress line shows only on a terminal (see `MIND_PROGRESS`), so in a
+script a blocked command waits silently; read `.lock.holder` to see what it
+waits on. A command holding the lock shared records nothing, so waiting
+behind one shows the bare message. A hook runs while its `mind` holds the
+lock, so a hook cannot run `mind`; see
+[Hook environment](install-hooks.md#hook-environment).
 
 ## Install and upgrade are transactional
 

@@ -357,8 +357,8 @@ impl Lobe {
 /// project-scoped (linked under a per-project subdirectory).
 ///
 /// Global lobes are auto-addable by `config lobes detect` when their marker is
-/// found. Project-scoped lobes require an explicit project directory; detect
-/// surfaces them so the caller can print guidance, but does not auto-add them.
+/// found. Project-scoped lobes require an explicit project directory, so they
+/// carry no markers and detection never offers them (HARN-5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// The lobe lives under a user-wide home directory (e.g. `~/.gemini/config`).
@@ -383,7 +383,7 @@ pub struct Preset {
     /// The directories whose presence signals this harness is installed,
     /// relative to the detection base (e.g. `.gemini` for Gemini, `.codex` for
     /// Codex); any one present is enough. Empty for a preset detection never
-    /// offers (the legacy `windsurf`, HARN-24).
+    /// offers: every project preset (`devin`, the legacy `windsurf`, HARN-24).
     pub markers: &'static [&'static str],
     /// Whether this preset is global (linked under a shared harness home) or
     /// project-scoped (linked under a per-project directory).
@@ -394,11 +394,11 @@ pub struct Preset {
 /// - `gemini`: `~/.gemini` exists (Gemini CLI / Antigravity shared home; lobe is `~/.gemini/config`).
 /// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
 /// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
-/// - `devin`: any of `~/.config/devin`, `~/.devin`, `~/.codeium/windsurf` exists
-///   (Devin Desktop, formerly Windsurf, and the Devin CLI; HARN-24). The lobe is
-///   `<project>/.devin`, the project skills dir Devin prefers.
-/// - `devin-cli`: `~/.config/devin` exists (the Devin CLI's global config home,
-///   whose `skills/` it reads; HARN-25).
+/// - `devin-cli`: any of `~/.config/devin`, `~/.devin`, `~/.codeium/windsurf`
+///   exists (Devin Desktop, formerly Windsurf, and the Devin CLI). The lobe is
+///   `~/.config/devin`, whose `skills/` both read for every workspace (HARN-25).
+/// - `devin`: never detected. It is the opt-in project lobe
+///   (`<project>/.devin`), for skills only one project should see (HARN-24).
 /// - `windsurf`: never detected. It is the legacy name for the project lobe
 ///   (`<project>/.windsurf`), which Devin still reads as a fallback (HARN-24).
 pub const PRESETS: &[Preset] = &[
@@ -423,14 +423,13 @@ pub const PRESETS: &[Preset] = &[
         markers: &[".agents"],
         scope: Scope::Global,
     },
-    // spec: HARN-24
+    // spec: HARN-24 -- opt-in only: the global `devin-cli` lobe already
+    // reaches every Devin workspace, so detection never offers a project one.
     Preset {
         name: "devin",
         rel_path: ".devin",
         kinds: &[ItemKind::Skill],
-        // The Devin CLI's home, Devin Desktop's extensions dir, and the
-        // Windsurf-era global config home Devin Desktop still uses.
-        markers: &[".config/devin", ".devin", ".codeium/windsurf"],
+        markers: &[],
         scope: Scope::Project,
     },
     // spec: HARN-25
@@ -438,7 +437,9 @@ pub const PRESETS: &[Preset] = &[
         name: "devin-cli",
         rel_path: ".config/devin",
         kinds: &[ItemKind::Skill],
-        markers: &[".config/devin"],
+        // The shared global config home, Devin Desktop's extensions dir, and
+        // the Windsurf-era config home of a machine upgraded from Windsurf.
+        markers: &[".config/devin", ".devin", ".codeium/windsurf"],
         scope: Scope::Global,
     },
     // spec: HARN-24 -- legacy: Devin still reads `<project>/.windsurf/skills`,
@@ -2745,22 +2746,29 @@ mod tests {
         assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
         assert_eq!(lookup_preset("universal").unwrap().scope, Scope::Global);
 
-        // spec: HARN-24 -- devin is the project preset at <project>/.devin.
+        // spec: HARN-24 -- devin is the opt-in project preset at
+        // <project>/.devin, never detected.
         let devin = lookup_preset("devin").unwrap();
         assert_eq!(devin.rel_path, ".devin");
         assert_eq!(devin.kinds, &[ItemKind::Skill]);
         assert_eq!(devin.scope, Scope::Project);
-        assert_eq!(
-            devin.markers,
-            &[".config/devin", ".devin", ".codeium/windsurf"]
-        );
+        assert!(devin.markers.is_empty());
 
-        // spec: HARN-25 -- devin-cli is the global preset at ~/.config/devin.
+        // spec: HARN-25 -- devin-cli is the global preset at ~/.config/devin,
+        // detected by every Devin marker.
         let devin_cli = lookup_preset("devin-cli").unwrap();
         assert_eq!(devin_cli.rel_path, ".config/devin");
         assert_eq!(devin_cli.kinds, &[ItemKind::Skill]);
         assert_eq!(devin_cli.scope, Scope::Global);
-        assert_eq!(devin_cli.markers, &[".config/devin"]);
+        assert_eq!(
+            devin_cli.markers,
+            &[".config/devin", ".devin", ".codeium/windsurf"]
+        );
+
+        // spec: HARN-5 -- detection never offers a project preset.
+        for p in PRESETS.iter().filter(|p| p.scope == Scope::Project) {
+            assert!(p.markers.is_empty(), "{} has markers", p.name);
+        }
 
         // spec: HARN-24 -- windsurf is legacy: same project layout under
         // .windsurf, and no marker, so detection never offers it.
@@ -2859,35 +2867,32 @@ mod tests {
             Some([ItemKind::Skill].as_slice())
         );
 
-        // The Windsurf-era home is detected as devin (project lobe <base>/.devin),
-        // never as the legacy windsurf preset, and devin-cli needs ~/.config/devin.
-        assert_eq!(
-            names.iter().filter(|n| **n == "devin").count(),
-            1,
-            "devin must appear exactly once: {names:?}"
-        );
-        let (_, devin_lobe) = detected.iter().find(|(n, _)| *n == "devin").unwrap();
-        assert_eq!(devin_lobe.path, base.join(".devin"));
+        // The Windsurf-era home is detected as the global devin-cli lobe
+        // (<base>/.config/devin), never as a project preset.
+        let (_, devin_lobe) = detected
+            .iter()
+            .find(|(n, _)| *n == "devin-cli")
+            .expect("devin-cli detected");
+        assert_eq!(devin_lobe.path, base.join(".config/devin"));
         assert_eq!(
             devin_lobe.kinds.as_deref(),
             Some([ItemKind::Skill].as_slice())
         );
+        assert!(!names.contains(&"devin"), "{names:?}");
         assert!(!names.contains(&"windsurf"), "{names:?}");
-        assert!(!names.contains(&"devin-cli"), "{names:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // HARN-24: each of devin's markers alone detects it; a bare `.windsurf` dir
-    // detects nothing.
+    // HARN-24/HARN-25: each Devin marker alone detects the global devin-cli
+    // lobe and no project preset; a bare `.windsurf` dir detects nothing.
     #[test]
     fn detect_homes_devin_markers() {
-        // spec: HARN-24
+        // spec: HARN-24 HARN-25
         for marker in [".config/devin", ".devin", ".codeium/windsurf"] {
             let (base, detected) = detect_with("devin", &[marker]);
             let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
-            assert!(names.contains(&"devin"), "{marker}: {names:?}");
-            assert!(!names.contains(&"windsurf"), "{marker}: {names:?}");
+            assert_eq!(names, ["devin-cli"], "{marker}");
             let _ = std::fs::remove_dir_all(&base);
         }
         let (base, detected) = detect_with("bare-windsurf", &[".windsurf"]);

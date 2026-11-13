@@ -402,7 +402,7 @@ recent hook results. `TARGET` is a source filter or a `source#item` ref.
 
 | flag (`run`) | effect |
 |--------------|--------|
-| `--event <install\|update\|uninstall\|build>` | which hooks (default `install`; `build` is for items) |
+| `--event <install\|update\|uninstall\|build\|items>` | which hooks (default `install`; `build` is for an item, `items` for a source) |
 | `--force`, `--rerun` | re-run hooks already recorded at the current commit |
 | `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
 
@@ -410,7 +410,7 @@ recent hook results. `TARGET` is a source filter or a `source#item` ref.
 |------------------|--------|
 | `--failed` | only hooks that failed |
 | `--outcome <LIST>` | only these outcomes (`ok`, `failed`, `skipped`, `declined`, `aborted`, `interrupted`) |
-| `--event <LIST>` | only these events (`install`, `update`, `uninstall`, `build`) |
+| `--event <LIST>` | only these events (`install`, `update`, `uninstall`, `build`, `items`) |
 | `--since <WHEN>` | only results since a duration ago (`2h`, `7d`) or a UTC date or time |
 | `--limit <N>` | only the newest N results |
 | `--show` | print each result's saved output |
@@ -425,7 +425,7 @@ mind config show
 mind config lobes list
 mind config lobes add [PATH] [--preset NAME] [--subdir REL] [--snapshot] [-f]
 mind config lobes remove <PATH> [--snapshot]
-mind config lobes detect
+mind config lobes detect [--yes]
 mind config auto-update <on|off> [--every DURATION]
 ```
 
@@ -439,7 +439,9 @@ manages agent homes:
 | `--snapshot` | `add`: write real-file copies, register nothing; `remove`: replace links with copies first |
 | `-f`, `--force` | overwrite a colliding file |
 
-`detect` reports which harnesses are installed and offers to add them. See
+`detect` reports which harnesses are installed and offers to add their global
+lobes: `--yes` adds without asking, a terminal is asked, and otherwise it only
+reports. `--json` prints the detected lobes and whether they were added. See
 [Use more than one agent](lobes.md) and [Configuration and paths](configuration.md).
 
 `auto-update on` adds a `SessionStart` hook to each Claude lobe's
@@ -454,7 +456,9 @@ mind link-project [DIR] [--preset NAME] [--subdir REL] [--snapshot] [-f]
 ```
 
 Shorthand for `config lobes add DIR --preset devin`, with `DIR` defaulting to
-the current directory. See [Project lobes](lobes.md#project-lobes).
+the current directory: a lobe for skills only that project should see. Devin
+does not need one to see your skills, since the global `devin-cli` lobe reaches
+every workspace. See [Project lobes](lobes.md#project-lobes).
 
 ## absorb
 
