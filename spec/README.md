@@ -88,6 +88,7 @@ and verified.
 | Item `[[items.hooks]]` array (parity with source `[[hooks]]`); nested lifecycle order `source.install -> item.install* ... item.uninstall* -> source.uninstall` | done | HOOK-86, HOOK-87 |
 | `init-source` flags bare sibling references only under a prefix; `hardcoded-path`/`bare-tool` messages note install-hook-populated locations are safe | done | INIT-9, CLI-146 |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
+| Lock holder record: an exclusive holder writes `.lock.holder`, a waiting command names it in its wait step | done | STO-84, STO-85, STO-86 |
 | `probe` matches description text, not just name | done | CLI-85 |
 | README quickstart and mental model; troubleshooting/FAQ on the docs site | done | [../README.md](../README.md), [../docs/src/](../docs/src/) |
 | Starter source example (plain convention layout) | done | [../examples/](../examples/) |

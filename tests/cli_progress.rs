@@ -367,6 +367,63 @@ fn a_command_blocked_on_the_lock_says_it_is_waiting() {
     assert!(!labels(&r.stderr).contains(&WAITING), "{:?}", r.stderr);
 }
 
+// spec: PRG-4 STO-85
+#[test]
+fn a_blocked_command_names_the_recorded_holder() {
+    let sb = Sandbox::new();
+    let mut held = fd_lock::RwLock::new(
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sb.mind_home.join(".lock"))
+            .unwrap(),
+    );
+    let guard = held.write().unwrap();
+    // This test process stands in for the holder, so the pid is live.
+    let pid = std::process::id();
+    write(
+        &sb.mind_home.join(".lock.holder"),
+        &format!(r#"{{"pid":{pid},"command":"mind upgrade --yes","started":0}}"#),
+    );
+
+    let err_path = sb.base.join("stderr.out");
+    let mut child = sb
+        .cmd(Some("always"), &["recall"])
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&err_path).unwrap())
+        .spawn()
+        .expect("run mind");
+    let want = format!(
+        "waiting for another mind command to finish: mind upgrade --yes (pid {pid}, running "
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !labels(&std::fs::read_to_string(&err_path).unwrap())
+        .iter()
+        .any(|l| l.starts_with(&want))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wait step never named the holder: {:?}",
+            std::fs::read_to_string(&err_path).unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(guard);
+    assert!(child.wait().unwrap().success());
+}
+
+// spec: STO-84
+#[test]
+fn a_mutating_command_leaves_no_holder_record_behind() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("src", None);
+    let r = sb.run(Some("never"), &["meld", &repo, "--pin", "HEAD", "--yes"]);
+    assert!(r.success, "{}{}", r.stdout, r.stderr);
+    assert!(sb.mind_home.join(".lock").exists());
+    assert!(!sb.mind_home.join(".lock.holder").exists());
+}
+
 // spec: PRG-5
 #[test]
 fn nothing_else_lands_on_a_drawn_spinner_line() {

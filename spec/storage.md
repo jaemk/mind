@@ -12,6 +12,7 @@ The on-disk layout and the two persisted JSON files.
   store/<kind>/<name>/          installed copy of each item (name is effective)
   .tmp/staging|backup/...        scratch for transactional installs
   .lock                         global advisory lock (STO-40)
+  .lock.holder                  who holds .lock exclusively (STO-84)
 
 <agent home>/                   (one or more; default ~/.claude)
   skills/<name>      -> store/skill/<name>
@@ -369,6 +370,30 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   A reader therefore sees either the old file or the new file, never a partial one,
   and a crash mid-write leaves the previous file intact. This holds independently
   of the lock, so it protects even a lock-less reader.
+- `STO-84` A command that takes a home's lock exclusively (blocking, or the
+  non-blocking take of AUP-18) records itself beside it in
+  `<home>/.lock.holder` once it holds every home's lock: a JSON object with
+  `pid`, `command` (`mind` followed by its arguments, with the userinfo of any
+  URL-shaped argument removed so a credential is never written), `cwd` (omitted
+  when unknown), and `started` (Unix seconds). The record is written through a
+  temp file and a rename, so it is never read half-written, and is removed
+  before the lock is released. Only homes whose lock file opened for writing
+  get a record, and a record that cannot be written does not fail the command.
+  A shared holder records nothing, since several may hold the lock at once.
+- `STO-85` A command that waits on a home's lock (STO-42) reads that home's
+  holder record and names the holder in its wait step (PRG-4). A record that
+  does not parse, or whose `pid` is not a live process (a holder that crashed
+  before removing it), names no one, and the step keeps the bare label. The
+  waiter re-reads the record while it waits, so the step follows a change of
+  holder and the holder's running time.
+- `STO-86` The holder record is compatible across `mind` versions sharing a
+  home. The lock itself is unchanged: `.lock` keeps its path and locking, and
+  its contents are never written, so older and newer binaries exclude each
+  other as before. A binary that predates STO-84 neither writes nor reads the
+  record: a newer command waiting on it shows the bare label, and an older
+  command waiting on a newer one shows its own label. A record parses with
+  unknown fields ignored and `started` defaulting to 0, so a later version may
+  add fields without breaking the label in an earlier one.
 
 ## `evolve` binary swap
 

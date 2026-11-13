@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-11-12
+
+### Added
+
+- A command holding the state lock exclusively records itself in
+  `<home>/.lock.holder` (pid, command line with URL credentials removed, cwd,
+  start time), and removes it before releasing the lock. A command waiting on
+  the lock names the holder in its wait step, e.g. `waiting for another mind
+  command to finish: mind upgrade --yes (pid 4242, running 1m15s)`, and
+  follows a change of holder while it waits. A record left by a crashed
+  holder is ignored. The lock itself is unchanged, so older and newer
+  binaries still exclude each other; a holder that writes no record shows
+  the bare label.
+
 ## [0.50.0] - 2026-11-10
 
 ### Changed
@@ -2457,7 +2471,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.50.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.51.0...HEAD
+[0.51.0]: https://github.com/jaemk/mind/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/jaemk/mind/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/jaemk/mind/compare/v0.48.0...v0.49.0
 [0.48.0]: https://github.com/jaemk/mind/compare/v0.47.0...v0.48.0
