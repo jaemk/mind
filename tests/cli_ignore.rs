@@ -5,11 +5,11 @@
 //! git repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed
 //! at temp dirs. No network.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+mod common;
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
+use common::{fixture_dir, git, write_file};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 struct Sandbox {
     base: PathBuf,
@@ -26,9 +26,7 @@ struct Run {
 
 impl Sandbox {
     fn new() -> Sandbox {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-ign-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = fixture_dir("ign");
         let source = base.join("lib");
         let sb = Sandbox {
             base: base.clone(),
@@ -36,7 +34,7 @@ impl Sandbox {
             mind_home: base.join("mind"),
             claude_home: base.join("claude"),
         };
-        write(&source.join("README.md"), "# fixture\n");
+        write_file(&source.join("README.md"), "# fixture\n");
         git(&source, &["-c", "init.defaultBranch=main", "init", "-q"]);
         git(&source, &["config", "user.email", "t@t"]);
         git(&source, &["config", "user.name", "t"]);
@@ -67,7 +65,7 @@ impl Sandbox {
     }
 
     fn write_and_commit(&self, rel: &str, contents: &str) {
-        write(&self.source.join(rel), contents);
+        write_file(&self.source.join(rel), contents);
         git(&self.source, &["add", "-A"]);
         git(&self.source, &["commit", "-qm", "fixture"]);
     }
@@ -82,22 +80,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 /// A source whose single skill IS the repo root: a top-level `SKILL.md`
@@ -529,7 +511,7 @@ fn a_dot_git_file_is_ignored_like_a_dot_git_directory() {
     // source is a "linked" source (spec/source addressing) that `mind` scans
     // from its working tree directly, so an untracked file here is exactly
     // what a scan reads.
-    write(
+    write_file(
         &sb.source.join("skills/a/.git"),
         "gitdir: ../../.git/modules/a\n",
     );

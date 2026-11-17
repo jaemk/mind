@@ -4,13 +4,13 @@
 //! git repo whose commits carry semver release tags, melded by filesystem path
 //! with `MIND_HOME`/`CLAUDE_HOME` pointed at temp dirs. No network.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use common::{fixture_dir, git, write_file};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::Value;
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct Sandbox {
     base: PathBuf,
@@ -28,9 +28,7 @@ struct Run {
 impl Sandbox {
     /// An empty git repo named `name` on branch `main`.
     fn new(name: &str) -> Sandbox {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-versions-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = fixture_dir("versions");
         let source = base.join(name);
         std::fs::create_dir_all(&source).unwrap();
         for args in [
@@ -198,22 +196,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write_file(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} in {dir:?}");
 }
 
 const RELEASE_TAGS: &str = "[source]\nrelease-tags = \"v{version}\"\n";

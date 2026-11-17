@@ -3847,9 +3847,7 @@ mod tests {
     // End-to-end through `Registry::load`: a hand-written sources.json carrying
     // a local source with a RELATIVE url that resolves against the real
     // process cwd is rewritten to the absolute form in memory. Constructs the
-    // resolving relative path as `../<unique>` against the real cwd so the
-    // fixture directory lands next to (not inside) the crate's own working
-    // tree, and cleans it up unconditionally.
+    // resolving relative path under the build directory, and cleans it up.
     #[test]
     fn registry_load_migrates_a_resolving_relative_local_url() {
         let cwd = std::env::current_dir().expect("must read cwd");
@@ -3861,9 +3859,9 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         );
-        let target_abs = cwd.parent().expect("cwd must have a parent").join(&unique);
+        let target_abs = cwd.join("target").join(&unique);
         std::fs::create_dir_all(&target_abs).unwrap();
-        let relative = format!("../{unique}");
+        let relative = format!("target/{unique}");
 
         let (base, paths) = tmp_paths_src();
         let sources_json = format!(
