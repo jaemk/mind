@@ -81,7 +81,7 @@ rm -rf /tmp/ns-demo
 
 ## Verified
 
-`tests/cli.rs::example_namespacing_expands_references` melds this directory and
+`tests/cli/namespace.rs::example_namespacing_expands_references` melds this directory and
 asserts the expansion, so the example stays correct as the code changes.
 
 ## See also

@@ -75,5 +75,5 @@ rm -rf /tmp/tooling-demo
 
 ## Verified
 
-`tests/cli.rs::example_tooling_expands_path_tokens` melds this directory and
+`tests/cli/tools.rs::example_tooling_expands_path_tokens` melds this directory and
 asserts the token expansion, so the example stays correct as the code changes.

@@ -64,7 +64,7 @@ rm -rf /tmp/monorepo-demo
 
 ## Verified
 
-`tests/cli.rs::example_monorepo_roots_discovery` melds this directory and asserts
+`tests/cli/discovery.rs::example_monorepo_roots_discovery` melds this directory and asserts
 both items are discovered from their subtrees, so the example stays correct as
 the code changes.
 

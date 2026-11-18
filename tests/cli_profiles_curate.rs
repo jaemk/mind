@@ -7,9 +7,12 @@
 //! temp dirs, no network. Repos melded by plain local path are linked
 //! sources, so edits are visible to the next command with no fetch.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::{git, write};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -109,22 +112,6 @@ impl Repo {
             &format!("[discover]\nsources = [\n{}\n]\n", entries.join(",\n")),
         );
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 /// A library with skills a, b, c and profiles `basic = [a]`, `extra = [b]`.

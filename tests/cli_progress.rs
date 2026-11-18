@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+use common::write;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Return to column 0 and erase the line: the spinner's draw and clear prefix.
@@ -105,11 +108,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {

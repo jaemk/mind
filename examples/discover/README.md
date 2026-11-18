@@ -71,7 +71,7 @@ rm -rf /tmp/discover-demo
 
 ## Verified
 
-`tests/cli.rs::example_discover_kind_globs` melds this directory and asserts the
+`tests/cli/discovery.rs::example_discover_kind_globs` melds this directory and asserts the
 glob-matched items are offered and the excluded one is not, so the example stays
 correct as the code changes.
 

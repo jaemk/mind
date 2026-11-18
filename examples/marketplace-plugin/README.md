@@ -28,4 +28,4 @@ either, since that count is for entries under the directory `mind` actually
 scans. Setting the key is not harmless: it silently splits what the harness
 offers from what `mind` manages.
 
-Used by `Sandbox::from_example("marketplace-plugin")` in `tests/cli.rs`.
+Used by `Sandbox::from_example("marketplace-plugin")` in `tests/cli/`.

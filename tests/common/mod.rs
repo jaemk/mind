@@ -1,4 +1,7 @@
 //! Shared helpers for isolated CLI integration fixtures.
+//!
+//! Each test crate includes this with `mod common;` and uses only some of it.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,7 +17,7 @@ pub fn fixture_dir(label: &str) -> PathBuf {
     base
 }
 
-pub fn write_file(path: &Path, contents: &str) {
+pub fn write(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
 }

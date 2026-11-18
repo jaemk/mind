@@ -4,9 +4,12 @@
 //! directory (local path, no network), using isolated MIND_HOME / CLAUDE_HOME
 //! temp dirs, exactly as tests/review_workflows.rs does.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::write;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -85,11 +88,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 /// Lines of `text` carrying `needle`.

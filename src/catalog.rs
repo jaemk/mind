@@ -5422,7 +5422,7 @@ mod tests {
 }
 
 /// Plugin-manifest discovery tests (MKT-1..6).
-/// Note: spec IDs are added in tests/cli.rs (shard 5); these are unit tests only.
+/// Note: spec IDs are added in tests/cli/ (shard 5); these are unit tests only.
 #[cfg(test)]
 mod plugin_tests {
     use super::*;

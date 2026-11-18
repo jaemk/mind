@@ -58,6 +58,6 @@ convention discovery) and DSC-50 (`[source].roots` convention scan roots).
 
 ## Verified
 
-`tests/cli.rs::root_mindfile_exposes_hello` melds a repo carrying the real
+`tests/cli/discovery.rs::root_mindfile_exposes_hello` melds a repo carrying the real
 root `mind.toml` and this directory, then asserts `hello-mind` is discovered and
 links into the agent home, so the landing-page command stays correct.

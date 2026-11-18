@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+use common::git;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 // ---- Sandbox helpers --------------------------------------------------------
@@ -153,17 +156,6 @@ impl Drop for Sandbox {
 fn write_file(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 fn git_init(dir: &Path) {
