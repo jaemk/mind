@@ -646,9 +646,14 @@ pub fn run_hook(
     env: &HookEnv,
     site: crate::hook_log::Site,
 ) -> Result<()> {
-    crate::progress::suspend(|| {
+    // spec: LIFE-62 -- the transaction notes the hook, so an interruption
+    // while it runs is reported: its effects are outside the journal.
+    crate::transaction::hook_started(&format!("{identity} {event}: {label}"), clone_dir);
+    let result = crate::progress::suspend(|| {
         run_hook_framed(command, clone_dir, identity, event, label, env, site)
-    })
+    });
+    crate::transaction::hook_finished();
+    result
 }
 
 /// [`run_hook`] without the progress suspension.

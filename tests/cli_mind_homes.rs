@@ -640,6 +640,49 @@ fn later_curated_sources_follow_the_curator_home() {
     );
 }
 
+/// `upgrade --dry-run` names the curated sources that would follow a curator
+/// whose own `mind-home` moves it, as the real pass moves them.
+#[test]
+fn a_home_move_preview_names_the_followers() {
+    // spec: CLI-263 HOME-5 HOME-15
+    let nested = Sandbox::new(None);
+    let discover = format!(
+        "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+        nested.spec()
+    );
+    let curator = Sandbox::new(Some(&discover));
+    let r = curator.mind(&["--yes", "meld", &curator.spec()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(curator.sources_in(&curator.default_home).len(), 2);
+    write(
+        &curator.source.join("mind.toml"),
+        &format!(
+            "[source]\nmind-home = {:?}\n{discover}",
+            curator.extra_str()
+        ),
+    );
+    let r = curator.mind(&["--json", "upgrade", "--dry-run"]);
+    assert!(r.ok(), "preview: {}\n{}", r.stdout, r.stderr);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    let mut moved: Vec<String> = v["home_moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["source"].as_str().unwrap().to_string())
+        .collect();
+    moved.sort();
+    let mut expected = vec![curator.identity(), nested.identity()];
+    expected.sort();
+    assert_eq!(moved, expected, "{v}");
+    assert_eq!(curator.sources_in(&curator.default_home).len(), 2);
+
+    let r = curator.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    let mut in_extra = curator.sources_in(&curator.extra);
+    in_extra.sort();
+    assert_eq!(in_extra, expected);
+}
+
 /// The `mind-homes` config key lists extra homes like `MIND_HOMES`.
 #[test]
 fn the_config_key_lists_extra_homes() {

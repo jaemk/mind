@@ -189,6 +189,151 @@ pub struct Manifest {
 /// The maximum schema version this binary can read.
 const MANIFEST_VERSION: u32 = 1;
 
+type ManifestWrite = (std::path::PathBuf, Vec<u8>, bool, std::path::PathBuf);
+
+fn manifest_journal_files(paths: &Paths) -> Vec<std::path::PathBuf> {
+    std::iter::once(paths.mind_home.clone())
+        .chain(paths.extra_homes())
+        .map(|home| crate::paths::normalize_home(&home).join(".manifest-journal.json"))
+        .collect()
+}
+
+pub(crate) fn manifest_journal_pending(paths: &Paths) -> Result<bool> {
+    for file in manifest_journal_files(paths) {
+        match std::fs::symlink_metadata(&file) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MindError::io(&file, error)),
+        }
+    }
+    Ok(false)
+}
+
+/// Recover interrupted per-home manifest saves while holding state locks.
+pub(crate) fn recover_manifest_journal(paths: &Paths) -> Result<()> {
+    for file in manifest_journal_files(paths) {
+        recover_one_manifest_journal(&file)?;
+    }
+    Ok(())
+}
+
+/// Check the manifest bytes a journal would publish (STO-87, LIFE-61): a
+/// manifest this binary can read.
+pub(crate) fn check_journal_payload(contents: &[u8]) -> std::result::Result<(), String> {
+    let manifest: Manifest = serde_json::from_slice(contents)
+        .map_err(|error| format!("the recorded manifest is invalid: {error}"))?;
+    if manifest.version > MANIFEST_VERSION {
+        return Err(format!(
+            "the recorded manifest uses schema version {} but this mind only supports up to version {MANIFEST_VERSION}; run `mind evolve`",
+            manifest.version
+        ));
+    }
+    Ok(())
+}
+
+/// A journal that fails validation (STO-87): fail closed, keep the file.
+fn invalid_journal(file: &std::path::Path, reason: impl ToString) -> MindError {
+    MindError::ManifestJournal {
+        path: file.to_path_buf(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Map a journal I/O failure: malformed content is an invalid journal, any
+/// other failure (permissions, a full disk) stays an I/O error.
+fn journal_error(file: &std::path::Path, error: std::io::Error) -> MindError {
+    if error.kind() == std::io::ErrorKind::InvalidData {
+        invalid_journal(file, error)
+    } else {
+        MindError::io(file, error)
+    }
+}
+
+/// Refuse a dry run while any configured home has a journal to recover:
+/// recovery writes state, which a dry run must not do (STO-87).
+pub(crate) fn refuse_pending_recovery(paths: &Paths) -> Result<()> {
+    for file in manifest_journal_files(paths) {
+        match std::fs::symlink_metadata(&file) {
+            Ok(_) => return Err(MindError::RecoveryPending { path: file }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(MindError::io(&file, error)),
+        }
+    }
+    Ok(())
+}
+
+fn recover_one_manifest_journal(file: &std::path::Path) -> Result<()> {
+    match std::fs::symlink_metadata(file) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(invalid_journal(file, "the journal must not be a symlink"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(MindError::io(file, error)),
+    }
+    let mut journal = match crate::transaction::Journal::load(file) {
+        Ok(journal) => journal,
+        // Replaced by a dangling symlink between the check above and the
+        // open (O_NOFOLLOW): fail closed rather than treating it as absent.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(file) {
+                Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Ok(_) => return Err(invalid_journal(file, "the journal is a dangling symlink")),
+                Err(other) => return Err(MindError::io(file, other)),
+            }
+        }
+        Err(error) => return Err(journal_error(file, error)),
+    };
+    // A journal may authorize writes only to the manifest in its own home.
+    // In particular, a shared extra home cannot authorize changes to another
+    // configured home even if both are locked by this process.
+    let allowed = file
+        .parent()
+        .expect("journal has a home")
+        .join("manifest.json");
+    if journal.intents.len() > 1 {
+        return Err(invalid_journal(
+            file,
+            "the journal records more than one operation",
+        ));
+    }
+    for intent in &mut journal.intents {
+        let crate::transaction::Intent::Manifest {
+            destination,
+            contents,
+            ..
+        } = intent
+        else {
+            return Err(invalid_journal(
+                file,
+                "the journal records a non-manifest operation",
+            ));
+        };
+        if crate::paths::normalize_home(destination) != allowed {
+            return Err(invalid_journal(
+                file,
+                format!(
+                    "destination '{}' is not this home's manifest",
+                    destination.display()
+                ),
+            ));
+        }
+        // Older saves could have recorded a relative destination. Once it is
+        // validated against this journal's own home, replay it in normalized
+        // form so a stranded journal can be recovered too.
+        *destination = allowed.clone();
+        check_journal_payload(contents).map_err(|reason| invalid_journal(file, reason))?;
+    }
+    if journal.decision == crate::transaction::Decision::Commit {
+        journal
+            .finish_prevalidated_manifests()
+            .map_err(|error| journal_error(file, error))?;
+    }
+    std::fs::remove_file(file).map_err(|error| MindError::io(file, error))?;
+    crate::transaction::sync_parent(file).map_err(|error| MindError::io(file, error))?;
+    Ok(())
+}
+
 fn default_version() -> u32 {
     1
 }
@@ -251,6 +396,57 @@ impl Manifest {
     /// in (HOME-3, HOME-7). A home whose file would not change is not written.
     // spec: HOME-3 HOME-7
     pub fn save(&self, paths: &Paths) -> Result<()> {
+        let writes = self.prepare_writes(paths)?;
+        if writes.is_empty() {
+            return Ok(());
+        }
+        for (_, _, is_default, home) in &writes {
+            if *is_default {
+                paths.ensure_layout()?;
+            } else {
+                crate::paths::mkdir_p(home)?;
+            }
+        }
+        // spec: LIFE-60 -- inside a command transaction, every home's manifest
+        // commits at once with the item changes it describes.
+        let manifests: Vec<(std::path::PathBuf, Vec<u8>)> = writes
+            .iter()
+            .map(|(file, json, _, _)| (file.clone(), json.clone()))
+            .collect();
+        if crate::transaction::commit_manifests(&manifests)? {
+            return Ok(());
+        }
+        // spec: STO-87 -- otherwise each home commits separately. A journal is
+        // discoverable from its own home and never grants one home authority
+        // over another. An interrupted save may therefore leave later homes at
+        // their previous versions.
+        for (file, json, _, home) in writes {
+            let journal_file = home.join(".manifest-journal.json");
+            // spec: LIFE-64
+            let prior =
+                crate::transaction::Prior::of(&file).map_err(|e| MindError::io(&file, e))?;
+            let mut journal = crate::transaction::Journal::begin(&journal_file)
+                .map_err(|e| MindError::io(&journal_file, e))?;
+            journal
+                .record(crate::transaction::Intent::Manifest {
+                    staged: file.clone(),
+                    destination: file,
+                    contents: json,
+                    prior: Some(prior),
+                })
+                .map_err(|e| MindError::io(&journal_file, e))?;
+            journal
+                .commit()
+                .map_err(|e| MindError::io(&journal_file, e))?;
+            recover_one_manifest_journal(&journal_file)?;
+        }
+        Ok(())
+    }
+
+    /// Prepare all per-home manifest payloads before writing any of them.
+    /// This is the serialization boundary needed by a future transaction
+    /// coordinator; the caller must hold the state lock throughout.
+    fn prepare_writes(&self, paths: &Paths) -> Result<Vec<ManifestWrite>> {
         use crate::paths::normalize_home;
         let default = normalize_home(&paths.mind_home);
         // An entry naming no allowed home stays in the default manifest, so a
@@ -264,13 +460,9 @@ impl Manifest {
         };
         let mut homes = vec![default.clone()];
         homes.extend(extra.iter().cloned());
-        let file_of = |home: &std::path::Path| {
-            if *home == *default {
-                paths.manifest_file()
-            } else {
-                home.join("manifest.json")
-            }
-        };
+        // Journal destinations and journal discovery must use the same
+        // normalized home, including when MIND_HOME is relative.
+        let file_of = |home: &std::path::Path| home.join("manifest.json");
         // spec: HOME-3 -- every home's file as it is before this save writes
         // any. An entry `load` skipped because an earlier home holds the same
         // key is written back unchanged, not dropped.
@@ -286,6 +478,7 @@ impl Manifest {
                     .unwrap_or_default()
             })
             .collect();
+        let mut writes = Vec::new();
         for (i, home) in homes.iter().enumerate() {
             let is_default = *home == default;
             let mut subset = Manifest {
@@ -311,14 +504,9 @@ impl Manifest {
                 None if subset.items.is_empty() => continue,
                 _ => {}
             }
-            if is_default {
-                paths.ensure_layout()?;
-            } else {
-                crate::paths::mkdir_p(home)?;
-            }
-            Paths::atomic_write(&file, &json)?;
+            writes.push((file, json, is_default, home.clone()));
         }
-        Ok(())
+        Ok(writes)
     }
 
     pub fn insert(&mut self, item: InstalledItem) {
@@ -427,6 +615,20 @@ mod tests {
             version: None,
             lobe: None,
         }
+    }
+
+    #[test]
+    fn preparation_does_not_write_and_matches_persisted_manifest() {
+        let (base, paths) = tmp_paths();
+        let mut manifest = Manifest::default();
+        manifest.insert(stub_item("prepared"));
+        let writes = manifest.prepare_writes(&paths).unwrap();
+        assert_eq!(writes.len(), 1);
+        assert!(!paths.manifest_file().exists());
+        manifest.save(&paths).unwrap();
+        assert_eq!(std::fs::read(&writes[0].0).unwrap(), writes[0].1);
+        assert!(manifest.prepare_writes(&paths).unwrap().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// Install reasons (PROF-20) round-trip through `manifest.json`; an entry

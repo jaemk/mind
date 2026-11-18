@@ -225,9 +225,12 @@ is proven:
 1. Build the new copy in a staging dir (`~/.mind/.tmp/staging/...`) and expand
    its `{{ns:}}` references there. The likeliest failure (a bad reference) occurs
    now, while the live install is untouched.
-2. Move any existing store copy aside to a backup, move staging into place, and
-   ensure the symlink.
-3. On failure during the swap, restore from backup; on success, drop it.
+2. Move any existing store copy aside into the transaction's trash
+   (`<home>/.tmp/tx/...`), move staging into place, and create the symlink.
+   Each step is journaled first in `src/transaction.rs`.
+3. On failure during the swap, undo the item's journaled steps; on commit (the
+   manifest save), empty the trash. A crash leaves `.tx-journal.json`, which
+   the next command recovers under the exclusive lock (spec LIFE-59..63).
 
 A failed upgrade therefore never leaves you worse off than before it started.
 

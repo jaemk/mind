@@ -47,6 +47,14 @@ pub(crate) fn hash_str(s: &str) -> String {
     h.finish_hex()
 }
 
+/// Fingerprint a file's bytes as `<length>:<FNV-1a digest>`: enough to tell
+/// whether a file still holds what it did (LIFE-64), not cryptographic.
+pub(crate) fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let mut h = Fnv::new();
+    h.write(bytes);
+    format!("{}:{}", bytes.len(), h.finish_hex())
+}
+
 /// Hash an item path: a single file, or a directory hashed recursively, with
 /// NO ignore rules applied -- not even the IGN-2 built-ins (`.git`, `.hg`,
 /// `.svn`, `.bzr`): it calls [`hash_path_ignoring`] with

@@ -828,18 +828,20 @@ fn recommended_for_breaking(pin: &Pin) -> Option<String> {
 /// caret of the new release (`^2.0.0`) and is resolved there, so its items then
 /// upgrade through the ordinary pass. `--allow-breaking` accepts them all; on a
 /// terminal without `--yes` or `--json` each gets its own `[y/N]` prompt;
-/// otherwise they are skipped.
+/// otherwise they are skipped. A `preview` (CLI-263) lists them all as not
+/// applied, changing nothing.
 // spec: VER-61 VER-62 VER-63
 fn settle_breaking_moves(
     paths: &Paths,
     registry: &mut Registry,
     in_scope: &dyn Fn(&str) -> bool,
     yes: bool,
+    preview: bool,
     out: &crate::render::OutputCtx,
 ) -> Result<Vec<BreakingMoveJson>> {
-    let allow = ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
+    let allow = !preview && ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
     // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
-    let interactive = !yes && !out.json && crate::hook::is_tty();
+    let interactive = !preview && !yes && !out.json && crate::hook::is_tty();
     let mut changed = false;
     let mut moves = Vec::new();
     for source in &mut registry.sources {
@@ -1182,18 +1184,21 @@ pub(crate) fn move_to_home(
 /// chose its home (HOME-15). The curated sources that follow it move with it
 /// (HOME-8); the upgrade pass then reinstalls their items there. A home that
 /// is not allowed, or a move that fails, leaves the source where it is with a
-/// warning. Returns whether any source moved.
+/// warning. Returns whether any source moved. A `preview` (CLI-263) moves
+/// nothing and returns the moves it would make instead.
 // spec: HOME-15
 fn follow_declared_homes(
     paths: &Paths,
     registry: &Registry,
     in_scope: &dyn Fn(&crate::source::Source) -> bool,
     accept: crate::hook::Accept,
-) -> Result<bool> {
+    preview: bool,
+) -> Result<(bool, Vec<HomeMoveJson>)> {
     use crate::paths::normalize_home;
     let out = crate::render::ctx();
     let mut saved = false;
     let mut any = false;
+    let mut predicted = Vec::new();
     let names: Vec<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
     for name in names {
         // Re-read: an earlier move may have taken this source along.
@@ -1249,6 +1254,38 @@ fn follow_declared_homes(
             );
             continue;
         }
+        if preview {
+            // The sources that follow its home move with it (HOME-5).
+            for member in &family {
+                let from = normalize_home(&paths.home_of(member));
+                let member_shown = strip_ansi(member);
+                if from == to
+                    || predicted
+                        .iter()
+                        .any(|m: &HomeMoveJson| m.source == member_shown)
+                {
+                    continue;
+                }
+                if !out.json {
+                    let why = if *member == name {
+                        "its mind.toml declares `mind-home`".to_string()
+                    } else {
+                        format!("it follows {shown}")
+                    };
+                    println!(
+                        "{member_shown} would move from {} to {} ({why})",
+                        from.display(),
+                        to.display()
+                    );
+                }
+                predicted.push(HomeMoveJson {
+                    source: member_shown,
+                    from: from.display().to_string(),
+                    to: to.display().to_string(),
+                });
+            }
+            continue;
+        }
         if !saved {
             // What the pass changed so far (sync, breaking moves) is on disk
             // before a move reads the registry back.
@@ -1266,7 +1303,15 @@ fn follow_declared_homes(
             ),
         }
     }
-    Ok(any)
+    Ok((any, predicted))
+}
+
+/// A source move `upgrade --dry-run` predicts (HOME-15, CLI-263).
+#[derive(Clone, Debug, serde::Serialize)]
+struct HomeMoveJson {
+    source: String,
+    from: String,
+    to: String,
 }
 
 /// Reinstall, through the upgrade pass and without fetching, every installed
@@ -5174,6 +5219,29 @@ pub fn unmeld(
     accept: crate::hook::Accept,
     uninstall_hook: Option<String>,
 ) -> Result<()> {
+    unmeld_inner(paths, name, unlink_only, yes, accept, uninstall_hook, false)
+}
+
+pub fn unmeld_preview(
+    paths: &Paths,
+    name: &str,
+    keep_items: bool,
+    accept: crate::hook::Accept,
+    uninstall_hook: Option<String>,
+) -> Result<()> {
+    unmeld_inner(paths, name, keep_items, false, accept, uninstall_hook, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unmeld_inner(
+    paths: &Paths,
+    name: &str,
+    unlink_only: bool,
+    yes: bool,
+    accept: crate::hook::Accept,
+    uninstall_hook: Option<String>,
+    preview: bool,
+) -> Result<()> {
     // spec: HOOK-186 -- the plan's answer lasts for this verb only.
     let _answers = crate::consent::scope();
     let out = crate::render::ctx();
@@ -5224,6 +5292,65 @@ pub fn unmeld(
         return Err(MindError::SourceNotFound {
             name: name.to_string(),
         });
+    }
+
+    if preview {
+        let manifest = Manifest::load(paths)?;
+        let names: Vec<_> = matched.iter().map(|i| &registry.sources[*i]).collect();
+        let mut hooks = Vec::new();
+        let mut rows = Vec::new();
+        for source in names {
+            hooks.extend(unmeld_plan(
+                paths,
+                &registry,
+                &source.name,
+                unlink_only,
+                uninstall_hook.as_deref(),
+                accept,
+            )?);
+            let items: Vec<_> = if unlink_only {
+                Vec::new()
+            } else {
+                manifest.items.values().filter(|i| i.source == source.name).map(|i| serde_json::json!({
+                    "key": i.display_key(), "store": display_path(&paths.mind_home.join(&i.store)),
+                    "links": i.links.iter().map(|p| strip_ansi(p)).collect::<Vec<_>>()
+                })).collect()
+            };
+            let dir = clone_dir_checked(paths, source)?;
+            let clone = (!source.is_linked() && dir.exists()).then(|| display_path(&dir));
+            rows.push(serde_json::json!({"source": strip_ansi(&source.name), "items":items, "clone":clone}));
+        }
+        if out.json {
+            let hook_rows: Vec<_> = hooks.iter().map(|h| serde_json::json!({"source":strip_ansi(&h.key.source),"item":h.key.item.as_ref().map(|v| strip_ansi(v)),"event":strip_ansi(&h.key.event),"command":strip_ansi(&h.label)})).collect();
+            print_json(
+                &serde_json::json!({"schema":1,"action":"unmeld","outcome":"preview","sources":rows,"hooks":hook_rows,"keep_items":unlink_only}),
+            )?;
+        } else {
+            println!("Preview: unmeld would remove {} source(s):", rows.len());
+            for row in &rows {
+                println!("  {}", row["source"].as_str().unwrap_or_default());
+                if let Some(clone) = row["clone"].as_str() {
+                    println!("    clone: {clone}");
+                }
+                for item in row["items"].as_array().unwrap() {
+                    println!(
+                        "    {} (store: {})",
+                        item["key"].as_str().unwrap_or_default(),
+                        item["store"].as_str().unwrap_or_default()
+                    );
+                    for link in item["links"].as_array().unwrap() {
+                        println!("      link: {}", link.as_str().unwrap_or_default());
+                    }
+                }
+            }
+            if unlink_only {
+                println!("Installed items will be kept.");
+            }
+            if !hooks.is_empty() {
+                print!("{}", crate::consent::render(&hooks));
+            }
+        }
+        return Ok(());
     }
 
     // CLI-28: when a glob matches more than one source, list the matched sources
@@ -8124,6 +8251,52 @@ pub fn forget_source_profile(
     Ok(())
 }
 
+pub fn forget_source_profile_preview(
+    paths: &Paths,
+    source_ref: &str,
+    profile: &str,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let names = crate::profile::parse_cli_names(&[profile.to_string()])?;
+    let [name] = names.as_slice() else {
+        return Err(MindError::InvalidProfileName {
+            name: profile.trim().to_string(),
+            reason: "forget --profile takes one profile name".to_string(),
+        });
+    };
+    let source_name = resolve_profile_source(paths, source_ref)?;
+    let registry = Registry::load(paths)?;
+    let source = registry
+        .find(&source_name)
+        .ok_or_else(|| MindError::SourceNotFound {
+            name: source_name.clone(),
+        })?;
+    let enabled = source.profiles.clone().unwrap_or_default();
+    if !enabled.iter().any(|p| p == name) {
+        let manifest = Manifest::load(paths)?;
+        return preview_removals(
+            paths,
+            &manifest,
+            Vec::new(),
+            "forget",
+            accept,
+            Some(
+                serde_json::json!({"source":strip_ansi(&source_name),"name":strip_ansi(name),"enabled":false,"remaining":enabled,"kept":[]}),
+            ),
+        );
+    }
+    let ProfileDisable {
+        plan,
+        remove,
+        kept,
+        manifest,
+        ..
+    } = resolve_profile_disable(paths, &registry, source, name, true)?;
+    let kept: Vec<_> = kept.iter().map(|(key, deps)| serde_json::json!({"key":strip_ansi(key),"dependents":deps.iter().map(|d|strip_ansi(d)).collect::<Vec<_>>()})).collect();
+    let extra = serde_json::json!({"source":strip_ansi(&source_name),"name":strip_ansi(name),"enabled":true,"remaining":plan.remaining_enabled.unwrap_or_default(),"kept":kept});
+    preview_removals(paths, &manifest, remove, "forget", accept, Some(extra))
+}
+
 /// What disabling one profile of a source resolves to (PROF-25), before any
 /// gate: the plan, the keys to forget, and the `(key, dependents)` pairs kept
 /// because another installed item depends on them (DEP-60).
@@ -9095,6 +9268,7 @@ fn track_profiles_for_upgrade(
     catalog: &[CatalogItem],
     mode: NewItems,
     leftovers: &[String],
+    preview: bool,
 ) -> Result<ProfileTracking> {
     let mut tracking = ProfileTracking::default();
     for name in sources {
@@ -9114,9 +9288,13 @@ fn track_profiles_for_upgrade(
         let safe_source = strip_ansi(name);
         for p in &dropped {
             // spec: PROF-24
+            let action = if preview {
+                "would be removed from"
+            } else {
+                "removed from"
+            };
             crate::render::warn(format!(
-                "profile '{}' is no longer declared by {safe_source}; removed from its enabled \
-                 profiles",
+                "profile '{}' is no longer declared by {safe_source}; {action} its enabled profiles",
                 strip_ansi(p)
             ));
         }
@@ -9180,7 +9358,9 @@ fn track_profiles_for_upgrade(
                         .collect(),
                 );
             }
-            registry.save(paths)?;
+            if !preview {
+                registry.save(paths)?;
+            }
         }
 
         if diff.additions.is_empty() || kept.is_empty() {
@@ -9211,7 +9391,7 @@ fn track_profiles_for_upgrade(
         } = plan;
         let (present, fresh): (Vec<ProfileMember>, Vec<ProfileMember>) =
             members.into_iter().partition(|m| m.installed);
-        if !present.is_empty() {
+        if !present.is_empty() && !preview {
             // An addition already installed is snapshotted and tagged, not
             // proposed (PROF-21).
             let now = ProfilePlan {
@@ -9250,7 +9430,9 @@ fn track_profiles_for_upgrade(
                 let mut registry = Registry::load(paths)?;
                 if let Some(s) = registry.sources.iter_mut().find(|s| s.name == *name) {
                     crate::profile::record_applied(s, &[], &keys);
-                    registry.save(paths)?;
+                    if !preview {
+                        registry.save(paths)?;
+                    }
                 }
                 tracking.ignored.extend(fresh.iter().map(|m| NewItem {
                     key: strip_ansi(&m.target.key),
@@ -9376,6 +9558,7 @@ fn track_whole_for_upgrade(
     sources: &[String],
     catalog: &[CatalogItem],
     mode: NewItems,
+    preview: bool,
 ) -> Result<WholeTracking> {
     let mut tracking = WholeTracking::default();
     if sources.is_empty() {
@@ -9448,7 +9631,7 @@ fn track_whole_for_upgrade(
             tracking.targets.push((name.clone(), fresh));
         }
     }
-    if changed {
+    if changed && !preview {
         registry.save(paths)?;
     }
     Ok(tracking)
@@ -9531,17 +9714,19 @@ fn print_whole_additions(tracking: &WholeTracking) {
 
 /// The notes for new items an upgrade did not propose (LIFE-55): skipped ones
 /// come back next time, ignored ones do not.
-fn note_unproposed_new_items(skipped: usize, ignored: &[NewItem]) {
+fn note_unproposed_new_items(skipped: usize, ignored: &[NewItem], preview: bool) {
     if skipped > 0 {
+        let action = if preview { "would skip" } else { "skipped" };
         crate::render::note(format!(
-            "note: skipped {skipped} new item(s) (--skip-new); the next upgrade offers them again"
+            "note: {action} {skipped} new item(s) (--skip-new); the next upgrade offers them again"
         ));
     }
     for i in ignored {
+        let action = if preview { "would ignore" } else { "ignored" };
         // Source-qualified, so it cannot be ambiguous with a same-named item
         // in another melded source.
         crate::render::note(format!(
-            "note: ignored new item {} from {} (--ignore-new); run `mind learn {}` to install it",
+            "note: {action} new item {} from {} (--ignore-new); run `mind learn {}` to install it",
             i.key,
             i.source,
             crate::error::shell_quote(&format!("{}#{}", i.source, i.key))
@@ -11441,6 +11626,202 @@ pub fn forget(
     )
 }
 
+/// Preview the same managed selection as forget; an exact miss may select an
+/// unmanaged item, just as the removal path does.
+pub fn forget_preview(
+    paths: &Paths,
+    item_ref: Option<&str>,
+    unmanaged: bool,
+    dropped: bool,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let manifest = Manifest::load(paths)?;
+    let parsed = item_ref.map(parse_item_ref).transpose()?;
+    if unmanaged {
+        let scanned = crate::unmanaged::scan(paths, &manifest)?;
+        let items = crate::unmanaged::select(&scanned, parsed.as_ref());
+        if items.is_empty() {
+            return Err(MindError::NotInstalled {
+                name: item_ref.unwrap_or("*").to_string(),
+            });
+        }
+        return preview_unmanaged(&items);
+    }
+    if dropped {
+        let keys = dropped_item_keys(paths, &manifest, item_ref, None)?;
+        return preview_removals(paths, &manifest, keys, "forget", accept, None);
+    }
+    let parsed = parsed.expect("clap requires an item");
+    let keys = if is_glob(&parsed.name) {
+        let matches = select_installed(&manifest.items, &parsed);
+        if matches.is_empty() {
+            return Err(MindError::NotInstalled {
+                name: parsed.name.clone(),
+            });
+        }
+        matches.iter().map(|i| i.key().into()).collect()
+    } else {
+        match crate::resolve::resolve_installed(&manifest.items, &parsed) {
+            Ok(item) => vec![item.key().into()],
+            Err(MindError::NotInstalled { .. }) => {
+                let scanned = crate::unmanaged::scan(paths, &manifest)?;
+                let item = crate::unmanaged::resolve(&scanned, &parsed)?;
+                return preview_unmanaged(&[item]);
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    preview_removals(paths, &manifest, keys, "forget", accept, None)
+}
+
+pub fn prune_preview(
+    paths: &Paths,
+    source: Option<&str>,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    let manifest = Manifest::load(paths)?;
+    let keys = prune_keys(paths, &manifest, source)?;
+    preview_removals(paths, &manifest, keys, "prune", accept, None)
+}
+
+fn preview_unmanaged(items: &[&crate::unmanaged::UnmanagedItem]) -> Result<()> {
+    let rows: Vec<_> = items.iter().map(|item| serde_json::json!({
+        "key": item.display_key(), "paths": item.paths.iter().map(|p| display_path(p)).collect::<Vec<_>>(),
+        "managed": false,
+    })).collect();
+    if crate::render::ctx().json {
+        print_json(
+            &serde_json::json!({"schema":1,"action":"forget","outcome":"preview","items":rows,"hooks":[]}),
+        )
+    } else {
+        println!("Preview: these unmanaged files or directories would be removed:");
+        for row in &rows {
+            println!(
+                "  {}: {}",
+                row["key"].as_str().unwrap_or_default(),
+                row["paths"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Ok(())
+    }
+}
+
+// spec: CLI-264 -- use the same selected keys and catalog as the removal,
+// but only render the plan; neither hooks nor deletion are invoked.
+fn preview_removals(
+    paths: &Paths,
+    manifest: &Manifest,
+    keys: Vec<String>,
+    action: &'static str,
+    accept: crate::hook::Accept,
+    profile: Option<serde_json::Value>,
+) -> Result<()> {
+    let registry = Registry::load(paths)?;
+    let scan = catalog::scan(paths, &registry);
+    let catalog_complete = scan.is_ok();
+    let catalog = scan.unwrap_or_default();
+    let graph = crate::deps::installed_graph(
+        &catalog,
+        |it| {
+            manifest
+                .items
+                .get(it.key().as_str())
+                .is_some_and(|m| m.source == it.source)
+        },
+        read_item_text,
+    );
+    let mut hooks = Vec::new();
+    let mut sources = BTreeSet::new();
+    let mut rows = Vec::new();
+    for key in &keys {
+        let item = &manifest.items[key];
+        let resolved = item_catalog_match(&catalog, item)
+            .map(|c| c.uninstall_hooks())
+            .unwrap_or_default();
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
+        hooks.extend(item_uninstall_plan(paths, item, &resolved, &commit, accept));
+        sources.insert(item.source.clone());
+        rows.push(serde_json::json!({"key": item.display_key(), "source": strip_ansi(&item.source),
+            "store": display_path(&paths.mind_home.join(&item.store)),
+            "links": item.links.iter().map(|p| strip_ansi(p)).collect::<Vec<_>>(),
+            "dependents": graph.dependents(key).iter().map(|d| strip_ansi(d)).collect::<Vec<_>>(), "managed": true}));
+    }
+    for source in &sources {
+        hooks.extend(crate::items_hook::planned(
+            paths,
+            &registry,
+            [source.as_str()],
+            crate::items_hook::PlanWhen::Touched,
+            accept,
+        ));
+    }
+    if crate::render::ctx().json {
+        let hook_rows: Vec<_> = hooks.iter().map(|h| serde_json::json!({"source":strip_ansi(&h.key.source),"item":h.key.item.as_ref().map(|v| strip_ansi(v)),"event":strip_ansi(&h.key.event),"command":strip_ansi(&h.label)})).collect();
+        print_json(
+            &serde_json::json!({"schema":1,"action":action,"outcome":"preview","items":rows,"hooks":hook_rows,"catalog_complete":catalog_complete,"profile":profile}),
+        )
+    } else {
+        println!("Preview: {action} would remove {} item(s):", rows.len());
+        if let Some(profile) = &profile {
+            println!(
+                "  profile {} of {} (enabled: {}, remaining: {})",
+                profile["name"].as_str().unwrap_or_default(),
+                profile["source"].as_str().unwrap_or_default(),
+                profile["enabled"],
+                profile["remaining"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            for kept in profile["kept"].as_array().unwrap() {
+                println!(
+                    "  kept {} (needed by {})",
+                    kept["key"].as_str().unwrap_or_default(),
+                    kept["dependents"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+        if !catalog_complete {
+            println!("Source scan failed; dependents and hooks may be incomplete.");
+        }
+        for row in &rows {
+            println!(
+                "  {} (store: {})",
+                row["key"].as_str().unwrap_or_default(),
+                row["store"].as_str().unwrap_or_default()
+            );
+            for link in row["links"].as_array().unwrap() {
+                println!("    link: {}", link.as_str().unwrap_or_default());
+            }
+            for dep in row["dependents"].as_array().unwrap() {
+                println!("    dependent: {}", dep.as_str().unwrap_or_default());
+            }
+        }
+        if !hooks.is_empty() {
+            print!("{}", crate::consent::render(&hooks));
+        }
+        Ok(())
+    }
+}
+
 /// `mind prune [<source>]` -- remove every installed item that is no longer
 /// part of a melded source: the `forget --dropped` set (CLI-245) plus each
 /// source's profile leftovers (PROF-37, PROF-38), narrowed to the items whose
@@ -11457,6 +11838,12 @@ pub fn prune(
     accept: crate::hook::Accept,
 ) -> Result<()> {
     let manifest = Manifest::load(paths)?;
+    let keys = prune_keys(paths, &manifest, source)?;
+    let target = source.unwrap_or("*");
+    forget_dropped(paths, "prune", manifest, keys, target, yes, false, accept)
+}
+
+fn prune_keys(paths: &Paths, manifest: &Manifest, source: Option<&str>) -> Result<Vec<String>> {
     if let Some(sel) = source {
         crate::resolve::validate_source_selector(sel)?;
         // The filter matches the source an item was installed from, so an
@@ -11471,15 +11858,14 @@ pub fn prune(
             });
         }
     }
-    let mut keys = dropped_item_keys(paths, &manifest, None, source)?;
-    for key in all_profile_leftovers(paths, &manifest, source)? {
+    let mut keys = dropped_item_keys(paths, manifest, None, source)?;
+    for key in all_profile_leftovers(paths, manifest, source)? {
         if !keys.contains(&key) {
             keys.push(key);
         }
     }
     keys.sort();
-    let target = source.unwrap_or("*");
-    forget_dropped(paths, "prune", manifest, keys, target, yes, false, accept)
+    Ok(keys)
 }
 
 /// The profile leftovers (PROF-37) of every melded source with a clone on
@@ -12928,6 +13314,24 @@ enum SourceScope<'a> {
     /// An `upgrade --source` filter, resolved against the registry the pass
     /// itself loads (CLI-231 matching).
     Filter(&'a str),
+    Preview(Option<&'a str>),
+}
+
+pub fn upgrade_preview(
+    paths: &Paths,
+    item: Option<&str>,
+    source: Option<&str>,
+    accept: crate::hook::Accept,
+) -> Result<()> {
+    emit_upgrade_result(upgrade_inner_scoped(
+        paths,
+        false,
+        item,
+        true,
+        SourceScope::Preview(source),
+        None,
+        accept,
+    )?)
 }
 
 /// The upgrade pass, additionally restricted to a `source_scope` (CLI-232, H2
@@ -12959,7 +13363,10 @@ fn upgrade_inner_scoped(
     let policy = Policy::load()?;
     // spec: LIFE-53 -- before the fetch below can bring in new items, mark the
     // sources whose items are all installed, so those items read as new.
-    record_whole_sources(paths, None)?;
+    let preview = matches!(source_scope, SourceScope::Preview(_));
+    if !preview {
+        record_whole_sources(paths, None)?;
+    }
     let mut registry = Registry::load(paths)?;
 
     let (source_scope, source_filter_desc): (Option<HashSet<String>>, Option<&str>) =
@@ -12971,6 +13378,14 @@ fn upgrade_inner_scoped(
                 crate::resolve::validate_source_selector(sel)?;
                 let names = select_sources(&registry, sel)?;
                 (Some(names.into_iter().collect()), Some(sel))
+            }
+            SourceScope::Preview(None) => (None, None),
+            SourceScope::Preview(Some(sel)) => {
+                crate::resolve::validate_source_selector(sel)?;
+                (
+                    Some(select_sources(&registry, sel)?.into_iter().collect()),
+                    Some(sel),
+                )
             }
         };
 
@@ -13033,12 +13448,15 @@ fn upgrade_inner_scoped(
             .iter()
             .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
     };
-    let breaking_moves = settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, &out)?;
+    // spec: CLI-263 -- a preview lists them, unapplied.
+    let breaking_moves =
+        settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, preview, &out)?;
     // spec: HOME-15 -- with each clone at its new commit, a source whose own
     // `mind-home` now names another home moves there, and the pass below
     // reinstalls its items in that home (HOME-8) and links them into the lobe
     // now in effect (LOBE-5). Only an unscoped or source-scoped pass moves a
     // source; an `upgrade <item>` names items.
+    let mut home_moves = Vec::new();
     if filter.is_none() && key_scope.is_none() {
         let admits = |s: &crate::source::Source| {
             source_scope.as_ref().is_none_or(|sc| sc.contains(&s.name))
@@ -13046,7 +13464,10 @@ fn upgrade_inner_scoped(
                     .as_ref()
                     .is_none_or(|p| !p.lock() || p.allow_matches(&s.base_identity()))
         };
-        if follow_declared_homes(paths, &registry, &admits, accept)? {
+        // spec: CLI-263 -- a preview reports the moves instead.
+        let (moved, predicted) = follow_declared_homes(paths, &registry, &admits, accept, preview)?;
+        home_moves = predicted;
+        if moved {
             registry = Registry::load(paths)?;
         }
     }
@@ -13168,6 +13589,13 @@ fn upgrade_inner_scoped(
             .and_then(|()| paths.source_lobe(&s.name).map(drop));
         if let Err(e) = checked {
             catalog.retain(|c| c.source != s.name);
+            if preview
+                && hook_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.contains(&s.name))
+            {
+                continue;
+            }
             unscannable.push(s.name.clone());
             if !out.json {
                 let safe_e = strip_ansi(&e.to_string());
@@ -13234,8 +13662,14 @@ fn upgrade_inner_scoped(
     } else {
         Vec::new()
     };
-    let tracking =
-        track_profiles_for_upgrade(paths, &profile_sources, &catalog, mode, &leftover_keys)?;
+    let tracking = track_profiles_for_upgrade(
+        paths,
+        &profile_sources,
+        &catalog,
+        mode,
+        &leftover_keys,
+        preview,
+    )?;
     // spec: LIFE-54 -- the same scoping for sources installed whole; a
     // profile-tracked source is tracked by its profiles instead.
     let whole_sources: Vec<String> = if filter.is_none() && key_scope.is_none() {
@@ -13256,7 +13690,7 @@ fn upgrade_inner_scoped(
     } else {
         Vec::new()
     };
-    let whole = track_whole_for_upgrade(paths, &whole_sources, &catalog, mode)?;
+    let whole = track_whole_for_upgrade(paths, &whole_sources, &catalog, mode, preview)?;
     let ignored: Vec<NewItem> = tracking
         .ignored
         .iter()
@@ -13264,7 +13698,7 @@ fn upgrade_inner_scoped(
         .cloned()
         .collect();
     if !out.json {
-        note_unproposed_new_items(tracking.skipped + whole.skipped, &ignored);
+        note_unproposed_new_items(tracking.skipped + whole.skipped, &ignored, preview);
     }
     // Tracking may have persisted snapshot/tag changes; read them back so the
     // pass below (and its manifest save) starts from them.
@@ -13424,6 +13858,173 @@ fn upgrade_inner_scoped(
         r
     };
 
+    if preview {
+        validate_upgrade_collisions(&pending, &manifest)?;
+    }
+
+    // spec: CLI-263 -- stop before consent or any hooks or installs. The
+    // tracking routines above compute the same selections without saving them.
+    if preview {
+        let mut hooks = source_plan.clone();
+        for up in &pending {
+            let is_update = up.new_name == up.old.name;
+            hooks.extend(item_install_plan(
+                paths, &registry, &up.cat, is_update, accept,
+            ));
+            if !is_update {
+                hooks.extend(item_uninstall_plan(
+                    paths,
+                    &up.old,
+                    &up.cat.uninstall_hooks(),
+                    &up.old.commit,
+                    accept,
+                ));
+            }
+        }
+        for item in &left_prunes {
+            let item_hooks = item_catalog_match(&catalog, item)
+                .map(|c| c.uninstall_hooks())
+                .unwrap_or_default();
+            let commit = registry
+                .find(&item.source)
+                .and_then(|s| s.commit.clone())
+                .unwrap_or_default();
+            hooks.extend(item_uninstall_plan(
+                paths,
+                item,
+                &item_hooks,
+                &commit,
+                accept,
+            ));
+        }
+        // spec: CLI-263 -- the additions install through the learn path, so
+        // their dependency closures and install hooks are predicted from it.
+        let mut closure: Vec<CatalogItem> = Vec::new();
+        {
+            let mut seen: HashSet<(String, String)> = HashSet::new();
+            let mut take = |it: CatalogItem| {
+                if seen.insert((it.source.clone(), it.key().as_str().to_string())) {
+                    closure.push(it);
+                }
+            };
+            let targets: Vec<&LearnTarget> =
+                whole.targets.iter().flat_map(|(_, t)| t.iter()).collect();
+            for plan in learn_plans(paths, &targets)? {
+                plan.items.into_iter().for_each(&mut take);
+            }
+            for (source_name, plan) in &tracking.plans {
+                for key in &plan.pending {
+                    if let Some(it) = catalog
+                        .iter()
+                        .find(|c| c.source == *source_name && c.key().as_str() == key)
+                    {
+                        take(it.clone());
+                    }
+                }
+            }
+        }
+        let named: HashSet<(&str, &str)> = whole
+            .additions
+            .iter()
+            .map(|a| (a.source.as_str(), a.key.as_str()))
+            .chain(
+                tracking
+                    .additions
+                    .iter()
+                    .map(|a| (a.source.as_str(), a.key.as_str())),
+            )
+            .collect();
+        let dependencies: Vec<String> = closure
+            .iter()
+            .filter(|it| !named.contains(&(it.source.as_str(), it.key().as_str())))
+            .map(CatalogItem::display_key)
+            .collect();
+        for it in &closure {
+            hooks.extend(item_install_plan(paths, &registry, it, false, accept));
+        }
+        let touched: HashSet<&str> = pending
+            .iter()
+            .map(|u| u.cat.source.as_str())
+            .chain(prunes.iter().chain(&left_prunes).map(|i| i.source.as_str()))
+            .chain(closure.iter().map(|it| it.source.as_str()))
+            .collect();
+        let scoped = in_scope(&registry);
+        for source in &registry.sources {
+            let when = if touched.contains(source.name.as_str()) {
+                crate::items_hook::PlanWhen::Touched
+            } else if scoped.contains(&source.name) {
+                crate::items_hook::PlanWhen::Pending
+            } else {
+                continue;
+            };
+            hooks.extend(crate::items_hook::planned(
+                paths,
+                &registry,
+                [source.name.as_str()],
+                when,
+                accept,
+            ));
+        }
+        if out.json {
+            let items: Vec<_> = pending.iter().map(|u| serde_json::json!({
+                "key": u.old.display_key(), "source": strip_ansi(&u.old.source),
+                "new_name": strip_ansi(&u.new_name), "links": u.old.links.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>()
+            })).collect();
+            let hook_rows: Vec<_> = hooks.iter().map(|h| serde_json::json!({
+                "source": strip_ansi(&h.key.source), "item": h.key.item.as_ref().map(|v| strip_ansi(v)),
+                "event": strip_ansi(&h.key.event), "command": strip_ansi(&h.label),
+            })).collect();
+            print_json(
+                &serde_json::json!({"schema": 1, "action": "upgrade", "outcome": "preview",
+                "basis": "current checkouts", "upgrades": items,
+                "prunes": prunes.iter().chain(&left_prunes).map(|i| i.display_key()).collect::<Vec<_>>(),
+                "profile_additions": tracking.additions, "profile_departures": tracking.departures,
+                "new_items": whole.additions, "ignored_new_items": ignored, "unscannable": unscannable.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>(),
+                "dependencies": dependencies, "breaking": breaking_moves, "home_moves": home_moves,
+                "hooks": hook_rows,
+                "limitations": "No fetch, content diff or build output is predicted."}),
+            )?;
+        } else {
+            println!("Preview based on current checkouts; no fetch or hooks run.");
+            print_upgrade_report(paths, &registry, &pending, &tracking);
+            print_whole_additions(&whole);
+            print_prunes(&prunes);
+            print_left_prunes(&left_prunes);
+            if !dependencies.is_empty() {
+                println!(
+                    "Dependencies the additions would also install: {}",
+                    dependencies.join(", ")
+                );
+            }
+            if !hooks.is_empty() {
+                print!("{}", crate::consent::render(&hooks));
+            }
+            if !unscannable.is_empty() {
+                println!(
+                    "Could not check: {}",
+                    unscannable
+                        .iter()
+                        .map(|s| strip_ansi(s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            if pending.is_empty()
+                && prunes.is_empty()
+                && left_prunes.is_empty()
+                && !tracking.has_additions()
+                && whole.targets.is_empty()
+                && home_moves.is_empty()
+                && hooks.is_empty()
+                && unscannable.is_empty()
+            {
+                println!("everything is up to date");
+            }
+            println!("Not predicted: content diffs or build output.");
+        }
+        return Ok(None);
+    }
+
     if pending.is_empty()
         && prunes.is_empty()
         && left_prunes.is_empty()
@@ -13477,72 +14078,7 @@ fn upgrade_inner_scoped(
         print_left_prunes(&left_prunes);
     }
 
-    // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
-    // the pending report above, so a batch that hit either collision aborted
-    // with no visibility into what else was pending. They now run after the
-    // report so a human run always sees the full pending list first, even
-    // when it then aborts. Both raise `UpgradeRenameCollision`, which (unlike
-    // `AmbiguousItem`) names the collision explicitly and states both real
-    // remedies (`mind forget`, re-namespace with `mind meld -N`) rather than
-    // phrasing it as a "query" the user never typed with no next step.
-    for up in &pending {
-        if up.new_name == up.old.name {
-            continue;
-        }
-        // `up.new_name` is the bare effective name (`CatalogItem::effective_name`);
-        // the manifest is keyed `kind:name` (`InstalledItem::key`), so the lookup
-        // key must carry the kind prefix too.
-        let new_key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
-        if let Some(occupant) = manifest.items.get(&new_key) {
-            let same_identity = occupant.kind == up.old.kind
-                && occupant.bare_name == up.old.bare_name
-                && occupant.source == up.old.source;
-            if !same_identity {
-                // spec: DSC-95 -- sanitize each field passed into the
-                // error before it is embedded in the (source-controlled-name
-                // carrying) Display message.
-                return Err(MindError::UpgradeRenameCollision {
-                    key: strip_ansi(&new_key),
-                    existing_source: strip_ansi(&occupant.source),
-                    incoming: strip_ansi(up.old.key().as_str()),
-                    incoming_source: strip_ansi(&up.old.source),
-                });
-            }
-        }
-    }
-
-    // spec: LIFE-46 -- the guard above compares each rename against the
-    // PRE-EXISTING manifest, but two pending items in ONE batch can converge on
-    // the same target key when neither key is occupied yet (each source drops
-    // its prefix in the same upgrade). The first install then becomes the
-    // second's "previous version" and is evicted silently. Detect a duplicate
-    // target key WITHIN `pending` too (verified: sources `jx:review` and
-    // `jy:review` both dropping their prefixes). The result key of an item that
-    // is not renaming is its unchanged key, so a rename colliding with a
-    // non-renaming sibling is caught as well.
-    {
-        use std::collections::HashMap;
-        let mut seen: HashMap<String, &Upgrade> = HashMap::new();
-        for up in &pending {
-            let key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
-            if let Some(prev) = seen.get(&key) {
-                let same_identity = prev.old.kind == up.old.kind
-                    && prev.old.bare_name == up.old.bare_name
-                    && prev.old.source == up.old.source;
-                if !same_identity {
-                    // spec: DSC-95
-                    return Err(MindError::UpgradeRenameCollision {
-                        key: strip_ansi(&key),
-                        existing_source: strip_ansi(&prev.old.source),
-                        incoming: strip_ansi(up.old.key().as_str()),
-                        incoming_source: strip_ansi(&up.old.source),
-                    });
-                }
-            } else {
-                seen.insert(key, up);
-            }
-        }
-    }
+    validate_upgrade_collisions(&pending, &manifest)?;
 
     if !yes {
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60): a
@@ -13780,7 +14316,13 @@ fn upgrade_inner_scoped(
                     continue;
                 }
                 let old_path = std::path::Path::new(old_link);
-                match install::remove_path(old_path) {
+                // spec: LIFE-59 -- journaled, so a rollback restores the link
+                // along with the old store copy.
+                match install::remove_journaled(
+                    paths,
+                    old_path,
+                    &paths.home_of_item_store(&up.old.store),
+                ) {
                     Ok(()) => continue,
                     // spec: LOBE-6 -- a stale link in a lobe that cannot be
                     // written stays recorded, so a run that can write there
@@ -14279,6 +14821,78 @@ fn select_upgrade_hooks(
             })
             .collect(),
     }
+}
+
+/// Refuse upgrade renames that would collide with installed or pending items.
+fn validate_upgrade_collisions(pending: &[Upgrade], manifest: &Manifest) -> Result<()> {
+    // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
+    // the pending report above, so a batch that hit either collision aborted
+    // with no visibility into what else was pending. They now run after the
+    // report so a human run always sees the full pending list first, even
+    // when it then aborts. Both raise `UpgradeRenameCollision`, which (unlike
+    // `AmbiguousItem`) names the collision explicitly and states both real
+    // remedies (`mind forget`, re-namespace with `mind meld -N`) rather than
+    // phrasing it as a "query" the user never typed with no next step.
+    for up in pending {
+        if up.new_name == up.old.name {
+            continue;
+        }
+        // `up.new_name` is the bare effective name (`CatalogItem::effective_name`);
+        // the manifest is keyed `kind:name` (`InstalledItem::key`), so the lookup
+        // key must carry the kind prefix too.
+        let new_key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+        if let Some(occupant) = manifest.items.get(&new_key) {
+            let same_identity = occupant.kind == up.old.kind
+                && occupant.bare_name == up.old.bare_name
+                && occupant.source == up.old.source;
+            if !same_identity {
+                // spec: DSC-95 -- sanitize each field passed into the
+                // error before it is embedded in the (source-controlled-name
+                // carrying) Display message.
+                return Err(MindError::UpgradeRenameCollision {
+                    key: strip_ansi(&new_key),
+                    existing_source: strip_ansi(&occupant.source),
+                    incoming: strip_ansi(up.old.key().as_str()),
+                    incoming_source: strip_ansi(&up.old.source),
+                });
+            }
+        }
+    }
+
+    // spec: LIFE-46 -- the guard above compares each rename against the
+    // PRE-EXISTING manifest, but two pending items in ONE batch can converge on
+    // the same target key when neither key is occupied yet (each source drops
+    // its prefix in the same upgrade). The first install then becomes the
+    // second's "previous version" and is evicted silently. Detect a duplicate
+    // target key WITHIN `pending` too (verified: sources `jx:review` and
+    // `jy:review` both dropping their prefixes). The result key of an item that
+    // is not renaming is its unchanged key, so a rename colliding with a
+    // non-renaming sibling is caught as well.
+    {
+        use std::collections::HashMap;
+        let mut seen: HashMap<String, &Upgrade> = HashMap::new();
+        for up in pending {
+            let key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+            if let Some(prev) = seen.get(&key) {
+                let same_identity = prev.old.kind == up.old.kind
+                    && prev.old.bare_name == up.old.bare_name
+                    && prev.old.source == up.old.source;
+                if !same_identity {
+                    // spec: DSC-95
+                    return Err(MindError::UpgradeRenameCollision {
+                        key: strip_ansi(&key),
+                        existing_source: strip_ansi(&prev.old.source),
+                        incoming: strip_ansi(up.old.key().as_str()),
+                        incoming_source: strip_ansi(&up.old.source),
+                    });
+                }
+            } else {
+                seen.insert(key, up);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// What `upgrade` should do with one installed item before the catalog lookup.
@@ -18260,182 +18874,189 @@ pub fn auto_update_run(
         }
         return up_to_date(json);
     };
-    // spec: AUP-15 -- every consent gate takes its no-TTY path, and git never
-    // asks for credentials.
-    crate::hook::force_non_interactive();
-    git::set_noninteractive(true);
+    crate::transaction::recover(paths)?;
+    // spec: LIFE-62 -- the unattended run is one transaction like a verb.
+    let tx = crate::transaction::begin(paths);
+    let result = (|| -> Result<()> {
+        // spec: AUP-15 -- every consent gate takes its no-TTY path, and git never
+        // asks for credentials.
+        crate::hook::force_non_interactive();
+        git::set_noninteractive(true);
 
-    let policy = Policy::load()?;
-    let manifest = Manifest::load(paths)?;
-    let mut registry = Registry::load(paths)?;
-    let mut report = Report {
-        time: crate::auto_update::now(),
-        ..Report::default()
-    };
-    let mut breaking: Vec<BreakingMoveJson> = Vec::new();
-    let mut moved_names: Vec<String> = Vec::new();
-    for source in &mut registry.sources {
-        let level = auto_update_level(source, auto_update_cap(policy.as_ref(), source));
-        if level == Level::Off {
-            continue;
-        }
-        // POL-12: a source the locked allowlist no longer admits is not moved.
-        if let Some(p) = policy.as_ref()
-            && p.lock()
-            && !p.allow_matches(&source.base_identity())
-        {
-            continue;
-        }
-        let shown = strip_ansi(&source.name);
-        enum Step {
-            Unchanged(Box<Pin>),
-            Moved(String, Box<Pin>, bool),
-            Held(String),
-        }
-        let current: &crate::source::Source = source;
-        let step = (|| -> Result<Step> {
-            let dir = clone_dir_checked(paths, current)?;
-            let moving = || -> Result<Step> {
-                let (mut commit, mut pin) = sync_clone_to_pin(current, &dir)?;
-                let mut took_breaking = false;
-                if level == Level::Breaking {
-                    let mut probe = current.clone();
-                    probe.pin = pin.clone();
-                    if let Some((c, p)) = auto_update_breaking_move(&probe, &dir)? {
-                        commit = c;
-                        pin = p;
-                        took_breaking = true;
+        let policy = Policy::load()?;
+        let manifest = Manifest::load(paths)?;
+        let mut registry = Registry::load(paths)?;
+        let mut report = Report {
+            time: crate::auto_update::now(),
+            ..Report::default()
+        };
+        let mut breaking: Vec<BreakingMoveJson> = Vec::new();
+        let mut moved_names: Vec<String> = Vec::new();
+        for source in &mut registry.sources {
+            let level = auto_update_level(source, auto_update_cap(policy.as_ref(), source));
+            if level == Level::Off {
+                continue;
+            }
+            // POL-12: a source the locked allowlist no longer admits is not moved.
+            if let Some(p) = policy.as_ref()
+                && p.lock()
+                && !p.allow_matches(&source.base_identity())
+            {
+                continue;
+            }
+            let shown = strip_ansi(&source.name);
+            enum Step {
+                Unchanged(Box<Pin>),
+                Moved(String, Box<Pin>, bool),
+                Held(String),
+            }
+            let current: &crate::source::Source = source;
+            let step = (|| -> Result<Step> {
+                let dir = clone_dir_checked(paths, current)?;
+                let moving = || -> Result<Step> {
+                    let (mut commit, mut pin) = sync_clone_to_pin(current, &dir)?;
+                    let mut took_breaking = false;
+                    if level == Level::Breaking {
+                        let mut probe = current.clone();
+                        probe.pin = pin.clone();
+                        if let Some((c, p)) = auto_update_breaking_move(&probe, &dir)? {
+                            commit = c;
+                            pin = p;
+                            took_breaking = true;
+                        }
                     }
+                    if current.commit.as_deref() == Some(commit.as_str()) {
+                        // Nothing moved; keep the refreshed release metadata.
+                        return Ok(Step::Unchanged(Box::new(pin)));
+                    }
+                    let mut next = current.clone();
+                    next.pin = pin.clone();
+                    next.commit = Some(commit.clone());
+                    if let Some(why) = auto_update_hold_reason(paths, &next, &dir, &manifest)? {
+                        // spec: AUP-17 -- put the clone back where the source is
+                        // recorded, so the source and its items do not disagree.
+                        auto_update_restore_clone(current, &dir)?;
+                        return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
+                    }
+                    // spec: LOBE-2 -- a lobe the new commit names that is refused
+                    // fails the move (the hold scan above read it), so the clone
+                    // goes back and the run reports it.
+                    paths.source_lobe(&next.name)?;
+                    Ok(Step::Moved(commit, Box::new(pin), took_breaking))
+                };
+                let step = moving();
+                if step.is_err() {
+                    // A failure after the clone moved (a breaking resolution, the
+                    // hold scan) must not leave it ahead of the registry.
+                    let _ = auto_update_restore_clone(current, &dir);
                 }
-                if current.commit.as_deref() == Some(commit.as_str()) {
-                    // Nothing moved; keep the refreshed release metadata.
-                    return Ok(Step::Unchanged(Box::new(pin)));
+                step
+            })();
+            match step {
+                Ok(Step::Unchanged(pin)) => source.pin = *pin,
+                Ok(Step::Moved(commit, pin, took_breaking)) => {
+                    let from = resolved_version(&source.pin);
+                    let to = resolved_version(&pin);
+                    report.moved.push(format!("{shown} {from} -> {to}"));
+                    if took_breaking {
+                        // spec: AUP-13
+                        breaking.push(BreakingMoveJson {
+                            source: shown.clone(),
+                            from: from.clone(),
+                            to: to.clone(),
+                            applied: true,
+                            recommended: true,
+                        });
+                    }
+                    source.pin = *pin;
+                    source.commit = Some(commit);
+                    moved_names.push(source.name.clone());
                 }
-                let mut next = current.clone();
-                next.pin = pin.clone();
-                next.commit = Some(commit.clone());
-                if let Some(why) = auto_update_hold_reason(paths, &next, &dir, &manifest)? {
-                    // spec: AUP-17 -- put the clone back where the source is
-                    // recorded, so the source and its items do not disagree.
-                    auto_update_restore_clone(current, &dir)?;
-                    return Ok(Step::Held(format!("{}: {why}", resolved_version(&pin))));
-                }
-                // spec: LOBE-2 -- a lobe the new commit names that is refused
-                // fails the move (the hold scan above read it), so the clone
-                // goes back and the run reports it.
-                paths.source_lobe(&next.name)?;
-                Ok(Step::Moved(commit, Box::new(pin), took_breaking))
-            };
-            let step = moving();
-            if step.is_err() {
-                // A failure after the clone moved (a breaking resolution, the
-                // hold scan) must not leave it ahead of the registry.
-                let _ = auto_update_restore_clone(current, &dir);
+                Ok(Step::Held(why)) => report.held.push(format!("{shown} {why}")),
+                Err(e) => report
+                    .failed
+                    .push(format!("{shown}: {}", strip_ansi(&e.to_string()))),
             }
-            step
-        })();
-        match step {
-            Ok(Step::Unchanged(pin)) => source.pin = *pin,
-            Ok(Step::Moved(commit, pin, took_breaking)) => {
-                let from = resolved_version(&source.pin);
-                let to = resolved_version(&pin);
-                report.moved.push(format!("{shown} {from} -> {to}"));
-                if took_breaking {
-                    // spec: AUP-13
-                    breaking.push(BreakingMoveJson {
-                        source: shown.clone(),
-                        from: from.clone(),
-                        to: to.clone(),
-                        applied: true,
-                        recommended: true,
-                    });
-                }
-                source.pin = *pin;
-                source.commit = Some(commit);
-                moved_names.push(source.name.clone());
+        }
+        registry.save(paths)?;
+
+        if !moved_names.is_empty() {
+            // spec: LIFE-57 AUP-21 -- the pass may prune; record what it removed,
+            // since a background run has no one watching.
+            let before = Manifest::load(paths)?;
+            // The ordinary pass, scoped to what moved, with --yes and no prompts.
+            let pass = upgrade_inner_scoped(
+                paths,
+                true,
+                None,
+                true,
+                SourceScope::Names(&moved_names, None),
+                None,
+                crate::hook::Accept::default(),
+            );
+            if let Ok(after) = Manifest::load(paths) {
+                report.pruned = removed_identities(&before, &after);
             }
-            Ok(Step::Held(why)) => report.held.push(format!("{shown} {why}")),
-            Err(e) => report
-                .failed
-                .push(format!("{shown}: {}", strip_ansi(&e.to_string()))),
+            if let Err(e) = pass {
+                report
+                    .failed
+                    .push(format!("upgrade: {}", strip_ansi(&e.to_string())));
+            }
         }
-    }
-    registry.save(paths)?;
 
-    if !moved_names.is_empty() {
-        // spec: LIFE-57 AUP-21 -- the pass may prune; record what it removed,
-        // since a background run has no one watching.
-        let before = Manifest::load(paths)?;
-        // The ordinary pass, scoped to what moved, with --yes and no prompts.
-        let pass = upgrade_inner_scoped(
-            paths,
-            true,
-            None,
-            true,
-            SourceScope::Names(&moved_names, None),
-            None,
-            crate::hook::Accept::default(),
-        );
-        if let Ok(after) = Manifest::load(paths) {
-            report.pruned = removed_identities(&before, &after);
+        // spec: AUP-19 AUP-21
+        crate::auto_update::append_log(paths, &report);
+        let mut state = State::load(paths);
+        state.last_run = Some(crate::auto_update::now());
+        if !report.is_empty() {
+            state.unshown.push(report.clone());
         }
-        if let Err(e) = pass {
-            report
-                .failed
-                .push(format!("upgrade: {}", strip_ansi(&e.to_string())));
+        // spec: HOME-1 -- the state lives in the default home, which a sandbox
+        // that allows writes only to an extra home cannot write. It throttles and
+        // reports; losing it must not fail a run whose updates already applied.
+        if let Err(e) = state.save(paths) {
+            eprintln!(
+                "warning: auto-update state not saved: {}",
+                strip_ansi(&e.to_string())
+            );
         }
-    }
 
-    // spec: AUP-19 AUP-21
-    crate::auto_update::append_log(paths, &report);
-    let mut state = State::load(paths);
-    state.last_run = Some(crate::auto_update::now());
-    if !report.is_empty() {
-        state.unshown.push(report.clone());
-    }
-    // spec: HOME-1 -- the state lives in the default home, which a sandbox
-    // that allows writes only to an extra home cannot write. It throttles and
-    // reports; losing it must not fail a run whose updates already applied.
-    if let Err(e) = state.save(paths) {
-        eprintln!(
-            "warning: auto-update state not saved: {}",
-            strip_ansi(&e.to_string())
-        );
-    }
-
-    if json {
-        return print_json(&AutoUpdateJson {
-            schema: 1,
-            action: "auto-update run",
-            target: "*",
-            outcome: if report.failed.is_empty() {
-                "ok"
-            } else {
-                "partial"
-            },
-            moved: report.moved,
-            pruned: report.pruned,
-            held: report.held,
-            failed: report.failed,
-            breaking,
-        });
-    }
-    for line in &report.moved {
-        println!("auto-update: moved {line}");
-    }
-    for line in &report.pruned {
-        println!("auto-update: pruned {line}");
-    }
-    for line in &report.held {
-        println!("auto-update: held {line}");
-    }
-    for line in &report.failed {
-        eprintln!("auto-update: failed {line}");
-    }
-    if report.is_empty() {
-        println!("auto-update: everything is up to date");
-    }
-    Ok(())
+        if json {
+            return print_json(&AutoUpdateJson {
+                schema: 1,
+                action: "auto-update run",
+                target: "*",
+                outcome: if report.failed.is_empty() {
+                    "ok"
+                } else {
+                    "partial"
+                },
+                moved: report.moved,
+                pruned: report.pruned,
+                held: report.held,
+                failed: report.failed,
+                breaking,
+            });
+        }
+        for line in &report.moved {
+            println!("auto-update: moved {line}");
+        }
+        for line in &report.pruned {
+            println!("auto-update: pruned {line}");
+        }
+        for line in &report.held {
+            println!("auto-update: held {line}");
+        }
+        for line in &report.failed {
+            eprintln!("auto-update: failed {line}");
+        }
+        if report.is_empty() {
+            println!("auto-update: everything is up to date");
+        }
+        Ok(())
+    })();
+    tx.settle(&result)?;
+    result
 }
 
 /// Start `mind auto-update run` in a new session with no terminal and return

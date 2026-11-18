@@ -10,7 +10,8 @@ The on-disk layout and the two persisted JSON files.
   manifest.json                 installed-item manifest
   sources/<host>/<owner>/<repo> clone of each melded repo
   store/<kind>/<name>/          installed copy of each item (name is effective)
-  .tmp/staging|backup/...        scratch for transactional installs
+  .tmp/staging|tx/...            scratch for transactional installs (LIFE-59)
+  .tx-journal.json               an unfinished command transaction's journal
   .lock                         global advisory lock (STO-40)
   .lock.holder                  who holds .lock exclusively (STO-84)
 
@@ -348,7 +349,7 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   and `config.toml`). A command acquires the lock before it reads state and holds
   it until the command completes, so a mutating command's read-modify-write cycle
   is never interleaved with another process's (and two installs of the same item
-  cannot share the `.tmp/staging|backup` scratch). The lock lives under the mind
+  cannot share the `.tmp/staging|tx` scratch). The lock lives under the mind
   root, so a `MIND_HOME` override (e.g. a test's temp home) gets its own isolated
   lock.
 - `STO-41` The lock is acquired exclusively by mutating commands (`meld`, `unmeld`,
@@ -786,6 +787,19 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   path backfills links into a newly added lobe (e.g. a preset base such as
   `base/.gemini/config`) whose parent may not exist yet, so gating there would
   suppress the very links it exists to create.
+
+## Interrupted manifest publication
+
+- `STO-87` A save made outside a command transaction (LIFE-59) publishes each
+  changed mind-home manifest as an independent transaction with a journal
+  (`.manifest-journal.json`) in that same home. A later state-reading command
+  configured to use that home recovers its journal under the exclusive state
+  lock: an uncommitted journal is discarded and a committed journal is replayed
+  into that home's manifest. Such a journal cannot write any other home's
+  manifest; invalid journals fail closed with `manifest-journal`. Dry runs
+  refuse pending recovery without changing state. Such a save spanning
+  multiple homes is not atomic: interruption can leave later homes unchanged.
+  Inside a command transaction, a save commits every home at once (LIFE-60).
 
 ## Errors
 

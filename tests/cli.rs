@@ -6355,6 +6355,14 @@ fn upgrade_rename_refuses_to_evict_a_different_sources_item() {
     x.write_and_commit("mind.toml", "[source]\n");
     assert!(x.mind(&["sync"]).success);
 
+    // spec: CLI-263 -- preview refuses the same collision before changing state.
+    let preview = x.mind(&["upgrade", "--dry-run", "--json"]);
+    assert!(!preview.success, "{}", preview.stdout);
+    assert_eq!(
+        parse_json(&preview.stdout)["error"]["kind"],
+        "upgrade-rename-collision"
+    );
+
     let r = x.mind(&["upgrade", "--yes"]);
     assert!(
         !r.success,
@@ -6418,6 +6426,14 @@ fn upgrade_rename_within_batch_collision_is_refused() {
     x.write_and_commit("mind.toml", "[source]\n");
     y.write_and_commit("mind.toml", "[source]\n");
     assert!(x.mind(&["sync"]).success);
+
+    // spec: CLI-263 -- within-batch collisions are also rejected by preview.
+    let preview = x.mind(&["upgrade", "--dry-run", "--json"]);
+    assert!(!preview.success, "{}", preview.stdout);
+    assert_eq!(
+        parse_json(&preview.stdout)["error"]["kind"],
+        "upgrade-rename-collision"
+    );
 
     // One batch upgrade covering both sources: both renames converge on
     // skill:review and must be refused without touching either item.

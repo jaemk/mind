@@ -15,6 +15,10 @@ and verified.
 
 | Feature | Status | Spec |
 |---------|--------|------|
+| Upgrade preview using current checkouts | done | CLI-263 |
+| Removal previews | done | CLI-264 |
+| Recovery after interrupted installs | done | LIFE-59, LIFE-60, LIFE-61, LIFE-62, LIFE-63, LIFE-64 |
+| Recovery after interrupted manifest publication | done | STO-87 |
 | Core verbs (meld, unmeld, learn, forget, sync, upgrade, recall, probe, introspect) | done | [cli.md](cli.md) |
 | `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
 | `learn --all`: install every item of a source (sugar for `<source>#*`) | done | CLI-36 |

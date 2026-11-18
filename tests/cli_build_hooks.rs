@@ -8,11 +8,11 @@
 //! - (c) the build hook re-runs when the item is reinstalled/upgraded (HOOK-73)
 //! - (d) without the flag, a non-TTY context still skips the build hook (HOOK-72)
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+mod common;
 
-static COUNTER: AtomicU32 = AtomicU32::new(0);
+use common::{fixture_dir, git, write_file as write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 struct Sandbox {
     base: PathBuf,
@@ -29,9 +29,7 @@ struct Run {
 
 impl Sandbox {
     fn new(name: &str) -> Sandbox {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-bld-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = fixture_dir("bld");
         let source = base.join(name);
         let sb = Sandbox {
             base: base.clone(),
@@ -80,22 +78,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 // ---------------------------------------------------------------------------

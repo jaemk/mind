@@ -1333,6 +1333,34 @@ pub enum MindError {
         supported: u32,
     },
 
+    /// STO-87: an interrupted manifest save left a journal that fails
+    /// validation. Recovery fails closed and keeps the file for diagnosis.
+    // spec: STO-87
+    #[error(
+        "invalid manifest journal at '{}': {reason}; it was kept for diagnosis (remove it to discard the interrupted save)",
+        path.display()
+    )]
+    ManifestJournal { path: PathBuf, reason: String },
+
+    /// LIFE-61: an interrupted command's transaction journal fails validation,
+    /// or a step of its recovery found a state it cannot account for.
+    /// Recovery fails closed and keeps the journal for diagnosis.
+    // spec: LIFE-61
+    #[error(
+        "cannot recover the interrupted change recorded in '{}': {reason}; the journal was kept for diagnosis (inspect the paths it names, then remove it to go on without recovering; anything it moved aside is under that home's .tmp/tx)",
+        path.display()
+    )]
+    TransactionJournal { path: PathBuf, reason: String },
+
+    /// STO-87 LIFE-61: a dry run found an interrupted change. Recovery writes
+    /// state, so a dry run refuses rather than recovering.
+    // spec: STO-87 LIFE-61
+    #[error(
+        "an interrupted change recorded in '{}' needs recovery; run `mind recall` to finish it, then retry the dry run",
+        path.display()
+    )]
+    RecoveryPending { path: PathBuf },
+
     /// HOOK-103: `--event build` is valid only for an item target; a source has
     /// no build hook. Checked before running anything.
     // spec: HOOK-103 CLI-195
@@ -2002,6 +2030,9 @@ impl MindError {
             MindError::HomebrewManaged { .. } => "homebrew-managed",
             MindError::SelfUpdateInvalidTarget { .. } => "self-update-invalid-target",
             MindError::StateTooNew { .. } => "state-too-new",
+            MindError::ManifestJournal { .. } => "manifest-journal",
+            MindError::RecoveryPending { .. } => "recovery-pending",
+            MindError::TransactionJournal { .. } => "transaction-journal",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::ItemsEventRequiresSourceTarget => "items-event-requires-source-target",
             MindError::HookAborted { .. } => "hook-aborted",
@@ -3180,6 +3211,28 @@ mod tests {
         assert_eq!(MindError::GitNotFound.kind(), "git-not-found");
         assert_eq!(MindError::ReleaseAssetEmpty.kind(), "release-asset-empty");
         assert_eq!(MindError::LobeTargetRequired.kind(), "lobe-target-required");
+        // spec: STO-87
+        assert_eq!(
+            MindError::ManifestJournal {
+                path: "j".into(),
+                reason: "r".into()
+            }
+            .kind(),
+            "manifest-journal"
+        );
+        assert_eq!(
+            MindError::RecoveryPending { path: "j".into() }.kind(),
+            "recovery-pending"
+        );
+        // spec: LIFE-61
+        assert_eq!(
+            MindError::TransactionJournal {
+                path: "j".into(),
+                reason: "r".into()
+            }
+            .kind(),
+            "transaction-journal"
+        );
         // spec: HOOK-103 CLI-195 -- the two `hooks run` error variants carry
         // stable slugs.
         assert_eq!(

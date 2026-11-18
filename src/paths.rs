@@ -914,15 +914,6 @@ impl Paths {
             .join(name)
     }
 
-    /// Where the previous store copy is held during a swap, for rollback.
-    pub fn backup_path_of(&self, source: &str, kind: ItemKind, name: &str) -> PathBuf {
-        self.home_of(source)
-            .join(".tmp")
-            .join("backup")
-            .join(kind.as_str())
-            .join(name)
-    }
-
     /// A `.tmp` directory for throwaway work tied to no source (`review`'s
     /// clone, the TUI preview): the first allowed home, default first, whose
     /// `.tmp` can be created and written (HOME-14). When none can, the

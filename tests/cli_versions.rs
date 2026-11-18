@@ -329,6 +329,36 @@ fn a_release_above_a_comparator_range_is_a_breaking_move() {
 }
 
 #[test]
+fn an_upgrade_preview_lists_a_breaking_release_without_taking_it() {
+    // spec: CLI-263 VER-61
+    let (sb, [_a, b, _c]) = released("ver-preview-break", RELEASE_TAGS);
+    assert!(
+        sb.mind(&["meld", &sb.spec(), "--pin", "version=<2.0", "--yes"])
+            .success
+    );
+    let registry = std::fs::read(sb.mind_home.join("sources.json")).unwrap();
+    let r = sb.mind(&["upgrade", "--dry-run", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let doc: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(doc["breaking"][0]["from"], "1.1.0", "{doc}");
+    assert_eq!(doc["breaking"][0]["to"], "2.0.0", "{doc}");
+    assert_eq!(doc["breaking"][0]["applied"], false, "{doc}");
+    let r = sb.mind(&["upgrade", "--dry-run"]);
+    assert!(
+        r.stdout.contains("1.1.0 -> 2.0.0 (breaking, not applied"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(
+        std::fs::read(sb.mind_home.join("sources.json")).unwrap(),
+        registry
+    );
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "<2.0", "{pin}");
+    assert_eq!(commit, b);
+}
+
+#[test]
 fn a_range_that_does_not_parse_is_a_usage_error() {
     // spec: VER-22
     let (sb, _) = released("ver-bad-range", RELEASE_TAGS);
@@ -475,6 +505,180 @@ fn a_local_meld_stays_linked_to_its_working_tree() {
     assert_ne!(pin["kind"], "version", "{pin}");
     assert_eq!(commit, sb.head(), "the working-tree HEAD");
     assert!(sb.installed_agent().contains("unreleased"));
+}
+
+// spec: CLI-263
+#[test]
+fn upgrade_preview_reports_drift_and_hooks_without_mutating_or_running_them() {
+    let sb = Sandbox::new("preview");
+    sb.commit("old", "");
+    let installed = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(
+        installed.success,
+        "{} {}",
+        installed.stdout, installed.stderr
+    );
+    let marker = sb.base.join("hook-ran");
+    write_file(
+        &sb.source.join("agents/dev.md"),
+        &format!(
+            "---\nname: dev\ndescription: changed\nupdate: touch {}\n---\n# changed\n",
+            marker.display()
+        ),
+    );
+    let registry = std::fs::read(sb.mind_home.join("sources.json")).unwrap();
+    let manifest = std::fs::read(sb.mind_home.join("manifest.json")).unwrap();
+    let old = sb.installed_agent();
+    let r = sb.mind(&["upgrade", "--dry-run", "--json", "--accept-hooks"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let result: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(result["outcome"], "preview");
+    assert_eq!(result["upgrades"][0]["key"], "agent:dev");
+    assert!(
+        result["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["command"].as_str().unwrap_or_default().contains("touch"))
+    );
+    assert!(!marker.exists());
+    assert_eq!(
+        registry,
+        std::fs::read(sb.mind_home.join("sources.json")).unwrap()
+    );
+    assert_eq!(
+        manifest,
+        std::fs::read(sb.mind_home.join("manifest.json")).unwrap()
+    );
+    assert_eq!(old, sb.installed_agent());
+    let filtered = sb.mind(&["upgrade", "skill:no-match", "-n", "--json"]);
+    assert!(filtered.success, "{}", filtered.stderr);
+    let result: Value = serde_json::from_str(&filtered.stdout).unwrap();
+    assert_eq!(result["upgrades"].as_array().unwrap().len(), 0);
+    let text = sb.mind(&["upgrade", "--source", &sb.identity(), "-n"]);
+    assert!(text.success, "{} {}", text.stdout, text.stderr);
+    assert!(text.stdout.contains("current checkouts"), "{}", text.stdout);
+    assert!(text.stdout.contains("agent:dev"), "{}", text.stdout);
+    let incompatible = sb.mind(&["upgrade", "-n", "--allow-breaking"]);
+    assert!(!incompatible.success);
+}
+
+// spec: CLI-264
+#[test]
+fn removal_previews_show_managed_and_unmanaged_items_without_removing_them() {
+    let sb = Sandbox::new("removal-preview");
+    sb.commit("old", "");
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let marker = sb.base.join("removed-hook-ran");
+    write_file(
+        &sb.source.join("agents/dev.md"),
+        &format!(
+            "---\nname: dev\ndescription: old\nuninstall: touch {}\n---\n# dev\n",
+            marker.display()
+        ),
+    );
+    let manifest = std::fs::read(sb.mind_home.join("manifest.json")).unwrap();
+    let old = sb.installed_agent();
+    let r = sb.mind(&["forget", "agent:dev", "--dry-run", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let value: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(value["items"][0]["key"], "agent:dev");
+    assert_eq!(value["items"][0]["managed"], true);
+    assert!(!value["items"][0]["links"].as_array().unwrap().is_empty());
+    assert!(
+        value["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["command"].as_str().unwrap_or_default().contains("touch"))
+    );
+    assert!(!marker.exists());
+    assert_eq!(old, sb.installed_agent());
+    assert_eq!(
+        manifest,
+        std::fs::read(sb.mind_home.join("manifest.json")).unwrap()
+    );
+    let unmanaged = sb.claude_home.join("agents/manual.md");
+    write_file(&unmanaged, "---\nname: manual\n---\n# manual\n");
+    let r = sb.mind(&["forget", "agent:manual", "--dry-run", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let value: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(value["items"][0]["managed"], false);
+    assert!(unmanaged.exists());
+    let r = sb.mind(&["forget", "--unmanaged", "--dry-run", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(unmanaged.exists());
+    std::fs::remove_file(sb.source.join("agents/dev.md")).unwrap();
+    let r = sb.mind(&["prune", "--dry-run", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let value: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(value["items"][0]["key"], "agent:dev");
+    assert_eq!(old, sb.installed_agent());
+    assert_eq!(
+        manifest,
+        std::fs::read(sb.mind_home.join("manifest.json")).unwrap()
+    );
+}
+
+// spec: CLI-264
+#[test]
+fn profile_and_unmeld_previews_keep_state_and_report_the_selected_plan() {
+    let sb = Sandbox::new("profile-preview");
+    sb.commit("old", "[profiles]\ndefault = [\"agent:dev\"]\n");
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let registry = std::fs::read(sb.mind_home.join("sources.json")).unwrap();
+    let manifest = std::fs::read(sb.mind_home.join("manifest.json")).unwrap();
+    let old = sb.installed_agent();
+    let r = sb.mind(&[
+        "forget",
+        &sb.identity(),
+        "--profile",
+        "default",
+        "-n",
+        "--json",
+    ]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let result: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(result["profile"]["name"], "default");
+    assert_eq!(result["profile"]["enabled"], true);
+    assert_eq!(result["items"][0]["key"], "agent:dev");
+    let marker = sb.base.join("unmeld-hook-ran");
+    let command = format!("touch {}", marker.display());
+    let r = sb.mind(&[
+        "unmeld",
+        &sb.identity(),
+        "--uninstall-hook",
+        &command,
+        "--accept-hooks",
+        "-n",
+        "--json",
+    ]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let result: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(result["sources"][0]["items"][0]["key"], "agent:dev");
+    assert!(
+        result["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["command"] == command)
+    );
+    assert!(!marker.exists());
+    let r = sb.mind(&["unmeld", &sb.identity(), "--keep-items", "-n", "--json"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let result: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert!(result["sources"][0]["items"].as_array().unwrap().is_empty());
+    assert_eq!(
+        registry,
+        std::fs::read(sb.mind_home.join("sources.json")).unwrap()
+    );
+    assert_eq!(
+        manifest,
+        std::fs::read(sb.mind_home.join("manifest.json")).unwrap()
+    );
+    assert_eq!(old, sb.installed_agent());
 }
 
 #[test]

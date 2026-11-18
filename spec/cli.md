@@ -845,7 +845,30 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `AmbiguousItem` on account of the qualifier alone: `upgrade`'s filter always
   selects every match (CLI-65) rather than requiring a single one, so it never
   goes through the single-match `resolve()` path (CLI-3) that could raise it.
+- `CLI-264` `forget --dry-run`, `prune --dry-run`, and `unmeld --dry-run` preview their selected
+  removals without changing installed items or running hooks. They report the
+  store and lobe paths, dependents, and known hooks, in text or JSON. `forget`
+  also previews unmanaged entries, including an exact unmanaged fallback;
+  `--profile` reports the profile disable plan, retained dependents, and the
+  profiles that would remain. `unmeld` uses the same source selection and
+  hook plan as removal and honors `--keep-items`. The normal shared-lock
+  initialization may create the mind home and lock file.
 - `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
+- `CLI-263` `upgrade --dry-run` previews the current local checkouts without
+  fetching, recording tracking changes, applying upgrades, or running hooks.
+  It honors item and source filters, reports pending upgrades, tracked additions,
+  removals, ignored additions and hooks for existing items and sources, and names in-scope sources
+  that could not be scanned. It also reports each in-scope breaking release
+  as not applied (VER-61), each source move a newly declared `mind-home` would
+  make (HOME-15), including the curated sources that follow it (HOME-5), the
+  dependencies the additions would install beyond
+  themselves, and the install hooks of every addition and dependency. JSON
+  reports these as structured arrays (`breaking`, `home_moves`,
+  `dependencies`, `hooks`). Preview rejects the same rename collisions as the
+  application pass. It discloses that content diffs and build output are not
+  predicted, and in text mode says `everything is up to date` when nothing
+  would change; `--allow-breaking` cannot be combined with the preview. As with other shared-lock commands, the mind home
+  and lock file may be created when absent.
 - `CLI-262` An `upgrade` positional that matches no installed item under
   CLI-63/CLI-65 but does match a melded source under `sync`'s filter
   (CLI-231) is read as `--source <filter>` (CLI-244): `mind upgrade
