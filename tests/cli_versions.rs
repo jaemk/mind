@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{fixture_dir, git, write_file};
+use common::{fixture_dir, git, write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -49,7 +49,7 @@ impl Sandbox {
     /// Commit an agent whose description is `desc`, plus `mind_toml` as the
     /// root `mind.toml` (removed when empty). Returns the commit sha.
     fn commit(&self, desc: &str, mind_toml: &str) -> String {
-        write_file(
+        write(
             &self.source.join("agents/dev.md"),
             &format!("---\nname: dev\ndescription: {desc}\n---\n# dev\n"),
         );
@@ -57,7 +57,7 @@ impl Sandbox {
         if mind_toml.is_empty() {
             let _ = std::fs::remove_file(&toml);
         } else {
-            write_file(&toml, mind_toml);
+            write(&toml, mind_toml);
         }
         git(&self.source, &["add", "-A"]);
         git(&self.source, &["commit", "-qm", desc]);
@@ -519,7 +519,7 @@ fn upgrade_preview_reports_drift_and_hooks_without_mutating_or_running_them() {
         installed.stdout, installed.stderr
     );
     let marker = sb.base.join("hook-ran");
-    write_file(
+    write(
         &sb.source.join("agents/dev.md"),
         &format!(
             "---\nname: dev\ndescription: changed\nupdate: touch {}\n---\n# changed\n",
@@ -571,7 +571,7 @@ fn removal_previews_show_managed_and_unmanaged_items_without_removing_them() {
     let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     let marker = sb.base.join("removed-hook-ran");
-    write_file(
+    write(
         &sb.source.join("agents/dev.md"),
         &format!(
             "---\nname: dev\ndescription: old\nuninstall: touch {}\n---\n# dev\n",
@@ -600,7 +600,7 @@ fn removal_previews_show_managed_and_unmanaged_items_without_removing_them() {
         std::fs::read(sb.mind_home.join("manifest.json")).unwrap()
     );
     let unmanaged = sb.claude_home.join("agents/manual.md");
-    write_file(&unmanaged, "---\nname: manual\n---\n# manual\n");
+    write(&unmanaged, "---\nname: manual\n---\n# manual\n");
     let r = sb.mind(&["forget", "agent:manual", "--dry-run", "--json"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     let value: Value = serde_json::from_str(&r.stdout).unwrap();
@@ -857,20 +857,20 @@ fn release(sb: &Sandbox, msg: &str, tag: &str) -> String {
 fn a_compatible_move_that_drops_or_rekinds_an_item_is_warned_about() {
     // spec: VER-65
     let sb = Sandbox::new("ver-looks-breaking");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
-    write_file(&sb.source.join("agents/shift.md"), &agent("shift", "x"));
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    write(&sb.source.join("agents/shift.md"), &agent("shift", "x"));
     release(&sb, "one-zero", "v1.0.0");
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
             .success
     );
 
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
     std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
     std::fs::remove_file(sb.source.join("agents/shift.md")).unwrap();
-    write_file(
+    write(
         &sb.source.join("rules/shift.md"),
         "---\ndescription: s\n---\n",
     );
@@ -912,9 +912,9 @@ fn a_release_that_breaks_an_item_manifest_is_not_warned_as_a_drop() {
     // spec: DSC-123 -- a skill skipped for an unreadable mind.toml is still
     // shipped, so the compatible move does not "drop" it or hint at prune.
     let sb = Sandbox::new("ver-unreadable");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(
         &sb.source.join("skills/helper/SKILL.md"),
         "---\nname: helper\ndescription: h\n---\n",
     );
@@ -925,8 +925,8 @@ fn a_release_that_breaks_an_item_manifest_is_not_warned_as_a_drop() {
     );
     assert!(sb.claude_home.join("skills/helper").exists());
 
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
-    write_file(&sb.source.join("skills/helper/mind.toml"), "bogus = 1\n");
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write(&sb.source.join("skills/helper/mind.toml"), "bogus = 1\n");
     release(&sb, "one-one", "v1.1.0");
 
     let r = sb.mind(&["upgrade", "--yes"]);
@@ -945,20 +945,20 @@ fn a_release_that_breaks_an_item_manifest_is_not_warned_as_a_drop() {
 fn a_release_that_drops_an_item_of_a_pruning_source_prunes_it_without_a_warning() {
     // spec: LIFE-57 LIFE-58
     let sb = Sandbox::new("ver-prune");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
     release(&sb, "one-zero", "v1.0.0");
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
             .success
     );
 
-    write_file(
+    write(
         &sb.source.join("mind.toml"),
         &format!("{RELEASE_TAGS}prune = true\n"),
     );
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
     std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
     release(&sb, "one-one", "v1.1.0");
 
@@ -976,19 +976,19 @@ fn a_breaking_release_not_taken_prunes_nothing() {
     // resolves to, so a breaking release the user has not accepted removes
     // nothing; taking it does.
     let sb = Sandbox::new("ver-prune-breaking");
-    write_file(
+    write(
         &sb.source.join("mind.toml"),
         &format!("{RELEASE_TAGS}prune = true\n"),
     );
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
     release(&sb, "one-zero", "v1.0.0");
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
             .success
     );
 
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
     std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
     release(&sb, "two-zero", "v2.0.0");
 
@@ -1014,12 +1014,12 @@ fn a_breaking_release_not_taken_prunes_nothing() {
 fn a_compatible_move_that_removes_a_token_referent_is_warned_about() {
     // spec: VER-65
     let sb = Sandbox::new("ver-looks-breaking-ref");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(
         &sb.source.join("agents/dev.md"),
         &agent("dev", "use {{ns:helper}}"),
     );
-    write_file(&sb.source.join("agents/helper.md"), &agent("helper", "h"));
+    write(&sb.source.join("agents/helper.md"), &agent("helper", "h"));
     release(&sb, "one-zero", "v1.0.0");
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
@@ -1044,15 +1044,15 @@ fn an_accepted_breaking_release_is_not_warned_as_looking_breaking() {
     // spec: VER-65 -- only a compatible move is checked; a new major is
     // expected to break.
     let sb = Sandbox::new("ver-looks-breaking-major");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(&sb.source.join("agents/gone.md"), &agent("gone", "x"));
     release(&sb, "one-zero", "v1.0.0");
     assert!(
         sb.mind(&["meld", &sb.spec(), "--pin", "version=^1", "--yes"])
             .success
     );
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "two"));
     std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
     release(&sb, "two-zero", "v2.0.0");
 
@@ -1179,7 +1179,7 @@ fn a_local_directory_that_is_not_a_repo_fails_with_the_git_error() {
     // spec: VER-81
     let sb = Sandbox::new("ver-not-a-repo");
     let plain = sb.base.join("plain");
-    write_file(&plain.join("agents/dev.md"), &agent("dev", "x"));
+    write(&plain.join("agents/dev.md"), &agent("dev", "x"));
     let r = sb.mind(&["meld", &plain.to_string_lossy(), "--pin", "version=^1"]);
     assert!(!r.success, "{}", r.stdout);
     assert!(r.stderr.contains("git"), "{}", r.stderr);
@@ -1189,12 +1189,12 @@ fn a_local_directory_that_is_not_a_repo_fails_with_the_git_error() {
 fn an_item_link_instance_accepts_a_version_pin() {
     // spec: VER-81 LNK-4
     let sb = Sandbox::new("ver-item-link");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
     let skill = |desc: &str| format!("---\nname: greet\ndescription: {desc}\n---\n# greet\n");
-    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("one-zero"));
-    write_file(&sb.source.join("agents/other.md"), &agent("other", "x"));
+    write(&sb.source.join("skills/greet/SKILL.md"), &skill("one-zero"));
+    write(&sb.source.join("agents/other.md"), &agent("other", "x"));
     let a = release(&sb, "one-zero", "v1.0.0");
-    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("tip"));
+    write(&sb.source.join("skills/greet/SKILL.md"), &skill("tip"));
     git(&sb.source, &["add", "-A"]);
     git(&sb.source, &["commit", "-qm", "tip"]);
 
@@ -1229,7 +1229,7 @@ fn an_item_link_instance_accepts_a_version_pin() {
 
     // spec: VER-43 -- a newer compatible release moves the instance, and its
     // one item upgrades.
-    write_file(&sb.source.join("skills/greet/SKILL.md"), &skill("one-one"));
+    write(&sb.source.join("skills/greet/SKILL.md"), &skill("one-one"));
     let b = release(&sb, "one-one", "v1.1.0");
     let r = sb.mind(&["upgrade", "--yes"]);
     assert!(r.success, "upgrade: {}", r.stderr);
@@ -1502,7 +1502,7 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
     // an exact version is pinned.
     let (sb, [a, b, _c]) = released("ver-policy", RELEASE_TAGS);
     let policy = sb.base.join("policy.toml");
-    write_file(&policy, "[sources]\npinned = true\n");
+    write(&policy, "[sources]\npinned = true\n");
     let run = |pin: &str| {
         Command::new(env!("CARGO_BIN_EXE_mind"))
             .args(["meld", &sb.spec(), "--pin", pin])
@@ -1527,7 +1527,7 @@ fn a_version_range_is_unpinned_under_require_pinned_policy() {
     assert_eq!(sb.pin().1, a);
 
     // With allow-version-ranges, a range counts as pinned.
-    write_file(
+    write(
         &policy,
         "[sources]\npinned = true\nallow-version-ranges = true\n",
     );
@@ -1551,7 +1551,7 @@ fn a_default_release_pin_the_policy_refuses_is_not_announced() {
     // meld never claims to follow releases.
     let (sb, _) = released("ver-policy-note", RELEASE_TAGS);
     let policy = sb.base.join("policy.toml");
-    write_file(&policy, "[sources]\npinned = true\n");
+    write(&policy, "[sources]\npinned = true\n");
     let policy_env = policy.to_string_lossy().into_owned();
     let r = sb.mind_env(
         &["meld", &sb.remote_spec(), "--yes"],
@@ -1584,7 +1584,7 @@ fn a_policy_auto_meld_entry_takes_a_version_range() {
     // spec: VER-101
     let (sb, [_a, b, c]) = released("ver-auto-meld", RELEASE_TAGS);
     let policy = sb.base.join("policy.toml");
-    write_file(
+    write(
         &policy,
         &format!(
             "[sources]\npinned = true\nallow-version-ranges = true\n\n\
@@ -1622,7 +1622,7 @@ fn a_policy_auto_meld_entry_takes_a_version_range() {
 
     // spec: POL-55 -- a changed range is drift: re-pinned, then resolved by
     // the same sync.
-    write_file(
+    write(
         &policy,
         &format!(
             "[sources]\npinned = true\nallow-version-ranges = true\n\n\
@@ -1661,7 +1661,7 @@ fn review_checks_release_tags_and_breaks_since_the_highest_release() {
 
     // The tree since v2.0.0 turns the dev agent into a rule.
     std::fs::remove_file(sb.source.join("agents/dev.md")).unwrap();
-    write_file(
+    write(
         &sb.source.join("rules/dev.md"),
         "---\ndescription: d\n---\n",
     );
@@ -1678,14 +1678,14 @@ fn review_checks_release_tags_and_breaks_since_the_highest_release() {
     // The comparison is with the highest stable release consumers are on,
     // not a newer prerelease or a yanked version.
     let pre = Sandbox::new("ver-review-prerelease");
-    write_file(&pre.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&pre.source.join("agents/dev.md"), &agent("dev", "one"));
-    write_file(&pre.source.join("agents/gone.md"), &agent("gone", "x"));
+    write(&pre.source.join("mind.toml"), RELEASE_TAGS);
+    write(&pre.source.join("agents/dev.md"), &agent("dev", "one"));
+    write(&pre.source.join("agents/gone.md"), &agent("gone", "x"));
     release(&pre, "one-zero", "v1.0.0");
     std::fs::remove_file(pre.source.join("agents/gone.md")).unwrap();
     let rc = release(&pre, "two-rc", "v2.0.0-rc.1");
     pre.tag("v1.1.0", &rc);
-    write_file(
+    write(
         &pre.source.join("mind.toml"),
         "[source]\nrelease-tags = \"v{version}\"\nyanked = [\"1.1.0\"]\n",
     );
@@ -1725,9 +1725,9 @@ fn review_checks_release_tags_and_breaks_since_the_highest_release() {
 fn review_reports_a_dropped_item_and_tags_it_cannot_list() {
     // spec: VER-130
     let sb = Sandbox::new("ver-review-drop");
-    write_file(&sb.source.join("mind.toml"), RELEASE_TAGS);
-    write_file(&sb.source.join("agents/dev.md"), &agent("dev", "d"));
-    write_file(&sb.source.join("agents/gone.md"), &agent("gone", "g"));
+    write(&sb.source.join("mind.toml"), RELEASE_TAGS);
+    write(&sb.source.join("agents/dev.md"), &agent("dev", "d"));
+    write(&sb.source.join("agents/gone.md"), &agent("gone", "g"));
     release(&sb, "one-zero", "v1.0.0");
     std::fs::remove_file(sb.source.join("agents/gone.md")).unwrap();
     let r = sb.mind(&["review", &sb.spec()]);
@@ -1742,8 +1742,8 @@ fn review_reports_a_dropped_item_and_tags_it_cannot_list() {
 
     // A directory that is not a git repo has no tags to list.
     let plain = sb.base.join("plain");
-    write_file(&plain.join("mind.toml"), RELEASE_TAGS);
-    write_file(&plain.join("agents/dev.md"), &agent("dev", "d"));
+    write(&plain.join("mind.toml"), RELEASE_TAGS);
+    write(&plain.join("agents/dev.md"), &agent("dev", "d"));
     let r = sb.mind(&["review", &plain.to_string_lossy()]);
     assert!(r.success, "advisory only: {}", r.stderr);
     assert!(
@@ -1773,7 +1773,7 @@ fn init_source_declares_release_tags_when_the_repo_has_releases() {
     assert!(r.stdout.contains("1 release tag(s)"), "{}", r.stdout);
 
     // An existing mind.toml is left as it is.
-    write_file(&sb.source.join("mind.toml"), "[source]\n");
+    write(&sb.source.join("mind.toml"), "[source]\n");
     assert!(sb.mind(&["init-source", &sb.spec()]).success);
     let toml = std::fs::read_to_string(sb.source.join("mind.toml")).unwrap();
     assert_eq!(toml, "[source]\n");
@@ -1863,7 +1863,7 @@ fn dump_ranges_emits_the_range_and_plain_dump_still_freezes() {
 
     // The output re-melds: the nested source resolves its range afresh.
     let dumped = sb.base.join("dumped");
-    write_file(&dumped.join("mind.toml"), &ranged.stdout);
+    write(&dumped.join("mind.toml"), &ranged.stdout);
     for args in [
         vec!["-c", "init.defaultBranch=main", "init", "-q"],
         vec!["config", "user.email", "t@t"],
@@ -2323,9 +2323,9 @@ fn second_source(sb: &Sandbox, name: &str) -> PathBuf {
     ] {
         git(&dir, &args);
     }
-    write_file(&dir.join("mind.toml"), RELEASE_TAGS);
+    write(&dir.join("mind.toml"), RELEASE_TAGS);
     for (desc, tag) in [("other-one", "v1.0.0"), ("other-two", "v2.0.0")] {
-        write_file(&dir.join("agents/other.md"), &agent("other", desc));
+        write(&dir.join("agents/other.md"), &agent("other", desc));
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-qm", desc]);
         git(&dir, &["tag", tag]);

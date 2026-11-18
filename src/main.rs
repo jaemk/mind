@@ -453,7 +453,7 @@ fn json_reserves_stdout(command: &Command) -> bool {
 /// a Unicode-hostile output mode must not silently launch it.
 ///
 /// TUI-1 (interactive launch) requires a real TTY to verify; it is allowlisted
-/// rather than cited. TUI-2/TUI-71 (fallback) are tested in tests/cli.rs.
+/// rather than cited. TUI-2/TUI-71 (fallback) are tested in tests/cli/.
 // spec: TUI-2 TUI-71
 fn probe_launches_tui(no_tui: bool, json: bool, ascii: bool) -> bool {
     !no_tui && !json && !ascii && utf8_locale() && std::io::stdout().is_terminal()
@@ -1414,7 +1414,7 @@ mod tests {
     /// `review` and `hooks list` moved OUT of it (they answer `--json` with a
     /// document now, CLI-219/CLI-220) and `config show` moved out too (it
     /// always had a JSON branch; CLI-217's prior classification of it was
-    /// simply wrong, see `config_show_json_emits_one_document` in tests/cli.rs).
+    /// simply wrong, see `config_show_json_emits_one_document` in tests/cli/output.rs).
     // spec: CLI-217 CLI-218
     #[test]
     fn json_reservation_covers_result_verbs_and_spares_payload_verbs() {
@@ -1937,7 +1937,7 @@ mod tests {
     /// `sync --upgrade --accept-hooks` must parse and the flag must be forwarded
     /// to the upgrade pass so non-TTY CI can trigger hook re-runs unattended
     /// (HOOK-11, HOOK-23). Verified here by inspecting the parsed struct; the
-    /// end-to-end behavior is covered by tests/cli.rs.
+    /// end-to-end behavior is covered by tests/cli/.
     // spec: HOOK-11 HOOK-23 CLI-250
     #[test]
     fn sync_accept_hooks_parses() {

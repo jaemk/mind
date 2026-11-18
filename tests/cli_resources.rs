@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{fixture_dir, git, write_file};
+use common::{fixture_dir, git, write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -67,7 +67,7 @@ impl Sandbox {
     }
 
     fn write(&self, rel: &str, contents: &str) {
-        write_file(&self.source.join(rel), contents);
+        write(&self.source.join(rel), contents);
     }
 
     fn commit(&self) {

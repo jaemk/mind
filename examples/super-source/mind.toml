@@ -44,7 +44,7 @@ install-items = ["skill:scan"]
 # source's own [source] pin whether or not the source ships a mind.toml
 # (DSC-65). It is omitted here because it needs a real git history to clone
 # from, which ../starter (a plain directory in this tree, not its own repo)
-# does not have; see tests/cli.rs (search DSC-65) for a working pin demo.
+# does not have; see tests/cli/ (search DSC-65) for a working pin demo.
 [[discover.sources]]
 source = "../starter"
 

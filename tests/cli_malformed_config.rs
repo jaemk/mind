@@ -2,9 +2,12 @@
 //! the cap's origin when it names the cap key, so a malformed file that does not
 //! name it must not fail verbs that never read config.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::write;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -61,11 +64,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 /// The cap resolution must not be what fails: a malformed config that does not

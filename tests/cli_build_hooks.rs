@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{fixture_dir, git, write_file as write};
+use common::{fixture_dir, git, write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 

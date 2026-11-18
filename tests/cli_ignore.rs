@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{fixture_dir, git, write_file};
+use common::{fixture_dir, git, write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -34,7 +34,7 @@ impl Sandbox {
             mind_home: base.join("mind"),
             claude_home: base.join("claude"),
         };
-        write_file(&source.join("README.md"), "# fixture\n");
+        write(&source.join("README.md"), "# fixture\n");
         git(&source, &["-c", "init.defaultBranch=main", "init", "-q"]);
         git(&source, &["config", "user.email", "t@t"]);
         git(&source, &["config", "user.name", "t"]);
@@ -65,7 +65,7 @@ impl Sandbox {
     }
 
     fn write_and_commit(&self, rel: &str, contents: &str) {
-        write_file(&self.source.join(rel), contents);
+        write(&self.source.join(rel), contents);
         git(&self.source, &["add", "-A"]);
         git(&self.source, &["commit", "-qm", "fixture"]);
     }
@@ -511,7 +511,7 @@ fn a_dot_git_file_is_ignored_like_a_dot_git_directory() {
     // source is a "linked" source (spec/source addressing) that `mind` scans
     // from its working tree directly, so an untracked file here is exactly
     // what a scan reads.
-    write_file(
+    write(
         &sb.source.join("skills/a/.git"),
         "gitdir: ../../.git/modules/a\n",
     );

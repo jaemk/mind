@@ -4,13 +4,16 @@
 //!
 //! These drive the real `mind` binary against a hermetic, network-free fixture
 //! (a local git repo melded by filesystem path, with MIND_HOME/CLAUDE_HOME
-//! pointed at temp dirs), exactly as `tests/cli.rs` does. Where a non-TTY test
+//! pointed at temp dirs), exactly as `tests/cli/` does. Where a non-TTY test
 //! needs the hooks to actually run, it passes
 //! `--accept-hooks=install,update,uninstall` (HOOK-23/83).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::{git, write};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -102,22 +105,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 /// Read a log file the hooks append to, returning its non-empty lines in order.

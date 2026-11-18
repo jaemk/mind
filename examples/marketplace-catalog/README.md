@@ -11,4 +11,4 @@ Layout:
 The catalog is self-contained: all plugins are in-repo relative paths, no network access needed.
 External-plugin cases are built inline in tests using `Sandbox::bare` + `write_and_commit`.
 
-Used by `Sandbox::from_example("marketplace-catalog")` in `tests/cli.rs`.
+Used by `Sandbox::from_example("marketplace-catalog")` in `tests/cli/`.

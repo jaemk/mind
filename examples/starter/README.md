@@ -99,7 +99,7 @@ prefix).
 
 ## Verified
 
-`tests/cli.rs::example_starter_convention_discovery` melds this directory and
+`tests/cli/discovery.rs::example_starter_convention_discovery` melds this directory and
 asserts the items are discovered with their descriptions, so the example stays
 correct as the code changes. `tests/cli_examples_commands.rs` melds it and
 asserts the `ship` command installs and links at `commands/ship.md`, that

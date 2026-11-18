@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+use common::write;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A throwaway environment: a source git repo plus isolated MIND_HOME/CLAUDE_HOME.
@@ -97,11 +100,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 fn git(repo: &Path, args: &[&str]) {

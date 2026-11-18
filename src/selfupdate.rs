@@ -1979,7 +1979,7 @@ mod tests {
     // ---- POL-51..54: policy control over self-update -------------------------
 
     /// Load a `Policy` from a TOML string via a temp file (mirrors the
-    /// MIND_POLICY_FILE fixture pattern used in tests/cli.rs).
+    /// MIND_POLICY_FILE fixture pattern used in tests/cli/).
     fn policy_from_toml(toml: &str) -> crate::policy::Policy {
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
@@ -2667,7 +2667,7 @@ mod tests {
 
     // The --json shape (the `target_triple` key added alongside the existing
     // `action`/`target`/`outcome` keys, none renamed) is covered end-to-end at
-    // the CLI level in tests/cli.rs (`evolve_check_json_includes_target_triple_key`),
+    // the CLI level in tests/cli/ (`evolve_check_json_includes_target_triple_key`),
     // which drives the real binary and the real `print_evolve_json`, rather than
     // here: `print_evolve_json` writes straight to stdout via
     // `crate::render::print_json`, so a src/ unit test cannot observe its output

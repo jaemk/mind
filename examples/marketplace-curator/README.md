@@ -28,4 +28,4 @@ Convention discovery (honoring roots/flat-skills) then supplies the items and
 
 Melding this example over the network is avoided by using local sibling paths in
 `[discover].sources`; a real curator lists remote specs there. Used by
-`Sandbox::from_example("marketplace-curator")` in `tests/cli.rs`.
+`Sandbox::from_example("marketplace-curator")` in `tests/cli/`.

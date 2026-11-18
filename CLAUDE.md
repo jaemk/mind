@@ -268,12 +268,15 @@ automation, say so explicitly and explain why.
 - CLI behavior -> integration tests in `tests/`, which drive the real binary
   (`env!("CARGO_BIN_EXE_mind")`) against a hermetic fixture: a local git repo
   melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed at a temp
-  dir. No network. `tests/cli.rs` holds the general assertions; topical suites
-  live in siblings (`cli_absorb.rs`, `cli_dump.rs`, `cli_lobes.rs`,
+  dir. No network. `tests/cli/` is one test crate: `main.rs` holds the shared
+  `Sandbox` fixture and each sibling module covers one spec topic (`meld.rs`,
+  `upgrade.rs`, `discovery.rs`, `policy.rs`, `output.rs`, ...). Other topical
+  suites are their own crates (`cli_absorb.rs`, `cli_dump.rs`, `cli_lobes.rs`,
   `cli_install_items.rs`, `cli_build_hooks.rs`, `review_hooks.rs`,
   `item_lifecycle.rs`, ...). Add a new assertion to the matching topical file, or
-  to `cli.rs` if none fits. `Sandbox::from_example(<name>)` drives a shipped
-  `examples/<name>` the same way.
+  to `tests/cli/output.rs` if none fits. `tests/common/` holds helpers shared
+  across crates (`fixture_dir`, `write`, `git`); include it with `mod common;`.
+  `Sandbox::from_example(<name>)` drives a shipped `examples/<name>` the same way.
 
 Run everything with `cargo test`.
 

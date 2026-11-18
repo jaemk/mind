@@ -106,7 +106,7 @@ glyph and `(outdated)` text for an out-of-date item) and CLI-90 (introspect's
 
 ## Verified
 
-`tests/cli.rs::example_drift_upgrade` melds this directory, edits and syncs the
+`tests/cli/recall.rs::example_drift_upgrade` melds this directory, edits and syncs the
 source, and asserts the stale marker on `recall`, the `introspect` drift report,
 and that `mind upgrade` clears both, so the example stays correct as the code
 changes.

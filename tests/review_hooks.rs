@@ -7,16 +7,19 @@
 //!
 //! Each test drives the real `mind` binary against a hermetic fixture source
 //! directory (local path, no network), using isolated MIND_HOME / CLAUDE_HOME
-//! temp dirs, exactly as tests/cli.rs does.
+//! temp dirs, exactly as tests/cli/ does.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::write;
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
-// Minimal fixture harness (mirrors tests/cli.rs)
+// Minimal fixture harness (mirrors tests/cli/)
 // ---------------------------------------------------------------------------
 
 struct Sandbox {
@@ -72,11 +75,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 // ---------------------------------------------------------------------------

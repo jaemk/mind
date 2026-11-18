@@ -1396,7 +1396,7 @@ mod tests {
         // (DSC-58 default install = false) while staying non-authoritative so its
         // own convention discovery still surfaces the hello-mind example (DSC-35).
         // This validates the real file offline; the live recursive meld is network
-        // dependent and is guarded hermetically with local stand-ins in tests/cli.rs.
+        // dependent and is guarded hermetically with local stand-ins in tests/cli/.
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mt = MindToml::load(root)
             .expect("root mind.toml must parse")

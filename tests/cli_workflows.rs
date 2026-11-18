@@ -25,6 +25,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+mod common;
+use common::write;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Names the capture files of a single [`Sandbox::mind_bounded`] run.
 static BOUNDED_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -177,11 +180,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
 }
 
 fn git(repo: &Path, args: &[&str]) {

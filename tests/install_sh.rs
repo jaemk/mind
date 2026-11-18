@@ -63,7 +63,7 @@ fn release_yml_path() -> PathBuf {
 }
 
 /// A fresh, uniquely-named scratch directory under the system temp dir,
-/// mirroring the `mind-it-<pid>-<n>` convention `tests/cli.rs` uses.
+/// mirroring the `mind-it-<pid>-<n>` convention `tests/cli/` uses.
 fn scratch_dir(tag: &str) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir =

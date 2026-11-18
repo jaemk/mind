@@ -3,7 +3,7 @@
 //!
 //! Each test drives the real `mind` binary against a hermetic fixture: a local
 //! git repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed
-//! at temp dirs. No network. The fixture mirrors the pattern in tests/cli.rs.
+//! at temp dirs. No network. The fixture mirrors the pattern in tests/cli/.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

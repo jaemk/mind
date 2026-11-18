@@ -124,7 +124,7 @@ ls /tmp/hooks-demo/bin/.migrated   # created by the update hook
 
 ## Verified
 
-`tests/cli.rs::example_hooks_lists_declared_hooks` melds this directory and
+`tests/cli/hooks.rs::example_hooks_lists_declared_hooks` melds this directory and
 asserts the declared hooks, so the example stays correct as the code changes.
 `tests/cli_examples_commands.rs` melds it and asserts the update hook is
 listed by `hooks list` and does not run at `meld`.

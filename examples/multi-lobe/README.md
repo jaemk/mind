@@ -101,6 +101,6 @@ filter, preset table, and auto-detect behavior.
 
 ## Verified
 
-`tests/cli.rs::example_multi_lobe_links_into_all_homes` configures two lobes,
+`tests/cli/storage.rs::example_multi_lobe_links_into_all_homes` configures two lobes,
 melds this directory, and asserts `learn` links `recap` into both and `forget`
 removes it from both, so the example stays correct as the code changes.

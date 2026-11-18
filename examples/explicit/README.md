@@ -108,8 +108,8 @@ rm -rf /tmp/explicit-demo
 
 ## Verified
 
-`tests/cli.rs::example_explicit_inventory_offers_only_listed` melds this
+`tests/cli/discovery.rs::example_explicit_inventory_offers_only_listed` melds this
 directory and asserts the catalog offers only the listed items.
-`tests/cli.rs::example_explicit_item_hooks_fire` learns and forgets `scan` and
+`tests/cli/hooks.rs::example_explicit_item_hooks_fire` learns and forgets `scan` and
 asserts both hook output lines appear, so the example stays correct as the code
 changes.

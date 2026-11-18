@@ -7,12 +7,15 @@
 //! item-link cases, the `file://` deep-link form), with MIND_HOME/CLAUDE_HOME
 //! pointed at a temp dir and the managed policy injected via
 //! `MIND_POLICY_FILE` (honored only when no real system policy file exists,
-//! POL-2). Follows the `MIND_POLICY_FILE` pattern used in tests/cli.rs and
+//! POL-2). Follows the `MIND_POLICY_FILE` pattern used in tests/cli/ and
 //! tests/cli_item_link.rs.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+
+mod common;
+use common::{git, write};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -113,22 +116,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 const NOT_PERMITTED: &str = "source not permitted by the managed policy's allowlist";

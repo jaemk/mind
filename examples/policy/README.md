@@ -73,11 +73,11 @@ Expected output (exit non-zero):
 error: auto_meld entry "acme/agent-baseline" has no pin (tag or ref) but pinned = true
 ```
 
-Restore `tag = "v1.4.0"` before committing; `tests/cli.rs::example_policy_validates`
+Restore `tag = "v1.4.0"` before committing; `tests/cli/policy.rs::example_policy_validates`
 asserts the file validates clean.
 
 ## Verified
 
-`tests/cli.rs::example_policy_validates` runs `mind review --policy` against this
+`tests/cli/policy.rs::example_policy_validates` runs `mind review --policy` against this
 file and asserts it validates clean, so the example stays correct as the code
 changes.

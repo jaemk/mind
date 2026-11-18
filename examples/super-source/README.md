@@ -106,7 +106,7 @@ mind.toml                 [source] metadata + [discover].sources curating the ch
   override). An authoritative pin directive (`follow-branch`/`pin-tag`/
   `pin-ref`, DSC-65) would go on this same entry too, but it needs a real git
   history to clone from, which `../starter` (a plain directory in this tree,
-  not its own repo) does not have; see `tests/cli.rs` (search `DSC-65`) for a
+  not its own repo) does not have; see `tests/cli/` (search `DSC-65`) for a
   working pin demo.
 
 The nested specs are local paths (`../explicit` and friends) to the sibling
@@ -288,8 +288,8 @@ the super-source; removing it stays an explicit `unmeld` per source.
 
 ## Verified
 
-`tests/cli.rs::example_super_source_validates` runs `review` on this directory
-and asserts it validates. `tests/cli.rs::example_super_source_curate_reports_up_to_date`
+`tests/cli/discovery.rs::example_super_source_validates` runs `review` on this directory
+and asserts it validates. `tests/cli/curate.rs::example_super_source_curate_reports_up_to_date`
 melds the real example end to end (all five sources, DSC-59/60/61's fallback
 hook included) and asserts `mind curate --check` reports the curated chain as
 up to date, so the "Reconciling with `mind curate`" section above stays true

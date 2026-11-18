@@ -1,7 +1,7 @@
 //! Outside-in checks for upgrade previews against local sources.
 mod common;
 
-use common::{fixture_dir, git, write_file};
+use common::{fixture_dir, git, write};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -17,12 +17,12 @@ impl Fixture {
     fn new(config: &str) -> Self {
         let root = fixture_dir("upgrade-preview");
         let source = root.join("source");
-        write_file(
+        write(
             &source.join("skills/one/SKILL.md"),
             "---\ndescription: one\n---\n# one\n",
         );
         if !config.is_empty() {
-            write_file(&source.join("mind.toml"), config);
+            write(&source.join("mind.toml"), config);
         }
         for args in [
             &["-c", "init.defaultBranch=main", "init", "-q"][..],
@@ -92,11 +92,11 @@ fn preview_tracks_profile_additions_without_persisting_them() {
     f.run(&["meld", &f.source(), "--yes", "--json"]);
     let registry = std::fs::read(f.home.join("sources.json")).unwrap();
     let manifest = std::fs::read(f.home.join("manifest.json")).unwrap();
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\n",
     );
-    write_file(
+    write(
         &f.source.join("mind.toml"),
         "[profiles]\ndefault = [\"skill:one\", \"skill:two\"]\n",
     );
@@ -127,7 +127,7 @@ fn preview_reports_new_whole_source_items_and_keeps_extra_home_intact() {
     ]);
     let registry = std::fs::read(f.extra.join("sources.json")).unwrap();
     let manifest = std::fs::read(f.extra.join("manifest.json")).unwrap();
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\n",
     );
@@ -150,7 +150,7 @@ fn preview_reports_items_that_ignore_new_would_record() {
     let f = Fixture::new("");
     f.run(&["meld", &f.source(), "--yes", "--json"]);
     let registry = std::fs::read(f.home.join("sources.json")).unwrap();
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\n",
     );
@@ -207,18 +207,18 @@ fn preview_reports_an_additions_dependencies_and_install_hooks() {
     f.run(&["meld", &f.source(), "--yes", "--json"]);
     let manifest = std::fs::read(f.home.join("manifest.json")).unwrap();
     let marker = f.root.join("hook-ran");
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         &format!(
             "---\ndescription: two\ninstall: touch {}\n---\n# two\nUses {{{{ns:three}}}}.\n",
             marker.display()
         ),
     );
-    write_file(
+    write(
         &f.source.join("skills/three/SKILL.md"),
         "---\ndescription: three\n---\n# three\n",
     );
-    write_file(
+    write(
         &f.source.join("mind.toml"),
         "[profiles]\ndefault = [\"skill:one\", \"skill:two\"]\n",
     );
@@ -252,7 +252,7 @@ fn preview_reports_a_declared_home_move_without_moving() {
     let f = Fixture::new("");
     f.run(&["meld", &f.source(), "--yes", "--json"]);
     let registry = std::fs::read(f.home.join("sources.json")).unwrap();
-    write_file(
+    write(
         &f.source.join("mind.toml"),
         &format!("[source]\nmind-home = \"{}\"\n", f.extra.display()),
     );
@@ -285,7 +285,7 @@ fn text_preview_says_when_nothing_would_change() {
     f.run(&["meld", &f.source(), "--yes", "--json"]);
     let text = f.text(&["upgrade", "--dry-run"]);
     assert!(text.contains("everything is up to date"), "{text}");
-    write_file(
+    write(
         &f.source.join("skills/one/SKILL.md"),
         "---\ndescription: one\n---\n# changed\n",
     );
@@ -298,7 +298,7 @@ fn text_preview_says_when_nothing_would_change() {
 #[test]
 fn forget_glob_preview_matches_actual_selection_in_extra_home() {
     let f = Fixture::new("");
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\n",
     );
@@ -350,7 +350,7 @@ fn forget_glob_preview_matches_actual_selection_in_extra_home() {
 #[test]
 fn profile_removal_preview_keeps_dependencies_and_matches_apply() {
     let f = Fixture::new("[profiles]\ndefault = [\"skill:one\"]\n");
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\nUses {{ns:one}}.\n",
     );
@@ -398,7 +398,7 @@ fn profile_removal_preview_keeps_dependencies_and_matches_apply() {
 #[test]
 fn forget_preview_names_dependents_and_dropped_items() {
     let f = Fixture::new("");
-    write_file(
+    write(
         &f.source.join("skills/two/SKILL.md"),
         "---\ndescription: two\n---\n# two\nUses {{ns:one}}.\n",
     );

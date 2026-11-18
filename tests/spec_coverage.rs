@@ -36,7 +36,7 @@ const ALLOWLIST: &[&str] = &[
     // scanner recognizes exactly the literal `{{ns:` spelling `expand` does.)
     "NS-3",
     // A curated super-source adopting an un-onboarded nested source (DSC-59/60/61)
-    // is implemented and cited from tests/cli.rs (the apply, gate-with-warning,
+    // is implemented and cited from tests/cli/ (the apply, gate-with-warning,
     // and consumer-pin-override tests); no longer allowlisted.
     // Retired (never implemented): INIT-8 proposed an `init-source` scaffold of a
     // `[source].install` stub; dropped when that field was deprecated (HOOK-90).
@@ -58,10 +58,10 @@ const ALLOWLIST: &[&str] = &[
     //   from src/ignore.rs and tests/cli_ignore.rs.
     //   unmanaged lobe items (see spec/unmanaged.md): the scan + recall + probe
     //   listing + forget (UNM-1..5) are implemented and cited from src/unmanaged.rs
-    //   and tests/cli.rs; the interactive TUI group node (UNM-6) is implemented
+    //   and tests/cli/; the interactive TUI group node (UNM-6) is implemented
     //   and cited from src/tui/tree.rs and src/tui/app.rs. Bulk-forget of unmanaged
     //   items via `forget --unmanaged [glob]` (UNM-7/UNM-8) is now implemented and
-    //   cited from src/unmanaged.rs and tests/cli.rs; removed from the allowlist.
+    //   cited from src/unmanaged.rs and tests/cli/; removed from the allowlist.
     //   absorb (see spec/absorb.md): claim an unmanaged lobe item into a
     //   version-controlled source and install it managed (ABS-1..10) is now
     //   implemented and cited from src/commands/, src/git.rs, and
@@ -70,27 +70,27 @@ const ALLOWLIST: &[&str] = &[
     //   (DSC-62/63/64, discovery.md) that dump emits and the install flow honors,
     //   and the authoritative nested-entry pin (DSC-65) dump relies on are now
     //   implemented and cited from src/dump.rs, src/mindfile.rs, src/commands/,
-    //   tests/cli_install_items.rs, tests/cli_dump.rs, and tests/cli.rs; no longer
+    //   tests/cli_install_items.rs, tests/cli_dump.rs, and tests/cli/; no longer
     //   allowlisted.
     //   explicit item dependencies (see spec/dependencies.md): an optional
     //   `requires:` frontmatter key unioned with the `{{ns:}}`-derived edges
     //   (DEP-4/5/6) are now implemented and cited from src/catalog.rs, src/deps.rs,
-    //   src/install.rs, src/review.rs, and tests/cli.rs. Dependency-graph operations
+    //   src/install.rs, src/review.rs, and tests/cli/. Dependency-graph operations
     //   across the verbs (DEP-60/61/62) are now implemented and cited from
-    //   tests/cli.rs; no longer allowlisted. TUI dependency navigation (TUI-50/51)
+    //   tests/cli/; no longer allowlisted. TUI dependency navigation (TUI-50/51)
     //   is now implemented and cited from src/tui/tree.rs and src/tui/app.rs;
     //   no longer allowlisted.
     //   super-source install gating + discovery (DSC-54..57, see spec/discovery.md)
-    //   is implemented and cited from tests/cli.rs: the default gating (DSC-54),
+    //   is implemented and cited from tests/cli/: the default gating (DSC-54),
     //   `meld --install-super-sources` (DSC-55), the post-meld probe hint (DSC-56),
     //   and the `sync` re-walk of the discover chain (DSC-57).
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
-    //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
+    //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli/) and the
     //   maintainer `init-source` scaffolder (INIT-1..6; src/namespace.rs +
-    //   tests/cli.rs) are now implemented and cited; no IDs remain allowlisted.
+    //   tests/cli/) are now implemented and cited; no IDs remain allowlisted.
     //   Claude plugin marketplaces (spec/marketplace.md, MKT-1..16): now
-    //   implemented and cited from tests/cli.rs and unit tests in src/catalog.rs
+    //   implemented and cited from tests/cli/ and unit tests in src/catalog.rs
     //   and src/mindfile.rs; no MKT IDs remain allowlisted. This includes the
     //   marketplace + curator compose (MKT-15/16): a co-present mind.toml's
     //   own-item directives (roots/flat-skills/[[items]]/[discover] globs) suppress
@@ -99,7 +99,7 @@ const ALLOWLIST: &[&str] = &[
     //   self-update `evolve` verb: in-place upgrade of the mind binary using the
     //   same native curl/wget downloader as resources/install.sh (no external
     //   crate). The pure logic (platform triple, version compare/decision, the
-    //   --check report) is cited from src/selfupdate.rs and tests/cli.rs
+    //   --check report) is cited from src/selfupdate.rs and tests/cli/
     //   (CLI-140, CLI-141). CLI-142 is artifact *selection*, which is pure and
     //   is now cited from the asset-name and unsupported-platform tests. The
     //   binary swap (CLI-143) needs a real release and a writable install path,
@@ -142,18 +142,18 @@ const ALLOWLIST: &[&str] = &[
     //   (parse/resolve/disclosure/run) from src/hook.rs, the data/error/parse
     //   pieces from src/source.rs, src/error.rs, src/mindfile.rs, the `review`
     //   advisory from src/review.rs, the meld/upgrade wiring (run/skip/abort,
-    //   re-run gating, recording) from tests/cli.rs and src/commands/. No HOOK
+    //   re-run gating, recording) from tests/cli/ and src/commands/. No HOOK
     //   IDs remain allowlisted.
     //   enterprise managed policy (see spec/policy.md) is fully cited: the core
     //   (parse/locate/allow_matches/validate) from src/policy.rs, the enforcement
     //   (lock/pinned refusal, learn/sync/evolve gating, auto-meld provisioning,
-    //   lobe lock) from tests/cli.rs and src/paths.rs, and `mind review --policy`
+    //   lobe lock) from tests/cli/ and src/paths.rs, and `mind review --policy`
     //   from src/review.rs. No POL IDs remain allowlisted.
     //   within-source dependency resolution (a partial `learn` pulls in the
     //   siblings its items reference; see spec/dependencies.md) is fully cited:
     //   the resolution core (DEP-1..23, DEP-31 interaction) from tests in
     //   src/deps.rs and src/namespace.rs, the `learn` wiring (DEP-30/31/32) and
-    //   the explicit non-goal (DEP-50) from tests/cli.rs, and the interactive TUI
+    //   the explicit non-goal (DEP-50) from tests/cli/, and the interactive TUI
     //   confirm-and-install of the closure (DEP-40/41) from tests in src/tui/*.rs.
     //   No DEP IDs remain allowlisted.
     //   interactive TUI: IDs with automatable logic are now cited from tests
@@ -170,7 +170,7 @@ const ALLOWLIST: &[&str] = &[
     // Resource and helper tooling (spec/tooling.md) is cited: the `tool` kind and
     // discovery (TOOL-1/2/5/7) from src/catalog.rs, the path-token expander
     // (TOOL-10/11/12/14) from src/namespace.rs, and the end-to-end install
-    // behavior (TOOL-3/4/6/13/15) from tests/cli.rs. Item build hooks: the
+    // behavior (TOOL-3/4/6/13/15) from tests/cli/. Item build hooks: the
     // declaration (HOOK-70), the non-TTY skip (HOOK-72), the run-in-staging +
     // rollback (HOOK-71), the re-run on reinstall/upgrade (HOOK-73), and the
     // headless flag (HOOK-74) are all cited from src/install.rs and
@@ -202,16 +202,16 @@ const ALLOWLIST: &[&str] = &[
     //   rename mindfile `as` key to `namespace` in [discover].sources entries;
     //   `as` stays as a backwards-compatible alias (DSC-78): implemented and cited.
     // Namespace ergonomics: CLI-159 (--namespace flag), NS-30, and CLI-161
-    // (namespace mutability lock) are now implemented and cited from tests/cli.rs.
+    // (namespace mutability lock) are now implemented and cited from tests/cli/.
     // TUI-53 (TUI namespace edit) is now implemented and cited from src/tui/app.rs.
     // Polished output: CLI-150 (global flags) is cited from unit tests in
     // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the
     // ASCII fallback (CLI-152), the structured JSON result for mutating verbs
     // (CLI-153), and the NO_COLOR/non-UTF-8/--ascii gate-off conditions (CLI-154)
-    // are now cited from integration tests in tests/cli.rs. The rich (TTY) branch
+    // are now cited from integration tests in tests/cli/. The rich (TTY) branch
     // of the gate is unit-tested in src/render.rs (it needs a real PTY headlessly).
     // CLI-162 (--verbose global flag) is cited from unit tests in src/main.rs
-    // and integration tests in tests/cli.rs.
+    // and integration tests in tests/cli/.
     //   `mind hooks run` / `hooks list` (HOOK-100..104, CLI-194..196) are now
     //   implemented and cited from tests/cli_hooks.rs and unit tests in
     //   src/main.rs, src/resolve.rs, and src/hooks_cmd.rs.
@@ -333,7 +333,7 @@ fn cited_ids() -> BTreeSet<String> {
         // citations. A file with no test module contributes nothing -- and that
         // is often a SILENT loss, not a loud one: most `src/` modules have the
         // same IDs also cited from a `tests/*.rs` integration test (e.g.
-        // `plugin_manifest.rs`'s DSC-91/MKT-9 also live in `tests/cli.rs`), so
+        // `plugin_manifest.rs`'s DSC-91/MKT-9 also live in `tests/cli/`), so
         // missing the module here does not flip the gate to failing. Only an ID
         // cited *exclusively* from an undetected module, with no allowlist entry,
         // fails loudly. Do not rely on "the gate will tell me" -- verify

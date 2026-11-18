@@ -28,6 +28,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+use common::{git, write};
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct Sandbox {
@@ -238,22 +241,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2789,7 +2776,7 @@ fn hooks_run_hooks_not_run_emits_json_error_envelope() {
 /// CLI-181 says nothing is written to stderr *by the main error handler* on
 /// the JSON error path (main.rs's own `error: ...` / `caused by: ...` prose
 /// is suppressed there, matching `json_error_emits_envelope_on_stdout_not_stderr`
-/// in `tests/cli.rs`). It does not mean stderr is silent overall: CLI-217
+/// in `tests/cli/`). It does not mean stderr is silent overall: CLI-217
 /// routes an advisory note fired earlier in the same run to stderr rather
 /// than dropping it, and the HOOK-106 skip note is exactly such a note. So
 /// this run's stderr carries the routed note, but never the main handler's

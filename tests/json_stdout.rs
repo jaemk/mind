@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod common;
+use common::{git, write};
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A throwaway environment: a source git repo plus isolated MIND_HOME/CLAUDE_HOME.
@@ -96,22 +99,6 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.base);
     }
-}
-
-fn write(path: &Path, contents: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, contents).unwrap();
-}
-
-fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
 /// The CLI-217 assertion itself: `stdout` (trimmed) must parse as exactly one
@@ -663,7 +650,7 @@ fn absorb_json_answers_with_absorb_not_meld() {
 // (untested here: it needs a real or faked release endpoint, already covered
 // hermetically in `src/selfupdate.rs`'s fake-`curl`/`gh` tests); `init-source`
 // has no JSON output at all. `recall`/`probe`/`introspect` are exercised by
-// `tests/cli.rs::json_stdout_is_exactly_one_document_across_the_verb_surface`.
+// `tests/cli/output.rs::json_stdout_is_exactly_one_document_across_the_verb_surface`.
 // ---------------------------------------------------------------------------
 
 /// `mind review <target> --json` on a clean source (every item described, no

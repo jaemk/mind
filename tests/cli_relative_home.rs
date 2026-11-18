@@ -1,7 +1,7 @@
 //! Relative MIND_HOME paths must use the same journal and destination paths.
 mod common;
 
-use common::{fixture_dir, git, write_file};
+use common::{fixture_dir, git, write};
 use std::process::{Command, Stdio};
 
 // spec: STO-87
@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 fn relative_home_installs_and_recovers_manifest() {
     let root = fixture_dir("relative-home");
     let source = root.join("source");
-    write_file(
+    write(
         &source.join("skills/one/SKILL.md"),
         "---\ndescription: one\n---\n# one\n",
     );

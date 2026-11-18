@@ -94,6 +94,6 @@ and `unmeld` only undo the install and the meld.
 
 ## Verified
 
-`tests/cli.rs::example_absorb_claims_unmanaged_item` seeds an unmanaged lobe item
+`tests/cli/absorb.rs::example_absorb_claims_unmanaged_item` seeds an unmanaged lobe item
 and absorbs it into a temp git repo, asserting it becomes managed, so the example
 stays correct as the code changes.
