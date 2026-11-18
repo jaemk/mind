@@ -89,6 +89,8 @@ CLI surface and output:
   live in each submodule; fixtures shared between them are in `test_support.rs`.
 - `src/hooks_cmd.rs` - `hooks run`/`hooks list`: on-demand hook execution and inspection, outside meld/learn/forget/upgrade.
 - `src/main.rs` - entrypoint: parse, acquire the lock, dispatch (`match cli.command`) to `commands`, map errors to exit codes.
+- `src/verb.rs` - per-verb classification `main` reads before dispatch: lock mode, `--json` stdout reservation, dry run, hook verb name, items hooks settle scope. Classify a new verb here.
+- `src/json_stdout.rs` - the `--json` stdout reservation: one recorded result document, or the error envelope instead (CLI-217).
 - `src/render.rs` - output context: color, Unicode glyphs, and the `--json` emitter.
 - `src/sanitize.rs` - ANSI/control/bidi stripping for source-derived strings (shared by CLI and TUI).
 - `src/tui/` - the interactive `probe` TUI (`app`, `event`, `render`, `tree`, `preview`, ...).
