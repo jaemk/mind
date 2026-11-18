@@ -521,10 +521,7 @@ mod tests {
             std::env::set_var("MIND_AGENT_HOMES", home.to_str().unwrap());
             std::env::remove_var("MIND_POLICY_FILE");
         }
-        let paths = Paths {
-            mind_home: home.join("mind-home-unused"),
-            claude_home: home.clone(),
-        };
+        let paths = Paths::new(home.join("mind-home-unused"), home.clone());
         let result = scan(&paths, &Manifest::default());
         unsafe {
             match saved_agent_homes {

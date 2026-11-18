@@ -3384,10 +3384,7 @@ mod tests {
         let base =
             std::env::temp_dir().join(format!("mind-tui-app-upgrade-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let paths = crate::paths::Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = crate::paths::Paths::new(base.join("mind"), base.join("claude"));
         (paths, base)
     }
 

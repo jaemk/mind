@@ -417,7 +417,7 @@ fn build_entry(
 /// default home records none, so the output melds into whatever the default
 /// home is where it is melded.
 fn dump_home(paths: &Paths, source: &Source) -> Option<String> {
-    crate::paths::source_home(&source.name)?;
+    paths.source_home(&source.name)?;
     let home = paths.home_of(&source.name);
     if let Some(user) = dirs::home_dir()
         && let Ok(rest) = home.strip_prefix(&user)

@@ -758,10 +758,7 @@ mod tests {
     #[test]
     fn plain_meld_reaches_link_answers_by_path_not_by_bare_name() {
         let dir = scratch("lnk18-bypath");
-        let paths = Paths {
-            mind_home: dir.join("mind"),
-            claude_home: dir.join("claude"),
-        };
+        let paths = Paths::new(dir.join("mind"), dir.join("claude"));
         write_file_at(
             &dir.join("skills/review/SKILL.md"),
             "---\ndescription: the linked one\n---\n# review\n",
@@ -811,10 +808,7 @@ mod tests {
     #[test]
     fn plain_meld_reaches_link_treats_a_failed_scan_as_not_reachable() {
         let dir = scratch("lnk18-scanfail");
-        let paths = Paths {
-            mind_home: dir.join("mind"),
-            claude_home: dir.join("claude"),
-        };
+        let paths = Paths::new(dir.join("mind"), dir.join("claude"));
         // The clone is gone: `scan_source_at` reports `LinkedSourceGone`
         // (CLI-212). The probe must swallow it and answer "not reachable",
         // which selects the `--add-root` form -- the form that also works on a
@@ -933,10 +927,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn require_link_platform_is_ok_on_unix() {
-        let paths = Paths {
-            mind_home: PathBuf::from("/tmp/mind-life50"),
-            claude_home: PathBuf::from("/tmp/claude-life50"),
-        };
+        let paths = Paths::new(
+            PathBuf::from("/tmp/mind-life50"),
+            PathBuf::from("/tmp/claude-life50"),
+        );
         assert!(
             require_link_platform(&paths).is_ok(),
             "the platform guard must be a no-op on unix"

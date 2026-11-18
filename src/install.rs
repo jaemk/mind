@@ -1468,10 +1468,7 @@ mod tests {
         );
         std::fs::write(mind_home.join("config.toml"), cfg.as_bytes()).unwrap();
 
-        let paths = crate::paths::Paths {
-            mind_home: mind_home.clone(),
-            claude_home: claude_home.clone(),
-        };
+        let paths = crate::paths::Paths::new(mind_home.clone(), claude_home.clone());
 
         // The installed item has recorded links under both lobes; neither link
         // currently exists (they were broken). relink should repair the one under
@@ -2272,10 +2269,7 @@ mod tests {
         );
         std::fs::write(mind_home.join("config.toml"), cfg.as_bytes()).unwrap();
 
-        let paths = Paths {
-            mind_home: mind_home.clone(),
-            claude_home: lobe1.clone(),
-        };
+        let paths = Paths::new(mind_home.clone(), lobe1.clone());
 
         // Place a foreign regular file at lobe1's agent link location.
         let agents_dir = lobe1.join("agents");

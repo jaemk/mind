@@ -164,10 +164,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join(".manifest-journal.json"), b"{").unwrap();
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let poller = Poller::start(&paths, Duration::from_millis(1));
         let deadline = Instant::now() + Duration::from_secs(5);
         let error = loop {

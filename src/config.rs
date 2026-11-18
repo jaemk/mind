@@ -662,10 +662,7 @@ mod tests {
         let config_path = tmp.join("config.toml");
         std::fs::write(&config_path, b"[[[not valid toml").unwrap();
 
-        let paths = Paths {
-            mind_home: tmp.clone(),
-            claude_home: PathBuf::from("/tmp/claude-unused"),
-        };
+        let paths = Paths::new(tmp.clone(), PathBuf::from("/tmp/claude-unused"));
 
         let err = Config::load(&paths).unwrap_err();
 
@@ -701,10 +698,7 @@ mod tests {
         let config_path = tmp.join("config.toml");
         std::fs::write(&config_path, b"no_such_field = true\n").unwrap();
 
-        let paths = Paths {
-            mind_home: tmp.clone(),
-            claude_home: PathBuf::from("/tmp/claude-unused"),
-        };
+        let paths = Paths::new(tmp.clone(), PathBuf::from("/tmp/claude-unused"));
 
         let err = Config::load(&paths).unwrap_err();
 

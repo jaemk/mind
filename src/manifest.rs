@@ -527,10 +527,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-manifest-ver-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         (base, paths)
     }
 

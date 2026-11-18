@@ -450,7 +450,11 @@ pub(crate) fn scan_source(
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
     let clone_root = source.clone_dir(paths);
-    scan_source_at(clone_root, source, out)
+    let scanned = scan_root(&clone_root, source, out)?;
+    // spec: LOBE-1 -- the lobe the checked-out `mind.toml` declares, for the
+    // installs that follow this scan.
+    paths.set_source_lobe(&source.name, scanned.lobe.as_deref());
+    Ok(())
 }
 
 /// Scan a source whose clone root is known directly (e.g. for `review`, where
@@ -471,6 +475,18 @@ pub(crate) fn scan_source_reporting(
     source: &Source,
     out: &mut Vec<CatalogItem>,
 ) -> Result<Vec<CatalogItem>> {
+    scan_root(clone_root, source, out).map(|s| s.dropped)
+}
+
+/// What [`scan_root`] reports beside the items it appends.
+struct Scanned {
+    /// The convention resources RES-3 pruned from `out`.
+    dropped: Vec<CatalogItem>,
+    /// The lobe the checked-out `mind.toml` declares (LOBE-1).
+    lobe: Option<String>,
+}
+
+fn scan_root(clone_root: &Path, source: &Source, out: &mut Vec<CatalogItem>) -> Result<Scanned> {
     // spec: CLI-212 -- a linked source's working tree can vanish after meld (a
     // relocated or deleted /tmp fixture, a `cd` past a relative clean-up).
     // Detect it here, before `MindToml::load`'s NotFound-as-absent handling or
@@ -487,12 +503,7 @@ pub(crate) fn scan_source_reporting(
     // `ReservedPrefix` message is written for a meld that has not happened yet.
     // Re-point it at the one thing an already-melded user can do.
     let mindfile = MindToml::load(clone_root).map_err(|e| melded_prefix_error(source, e))?;
-    // spec: LOBE-1 -- the lobe the checked-out `mind.toml` declares, for the
-    // installs that follow this scan.
-    crate::paths::set_source_lobe(
-        &source.name,
-        mindfile.as_ref().and_then(|m| m.source.lobe.as_deref()),
-    );
+    let lobe = mindfile.as_ref().and_then(|m| m.source.lobe.clone());
 
     // spec: DSC-40 -- a source that wants a newer `mind` is scanned anyway,
     // with a warning: meld already asked before registering it (DSC-116), and
@@ -555,7 +566,10 @@ pub(crate) fn scan_source_reporting(
     if let Some(item_path) = &source.item_path {
         scan_item_link(clone_root, source, &prefix, item_path, out)?;
         resolve_ignores(&mut out[scan_start..], &source_ignore)?;
-        return Ok(Vec::new());
+        return Ok(Scanned {
+            dropped: Vec::new(),
+            lobe,
+        });
     }
 
     let base_start = out.len();
@@ -582,7 +596,7 @@ pub(crate) fn scan_source_reporting(
     // whatever discovery layer found it (convention, an authoritative
     // mind.toml, a plugin manifest, or an added root).
     resolve_ignores(&mut out[scan_start..], &source_ignore)?;
-    Ok(dropped)
+    Ok(Scanned { dropped, lobe })
 }
 
 /// The convention resources among `items` that no other item references
@@ -2916,10 +2930,7 @@ mod tests {
     /// Create a `Paths` whose sources dir is `base/sources`, so that
     /// the clone of `local/test/repo` lives at `base/sources/local/test/repo`.
     fn paths_for(base: &std::path::Path) -> Paths {
-        Paths {
-            mind_home: base.to_path_buf(),
-            claude_home: base.join("claude"),
-        }
+        Paths::new(base.to_path_buf(), base.join("claude"))
     }
 
     fn write_file(path: &std::path::Path, contents: &str) {
@@ -5493,10 +5504,7 @@ mod plugin_tests {
     }
 
     fn paths_for(base: &std::path::Path) -> Paths {
-        Paths {
-            mind_home: base.to_path_buf(),
-            claude_home: base.join("claude"),
-        }
+        Paths::new(base.to_path_buf(), base.join("claude"))
     }
 
     // Plugin.json with skill + agent is discovered; prefix from plugin name (MKT-1, MKT-3, MKT-5).
@@ -6848,10 +6856,7 @@ mod lifecycle_tests {
                 "uninstall = \"echo tear-down\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
@@ -6871,10 +6876,7 @@ mod lifecycle_tests {
             "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
         );
         write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
@@ -6903,10 +6905,7 @@ mod lifecycle_tests {
                 "install = \"   \"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
@@ -6939,10 +6938,7 @@ mod lifecycle_tests {
                 "uninstall = \"echo tear-down\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
@@ -6983,10 +6979,7 @@ mod lifecycle_tests {
                 "event = \"uninstall\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
@@ -7017,10 +7010,7 @@ mod lifecycle_tests {
             "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
         );
         write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
@@ -7046,10 +7036,7 @@ mod lifecycle_tests {
             &clone.join("commands/frontend/component.md"),
             "---\ndescription: nested\n---\n# component\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
 
@@ -7097,10 +7084,7 @@ mod lifecycle_tests {
                 "commands = { include = [\"packages/*/commands/*.md\"] }\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
 
@@ -7134,10 +7118,7 @@ mod lifecycle_tests {
             &clone.join("skills/scanner/SKILL.md"),
             "---\ndescription: scanner\ninstall: setup.sh\nupdate: migrate.sh\nuninstall: teardown.sh\n---\n# scanner\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let skill = items.iter().find(|i| i.name == "scanner").unwrap();
@@ -7162,10 +7143,7 @@ mod lifecycle_tests {
             &clone.join("agents/dev.md"),
             "---\ndescription: dev\ninstall: setup.sh\n---\n# dev\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let agent = items.iter().find(|i| i.name == "dev").unwrap();
@@ -7189,10 +7167,7 @@ mod lifecycle_tests {
             &clone.join("skills/scanner/mind.toml"),
             "[[hooks]]\nrun = \"manifest-install\"\nname = \"Set up\"\noptional = true\n\n[[hooks]]\nrun = \"manifest-update\"\nevent = \"update\"\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let skill = items.iter().find(|i| i.name == "scanner").unwrap();
@@ -7244,10 +7219,7 @@ mod lifecycle_tests {
                 "path = \"skills/quiet\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let scanner = items.iter().find(|i| i.name == "scanner").unwrap();
@@ -7283,10 +7255,7 @@ mod lifecycle_tests {
                 "path = \".\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).expect("the scan must succeed");
         let skill = items.iter().find(|i| i.name == "root-skill").unwrap();
@@ -7328,10 +7297,7 @@ mod lifecycle_tests {
             &clone.join("skills/healthy/SKILL.md"),
             "---\ndescription: healthy\n---\n# healthy\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items)
             .expect("one unreadable item manifest must not fail the scan");
@@ -7379,10 +7345,7 @@ mod lifecycle_tests {
                 "path = \"skills/other\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items)
             .expect("the declared inventory must still scan");
@@ -7409,10 +7372,7 @@ mod lifecycle_tests {
             &clone.join("tools/helper/mind.toml"),
             "[[hooks]]\nrun = \"manifest-build\"\nname = \"Build it\"\noptional = true\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
@@ -7457,10 +7417,7 @@ mod lifecycle_tests {
                 "path = \"tools/helper\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
@@ -7482,10 +7439,7 @@ mod lifecycle_tests {
             &clone.join("skills/plain/SKILL.md"),
             "---\ndescription: plain\ninstall: setup.sh\n---\n# plain\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
 
@@ -7527,10 +7481,7 @@ mod lifecycle_tests {
                 "event = \"build\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         let err = scan_source(&paths, &source_for(&clone), &mut items).unwrap_err();
         assert!(
@@ -7571,10 +7522,7 @@ mod lifecycle_tests {
                 "path = \"agents/linter.md\"\n",
             ),
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
@@ -7598,10 +7546,7 @@ mod lifecycle_tests {
             &clone.join("skills/review/SKILL.md"),
             "---\ndescription: review\nrequires:   agent:a    rule:b  \n---\n# review\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let skill = items.iter().find(|i| i.name == "review").unwrap();
@@ -7626,10 +7571,7 @@ mod lifecycle_tests {
             &clone.join("skills/review/SKILL.md"),
             "---\ndescription: review\nrequires:    \n---\n# review\n",
         );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let skill = items.iter().find(|i| i.name == "review").unwrap();

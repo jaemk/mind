@@ -51,123 +51,6 @@ thread_local! {
     static LOCAL_LOBE: RefCell<Option<Lobe>> = const { RefCell::new(None) };
 }
 
-/// The extra mind home each registered source lives in (HOME-6), keyed by
-/// source identity. A source absent from the map lives in the default home.
-/// Filled by `Registry::load` (from the file a source was read from) and by
-/// `meld` (from `--home` / `[source] mind-home`), and read wherever a source's
-/// clone, store copy, or scratch space is placed. Process-global rather than a
-/// `Source` field so the many places that only hold a source *name* (a
-/// catalog item, a manifest entry) resolve the same home.
-static SOURCE_HOMES: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// The extra home `source` lives in, or `None` for the default home.
-pub fn source_home(source: &str) -> Option<PathBuf> {
-    SOURCE_HOMES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(source)
-        .cloned()
-}
-
-/// Record that `source` lives in `home` (`None`: the default home).
-pub fn set_source_home(source: &str, home: Option<&Path>) {
-    let mut map = SOURCE_HOMES.lock().unwrap_or_else(|e| e.into_inner());
-    match home {
-        Some(h) => {
-            map.insert(source.to_string(), h.to_path_buf());
-        }
-        None => {
-            map.remove(source);
-        }
-    }
-}
-
-/// The `[source] lobe` each source declares (LOBE-1), as written in its
-/// `mind.toml`, keyed by source identity (`None`: it declares none). Filled
-/// by every catalog scan from the commit the clone is on, else read once from
-/// the clone [`set_source_clone`] recorded; resolved against the source's home
-/// by [`Paths::source_lobe`].
-type LobeMap = std::collections::BTreeMap<String, Option<String>>;
-static SOURCE_LOBES: std::sync::Mutex<LobeMap> = std::sync::Mutex::new(LobeMap::new());
-
-/// Each registered source's clone directory, for reading its `lobe` when no
-/// scan in this run has recorded it.
-static SOURCE_CLONES: std::sync::Mutex<std::collections::BTreeMap<String, PathBuf>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// Record the `lobe` `source`'s `mind.toml` declares (`None`: none).
-// spec: LOBE-1
-pub fn set_source_lobe(source: &str, lobe: Option<&str>) {
-    let lobe = lobe
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string);
-    SOURCE_LOBES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(source.to_string(), lobe);
-}
-
-/// Record where `source`'s clone is (`Registry::load`).
-pub fn set_source_clone(source: &str, dir: &Path) {
-    SOURCE_CLONES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(source.to_string(), dir.to_path_buf());
-}
-
-fn source_lobe_decl(source: &str) -> Option<String> {
-    if let Some(known) = SOURCE_LOBES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(source)
-    {
-        return known.clone();
-    }
-    let clone = SOURCE_CLONES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(source)
-        .cloned()?;
-    // A `mind.toml` that will not load is reported by the verbs that scan it;
-    // here it declares no lobe.
-    let lobe = crate::mindfile::MindToml::load(&clone)
-        .ok()
-        .flatten()
-        .and_then(|m| m.source.lobe);
-    set_source_lobe(source, lobe.as_deref());
-    lobe
-}
-
-/// The consumer's lobe for each source (LOBE-7), from `meld --lobe`, as
-/// recorded in the registry. Filled by `Registry::load` and by `meld`.
-static CONSUMER_LOBES: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
-
-/// Record the consumer's lobe for `source` (`None`: none).
-// spec: LOBE-7
-pub fn set_consumer_lobe(source: &str, lobe: Option<&str>) {
-    let mut map = CONSUMER_LOBES.lock().unwrap_or_else(|e| e.into_inner());
-    match lobe.map(str::trim).filter(|l| !l.is_empty()) {
-        Some(l) => {
-            map.insert(source.to_string(), l.to_string());
-        }
-        None => {
-            map.remove(source);
-        }
-    }
-}
-
-/// Forget every recorded consumer lobe (`Registry::load`, before it records
-/// the registry's own), so the map never outlives the registry entry.
-pub fn clear_consumer_lobes() {
-    CONSUMER_LOBES
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clear();
-}
-
 thread_local! {
     /// The `--lobe` of a meld or item-link learn in progress (LOBE-7), for
     /// the source it names, before that source's registry entry records it.
@@ -193,19 +76,13 @@ impl Drop for PendingLobeScope {
     }
 }
 
-pub(crate) fn consumer_lobe_decl(source: &str) -> Option<String> {
-    let pending = PENDING_LOBE.with(|c| {
+/// The pending `--lobe` (see [`PendingLobeScope`]) when it names `source`.
+fn pending_lobe(source: &str) -> Option<String> {
+    PENDING_LOBE.with(|c| {
         c.borrow()
             .as_ref()
             .filter(|(s, _)| s == source)
             .map(|(_, l)| l.clone())
-    });
-    pending.or_else(|| {
-        CONSUMER_LOBES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(source)
-            .cloned()
     })
 }
 
@@ -480,9 +357,128 @@ pub struct Paths {
     pub mind_home: PathBuf,
     /// `~/.claude` (or `$CLAUDE_HOME`).
     pub claude_home: PathBuf,
+    /// What the registry knows about each source's placement, shared by every
+    /// clone of these paths; see [`SourceIndex`].
+    index: std::sync::Arc<std::sync::Mutex<SourceIndex>>,
+}
+
+/// Per-source placement facts, keyed by source identity, recorded by
+/// `Registry::load`, `meld`, and the catalog scan, and read wherever only a
+/// source *name* is held (a catalog item, a manifest entry).
+#[derive(Debug, Default)]
+struct SourceIndex {
+    /// The extra mind home each source lives in (HOME-6). A source absent
+    /// from the map lives in the default home. From the file a source was read
+    /// from, or from `meld --home` / `[source] mind-home`.
+    homes: std::collections::BTreeMap<String, PathBuf>,
+    /// The `[source] lobe` each source declares (LOBE-1), as written in its
+    /// `mind.toml` (`None`: it declares none). Filled by every catalog scan
+    /// from the commit the clone is on, else read once from the clone in
+    /// `clones`; resolved against the source's home by [`Paths::source_lobe`].
+    lobes: std::collections::BTreeMap<String, Option<String>>,
+    /// Each registered source's clone directory, for reading its `lobe` when
+    /// no scan in this run has recorded it.
+    clones: std::collections::BTreeMap<String, PathBuf>,
+    /// The consumer's lobe for each source (LOBE-7), from `meld --lobe`, as
+    /// recorded in the registry.
+    consumer_lobes: std::collections::BTreeMap<String, String>,
 }
 
 impl Paths {
+    /// Paths rooted at `mind_home` and `claude_home`, with an empty index.
+    pub fn new(mind_home: PathBuf, claude_home: PathBuf) -> Self {
+        Paths {
+            mind_home,
+            claude_home,
+            index: Default::default(),
+        }
+    }
+
+    fn index(&self) -> std::sync::MutexGuard<'_, SourceIndex> {
+        self.index.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The extra home `source` lives in, or `None` for the default home.
+    pub fn source_home(&self, source: &str) -> Option<PathBuf> {
+        self.index().homes.get(source).cloned()
+    }
+
+    /// Record that `source` lives in `home` (`None`: the default home).
+    pub fn set_source_home(&self, source: &str, home: Option<&Path>) {
+        let mut index = self.index();
+        match home {
+            Some(h) => {
+                index.homes.insert(source.to_string(), h.to_path_buf());
+            }
+            None => {
+                index.homes.remove(source);
+            }
+        }
+    }
+
+    /// Record the `lobe` `source`'s `mind.toml` declares (`None`: none).
+    // spec: LOBE-1
+    pub fn set_source_lobe(&self, source: &str, lobe: Option<&str>) {
+        let lobe = lobe
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string);
+        self.index().lobes.insert(source.to_string(), lobe);
+    }
+
+    /// Record where `source`'s clone is (`Registry::load`).
+    pub fn set_source_clone(&self, source: &str, dir: &Path) {
+        self.index()
+            .clones
+            .insert(source.to_string(), dir.to_path_buf());
+    }
+
+    fn source_lobe_decl(&self, source: &str) -> Option<String> {
+        let clone = {
+            let index = self.index();
+            if let Some(known) = index.lobes.get(source) {
+                return known.clone();
+            }
+            index.clones.get(source).cloned()?
+        };
+        // A `mind.toml` that will not load is reported by the verbs that scan
+        // it; here it declares no lobe.
+        let lobe = crate::mindfile::MindToml::load(&clone)
+            .ok()
+            .flatten()
+            .and_then(|m| m.source.lobe);
+        self.set_source_lobe(source, lobe.as_deref());
+        lobe
+    }
+
+    /// Record the consumer's lobe for `source` (`None`: none).
+    // spec: LOBE-7
+    pub fn set_consumer_lobe(&self, source: &str, lobe: Option<&str>) {
+        let mut index = self.index();
+        match lobe.map(str::trim).filter(|l| !l.is_empty()) {
+            Some(l) => {
+                index
+                    .consumer_lobes
+                    .insert(source.to_string(), l.to_string());
+            }
+            None => {
+                index.consumer_lobes.remove(source);
+            }
+        }
+    }
+
+    /// Forget every recorded consumer lobe (`Registry::load`, before it records
+    /// the registry's own), so the map never outlives the registry entry.
+    pub fn clear_consumer_lobes(&self) {
+        self.index().consumer_lobes.clear();
+    }
+
+    /// The consumer's lobe for `source`: a pending `--lobe` for it, else the
+    /// recorded one.
+    pub(crate) fn consumer_lobe_decl(&self, source: &str) -> Option<String> {
+        pending_lobe(source).or_else(|| self.index().consumer_lobes.get(source).cloned())
+    }
+
     /// Resolve roots from the environment, falling back to the home directory.
     pub fn resolve() -> Result<Self> {
         let mind_home = match std::env::var_os("MIND_HOME") {
@@ -496,10 +492,7 @@ impl Paths {
             Some(p) => PathBuf::from(p),
             None => home()?.join(".claude"),
         };
-        Ok(Self {
-            mind_home,
-            claude_home,
-        })
+        Ok(Self::new(mind_home, claude_home))
     }
 
     /// The additional mind homes (HOME-2): `$MIND_HOMES` (a `:`-separated list)
@@ -696,7 +689,8 @@ impl Paths {
     /// extra home (HOME-6), else the default home.
     // spec: HOME-6
     pub fn home_of(&self, source: &str) -> PathBuf {
-        source_home(source).unwrap_or_else(|| self.mind_home.clone())
+        self.source_home(source)
+            .unwrap_or_else(|| self.mind_home.clone())
     }
 
     /// Resolve a source lobe (LOBE-2): a leading `~` is expanded and a
@@ -762,12 +756,12 @@ impl Paths {
     /// last-scanned `mind.toml`, or `None` when neither names one.
     // spec: LOBE-1 LOBE-2 LOBE-7
     pub fn source_lobe(&self, source: &str) -> Result<Option<PathBuf>> {
-        if let Some(d) = consumer_lobe_decl(source) {
+        if let Some(d) = self.consumer_lobe_decl(source) {
             return self
                 .resolve_lobe(source, &d, &lobe_origin(source, true))
                 .map(Some);
         }
-        source_lobe_decl(source)
+        self.source_lobe_decl(source)
             .map(|d| self.resolve_lobe(source, &d, &lobe_origin(source, false)))
             .transpose()
     }
@@ -890,7 +884,7 @@ impl Paths {
     /// `mind_home.join(store)` resolves either way.
     // spec: HOME-7
     pub fn store_rel_of(&self, source: &str, kind: ItemKind, name: &str) -> String {
-        match source_home(source) {
+        match self.source_home(source) {
             Some(home) => home
                 .join(self.store_rel(kind, name))
                 .to_string_lossy()
@@ -1598,18 +1592,36 @@ mod tests {
     #[test]
     fn pending_lobe_is_scoped_to_its_source() {
         // spec: LOBE-7
+        let paths = Paths::new(PathBuf::from("/mind"), PathBuf::from("/claude"));
         let src = "test/pending/lobe-scope";
-        assert_eq!(consumer_lobe_decl(src), None);
+        assert_eq!(paths.consumer_lobe_decl(src), None);
         {
             let _outer = PendingLobeScope::set(src, "outer");
             {
                 let _inner = PendingLobeScope::set(src, "inner");
-                assert_eq!(consumer_lobe_decl(src).as_deref(), Some("inner"));
-                assert_eq!(consumer_lobe_decl("test/pending/other"), None);
+                assert_eq!(paths.consumer_lobe_decl(src).as_deref(), Some("inner"));
+                assert_eq!(paths.consumer_lobe_decl("test/pending/other"), None);
             }
-            assert_eq!(consumer_lobe_decl(src).as_deref(), Some("outer"));
+            assert_eq!(paths.consumer_lobe_decl(src).as_deref(), Some("outer"));
         }
-        assert_eq!(consumer_lobe_decl(src), None);
+        assert_eq!(paths.consumer_lobe_decl(src), None);
+    }
+
+    /// The source index belongs to the paths it was recorded on (and their
+    /// clones), not to the process: a second set of paths starts empty.
+    #[test]
+    fn the_source_index_is_shared_by_clones_only() {
+        let paths = Paths::new(PathBuf::from("/mind"), PathBuf::from("/claude"));
+        paths.set_source_home("a", Some(Path::new("/extra")));
+        paths.set_consumer_lobe("a", Some("/lobe"));
+        let clone = paths.clone();
+        assert_eq!(clone.source_home("a"), Some(PathBuf::from("/extra")));
+        assert_eq!(clone.consumer_lobe_decl("a").as_deref(), Some("/lobe"));
+        let other = Paths::new(PathBuf::from("/mind"), PathBuf::from("/claude"));
+        assert_eq!(other.source_home("a"), None);
+        assert_eq!(other.consumer_lobe_decl("a"), None);
+        clone.clear_consumer_lobes();
+        assert_eq!(paths.consumer_lobe_decl("a"), None);
     }
 
     /// A command links like an agent or rule (one `.md` under the kind
@@ -1618,10 +1630,7 @@ mod tests {
     #[test]
     fn command_links_under_commands_with_its_effective_name() {
         // spec: CMD-5 CMD-6
-        let paths = Paths {
-            mind_home: PathBuf::from("/mind"),
-            claude_home: PathBuf::from("/claude"),
-        };
+        let paths = Paths::new(PathBuf::from("/mind"), PathBuf::from("/claude"));
         assert_eq!(
             paths
                 .default_link_rel(ItemKind::Command, "review")
@@ -1645,10 +1654,7 @@ mod tests {
     #[test]
     fn workflow_links_under_workflows_with_a_js_extension() {
         // spec: WF-10 WF-22
-        let paths = Paths {
-            mind_home: PathBuf::from("/mind"),
-            claude_home: PathBuf::from("/claude"),
-        };
+        let paths = Paths::new(PathBuf::from("/mind"), PathBuf::from("/claude"));
         assert_eq!(
             paths
                 .default_link_rel(ItemKind::Workflow, "review-changes")
@@ -2068,10 +2074,7 @@ mod tests {
             std::env::remove_var("MIND_AGENT_HOMES");
             std::env::set_var("MIND_POLICY_FILE", &policy_file);
         }
-        let paths = Paths {
-            mind_home,
-            claude_home,
-        };
+        let paths = Paths::new(mind_home, claude_home);
         (paths, base, policy_file, guard)
     }
 
@@ -2274,10 +2277,7 @@ mod tests {
         );
         std::fs::write(mind_home.join("config.toml"), &config_toml).unwrap();
 
-        let paths = Paths {
-            mind_home,
-            claude_home,
-        };
+        let paths = Paths::new(mind_home, claude_home);
         let homes: Vec<PathBuf> = paths
             .agent_homes()
             .unwrap()
@@ -2466,10 +2466,7 @@ mod tests {
             std::env::set_var("MIND_AGENT_HOMES", &env_val);
         }
 
-        let paths = Paths {
-            mind_home,
-            claude_home,
-        };
+        let paths = Paths::new(mind_home, claude_home);
         let homes = paths.agent_homes();
 
         // SAFETY: ENV_LOCK is held.
@@ -2933,10 +2930,7 @@ mod tests {
         )
         .unwrap();
 
-        let paths = Paths {
-            mind_home,
-            claude_home,
-        };
+        let paths = Paths::new(mind_home, claude_home);
         let homes = paths.agent_homes().unwrap();
         assert_eq!(homes.len(), 2);
         assert_eq!(homes[0].path, PathBuf::from("/c/bare"));
@@ -2985,10 +2979,7 @@ mod tests {
         )
         .unwrap();
 
-        let paths = Paths {
-            mind_home,
-            claude_home,
-        };
+        let paths = Paths::new(mind_home, claude_home);
         let homes = paths.agent_homes().unwrap();
         assert_eq!(
             homes.len(),
@@ -3264,10 +3255,7 @@ mod tests {
         std::fs::create_dir_all(&store_abs).unwrap();
         std::fs::write(store_abs.join("SKILL.md"), "---\ndescription: greet\n---\n").unwrap();
 
-        let paths = Paths {
-            mind_home: mind_home.clone(),
-            claude_home: base.join("claude-unused"),
-        };
+        let paths = Paths::new(mind_home.clone(), base.join("claude-unused"));
 
         let item = crate::manifest::InstalledItem {
             kind: ItemKind::Skill,
@@ -3367,10 +3355,7 @@ mod tests {
             format!("mind-homes = [{:?}]\n", extra.display().to_string()),
         )
         .unwrap();
-        let paths = Paths {
-            mind_home: mind_home.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind_home.clone(), base.join("claude"));
 
         let listed = extra.join("store/skill/alpha");
         assert_eq!(
@@ -3410,10 +3395,7 @@ mod tests {
             format!("mind-homes = [{:?}]\n", extra.display().to_string()),
         )
         .unwrap();
-        let paths = Paths {
-            mind_home: mind_home.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind_home.clone(), base.join("claude"));
         assert_eq!(paths.scratch_dir().unwrap(), mind_home.join(".tmp"));
         assert!(
             std::fs::read_dir(mind_home.join(".tmp"))

@@ -420,10 +420,7 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base =
             std::env::temp_dir().join(format!("mind-lock-{}-{n}-{label}", std::process::id()));
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         (paths, base)
     }
 

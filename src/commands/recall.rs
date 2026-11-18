@@ -185,7 +185,7 @@ pub fn recall(
                 // spec: AUP-11
                 let auto = auto_update_token(s, auto_update_cap(policy.as_ref(), s));
                 // spec: HOME-11 -- a source in an extra home names it.
-                let home = match crate::paths::source_home(&s.name) {
+                let home = match paths.source_home(&s.name) {
                     Some(h) => format!(" home:{}", h.display()),
                     None => String::new(),
                 };

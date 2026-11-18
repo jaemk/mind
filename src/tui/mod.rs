@@ -700,10 +700,7 @@ mod tests {
     /// never touch disk, so this is only here to satisfy `handle_key`'s signature.
     fn temp_paths() -> Paths {
         let base = std::env::temp_dir().join(format!("mind-tui-test-{}", std::process::id()));
-        Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        }
+        Paths::new(base.join("mind"), base.join("claude"))
     }
 
     /// `ScanQuiet` mutes the scan's degraded-state warnings while the TUI owns
@@ -976,10 +973,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-tui-mod-dep-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         // Pin the lobe to the isolated claude_home (hermeticity).
         crate::config::Config {
@@ -1086,10 +1080,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-tui-mod-ansi-dep-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![crate::config::LobeEntry::bare(
@@ -1204,10 +1195,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-tui-mod-nodep-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![crate::config::LobeEntry::bare(
@@ -1301,10 +1289,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-tui-mod-err-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![crate::config::LobeEntry::bare(
@@ -1438,10 +1423,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("mind-tui-ns-ok-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         let source_name = meld_plain_source(&paths, &base);
 
         let mut app = app::App::new(String::new(), None, None);
@@ -1488,10 +1470,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-tui-ns-lock-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let _owned = OwnedTemp(base.clone());
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         let source_name = meld_plain_source(&paths, &base);
 
         // Seed an installed item attributed to the source so the lock engages.

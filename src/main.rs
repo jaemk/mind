@@ -598,8 +598,14 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             accept,
         } => {
             // spec: LIFE-55
-            commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
-            commands::sync_with_selector(paths, source.as_deref(), upgrade, yes, accept.accept())
+            let new_items = commands::NewItems::from_flags(skip_new, ignore_new);
+            commands::sync_with_selector(
+                paths,
+                source.as_deref(),
+                upgrade.then_some(new_items),
+                yes,
+                accept.accept(),
+            )
         }
         Command::Upgrade {
             item,
@@ -616,10 +622,6 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             if !json && !dry_run {
                 auto_update::show_unshown(paths);
             }
-            // spec: VER-63
-            commands::set_allow_breaking(allow_breaking);
-            // spec: LIFE-55
-            commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
             // spec: CLI-262 - `dispatch` already resolved a target naming no
             // installed item but a melded source to that `--source` filter.
             commands::upgrade(
@@ -634,6 +636,10 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
                         .as_deref()
                         .map_or(commands::SourceScope::All, commands::SourceScope::Filter),
                     preview: dry_run,
+                    // spec: VER-63
+                    allow_breaking,
+                    // spec: LIFE-55
+                    new_items: commands::NewItems::from_flags(skip_new, ignore_new),
                     ..commands::UpgradeOpts::new(yes && !dry_run, accept)
                 },
             )

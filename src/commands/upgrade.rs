@@ -2,15 +2,6 @@
 
 use super::*;
 
-/// `upgrade --allow-breaking` (VER-63), set once by `main` before dispatch so
-/// the upgrade entry points keep their signatures.
-pub(super) static ALLOW_BREAKING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_allow_breaking(on: bool) {
-    ALLOW_BREAKING.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// What an upgrade pass does with an item new to a whole-tracked source
 /// (LIFE-54) or newly in an enabled profile (PROF-21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -34,27 +25,6 @@ impl NewItems {
         } else {
             NewItems::Install
         }
-    }
-}
-
-/// `--skip-new` / `--ignore-new` on `upgrade` and `sync --upgrade` (LIFE-55),
-/// set once by `main` like [`ALLOW_BREAKING`]. 0 = install, 1 = skip, 2 = ignore.
-static NEW_ITEMS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub fn set_new_items(mode: NewItems) {
-    let v = match mode {
-        NewItems::Install => 0,
-        NewItems::Skip => 1,
-        NewItems::Ignore => 2,
-    };
-    NEW_ITEMS.store(v, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub(super) fn new_items() -> NewItems {
-    match NEW_ITEMS.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => NewItems::Skip,
-        2 => NewItems::Ignore,
-        _ => NewItems::Install,
     }
 }
 
@@ -177,6 +147,12 @@ pub(crate) struct UpgradeOpts<'a> {
     /// `upgrade --dry-run` (CLI-263): report what the pass would do, from the
     /// current checkouts, and change nothing.
     pub(crate) preview: bool,
+    /// `upgrade --allow-breaking` (VER-63): take every in-scope breaking
+    /// release without asking.
+    pub(crate) allow_breaking: bool,
+    /// `--skip-new` / `--ignore-new` on `upgrade` and `sync --upgrade`
+    /// (LIFE-55).
+    pub(crate) new_items: NewItems,
 }
 
 impl<'a> UpgradeOpts<'a> {
@@ -190,6 +166,8 @@ impl<'a> UpgradeOpts<'a> {
             keys: None,
             accept,
             preview: false,
+            allow_breaking: false,
+            new_items: NewItems::Install,
         }
     }
 }
@@ -259,6 +237,8 @@ fn plan_upgrade(paths: &Paths, opts: &UpgradeOpts<'_>) -> Result<UpgradePlan> {
         keys: key_scope,
         accept,
         preview,
+        allow_breaking,
+        new_items: mode,
     } = *opts;
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
@@ -342,8 +322,15 @@ fn plan_upgrade(paths: &Paths, opts: &UpgradeOpts<'_>) -> Result<UpgradePlan> {
             .all(|s| s.as_ref().is_none_or(|s| s.contains(name)))
     };
     // spec: CLI-263 -- a preview lists them, unapplied.
-    let breaking_moves =
-        settle_breaking_moves(paths, &mut registry, &breaking_scope, yes, preview, &out)?;
+    let breaking_moves = settle_breaking_moves(
+        paths,
+        &mut registry,
+        &breaking_scope,
+        yes,
+        !preview && allow_breaking,
+        preview,
+        &out,
+    )?;
     // spec: HOME-15 -- with each clone at its new commit, a source whose own
     // `mind-home` now names another home moves there, and the pass below
     // reinstalls its items in that home (HOME-8) and links them into the lobe
@@ -503,7 +490,6 @@ fn plan_upgrade(paths: &Paths, opts: &UpgradeOpts<'_>) -> Result<UpgradePlan> {
     } else {
         Vec::new()
     };
-    let mode = new_items();
     // spec: PROF-39 -- the profile leftovers of a source that declares
     // `prune`, in the same scope as the profile tracking, computed before it
     // so the departures it reports can say they are being pruned.
@@ -2512,10 +2498,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&base);
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![crate::config::LobeEntry::bare(
