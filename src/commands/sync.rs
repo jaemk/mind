@@ -20,7 +20,7 @@ use super::*;
 /// [`sync_with_selector`] with no selector.
 pub fn sync(
     paths: &Paths,
-    then_upgrade: bool,
+    then_upgrade: Option<NewItems>,
     yes: bool,
     accept: crate::hook::Accept,
 ) -> Result<()> {
@@ -48,11 +48,12 @@ pub(super) fn select_sources(registry: &Registry, sel: &str) -> Result<Vec<Strin
 
 /// `mind sync [source]` — refresh melded source clones and catalogs. With a
 /// `[source]` selector, only matching sources are fetched (CLI-231); with none,
-/// every source is (CLI-50).
+/// every source is (CLI-50). `then_upgrade` is `--upgrade`, carrying its
+/// `--skip-new` / `--ignore-new` mode (LIFE-55).
 pub fn sync_with_selector(
     paths: &Paths,
     source_selector: Option<&str>,
-    then_upgrade: bool,
+    then_upgrade: Option<NewItems>,
     yes: bool,
     accept: crate::hook::Accept,
 ) -> Result<()> {
@@ -598,7 +599,7 @@ pub fn sync_with_selector(
     let mut pruned: Vec<String> = Vec::new();
     let mut version_rows = version_rows;
     let mut breaking_moves: Vec<BreakingMoveJson> = Vec::new();
-    if then_upgrade {
+    if let Some(new_items) = then_upgrade {
         // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
         // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
         // (CLI-169).
@@ -621,6 +622,8 @@ pub fn sync_with_selector(
                 sources: selected.as_deref().map_or(SourceScope::All, |names| {
                     SourceScope::Names(names, source_selector)
                 }),
+                // spec: LIFE-55
+                new_items,
                 ..UpgradeOpts::new(yes, accept)
             },
         )?;

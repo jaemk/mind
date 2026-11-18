@@ -534,17 +534,17 @@ pub(super) fn recommended_for_breaking(pin: &Pin) -> Option<String> {
 /// upgrade through the ordinary pass. `--allow-breaking` accepts them all; on a
 /// terminal without `--yes` or `--json` each gets its own `[y/N]` prompt;
 /// otherwise they are skipped. A `preview` (CLI-263) lists them all as not
-/// applied, changing nothing.
+/// applied, changing nothing; the caller passes `allow` false with it.
 // spec: VER-61 VER-62 VER-63
 pub(super) fn settle_breaking_moves(
     paths: &Paths,
     registry: &mut Registry,
     in_scope: &dyn Fn(&str) -> bool,
     yes: bool,
+    allow: bool,
     preview: bool,
     out: &crate::render::OutputCtx,
 ) -> Result<Vec<BreakingMoveJson>> {
-    let allow = !preview && ALLOW_BREAKING.load(std::sync::atomic::Ordering::Relaxed);
     // `--json` is non-interactive (LIFE-45): a prompt would corrupt its stdout.
     let interactive = !preview && !yes && !out.json && crate::hook::is_tty();
     let mut changed = false;

@@ -121,9 +121,6 @@ pub(super) fn ns_paths() -> (Paths, PathBuf) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let base = std::env::temp_dir().join(format!("mind-ns-set-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let paths = Paths {
-        mind_home: base.join("mind"),
-        claude_home: base.join("claude"),
-    };
+    let paths = Paths::new(base.join("mind"), base.join("claude"));
     (paths, base)
 }

@@ -497,7 +497,7 @@ pub(crate) fn set_lobe(
         paths.resolve_lobe(name, lobe, "--lobe")?;
         Some(lobe.to_string())
     };
-    crate::paths::set_consumer_lobe(name, wanted.as_deref());
+    paths.set_consumer_lobe(name, wanted.as_deref());
     if entry.lobe != wanted {
         entry.lobe = wanted;
         registry.save(paths)?;

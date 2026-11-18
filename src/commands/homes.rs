@@ -275,7 +275,9 @@ fn reinstall_moved_items(
 /// shadowed copy of a member, and puts the clones back when the registry
 /// cannot be saved.
 fn relocate_family(paths: &Paths, name: &str, to: Option<&std::path::Path>) -> Result<Vec<String>> {
-    use crate::paths::{normalize_home, set_source_home, source_home};
+    use crate::paths::normalize_home;
+    let source_home = |s: &str| paths.source_home(s);
+    let set_source_home = |s: &str, h: Option<&std::path::Path>| paths.set_source_home(s, h);
     let out = crate::render::ctx();
     let home_key = |h: Option<&std::path::Path>| normalize_home(h.unwrap_or(&paths.mind_home));
     let target = home_key(to);
@@ -438,7 +440,7 @@ pub(super) fn item_in_other_home(paths: &Paths, item: &crate::manifest::Installe
 /// home, with no `mind-home` of their own in their `mind.toml` or in the
 /// curator's entry for them (HOME-10).
 fn home_followers(paths: &Paths, registry: &Registry, curator: &str) -> Vec<String> {
-    use crate::paths::source_home;
+    let source_home = |s: &str| paths.source_home(s);
     let Some(cur) = registry.find(curator) else {
         return Vec::new();
     };

@@ -1966,10 +1966,7 @@ mod tests {
     }
 
     fn paths_for(base: &Path) -> Paths {
-        Paths {
-            mind_home: base.to_path_buf(),
-            claude_home: base.join("claude"),
-        }
+        Paths::new(base.to_path_buf(), base.join("claude"))
     }
 
     /// Build a registry Source pointing at `clone_dir` and a Paths that sees it.

@@ -1354,7 +1354,7 @@ impl Registry {
         // the home it was read from, so a save writes it back there.
         let mut reg = Self::load_file(&paths.sources_file())?;
         for src in &reg.sources {
-            crate::paths::set_source_home(&src.name, None);
+            paths.set_source_home(&src.name, None);
         }
         for home in paths.extra_homes() {
             let extra = Self::load_file(&home.join("sources.json"))?;
@@ -1370,7 +1370,7 @@ impl Registry {
                     ));
                     continue;
                 }
-                crate::paths::set_source_home(&src.name, Some(&home));
+                paths.set_source_home(&src.name, Some(&home));
                 reg.sources.push(src);
             }
         }
@@ -1378,10 +1378,10 @@ impl Registry {
         // in this run has recorded it.
         // spec: LOBE-7 -- the consumer lobes are exactly the registry's (a
         // `--lobe` in progress lives in its own scope until recorded).
-        crate::paths::clear_consumer_lobes();
+        paths.clear_consumer_lobes();
         for src in &reg.sources {
-            crate::paths::set_source_clone(&src.name, &src.clone_dir(paths));
-            crate::paths::set_consumer_lobe(&src.name, src.lobe.as_deref());
+            paths.set_source_clone(&src.name, &src.clone_dir(paths));
+            paths.set_consumer_lobe(&src.name, src.lobe.as_deref());
         }
         Ok(reg)
     }
@@ -3258,10 +3258,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-sources-ver-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.clone(), base.join("claude"));
         (base, paths)
     }
 

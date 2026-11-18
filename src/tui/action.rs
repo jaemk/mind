@@ -218,10 +218,10 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
             crate::hook::Accept::default(),
             None,
         )?,
-        // spec: TUI-22 -- `then_upgrade: false` here, so the new `yes` param
+        // spec: TUI-22 -- no upgrade pass here, so the `yes` param
         // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
         // (no --upgrade) this action mirrors.
-        ActionKind::Sync => commands::sync(paths, false, false, crate::hook::Accept::default())?,
+        ActionKind::Sync => commands::sync(paths, None, false, crate::hook::Accept::default())?,
         // spec: TUI-72 TUI-73 - `yes: true` so it applies without prompting on
         // stdin. Use the NO-SYNC, KEY-SCOPED upgrade: the confirm modal's
         // pending list was computed from an authoritative (memo-bypassing)
@@ -614,10 +614,7 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("mind-tui-action-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         (paths, TempDir(base))
     }
 
@@ -708,10 +705,7 @@ mod tests {
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
-        let paths_thread = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths_thread = Paths::new(base.join("mind"), base.join("claude"));
 
         // Run sync in background (it acquires exclusive lock).
         let handle = std::thread::spawn(move || {

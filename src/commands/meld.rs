@@ -446,12 +446,12 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             }
         }
         (None, Some(curator)) => crate::paths::MeldHome {
-            home: crate::paths::source_home(curator),
+            home: paths.source_home(curator),
             explicit: false,
         },
         (None, None) => crate::paths::meld_home(),
     };
-    crate::paths::set_source_home(&source.name, meld_home.home.as_deref());
+    paths.set_source_home(&source.name, meld_home.home.as_deref());
     // spec: HOME-15 -- a home the consumer chose is kept on `upgrade`.
     source.chosen_home = meld_home.explicit;
 
@@ -558,7 +558,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             }
         };
         if target != meld_home.home {
-            crate::paths::set_source_home(&source.name, target.as_deref());
+            paths.set_source_home(&source.name, target.as_deref());
             if !is_local {
                 dir = relocate_clone(paths, &source, &dir)?;
             }
@@ -568,7 +568,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     // anything is registered or installed, and the clone is removed. It is
     // checked against the home just settled: the consumer's `--lobe`, which
     // outranks the source's own (LOBE-7), else the source's `lobe`.
-    let consumer_lobe = crate::paths::consumer_lobe_decl(&source.name);
+    let consumer_lobe = paths.consumer_lobe_decl(&source.name);
     let in_effect = match consumer_lobe.as_deref() {
         Some(l) => Some((l, true)),
         None => mindfile
@@ -592,7 +592,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     }
     // spec: HOME-6 -- the sources this one curates default to its home.
     let _home_scope = crate::paths::MeldHomeScope::set(crate::paths::MeldHome {
-        home: crate::paths::source_home(&source.name),
+        home: paths.source_home(&source.name),
         explicit: false,
     });
     // spec: DSC-94 -- B4: a `mind.toml [source].description` is source-

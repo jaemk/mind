@@ -226,10 +226,7 @@ mod tests {
         // spec: TUI-30
         let (base, mind) = temp_base();
         let src = make_source_repo(&base);
-        let paths = Paths {
-            mind_home: mind.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind.clone(), base.join("claude"));
 
         let prev = preview(&paths, src.to_str().unwrap());
         assert!(prev.is_ok(), "preview should succeed: {:?}", prev.err());
@@ -258,10 +255,7 @@ mod tests {
     fn suggested_registry_empty_when_no_sources_melded() {
         // spec: TUI-31
         let (base, mind) = temp_base();
-        let paths = Paths {
-            mind_home: mind,
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind, base.join("claude"));
         let suggestions = suggested_registry(&paths).unwrap();
         assert!(
             suggestions.is_empty(),
@@ -302,10 +296,7 @@ mod tests {
             .unwrap();
 
         // Build paths with the super-source melded.
-        let paths = Paths {
-            mind_home: mind.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind.clone(), base.join("claude"));
         // Manually register the super-source.
         let mut super_source_parsed = parse_spec(super_src.to_str().unwrap()).unwrap();
         super_source_parsed.commit = Some("abc".to_string());
@@ -400,10 +391,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let paths = Paths {
-            mind_home: mind.clone(),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind.clone(), base.join("claude"));
         let mut super_source_parsed = parse_spec(super_src.to_str().unwrap()).unwrap();
         super_source_parsed.commit = Some("abc".to_string());
         let clone_dir = super_source_parsed.clone_dir(&paths);
@@ -444,10 +432,7 @@ mod tests {
     fn preview_invalid_spec_returns_error() {
         // spec: TUI-30
         let (base, mind) = temp_base();
-        let paths = Paths {
-            mind_home: mind,
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(mind, base.join("claude"));
         let result = preview(&paths, "not-a-valid/url-that-has-no-slash");
         // Should fail with some error (parse or git).
         // Either InvalidRepoSpec or a Git error.

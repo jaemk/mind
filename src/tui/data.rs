@@ -843,7 +843,7 @@ fn load_inner(paths: &Paths, refresh: Refresh<'_>) -> Result<Snapshot> {
         source_homes: registry
             .sources
             .iter()
-            .filter_map(|s| Some((s.name.clone(), crate::paths::source_home(&s.name)?)))
+            .filter_map(|s| Some((s.name.clone(), paths.source_home(&s.name)?)))
             .collect(),
         source_profiles,
         // spec: TUI-83
@@ -911,10 +911,7 @@ mod tests {
     fn temp_paths() -> (Paths, std::path::PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("mind-tui-data-{}-{n}", std::process::id()));
-        let paths = Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
+        let paths = Paths::new(base.join("mind"), base.join("claude"));
         (paths, base)
     }
 
