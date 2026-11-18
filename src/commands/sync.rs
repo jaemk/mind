@@ -139,29 +139,26 @@ pub fn sync_with_selector(
                 // sources pushed by a partially-failing meld_recursive can be rolled
                 // back, preventing a subsequent save from persisting a partial entry.
                 let snapshot_len = registry.sources.len();
+                // Not top-level: skip (not error) if a same-URL entry is already
+                // present. No install hook, curator, or item link; provisioned by
+                // policy, not by a curator (STO-82).
                 match meld_recursive(
-                    paths,
-                    &mut registry,
-                    &am.repo,
-                    None,
-                    vec![],
-                    vec![],
-                    false, // no consumer --flat-skills for an auto-melded source
-                    PinRequest::Follow(am.pin.clone()), // POL-55: apply the policy pin verbatim
-                    false, // skip (not error) if a same-URL entry is already present
-                    &mut visited,
-                    Some(policy),
-                    None,                           // auto-meld supplies no install hook
-                    crate::hook::Accept::default(), // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
-                    prefer_ssh,
-                    true, // auto-meld is non-interactive (no collision prompt)
-                    None, // auto-meld has no curator-supplied configuration
-                    &mut sync_skipped,
-                    None, // a policy auto-meld names a repo, never an item link
-                    None, // provisioned by policy, not by a curator (STO-82)
-                    &mut MeldProfiles::None,
-                    false, // spec: DSC-116 -- no one to ask; refuse
-                    false, // spec: DSC-121 -- no consumer flag
+                    &mut MeldState {
+                        paths,
+                        registry: &mut registry,
+                        visited: &mut visited,
+                        policy: Some(policy),
+                        // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
+                        accept: crate::hook::Accept::default(),
+                        prefer_ssh,
+                        skipped: &mut sync_skipped,
+                        accept_newer_mind: false, // spec: DSC-116 -- no one to ask; refuse
+                    },
+                    MeldRequest {
+                        consumer_pin: PinRequest::Follow(am.pin.clone()), // POL-55: apply the policy pin verbatim
+                        yes: true, // auto-meld is non-interactive (no collision prompt)
+                        ..MeldRequest::new(&am.repo, &mut MeldProfiles::None)
+                    },
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -496,29 +493,28 @@ pub fn sync_with_selector(
             let todo_alias = todo.alias.clone();
             let todo_kind = todo.item_kind;
             let todo_curator = todo.curator.clone();
+            // No consumer roots, add-roots (DSC-88: gated, carried via
+            // todo.curated), flat-skills, pin, or install hook on a re-walk.
             match meld_recursive(
-                paths,
-                &mut registry,
-                &todo.spec,
-                todo.alias,
-                vec![],
-                vec![], // spec: DSC-88 -- add-roots is gated; carried via todo.curated below
-                false,  // no consumer --flat-skills on a sync re-walk (curator config supplies it)
-                PinRequest::None,
-                false,
-                &mut visited,
-                policy.as_ref(),
-                None, // a re-walked nested source supplies no install hook
-                crate::hook::Accept::default(), // sync is non-TTY: its hooks take the HOOK-22 skip path
-                prefer_ssh,
-                true, // sync re-walk is non-interactive (no collision prompt)
-                Some(todo.curated),
-                &mut sync_skipped,
-                todo_kind,          // spec: DSC-100
-                Some(todo_curator), // spec: STO-82
-                &mut MeldProfiles::None,
-                false, // spec: DSC-116 -- no one to ask; refuse
-                false, // spec: DSC-121 -- no consumer flag
+                &mut MeldState {
+                    paths,
+                    registry: &mut registry,
+                    visited: &mut visited,
+                    policy: policy.as_ref(),
+                    // sync is non-TTY: its hooks take the HOOK-22 skip path
+                    accept: crate::hook::Accept::default(),
+                    prefer_ssh,
+                    skipped: &mut sync_skipped,
+                    accept_newer_mind: false, // spec: DSC-116 -- no one to ask; refuse
+                },
+                MeldRequest {
+                    alias: todo.alias,
+                    yes: true, // sync re-walk is non-interactive (no collision prompt)
+                    curated: Some(todo.curated),
+                    item_kind: todo_kind,           // spec: DSC-100
+                    curated_by: Some(todo_curator), // spec: STO-82
+                    ..MeldRequest::new(&todo.spec, &mut MeldProfiles::None)
+                },
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -620,14 +616,13 @@ pub fn sync_with_selector(
         // echo the filter that did the matching (M19).
         let pass = upgrade_inner_scoped(
             paths,
-            yes,
-            None,
-            true,
-            selected.as_deref().map_or(SourceScope::All, |names| {
-                SourceScope::Names(names, source_selector)
-            }),
-            None,
-            accept,
+            UpgradeOpts {
+                no_sync: true,
+                sources: selected.as_deref().map_or(SourceScope::All, |names| {
+                    SourceScope::Names(names, source_selector)
+                }),
+                ..UpgradeOpts::new(yes, accept)
+            },
         )?;
         if let Some(result) = pass {
             upgraded = result.installed;

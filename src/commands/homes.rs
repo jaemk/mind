@@ -256,12 +256,12 @@ fn reinstall_moved_items(
         // The meld's own result is the one `--json` document (CLI-217).
         upgrade_inner_scoped(
             paths,
-            yes,
-            None,
-            true,
-            SourceScope::Names(family, None),
-            Some(&keys),
-            accept,
+            UpgradeOpts {
+                no_sync: true,
+                sources: SourceScope::Names(family, None),
+                keys: Some(&keys),
+                ..UpgradeOpts::new(yes, accept)
+            },
         )?;
     }
     Ok(())

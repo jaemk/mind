@@ -86,29 +86,31 @@ pub(crate) fn meld_with_profiles(
         })
         .unwrap_or_else(|_| repo.to_string());
     let mut meld_skipped: Vec<SkippedEntry> = Vec::new();
+    // A top-level meld has no curator or curator configuration, and does not
+    // yet thread --yes (non-TTY always fires NS-45).
     let added = meld_recursive(
-        paths,
-        &mut registry,
-        repo,
-        alias,
-        roots,
-        add_roots,
-        flat_skills,
-        pin,
-        true,
-        &mut visited,
-        policy.as_ref(),
-        install_hook,
-        accept,
-        prefer_ssh,
-        false, // yes: top-level meld does not yet thread --yes (non-TTY always fires NS-45)
-        None,  // a top-level meld has no curator-supplied configuration
-        &mut meld_skipped,
-        item_kind, // spec: CLI-239 -- the consumer's `--kind` for a file link
-        None,      // a top-level meld has no curator
-        profiles,
-        accept_newer_mind,
-        full_history, // spec: DSC-121 -- the named source only, not what it curates
+        &mut MeldState {
+            paths,
+            registry: &mut registry,
+            visited: &mut visited,
+            policy: policy.as_ref(),
+            accept,
+            prefer_ssh,
+            skipped: &mut meld_skipped,
+            accept_newer_mind,
+        },
+        MeldRequest {
+            alias,
+            roots,
+            add_roots,
+            flat_skills,
+            consumer_pin: pin,
+            top_level: true,
+            install_hook,
+            item_kind,    // spec: CLI-239 -- the consumer's `--kind` for a file link
+            full_history, // spec: DSC-121 -- the named source only, not what it curates
+            ..MeldRequest::new(repo, profiles)
+        },
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -243,49 +245,103 @@ pub(crate) fn curated_config_for(
     })
 }
 
+/// State shared by every frame of one [`meld_recursive`] walk: the registry
+/// being built, the cycle guard, the skipped-entry report, and the settings
+/// every nested source inherits from the meld that started the walk.
+pub(crate) struct MeldState<'a> {
+    pub(crate) paths: &'a Paths,
+    pub(crate) registry: &'a mut Registry,
+    /// Cycle guard keyed on `identity|url` (LNK-4).
+    pub(crate) visited: &'a mut HashSet<String>,
+    pub(crate) policy: Option<&'a Policy>,
+    pub(crate) accept: crate::hook::Accept,
+    /// CLI-19: rewrite https remotes to SSH.
+    pub(crate) prefer_ssh: bool,
+    /// Nested entries skipped with a reason (DSC-79).
+    pub(crate) skipped: &'a mut Vec<SkippedEntry>,
+    /// The consumer's `meld --yes` answer to the DSC-116 question, carried to
+    /// the sources this meld curates.
+    pub(crate) accept_newer_mind: bool,
+}
+
+/// One source for [`meld_recursive`] to meld. [`MeldRequest::new`] gives the
+/// defaults of a nested meld (no consumer overrides, not top-level); a caller
+/// sets only the fields it supplies.
+pub(crate) struct MeldRequest<'a, 'p> {
+    pub(crate) repo: &'a str,
+    pub(crate) alias: Option<String>,
+    /// The consumer `--root` override (empty => no override).
+    pub(crate) roots: Vec<String>,
+    pub(crate) add_roots: Vec<String>,
+    pub(crate) flat_skills: bool,
+    /// The caller-supplied pin (CLI flags, or none for a nested source).
+    pub(crate) consumer_pin: PinRequest,
+    /// The user's own meld (errors on a duplicate) rather than a curated
+    /// nested meld (skips a duplicate).
+    pub(crate) top_level: bool,
+    pub(crate) install_hook: Option<String>,
+    /// Mirrors the CLI `--yes` flag (NS-45): forces non-interactive mode (the
+    /// NS-43 collision prompt is skipped and hard-errors instead).
+    pub(crate) yes: bool,
+    /// The curator-supplied configuration from a parent super-source's
+    /// `[discover].sources` entry (DSC-59): a pin, scan roots, and lifecycle
+    /// hooks. Applied only when the nested source ships no `mind.toml` of its
+    /// own (DSC-60); when it does, they are ignored with a warning.
+    pub(crate) curated: Option<CuratedConfig>,
+    /// The consumer's or curator's explicit kind for a file link (CLI-239, DSC-100).
+    pub(crate) item_kind: Option<ItemKind>,
+    /// The curator whose list registered this source (STO-82).
+    pub(crate) curated_by: Option<String>,
+    pub(crate) profiles: &'a mut MeldProfiles<'p>,
+    /// `--full-history` (DSC-121): the named source only, never what it curates.
+    pub(crate) full_history: bool,
+}
+
+impl<'a, 'p> MeldRequest<'a, 'p> {
+    pub(crate) fn new(repo: &'a str, profiles: &'a mut MeldProfiles<'p>) -> Self {
+        MeldRequest {
+            repo,
+            alias: None,
+            roots: vec![],
+            add_roots: vec![],
+            flat_skills: false,
+            consumer_pin: PinRequest::None,
+            top_level: false,
+            install_hook: None,
+            yes: false,
+            curated: None,
+            item_kind: None,
+            curated_by: None,
+            profiles,
+            full_history: false,
+        }
+    }
+}
+
 /// Meld one source and then its nested sources. Returns how many sources were
-/// newly added to the registry. `top_level` distinguishes the user's own meld
-/// (errors on a duplicate) from a curated nested meld (skips a duplicate).
-///
-/// `consumer_pin` is the caller-supplied pin (CLI flags or None for a nested
-/// source that inherits no pin override).
-/// `roots` is the consumer `--root` override (empty => no override).
-///
-/// `curated` carries the curator-supplied configuration from a parent
-/// super-source's `[discover].sources` entry (DSC-59): a follow-branch pin,
-/// scan roots, and lifecycle hooks. These apply only when the nested source
-/// ships no `mind.toml` of its own (DSC-60); when it does, they are ignored with
-/// a warning. `None` for a top-level meld or a nested source with no curator
-/// configuration.
-/// `yes` mirrors the CLI `--yes` flag (NS-45): when true, non-interactive mode
-/// is forced (the NS-43 collision prompt is skipped and hard-errors instead).
-/// `accept_newer_mind` is the consumer's `meld --yes` answer to the DSC-116
-/// question, carried to the sources this meld curates.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn meld_recursive(
-    paths: &Paths,
-    registry: &mut Registry,
-    repo: &str,
-    alias: Option<String>,
-    roots: Vec<String>,
-    add_roots: Vec<String>,
-    flat_skills: bool,
-    consumer_pin: PinRequest,
-    top_level: bool,
-    visited: &mut HashSet<String>,
-    policy: Option<&Policy>,
-    install_hook: Option<String>,
-    accept: crate::hook::Accept,
-    prefer_ssh: bool,
-    yes: bool,
-    curated: Option<CuratedConfig>,
-    skipped: &mut Vec<SkippedEntry>,
-    item_kind: Option<ItemKind>,
-    curated_by: Option<String>,
-    profiles: &mut MeldProfiles<'_>,
-    accept_newer_mind: bool,
-    full_history: bool,
-) -> Result<usize> {
+/// newly added to the registry.
+pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -> Result<usize> {
+    let paths = st.paths;
+    let policy = st.policy;
+    let accept = st.accept;
+    let prefer_ssh = st.prefer_ssh;
+    let accept_newer_mind = st.accept_newer_mind;
+    let MeldRequest {
+        repo,
+        alias,
+        roots,
+        add_roots,
+        flat_skills,
+        consumer_pin,
+        top_level,
+        install_hook,
+        yes,
+        curated,
+        item_kind,
+        curated_by,
+        profiles,
+        full_history,
+    } = req;
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
     // spec: DSC-121 -- the consumer's `--full-history`, honored at the clone
@@ -348,11 +404,11 @@ pub(super) fn meld_recursive(
     // on identity + URL: item-link instances share their repo's URL but are
     // distinct sources (LNK-4), while a same-name re-spec still reaches the
     // registry check below for its "already melded" warning.
-    if !visited.insert(format!("{}|{}", source.name, source.url)) {
+    if !st.visited.insert(format!("{}|{}", source.name, source.url)) {
         return Ok(0);
     }
 
-    if let Some(existing) = registry.find(&source.name) {
+    if let Some(existing) = st.registry.find(&source.name) {
         if top_level {
             return Err(MindError::SourceExists {
                 name: source.name.clone(),
@@ -1147,7 +1203,8 @@ pub(super) fn meld_recursive(
             // base identity, not the bare base itself: when every pre-existing
             // instance is aliased, the bare `host/owner/repo` never appears in the
             // registry and is not a name `unmeld` (or anything else) can resolve.
-            let existing: Vec<&str> = registry
+            let existing: Vec<&str> = st
+                .registry
                 .sources
                 .iter()
                 .filter(|s| s.base_identity() == base)
@@ -1280,7 +1337,7 @@ pub(super) fn meld_recursive(
     // spec: LNK-8 -- an item-link instance registers no nested sources: the
     // [discover].sources and marketplace-external walks below are skipped.
     let is_link = source.item_path.is_some();
-    registry.sources.push(source);
+    st.registry.sources.push(source);
 
     let mut added = 1;
     // DSC-80: count nested entries that failed to register for a non-auth reason,
@@ -1327,7 +1384,7 @@ pub(super) fn meld_recursive(
                         .unwrap_or_else(|| paths.sources_dir())
                         .display()
                 );
-                skipped.push(SkippedEntry {
+                st.skipped.push(SkippedEntry {
                     source: entry.source.clone(),
                     reason: "unresolvable_local_path".into(),
                 });
@@ -1347,31 +1404,21 @@ pub(super) fn meld_recursive(
             let curated = curated_config_for(entry, &toml_path)?;
             // Nested sources from a curated super-source get no consumer pin or
             // root override; the curator config (when applied) supplies them.
+            // No consumer roots, add-roots (DSC-88: the curator's is gated),
+            // flat-skills, pin, install hook, or --yes for a nested source; it
+            // inherits the walk's SSH preference and DSC-116 answer.
             match meld_recursive(
-                paths,
-                registry,
-                &entry.source,
-                entry.effective_alias(), // spec: DSC-78 — prefer `namespace`, fall back to `as`
-                vec![],                  // no consumer roots for nested sources
-                vec![], // spec: DSC-88 -- no consumer add-root; curator's add-roots is gated above
-                false,  // no consumer --flat-skills for nested sources (curator config supplies it)
-                PinRequest::None, // no consumer pin for nested sources
-                false,
-                visited,
-                policy,
-                None, // no consumer install hook for nested sources
-                accept,
-                prefer_ssh, // nested sources inherit the SSH preference
-                false,      // nested sources inherit non-interactive mode but not --yes
-                Some(curated),
-                skipped,
-                // spec: DSC-100 -- the entry's own `kind =`, for an item-link entry.
-                entry_kind,
-                // spec: STO-82 -- provenance for `curate` (CUR-7).
-                Some(super_source_name.clone()),
-                &mut MeldProfiles::Curated(entry), // spec: HOOK-142
-                accept_newer_mind,                 // spec: DSC-116
-                false, // spec: DSC-121 -- --full-history names one source
+                st,
+                MeldRequest {
+                    alias: entry.effective_alias(), // spec: DSC-78 -- prefer `namespace`, fall back to `as`
+                    curated: Some(curated),
+                    // spec: DSC-100 -- the entry's own `kind =`, for an item-link entry.
+                    item_kind: entry_kind,
+                    // spec: STO-82 -- provenance for `curate` (CUR-7).
+                    curated_by: Some(super_source_name.clone()),
+                    // spec: HOOK-142
+                    ..MeldRequest::new(&entry.source, &mut MeldProfiles::Curated(entry))
+                },
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1393,7 +1440,7 @@ pub(super) fn meld_recursive(
                     // clone failure. If the entry is already in the registry, it
                     // cloned successfully and the failure came from a descendant;
                     // propagate it unchanged so it is not misattributed to this entry.
-                    if registry.find(&entry_name).is_some() {
+                    if st.registry.find(&entry_name).is_some() {
                         return Err(e);
                     }
                     let Some(cfg) = &entry.on_auth_failure else {
@@ -1405,7 +1452,7 @@ pub(super) fn meld_recursive(
                         eprintln!("{line}");
                     }
                     if cfg.action == AuthFailureAction::Skip {
-                        skipped.push(SkippedEntry {
+                        st.skipped.push(SkippedEntry {
                             source: entry_name,
                             reason: "auth_failure".into(),
                         });
@@ -1439,13 +1486,13 @@ pub(super) fn meld_recursive(
                     // The primary's own clone failure exits before this loop is
                     // reached (parse/clone of the primary happens in the top-level
                     // meld_recursive call), so this arm only sees nested failures.
-                    if registry.find(&entry_name).is_some() {
+                    if st.registry.find(&entry_name).is_some() {
                         return Err(e);
                     }
                     for line in clone_failure_lines(&entry_name, &e) {
                         eprintln!("{line}");
                     }
-                    skipped.push(SkippedEntry {
+                    st.skipped.push(SkippedEntry {
                         source: entry_name,
                         reason: nested_skip_reason(&e),
                     });
@@ -1468,7 +1515,7 @@ pub(super) fn meld_recursive(
                     spec.apply_alias(entry.effective_alias());
                     true
                 }
-                && let Some(nested_src) = registry.find(&spec.name)
+                && let Some(nested_src) = st.registry.find(&spec.name)
             {
                 let nested_items = catalog::scan(paths, &single(nested_src))?;
                 for item_ref in refs {
@@ -1533,29 +1580,13 @@ pub(super) fn meld_recursive(
             // Recurse exactly like [discover].sources: cycle-safe
             // via visited, no consumer pin or roots, no install hook.
             match meld_recursive(
-                paths,
-                registry,
-                &repo_spec,
-                Some(entry_name.clone()),
-                vec![],
-                vec![],
-                false,
-                PinRequest::None, // no consumer pin
-                false,            // nested, not top-level
-                visited,
-                policy,
-                None, // no install hook override
-                accept,
-                prefer_ssh,
-                false, // marketplace nested sources inherit non-interactive
-                None,  // no curator config
-                skipped,
-                None, // a marketplace entry is a repo, never an item link
-                // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
-                Some(super_source_name.clone()),
-                &mut MeldProfiles::None,
-                accept_newer_mind, // spec: DSC-116
-                false,             // spec: DSC-121 -- --full-history names one source
+                st,
+                MeldRequest {
+                    alias: Some(entry_name.clone()),
+                    // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
+                    curated_by: Some(super_source_name.clone()),
+                    ..MeldRequest::new(&repo_spec, &mut MeldProfiles::None)
+                },
             ) {
                 Ok(n) => {
                     added += n;
@@ -1573,7 +1604,8 @@ pub(super) fn meld_recursive(
                             sub_spec.apply_alias(Some(entry_name.clone()));
                             true
                         }
-                        && let Some(sub) = registry
+                        && let Some(sub) = st
+                            .registry
                             .sources
                             .iter_mut()
                             .find(|s| s.name == sub_spec.name)
@@ -1613,13 +1645,13 @@ pub(super) fn meld_recursive(
                         .unwrap_or_else(|_| entry_name.clone());
                     // spec: DSC-79/DSC-70 -- a failure after the sub-source is
                     // already registered originates from a descendant; propagate.
-                    if registry.find(&sub_name).is_some() {
+                    if st.registry.find(&sub_name).is_some() {
                         return Err(e);
                     }
                     for line in clone_failure_lines(&sub_name, &e) {
                         eprintln!("{line}");
                     }
-                    skipped.push(SkippedEntry {
+                    st.skipped.push(SkippedEntry {
                         source: sub_name,
                         reason: nested_skip_reason(&e),
                     });
@@ -1639,7 +1671,7 @@ pub(super) fn meld_recursive(
     // separate hard error handled before the nested loop.
     if nested_clone_failures > 0
         && added == 1
-        && let Some(primary) = registry.find(&super_source_name)
+        && let Some(primary) = st.registry.find(&super_source_name)
         // spec: CLI-213 -- a single-source lookup, so it must not degrade: a
         // `LinkedSourceGone` primary would scan as empty here and be reported as
         // "every nested source failed and the curator has nothing of its own",
@@ -2669,29 +2701,29 @@ pub(crate) fn meld_curated_entry(
         .iter()
         .map(|s| format!("{}|{}", s.name, s.url))
         .collect();
+    // The curator's directive supplies the pin (DSC-65); there is no consumer
+    // install hook or --full-history (DSC-121).
     meld_recursive(
-        paths,
-        registry,
-        &entry.source,
-        entry.effective_alias(), // spec: DSC-78
-        vec![],
-        vec![],
-        false,
-        PinRequest::None, // the curator's directive supplies the pin (DSC-65)
-        false,            // nested, not top-level
-        &mut visited,
-        policy,
-        None, // no consumer install hook
-        accept,
-        prefer_ssh,
-        true, // non-interactive: `curate` has already taken the user's decision
-        Some(curated),
-        skipped,
-        item_kind,
-        Some(curator.to_string()),         // spec: STO-82
-        &mut MeldProfiles::Curated(entry), // spec: HOOK-142
-        false,                             // spec: DSC-116 -- no one to ask; refuse
-        false,                             // spec: DSC-121 -- no consumer flag
+        &mut MeldState {
+            paths,
+            registry,
+            visited: &mut visited,
+            policy,
+            accept,
+            prefer_ssh,
+            skipped,
+            accept_newer_mind: false, // spec: DSC-116 -- no one to ask; refuse
+        },
+        MeldRequest {
+            alias: entry.effective_alias(), // spec: DSC-78
+            // Non-interactive: `curate` has already taken the user's decision.
+            yes: true,
+            curated: Some(curated),
+            item_kind,
+            curated_by: Some(curator.to_string()), // spec: STO-82
+            // spec: HOOK-142
+            ..MeldRequest::new(&entry.source, &mut MeldProfiles::Curated(entry))
+        },
     )
 }
 
