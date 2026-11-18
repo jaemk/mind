@@ -203,7 +203,7 @@ pub fn is_tty() -> bool {
     if NON_INTERACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    match std::env::var_os("MIND_TTY") {
+    match crate::settings::Env.tty() {
         Some(v) => tty_override(&v),
         None => std::io::stdin().is_terminal(),
     }
@@ -690,7 +690,7 @@ fn run_hook_framed(
         .envs(env.vars())
         // spec: HOOK-144 -- a `mind` the hook starts must not wait on the
         // lock this process holds.
-        .env(crate::lock::IN_HOOK_ENV, "1")
+        .env(crate::settings::MIND_IN_HOOK, "1")
         .current_dir(clone_dir)
         .stdin(Stdio::null());
     // spec: HOOK-171 -- a Ctrl-C reaches the hook (same process group) and

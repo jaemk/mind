@@ -63,7 +63,6 @@ use std::io::Write;
 use serde::Serialize;
 
 use crate::catalog::{self, CatalogItem};
-use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
 use crate::git;
 use crate::install;

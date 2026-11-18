@@ -693,10 +693,9 @@ fn ancestors_confined(path: &Path, root: &Path) -> bool {
 // Crash injection (LIFE-63)
 // ---------------------------------------------------------------------------
 
-/// Test-only fault injection (LIFE-63): with `MIND_TEST_CRASH_AT=<n>`, the
-/// process exits abruptly (no destructors, no cleanup) at the n-th journal
-/// transition, as if it were killed there. Debug builds only.
-pub(crate) const CRASH_ENV: &str = "MIND_TEST_CRASH_AT";
+// Test-only fault injection (LIFE-63): with `MIND_TEST_CRASH_AT=<n>`
+// (`Env::crash_at`), the process exits abruptly (no destructors, no cleanup) at
+// the n-th journal transition, as if it were killed there. Debug builds only.
 /// The exit status of an injected crash.
 pub(crate) const CRASH_STATUS: i32 = 86;
 
@@ -704,7 +703,7 @@ pub(crate) const CRASH_STATUS: i32 = 86;
 fn crash_point() {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     static AT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let Some(at) = *AT.get_or_init(|| std::env::var(CRASH_ENV).ok()?.parse().ok()) else {
+    let Some(at) = *AT.get_or_init(|| crate::settings::Env.crash_at()) else {
         return;
     };
     if COUNT.fetch_add(1, Ordering::SeqCst) + 1 == at {

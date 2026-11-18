@@ -434,13 +434,13 @@ fn resolve_absorb_dest(
     }
 
     // ABS-2: MIND_ABSORB_TO env var is next.
-    if let Some(p) = std::env::var_os("MIND_ABSORB_TO") {
+    if let Some(p) = paths.settings().env().absorb_to() {
         let path = expand_tilde(&p.to_string_lossy());
         return Ok((path, false));
     }
 
     // ABS-2: absorb_to in config.toml.
-    let config = Config::load(paths)?;
+    let config = paths.settings().config()?;
     if let Some(p) = config.absorb_to {
         let path = expand_tilde(&p);
         return Ok((path, false));
@@ -495,10 +495,10 @@ fn resolve_absorb_dest(
 fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Result<()> {
     if yes {
         // --yes skips the prompt; save automatically.
-        let mut config = Config::load(paths)?;
+        let mut config = paths.settings().config()?;
         config.absorb_to = Some(dest.to_string_lossy().into_owned());
         paths.ensure_layout()?;
-        config.save(paths)?;
+        paths.settings().save_config(&config)?;
         return Ok(());
     }
     if !crate::hook::is_tty() {
@@ -510,10 +510,10 @@ fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Res
         "Save '{}' as absorb_to in config.toml?",
         dest.display()
     ))? {
-        let mut config = Config::load(paths)?;
+        let mut config = paths.settings().config()?;
         config.absorb_to = Some(dest.to_string_lossy().into_owned());
         paths.ensure_layout()?;
-        config.save(paths)?;
+        paths.settings().save_config(&config)?;
         println!("Saved absorb_to = '{}'", dest.display());
     }
     Ok(())
@@ -835,7 +835,7 @@ mod tests {
         offer_save_absorb_to(&paths, &dest, true).expect("offer_save_absorb_to");
 
         // Config now exists and records absorb_to = the chosen dest.
-        let cfg = Config::load(&paths).expect("load config");
+        let cfg = paths.settings().config().expect("load config");
         assert_eq!(
             cfg.absorb_to.as_deref(),
             Some(dest.to_string_lossy().as_ref()),

@@ -65,9 +65,9 @@ pub fn sync_with_selector(
         crate::resolve::validate_source_selector(sel)?;
     }
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     // CLI-19: auto-meld honors the user's SSH preference too.
-    let prefer_ssh = Config::load(paths)?.ssh;
+    let prefer_ssh = paths.settings().config()?.ssh;
     // spec: LIFE-53 -- before the fetch, as `upgrade` does.
     record_whole_sources(paths, None)?;
     let mut registry = Registry::load(paths)?;

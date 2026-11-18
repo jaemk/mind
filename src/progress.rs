@@ -343,9 +343,8 @@ fn truncate_to_width(s: &str, max: usize) -> String {
 /// The width the spinner line fits in: `COLUMNS` when set to a number, else
 /// the width of the terminal on stderr, else 80.
 fn stderr_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
+    crate::settings::Env
+        .columns()
         .or_else(|| columns_of(std::io::stderr()))
         .unwrap_or(80)
         .max(20)
@@ -376,14 +375,15 @@ static GLOBAL: OnceLock<Progress> = OnceLock::new();
 /// Turn progress on for this process when the flags and environment allow it
 /// (PRG-2), and start the redraw ticker. Call once, early in `main`.
 pub fn init(json: bool, no_progress: bool, ascii: bool) {
+    let env = crate::settings::Env;
     let stderr_tty = std::io::stderr().is_terminal();
     let inputs = Inputs {
-        setting: parse_setting(std::env::var("MIND_PROGRESS").ok().as_deref()),
+        setting: parse_setting(env.progress().as_deref()),
         no_progress,
         json,
         stderr_tty,
-        term_dumb: std::env::var("TERM").is_ok_and(|t| t == "dumb"),
-        ci: is_ci(std::env::var("CI").ok().as_deref()),
+        term_dumb: env.term_dumb(),
+        ci: is_ci(env.ci().as_deref()),
     };
     let Some(delay) = decide(&inputs) else {
         return;
@@ -391,7 +391,7 @@ pub fn init(json: bool, no_progress: bool, ascii: bool) {
     let cfg = Config {
         delay,
         unicode: !ascii && crate::render::detect_utf8_locale(),
-        color: !ascii && stderr_tty && std::env::var_os("NO_COLOR").is_none(),
+        color: !ascii && stderr_tty && !env.no_color(),
         // Off a terminal (`always`) the width cannot change; resolve it once.
         width: (!stderr_tty).then(stderr_width),
     };

@@ -484,7 +484,7 @@ pub fn planned<S: AsRef<str>>(
         PlanWhen::Pending => Manifest::load(paths).ok(),
         PlanWhen::Touched | PlanWhen::Emptied => None,
     };
-    let policy = crate::policy::Policy::load().ok().flatten();
+    let policy = paths.settings().policy().ok().flatten();
     let wanted: std::collections::BTreeSet<String> = sources
         .into_iter()
         .map(|s| s.as_ref().to_string())
@@ -561,7 +561,7 @@ pub fn settle(
 ) -> Result<()> {
     let after = snapshot(paths);
     let registry = Registry::load(paths)?;
-    let policy = crate::policy::Policy::load().ok().flatten();
+    let policy = paths.settings().policy().ok().flatten();
     for source in &registry.sources {
         let touched = before.source(&source.name) != after.source(&source.name);
         let in_scope = match scope {

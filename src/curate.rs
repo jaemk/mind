@@ -16,12 +16,10 @@ use serde::Serialize;
 
 use crate::catalog;
 use crate::commands::{self, InstallFlow, PinRequest, SkippedEntry};
-use crate::config::Config;
 use crate::error::{MindError, Result};
 use crate::manifest::Manifest;
 use crate::mindfile::{MindToml, NestedSource};
 use crate::paths::Paths;
-use crate::policy::Policy;
 use crate::sanitize::strip_ansi;
 use crate::source::{Pin, Registry, Source, parse_spec_quiet};
 
@@ -630,8 +628,8 @@ fn apply(
                 toml_path,
                 entry,
             } => {
-                let policy = Policy::load()?;
-                let prefer_ssh = Config::load(paths)?.ssh;
+                let policy = paths.settings().policy()?;
+                let prefer_ssh = paths.settings().config()?.ssh;
                 let mut registry = Registry::load(paths)?;
                 let added = commands::meld_curated_entry(
                     paths,

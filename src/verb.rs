@@ -157,23 +157,12 @@ pub(crate) fn probe_launches_tui(no_tui: bool, json: bool, ascii: bool) -> bool 
     !no_tui && !json && !ascii && utf8_locale() && std::io::stdout().is_terminal()
 }
 
-/// Whether the active locale advertises UTF-8 (TUI-71). Checks `LC_ALL`,
-/// `LC_CTYPE`, `LANG` in that order (first set wins); returns `false` when none
-/// is set (a conservative ASCII default). Mirrors `render::detect_utf8_locale`,
-/// which is private to that module; kept here so the probe launch gate does not
-/// depend on the color/glyph capability context (which also folds in `NO_COLOR`,
-/// a signal that must NOT block the TUI -- TUI-65 renders it monochrome).
+/// Whether the active locale advertises UTF-8 (TUI-71). Read straight from the
+/// locale rather than the color/glyph capability context, which also folds in
+/// `NO_COLOR`, a signal that must NOT block the TUI (TUI-65 renders it
+/// monochrome).
 pub(crate) fn utf8_locale() -> bool {
-    for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
-        if let Some(val) = std::env::var_os(var) {
-            let lower = val.to_string_lossy().to_lowercase();
-            if lower.is_empty() {
-                continue;
-            }
-            return lower.contains("utf-8") || lower.contains("utf8");
-        }
-    }
-    false
+    crate::settings::Env.utf8_locale()
 }
 
 /// Whether the command only previews (`--dry-run`): it then refuses to run

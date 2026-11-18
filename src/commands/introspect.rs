@@ -51,7 +51,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     let mut repaired_vanished_lobes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     {
-        let cfg_result = Config::load(paths);
+        let cfg_result = paths.settings().config();
         if let Ok(mut cfg) = cfg_result
             && !cfg.lobes.is_empty()
         {
@@ -95,7 +95,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                     };
                     lobe.reachable()
                 });
-                cfg.save(paths)?;
+                paths.settings().save_config(&cfg)?;
                 repaired.push("pruned vanished lobe(s) from config".to_string());
             }
         }
@@ -112,7 +112,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // reads it as a fallback), so it is advice, not an issue: it never counts
     // toward the summary and `--fix` leaves it alone.
     let mut notes: Vec<Issue> = Vec::new();
-    if let Ok(cfg) = Config::load(paths) {
+    if let Ok(cfg) = paths.settings().config() {
         for entry in &cfg.lobes {
             let path = std::path::Path::new(entry.path());
             if path.file_name().is_some_and(|n| n == ".windsurf")
@@ -142,7 +142,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // that lobe in place of the default one.
     // An item kept after its source was unmelded (`--keep-items`) is checked
     // against the lobe it recorded, unless a policy lobe lock rules (LOBE-4).
-    let lobes_locked = crate::policy::Policy::load()?.is_some_and(|p| p.lobes_lock());
+    let lobes_locked = paths.settings().policy()?.is_some_and(|p| p.lobes_lock());
     let live_lobes_for = |it: &crate::manifest::InstalledItem| -> Result<Vec<crate::paths::Lobe>> {
         let (own, lobes) = match (registry.find(&it.source), &it.lobe) {
             (None, Some(recorded)) if !lobes_locked => {

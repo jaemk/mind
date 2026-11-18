@@ -49,7 +49,7 @@ pub(super) fn parse_max_parallel_fetches(raw: Option<&str>) -> usize {
 /// The most source fetches `refresh_sources` runs at once
 /// (`MIND_MAX_PARALLEL_FETCHES`, default 8).
 fn max_parallel_fetches() -> usize {
-    parse_max_parallel_fetches(std::env::var("MIND_MAX_PARALLEL_FETCHES").ok().as_deref())
+    parse_max_parallel_fetches(crate::settings::Env.max_parallel_fetches().as_deref())
 }
 
 /// [`refresh_source`] for each of `sources`, fetching up to

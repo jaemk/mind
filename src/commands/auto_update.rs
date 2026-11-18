@@ -39,8 +39,8 @@ pub(super) fn auto_update_json(
 
 /// The managed policy, for showing auto-update levels (AUP-30). A policy that
 /// fails to load is reported by the verbs that enforce it, not here.
-pub(super) fn policy_for_display() -> Option<Policy> {
-    Policy::load().ok().flatten()
+pub(super) fn policy_for_display(paths: &Paths) -> Option<Policy> {
+    paths.settings().policy().ok().flatten()
 }
 
 /// The managed policy's cap on `source`'s auto-update level (AUP-30): its
@@ -392,7 +392,7 @@ pub fn auto_update_run(
         crate::hook::force_non_interactive();
         git::set_noninteractive(true);
 
-        let policy = Policy::load()?;
+        let policy = paths.settings().policy()?;
         let manifest = Manifest::load(paths)?;
         let mut registry = Registry::load(paths)?;
         let mut report = Report {
@@ -599,7 +599,8 @@ pub fn config_auto_update(paths: &Paths, on: bool, every: &str) -> Result<()> {
     let out = crate::render::ctx();
     if on {
         crate::auto_update::parse_duration(every)?;
-        if Policy::load()?.and_then(|p| p.auto_update_cap()) == Some(crate::auto_update::Level::Off)
+        if paths.settings().policy()?.and_then(|p| p.auto_update_cap())
+            == Some(crate::auto_update::Level::Off)
         {
             return Err(MindError::AutoUpdateForbidden);
         }

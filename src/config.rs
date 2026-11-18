@@ -5,7 +5,6 @@ use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ItemKind, MindError, Result};
-use crate::paths::Paths;
 
 /// One agent home ("lobe") in the config, optionally carrying a `kinds` filter
 /// (HARN-1). A lobe with no filter (`kinds == None`) admits all linkable kinds,
@@ -273,9 +272,7 @@ impl<'de> Deserialize<'de> for HookLogSetting {
     }
 }
 
-/// The environment variable that sets the metadata cap (DSC-104), between the
-/// `--max-metadata-size` flag and the config key in precedence.
-pub const MAX_METADATA_SIZE_ENV: &str = "MIND_MAX_METADATA_SIZE";
+use crate::settings::MIND_MAX_METADATA_SIZE;
 
 /// Resolve the metadata size cap from its three origins, highest precedence
 /// first: the `--max-metadata-size` flag, `MIND_MAX_METADATA_SIZE`, then the
@@ -323,7 +320,7 @@ impl MetadataLimitOrigin {
     pub fn label(&self) -> &'static str {
         match self {
             MetadataLimitOrigin::Flag(_) => "--max-metadata-size",
-            MetadataLimitOrigin::Env(_) => MAX_METADATA_SIZE_ENV,
+            MetadataLimitOrigin::Env(_) => MIND_MAX_METADATA_SIZE,
             MetadataLimitOrigin::Config(_) => "the 'max-metadata-size' config key",
             MetadataLimitOrigin::Default => "the built-in default",
         }
@@ -409,30 +406,12 @@ pub fn zero_turns_cap_off(raw: &str) -> bool {
     !digits.is_empty() && digits.chars().all(|c| c == '0')
 }
 
+#[cfg(test)]
 impl Config {
-    /// Load `config.toml` from the mind home, returning defaults if absent.
-    pub fn load(paths: &Paths) -> Result<Config> {
-        let file = paths.config_file();
-        match std::fs::read_to_string(&file) {
-            Ok(text) => toml::from_str(&text).map_err(|e| MindError::ConfigToml {
-                path: file.clone(),
-                msg: e.to_string(),
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(e) => Err(MindError::io(&file, e)),
-        }
-    }
-
-    /// Write the config back to `config.toml`, creating the mind home if needed.
-    pub fn save(&self, paths: &Paths) -> Result<()> {
-        std::fs::create_dir_all(&paths.mind_home)
-            .map_err(|e| MindError::io(&paths.mind_home, e))?;
-        let file = paths.config_file();
-        let text = toml::to_string(self).map_err(|e| MindError::TomlWrite {
-            path: file.clone(),
-            source: e,
-        })?;
-        Paths::atomic_write(&file, text.as_bytes())
+    /// [`crate::settings::Settings::save_config`], chained onto a fixture's
+    /// struct literal.
+    pub fn save(&self, paths: &crate::paths::Paths) -> Result<()> {
+        paths.settings().save_config(self)
     }
 }
 
@@ -501,7 +480,7 @@ mod tests {
             )
         );
         let err = resolve_metadata_limit_detail(None, Some("nope"), None).unwrap_err();
-        assert!(err.to_string().contains(MAX_METADATA_SIZE_ENV), "{err}");
+        assert!(err.to_string().contains(MIND_MAX_METADATA_SIZE), "{err}");
     }
 
     /// Every zero-valued spelling is flagged as turning the cap off by
@@ -540,7 +519,7 @@ mod tests {
                 Some("3MiB"),
                 "--max-metadata-size",
             ),
-            (None, Some("nope"), Some("3MiB"), MAX_METADATA_SIZE_ENV),
+            (None, Some("nope"), Some("3MiB"), MIND_MAX_METADATA_SIZE),
             (None, None, Some("huge"), "max-metadata-size"),
         ] {
             let err = resolve_metadata_limit(flag, env, cfg)
@@ -664,7 +643,7 @@ mod tests {
 
         let paths = Paths::new(tmp.clone(), PathBuf::from("/tmp/claude-unused"));
 
-        let err = Config::load(&paths).unwrap_err();
+        let err = paths.settings().config().unwrap_err();
 
         // Must be the ConfigToml variant, not Toml.
         assert!(
@@ -700,7 +679,7 @@ mod tests {
 
         let paths = Paths::new(tmp.clone(), PathBuf::from("/tmp/claude-unused"));
 
-        let err = Config::load(&paths).unwrap_err();
+        let err = paths.settings().config().unwrap_err();
 
         assert!(
             matches!(err, MindError::ConfigToml { .. }),

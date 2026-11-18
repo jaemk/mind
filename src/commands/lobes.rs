@@ -80,7 +80,7 @@ pub fn lobe_add_resolved(
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing. Load the policy first so the refusal precedes any config write.
-    if let Some(policy) = Policy::load()?
+    if let Some(policy) = paths.settings().policy()?
         && policy.lobes_lock()
     {
         return Err(lobes_locked_error("add"));
@@ -195,7 +195,7 @@ pub fn lobe_add_resolved(
         path: path_str.clone(),
         kinds: lobe.kinds.clone(),
     };
-    let mut cfg = Config::load(paths)?;
+    let mut cfg = paths.settings().config()?;
     if cfg.lobes.iter().any(|e| e.path() == path_str) {
         if out.json {
             return print_json(&MutationResult::new("lobe-add", &path_str, "no-op"));
@@ -213,7 +213,7 @@ pub fn lobe_add_resolved(
         }
     }
     cfg.lobes.push(entry.clone());
-    cfg.save(paths)?;
+    paths.settings().save_config(&cfg)?;
 
     // Determine if this is a project-scoped lobe for gitignore guidance.
     let is_project_scope =
@@ -254,7 +254,7 @@ pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
 pub fn lobe_list(paths: &Paths) -> Result<()> {
     let out = crate::render::ctx();
     paths.ensure_config()?;
-    let cfg = Config::load(paths)?;
+    let cfg = paths.settings().config()?;
     if out.json {
         if cfg.lobes.is_empty() {
             let default = crate::config::LobeEntry::bare(paths.claude_home.display().to_string());
@@ -272,8 +272,8 @@ pub fn lobe_list(paths: &Paths) -> Result<()> {
     // POL-40: under a managed lobe lock, `Paths::agent_homes` ignores
     // $MIND_AGENT_HOMES, so the override note would be false. Suppress it when a
     // policy is in effect and lobes are locked; otherwise behavior is unchanged.
-    let lobes_locked = matches!(Policy::load()?, Some(p) if p.lobes_lock());
-    if show_override_note(std::env::var_os("MIND_AGENT_HOMES").is_some(), lobes_locked) {
+    let lobes_locked = matches!(paths.settings().policy()?, Some(p) if p.lobes_lock());
+    if show_override_note(paths.settings().env().agent_homes().is_some(), lobes_locked) {
         println!("note: MIND_AGENT_HOMES is set and overrides the above");
     }
     Ok(())
@@ -297,13 +297,13 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing.
-    if let Some(policy) = Policy::load()?
+    if let Some(policy) = paths.settings().policy()?
         && policy.lobes_lock()
     {
         return Err(lobes_locked_error("remove"));
     }
     paths.ensure_config()?;
-    let mut cfg = Config::load(paths)?;
+    let mut cfg = paths.settings().config()?;
     let before = cfg.lobes.len();
     cfg.lobes.retain(|e| e.path() != path);
     if cfg.lobes.len() == before {
@@ -354,7 +354,7 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
         }
     }
 
-    cfg.save(paths)?;
+    paths.settings().save_config(&cfg)?;
     if out.json {
         // spec: HARN-14 -- a plain remove is `removed`; a `--snapshot` detach is
         // `detached` with `count` = the number of links frozen.
@@ -382,13 +382,13 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
 pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: refuse under a lobe lock before reporting or writing anything.
-    if let Some(policy) = Policy::load()?
+    if let Some(policy) = paths.settings().policy()?
         && policy.lobes_lock()
     {
         return Err(lobes_locked_error("detect"));
     }
     paths.ensure_config()?;
-    let mut cfg = Config::load(paths)?;
+    let mut cfg = paths.settings().config()?;
     let configured: HashSet<String> = cfg.lobes.iter().map(|e| e.path().to_string()).collect();
 
     // Dedup detected lobes against the configured set and against each other
@@ -459,7 +459,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             for (_, entry) in &global_candidates {
                 cfg.lobes.push(entry.clone());
             }
-            cfg.save(paths)?;
+            paths.settings().save_config(&cfg)?;
             let new_lobes = candidates_to_lobes(&global_candidates);
             // HARN-17: unconditional backfill; no --force plumbing for `detect`,
             // so a foreign target is reported (never clobbered).
@@ -493,7 +493,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             cfg.lobes.push(entry.clone());
             println!("{} added {name} lobe {}", out.ok(), format_lobe(entry));
         }
-        cfg.save(paths)?;
+        paths.settings().save_config(&cfg)?;
         let new_lobes = candidates_to_lobes(&global_candidates);
         // HARN-17: unconditional backfill; no --force plumbing for `detect`, so a
         // foreign target is reported (never clobbered).
@@ -540,7 +540,7 @@ mod tests {
     // End-to-end against a real `$MIND_POLICY_FILE`: with `[lobes].lock = true`
     // the loaded policy reports lobes_lock(), so the override note must be
     // suppressed even though `$MIND_AGENT_HOMES` is set. Drives the same
-    // `Policy::load()?` + `lobes_lock()` path `lobe_list` uses.
+    // `paths.settings().policy()?` + `lobes_lock()` path `lobe_list` uses.
     #[test]
     fn pol40_locked_policy_suppresses_override_note() {
         let managed = std::env::temp_dir().join("mind-pol40-managed-target");
@@ -555,8 +555,13 @@ mod tests {
             std::env::set_var("MIND_AGENT_HOMES", base.join("env-lobe").to_str().unwrap());
         }
 
-        let policy = Policy::load().unwrap().expect("policy should load");
-        let env_set = std::env::var_os("MIND_AGENT_HOMES").is_some();
+        let paths = Paths::new(base.clone(), base.join("claude"));
+        let policy = paths
+            .settings()
+            .policy()
+            .unwrap()
+            .expect("policy should load");
+        let env_set = paths.settings().env().agent_homes().is_some();
         let lobes_locked = policy.lobes_lock();
 
         // SAFETY: ENV_LOCK held.
@@ -587,8 +592,9 @@ mod tests {
             std::env::set_var("MIND_AGENT_HOMES", base.join("env-lobe").to_str().unwrap());
         }
 
-        let lobes_locked = matches!(Policy::load().unwrap(), Some(p) if p.lobes_lock());
-        let env_set = std::env::var_os("MIND_AGENT_HOMES").is_some();
+        let paths = Paths::new(base.clone(), base.join("claude"));
+        let lobes_locked = matches!(paths.settings().policy().unwrap(), Some(p) if p.lobes_lock());
+        let env_set = paths.settings().env().agent_homes().is_some();
 
         // SAFETY: ENV_LOCK held.
         unsafe {

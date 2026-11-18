@@ -811,7 +811,7 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
     let out = crate::render::ctx();
     // spec: POL-3 -- load once; Err = invalid policy (fail closed via `?`),
     // None = unmanaged, inert.
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     let mut registry = Registry::load(paths)?;
     let Some(source) = registry.find(source_name) else {
         // The caller only invokes this after confirming the source is
@@ -825,9 +825,9 @@ pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) ->
         let identity = source.base_identity();
         let allowed = policy.allow_matches(&identity);
         if policy.lock() && !allowed {
-            if let Some(path) = effective_policy_path() {
+            if let Some(path) = paths.settings().policy_path() {
                 // spec: POL-37
-                eprintln!("hint: managed policy at {path}");
+                eprintln!("hint: managed policy at {}", path.display());
             }
             return Err(MindError::SourceNotAllowed { identity });
         }

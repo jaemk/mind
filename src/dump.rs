@@ -419,7 +419,7 @@ fn build_entry(
 fn dump_home(paths: &Paths, source: &Source) -> Option<String> {
     paths.source_home(&source.name)?;
     let home = paths.home_of(&source.name);
-    if let Some(user) = dirs::home_dir()
+    if let Some(user) = paths.settings().env().home_dir()
         && let Ok(rest) = home.strip_prefix(&user)
     {
         return Some(format!("~/{}", rest.display()));

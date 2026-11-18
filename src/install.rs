@@ -671,7 +671,7 @@ fn expand_references(
         siblings.iter().map(CatalogItem::as_path_sibling).collect();
     // TOOL-16: render store paths with a leading `~` when the store is under
     // home, so a token expands to a value a Claude permission glob can match.
-    let home = dirs::home_dir();
+    let home = crate::settings::Env.home_dir();
     let ctx = namespace::PathCtx {
         store_root,
         home: home.as_deref(),
