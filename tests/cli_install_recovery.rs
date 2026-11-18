@@ -393,6 +393,44 @@ fn an_upgrade_across_two_homes_commits_both_or_neither() {
     }
 }
 
+// spec: LIFE-59 LIFE-63 HOME-8
+#[test]
+fn an_upgrade_moving_homes_killed_at_any_step_keeps_a_whole_item() {
+    let mut n = 1;
+    loop {
+        let sb = Sandbox::new();
+        let src = sb.source("src", "alpha", "v1");
+        sb.ok(&["--yes", "meld", src.to_str().unwrap()]);
+        // The source now declares the extra home: the upgrade reinstalls the
+        // item there and removes the copy left in the default home.
+        write(
+            &src.join("mind.toml"),
+            &format!("[source]\nmind-home = \"{}\"\n", sb.extra.display()),
+        );
+        let args = ["--yes", "upgrade"];
+        let crashed = sb.crash(n, &args).is_some();
+        if crashed {
+            sb.recover();
+        }
+        sb.settled();
+        assert!(body_is(&sb.installed("alpha"), "v1"), "step {n}");
+        // A clean rerun finishes the move.
+        sb.ok(&args);
+        assert!(body_is(&sb.installed("alpha"), "v1"), "step {n}");
+        assert!(sb.extra.join("store/skill/alpha").exists(), "step {n}");
+        assert!(
+            !sb.default_home.join("store/skill/alpha").exists(),
+            "step {n}: the old copy is left behind"
+        );
+        if !crashed {
+            assert!(n > 1);
+            return;
+        }
+        n += 1;
+        assert!(n < MAX_STEPS);
+    }
+}
+
 // spec: LIFE-61
 #[test]
 fn a_journal_naming_a_path_outside_mind_is_refused_and_kept() {

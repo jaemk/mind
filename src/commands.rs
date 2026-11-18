@@ -1255,19 +1255,35 @@ fn follow_declared_homes(
             continue;
         }
         if preview {
-            let from = normalize_home(&paths.home_of(&name));
-            if !out.json {
-                println!(
-                    "{shown} would move from {} to {} (its mind.toml declares `mind-home`)",
-                    from.display(),
-                    to.display()
-                );
+            // The sources that follow its home move with it (HOME-5).
+            for member in &family {
+                let from = normalize_home(&paths.home_of(member));
+                let member_shown = strip_ansi(member);
+                if from == to
+                    || predicted
+                        .iter()
+                        .any(|m: &HomeMoveJson| m.source == member_shown)
+                {
+                    continue;
+                }
+                if !out.json {
+                    let why = if *member == name {
+                        "its mind.toml declares `mind-home`".to_string()
+                    } else {
+                        format!("it follows {shown}")
+                    };
+                    println!(
+                        "{member_shown} would move from {} to {} ({why})",
+                        from.display(),
+                        to.display()
+                    );
+                }
+                predicted.push(HomeMoveJson {
+                    source: member_shown,
+                    from: from.display().to_string(),
+                    to: to.display().to_string(),
+                });
             }
-            predicted.push(HomeMoveJson {
-                source: shown.clone(),
-                from: from.display().to_string(),
-                to: to.display().to_string(),
-            });
             continue;
         }
         if !saved {
@@ -13993,6 +14009,17 @@ fn upgrade_inner_scoped(
                         .join(", ")
                 );
             }
+            if pending.is_empty()
+                && prunes.is_empty()
+                && left_prunes.is_empty()
+                && !tracking.has_additions()
+                && whole.targets.is_empty()
+                && home_moves.is_empty()
+                && hooks.is_empty()
+                && unscannable.is_empty()
+            {
+                println!("everything is up to date");
+            }
             println!("Not predicted: content diffs or build output.");
         }
         return Ok(None);
@@ -14289,7 +14316,13 @@ fn upgrade_inner_scoped(
                     continue;
                 }
                 let old_path = std::path::Path::new(old_link);
-                match install::remove_path(old_path) {
+                // spec: LIFE-59 -- journaled, so a rollback restores the link
+                // along with the old store copy.
+                match install::remove_journaled(
+                    paths,
+                    old_path,
+                    &paths.home_of_item_store(&up.old.store),
+                ) {
                     Ok(()) => continue,
                     // spec: LOBE-6 -- a stale link in a lobe that cannot be
                     // written stays recorded, so a run that can write there

@@ -292,8 +292,10 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   transaction-unique trash (`<home>/.tmp/tx/<id>/<n>`) rather than deleted, so
   every intent can be undone, and undone again after an interrupted undo.
   Each item install or uninstall is a savepoint: its failure undoes only its
-  own intents (LIFE-4, LIFE-43). A failed command rolls back everything since
-  the last manifest save.
+  own intents (LIFE-4, LIFE-43). An upgrade's removal of links the new copy no
+  longer owns, and of a store copy left in the home its source moved from
+  (HOME-8), is recorded the same way. A failed command rolls back everything
+  since the last manifest save.
 - `LIFE-60` A manifest save inside a transaction is its commit point: every
   changed home's manifest is recorded in the journal, then the commit decision,
   then each manifest is published and the trash is emptied. Before the

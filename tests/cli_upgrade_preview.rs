@@ -60,6 +60,20 @@ impl Fixture {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
+    fn text(&self, args: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &self.home)
+            .env("MIND_HOMES", &self.extra)
+            .env("CLAUDE_HOME", self.root.join("claude"))
+            .env_remove("MIND_TTY")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mind {args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn source(&self) -> String {
         self.source.to_string_lossy().into_owned()
     }
@@ -262,6 +276,22 @@ fn preview_reports_a_declared_home_move_without_moving() {
     // The real pass makes the move the preview named.
     f.run(&["upgrade", "--yes", "--json"]);
     assert!(f.extra.join("store/skill/one").exists());
+}
+
+// spec: CLI-263
+#[test]
+fn text_preview_says_when_nothing_would_change() {
+    let f = Fixture::new("");
+    f.run(&["meld", &f.source(), "--yes", "--json"]);
+    let text = f.text(&["upgrade", "--dry-run"]);
+    assert!(text.contains("everything is up to date"), "{text}");
+    write_file(
+        &f.source.join("skills/one/SKILL.md"),
+        "---\ndescription: one\n---\n# changed\n",
+    );
+    let text = f.text(&["upgrade", "--dry-run"]);
+    assert!(!text.contains("everything is up to date"), "{text}");
+    assert!(text.contains("skill:one"), "{text}");
 }
 
 // spec: CLI-264

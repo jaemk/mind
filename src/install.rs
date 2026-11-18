@@ -391,11 +391,19 @@ fn remove_recorded(paths: &Paths, path: &Path, home: &Path) -> Result<()> {
     }
 }
 
+/// Remove `path` as one journaled step ([`remove_recorded`], LIFE-59), so a
+/// failure or an interruption before the manifest commits puts it back.
+pub fn remove_journaled(paths: &Paths, path: &Path, home: &Path) -> Result<()> {
+    let scope = crate::transaction::scope();
+    remove_recorded(paths, path, home)?;
+    scope.done()
+}
+
 /// After a re-install of `old` as `new` (same item), remove the old store copy
 /// when the new one went elsewhere: the item's source moved to another mind
 /// home (HOME-8). A path outside the old copy's store root is left alone
-/// (LIFE-44).
-// spec: HOME-8
+/// (LIFE-44). The removal is journaled (LIFE-59).
+// spec: HOME-8 LIFE-59
 pub fn remove_moved_store(paths: &Paths, old: &InstalledItem, new: &InstalledItem) -> Result<()> {
     let old_path = paths.mind_home.join(&old.store);
     if old_path == paths.mind_home.join(&new.store) {
@@ -404,7 +412,7 @@ pub fn remove_moved_store(paths: &Paths, old: &InstalledItem, new: &InstalledIte
     if !is_confined_under(&old_path, &paths.store_root_of_item(&old.store)) {
         return Ok(());
     }
-    remove_path(&old_path)
+    remove_journaled(paths, &old_path, &paths.home_of_item_store(&old.store))
 }
 
 /// Canonicalize `link`'s PARENT directory and rejoin the file name, rather

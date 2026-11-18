@@ -860,12 +860,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   removals, ignored additions and hooks for existing items and sources, and names in-scope sources
   that could not be scanned. It also reports each in-scope breaking release
   as not applied (VER-61), each source move a newly declared `mind-home` would
-  make (HOME-15), the dependencies the additions would install beyond
+  make (HOME-15), including the curated sources that follow it (HOME-5), the
+  dependencies the additions would install beyond
   themselves, and the install hooks of every addition and dependency. JSON
   reports these as structured arrays (`breaking`, `home_moves`,
   `dependencies`, `hooks`). Preview rejects the same rename collisions as the
   application pass. It discloses that content diffs and build output are not
-  predicted; `--allow-breaking` cannot be combined with the preview. As with other shared-lock commands, the mind home
+  predicted, and in text mode says `everything is up to date` when nothing
+  would change; `--allow-breaking` cannot be combined with the preview. As with other shared-lock commands, the mind home
   and lock file may be created when absent.
 - `CLI-262` An `upgrade` positional that matches no installed item under
   CLI-63/CLI-65 but does match a melded source under `sync`'s filter
