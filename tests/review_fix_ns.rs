@@ -1353,7 +1353,7 @@ fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
 /// set to the wrapper, including the item's own name, so an item that names
 /// itself in its own prose (a `# name` heading is the common shape) has that
 /// mention wrapped. `init-source --template` removes the item's own name first
-/// (`commands.rs`), so the two wrappers disagree about self-mentions. This is
+/// (`commands/`), so the two wrappers disagree about self-mentions. This is
 /// pre-existing and not part of the NS-46/NS-47 change, but it is the same file
 /// rewrite, so it is pinned here rather than left undetected.
 /// spec: NS-24

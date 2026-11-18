@@ -773,7 +773,7 @@ fn download_step(target_version: &str) -> String {
 /// The "downloading mind <version>" line, or `None` under `--json`.
 ///
 /// `evolve` writes its own document straight to stdout rather than through
-/// `commands.rs`, so it gets none of CLI-217's structural protection: this guard
+/// `commands/`, so it gets none of CLI-217's structural protection: this guard
 /// is the only thing keeping a progress line out of `--json` stdout, which has to
 /// stay a single machine-readable document. Returning an `Option` rather than
 /// printing inline keeps that decision unit-testable without a download.
@@ -1117,7 +1117,7 @@ mod tests {
     /// `GITHUB_TOKEN`/`GH_TOKEN`) so they don't race each other. This is the
     /// crate-wide lock defined in `src/paths.rs` (C18): `set_var`/`remove_var`
     /// soundness is process-wide, not module-wide, and `src/paths.rs` and
-    /// `src/commands.rs` mutate their own overlapping set of env vars
+    /// `src/commands/` mutate their own overlapping set of env vars
     /// (`MIND_AGENT_HOMES`, `MIND_POLICY_FILE`, `MIND_HOME`, `CLAUDE_HOME`, ...)
     /// in the same multithreaded test binary, some via a spawned `git`, which
     /// snapshots `environ`. Using one shared lock here instead of a

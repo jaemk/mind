@@ -799,7 +799,7 @@ fn meld_learn_json_skips_the_curated_chain_for_a_super_source() {
 #[test]
 fn remeld_learn_json_folds_into_one_already_melded_document() {
     // spec: CLI-236 CLI-217 -- the re-meld `--json --learn` arm
-    // (commands.rs:4131-4146) is a second, independent implementation of the
+    // (commands/) is a second, independent implementation of the
     // CLI-156 folding that had no test at all before this one. If it called
     // the whole-set install helper instead of the matching one, a re-meld
     // under `--json --learn x --yes` would install (and report) the entire

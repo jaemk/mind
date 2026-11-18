@@ -1211,7 +1211,7 @@ fn hooks_run_source_install_runs_with_accept_hooks() {
 // whose text begins `note:` or `warning:`, or which is composed with
 // `out.warn()`" -- did not select them, for the same reason it did not select
 // `install.rs`'s `println!("running build hook for {}", ...)` or
-// `commands.rs`'s `println!("running install hook '{}' for {}", ...)`. That
+// `commands/hooks.rs`'s `println!("running install hook '{}' for {}", ...)`. That
 // marker-prefix rule is the reason this class kept shipping.
 //
 // Neither line was converted. Under `--json` the process runs with fd 1

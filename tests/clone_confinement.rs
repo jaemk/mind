@@ -7,7 +7,7 @@
 //! a command. These tests assert the OBSERVABLE outcome that holds regardless
 //! of which defense catches it: the out-of-tree victim directory (and its
 //! contents) survive `sync` and `unmeld` untouched, and `unmeld` never prints
-//! a success line for it. `src/commands.rs`'s `clone_dir_checked` unit tests
+//! a success line for it. `src/commands/homes.rs`'s `clone_dir_checked` unit tests
 //! (STO-69) pin the second, independent guard directly.
 
 use std::path::{Path, PathBuf};

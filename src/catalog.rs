@@ -507,7 +507,7 @@ pub(crate) fn scan_source_reporting(
     // empty alias (`--as ''`, or the meld prompt's "no prefix" choice) is the
     // explicit "no prefix" override and suppresses a declared `[source].prefix`.
     // Both inputs are validated where they are SET (the `--as`/`--namespace`
-    // alias in commands.rs, the `[source].prefix` at mindfile load) -- but a
+    // alias in commands/, the `[source].prefix` at mindfile load) -- but a
     // registry entry is never re-validated, and the reserved list grows: an
     // alias recorded before `workflow` (or any future kind word) joined it is
     // still in `sources.json` and still in effect here.
@@ -1037,7 +1037,7 @@ fn scan_source_layers(
             // `[discover].sources` list is a curator directive, NOT an own-item
             // directive, so it does not suppress the manifest (MKT-16): the
             // manifest still supplies the immediate source's items and the curator
-            // layer composes on top (handled at meld time in commands.rs). (The
+            // layer composes on top (handled at meld time in commands/meld.rs). (The
             // authoritative `[[items]]`/`[discover]`-glob case never reaches this
             // arm; it is handled by the `is_authoritative()` arm above.)
             let suppress_manifest = source.roots.is_some()
@@ -1051,11 +1051,11 @@ fn scan_source_layers(
             // by MKT-15), the plugin manifest is the authoritative item source and
             // convention discovery is skipped (MKT-2). A
             // `.claude-plugin/marketplace.json` (catalog super-source) is handled by
-            // commands.rs at meld time for external entries; in-repo entries are
+            // commands/meld.rs at meld time for external entries; in-repo entries are
             // scanned directly here (MKT-14).
             //
             // The "found and ignored" NOTE (for both the authoritative and the
-            // MKT-15 scan-layout suppression cases) is commands.rs's
+            // MKT-15 scan-layout suppression cases) is commands/meld.rs's
             // responsibility; catalog stays quiet (MKT-2).
             if !suppress_manifest
                 && let Some(plugin_path) = plugin_manifest::find_plugin_manifest(clone_root)
@@ -1091,7 +1091,7 @@ fn scan_source_layers(
                 scan_plugin_components(clone_root, source, &plugin_prefix, out)?;
 
                 // MKT-6/DSC-32: The plugin-level `description` describes the source
-                // (not each item); recording it on the Source is commands.rs's job
+                // (not each item); recording it on the Source is commands/meld.rs's job
                 // (shard 4). Per-item descriptions continue to come from frontmatter.
 
                 // spec: DSC-86 -- add-root items share the plugin's namespace.
@@ -1101,11 +1101,11 @@ fn scan_source_layers(
             // MKT-14: Check for a marketplace.json AFTER plugin.json (plugin.json wins
             // if both are present) and BEFORE the convention fallback. In-repo entries
             // are scanned as roots within this repo; external entries are skipped here
-            // (they are sub-melded by commands.rs). The marketplace is authoritative
+            // (they are sub-melded by commands/). The marketplace is authoritative
             // for the immediate source: when found (and not suppressed by MKT-15),
             // convention discovery is skipped. MKT-15: a mind.toml scan layout
             // suppresses only the manifest's own-item (in-repo plugin) layer; the
-            // marketplace's external curator entries still compose (commands.rs).
+            // marketplace's external curator entries still compose (commands/).
             if !suppress_manifest
                 && let Some(marketplace_path) =
                     plugin_manifest::find_marketplace_manifest(clone_root)
@@ -1872,7 +1872,7 @@ fn build_item(
     // spec: DSC-94 -- B4: a source-controlled description (frontmatter or an
     // `[[items]]` override) reaches every display surface (`recall`, `probe
     // --no-tui`, `--json`) from this one capture point, so sanitize it here
-    // exactly as the plugin-manifest path already does (commands.rs), closing
+    // exactly as the plugin-manifest path already does (commands/), closing
     // the raw-ANSI/bidi-override gap for the biggest funnel of source text.
     //
     // spec: WF-4 WF-5 WF-51 -- a workflow's description and `whenToUse` come
@@ -2302,7 +2302,7 @@ fn scan_plugin_flat_items(
 /// the listed leaf skill directories are scanned; otherwise `plugin_root/skills/` is
 /// scanned conventionally. Agents are always scanned conventionally from
 /// `plugin_root/agents/`. External entries are skipped — those are sub-melded by
-/// `commands.rs`.
+/// `commands/`.
 ///
 /// `outer_prefix`: the already-resolved effective prefix for the source (alias or
 /// mindfile prefix, filtered to `None` when empty). `has_explicit_prefix`: true when
@@ -2323,7 +2323,7 @@ fn scan_marketplace_in_repo_plugins(
         .unwrap_or_else(|_| clone_root.to_path_buf());
 
     for entry in manifest.into_entries() {
-        // Only process in-repo entries; external ones are sub-melded by commands.rs.
+        // Only process in-repo entries; external ones are sub-melded by commands/.
         let inrepo_path = match &entry.source {
             plugin_manifest::PluginSource::InRepo { path } => path.clone(),
             plugin_manifest::PluginSource::External { .. } => continue,
@@ -2473,7 +2473,7 @@ fn scan_marketplace_in_repo_plugins(
 /// (`hooks/`) and a `.mcp.json` file (mcpServers). Manifest-declared keys beyond
 /// these (lsp servers, monitors, themes, output styles) are not counted here
 /// because they leave no directory marker — they would require re-parsing the
-/// manifest. This is a dir-based heuristic; commands.rs calls it at meld time
+/// manifest. This is a dir-based heuristic; commands/meld.rs calls it at meld time
 /// and prints the summary via `SkippedComponents::summary`.
 ///
 /// spec: MKT-18 WF-40 -- a `commands/<name>.md` or `workflows/<name>.js` file
@@ -6729,7 +6729,7 @@ mod plugin_tests {
         // directive over OTHER repos, not an own-item directive). The marketplace
         // still defines the immediate source: its in-repo plugin items ARE
         // discovered. (The nested curator sources are melded at meld time in
-        // commands.rs; this scan-level test asserts the compose, i.e. no
+        // commands/; this scan-level test asserts the compose, i.e. no
         // suppression of the manifest's own items.)
         let tmp = TmpDir::new();
         let base = tmp.path();

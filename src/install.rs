@@ -258,7 +258,7 @@ pub fn install(
             .collect(),
         description: item.description.clone(),
         // spec: HOOK-110 -- filled in by the caller (`install_item` in
-        // commands.rs) once the item's install hooks have actually run; this
+        // commands/) once the item's install hooks have actually run; this
         // function runs no hooks itself.
         install_hooks: Vec::new(),
         // spec: LNK-19 -- likewise filled in by the caller, which is where the
@@ -1063,7 +1063,7 @@ fn run_item_hook(
 
 /// Run one batch of an item's lifecycle hooks (HOOK-81, HOOK-86) as the final
 /// step of installing it, in declaration order. Despite the name, `hooks` need
-/// not all be install-event hooks: the callers in `commands.rs`
+/// not all be install-event hooks: the callers in `commands/`
 /// (`install_item`) and `hooks_cmd.rs` (`hooks run`) also pass an item's
 /// update-event batch here on `upgrade` (HOOK-120/125), since an update batch
 /// is disclosed, prompted, and recorded exactly like an install one, just
@@ -1217,7 +1217,7 @@ pub(crate) fn depth_exceeded(path: &Path) -> MindError {
 
 /// Every file under `dir`, recursively, depth-capped (LIFE-52).
 ///
-/// `pub(crate)` so the LNK-18 pre-install reference scan in `commands.rs` walks
+/// `pub(crate)` so the LNK-18 pre-install reference scan in `commands/` walks
 /// an item tree exactly the way the install path does: one capped walker that
 /// surfaces a structured error, rather than a second, uncapped one whose
 /// failures are silent.

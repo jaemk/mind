@@ -415,7 +415,7 @@ fn run_source_hooks(
                     // text mode, unreachable from `--json` stdout because the
                     // run's fd 1 points at stderr (main.rs's `json_stdout`).
                     // Same for install.rs's `running build hook for ...` and
-                    // commands.rs's `running install hook '...' for ...`. See
+                    // commands/hooks.rs's `running install hook '...' for ...`. See
                     // `tests/cli_hooks.rs::hooks_run_running_hook_note_is_one_document`.
                     // spec: CLI-217
                     println!(
@@ -1559,7 +1559,7 @@ fn item_hook_target(installed: &InstalledItem) -> String {
 }
 
 /// Whether a source hook has already RUN at `current` for this event (mirrors
-/// the private `hook_ran_at` in commands.rs).
+/// the private `hook_ran_at` in commands/hooks.rs).
 ///
 /// The event is half the key (HOOK-124). Without it, a source declaring the
 /// same command for `install` and `update` has its update hook considered
@@ -1621,7 +1621,7 @@ fn record_item_hooks_run(paths: &Paths, key: &str, recorded: &[RecordedHook]) ->
 }
 
 /// Upsert a hook's run state in `source.install_hooks`, keyed by `(command,
-/// event)` (mirrors the private `record_install_hook` in commands.rs). A run
+/// event)` (mirrors the private `record_install_hook` in commands/hooks.rs). A run
 /// clears the HOOK-121 baseline flag: the record now describes a real run.
 // spec: HOOK-124
 fn record_hook_run(

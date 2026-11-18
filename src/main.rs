@@ -433,7 +433,7 @@ fn json_reserves_stdout(command: &Command) -> bool {
         //   completions/man -- the script / roff page IS the output
         Command::Dump { .. } | Command::Completions { .. } | Command::Man
         // `evolve` writes its own document straight to stdout from
-        // `selfupdate.rs` rather than through `commands.rs`, so redirecting fd 1
+        // `selfupdate.rs` rather than through `commands/`, so redirecting fd 1
         // would silence it.
         | Command::Evolve { .. }
         // A maintainer scaffolder that edits the target repo in place; it has
@@ -2299,7 +2299,7 @@ mod tests {
     /// failed" corridor CLI-181 relies on (the error envelope REPLACES
     /// whatever a verb recorded before failing, CLI-217 point 2). No verb in
     /// the current call graph reaches this in practice -- every `print_json`
-    /// call site in `commands.rs` is the last statement before its function
+    /// call site in `commands/` is the last statement before its function
     /// returns, so nothing can record and then still error out of the SAME
     /// call -- which is exactly why this is a direct unit test of the
     /// mechanism rather than an end-to-end one: `emit_instead`'s own contract

@@ -529,7 +529,7 @@ fn meld_refuses_a_traversing_ssh_host_before_touching_the_filesystem() {
 
 // --- POL-67: the install-hook gate site (HOOK-11's rerun_source_hooks) -----
 //
-// `rerun_source_hooks` (src/commands.rs) gates on
+// `rerun_source_hooks` (src/commands/upgrade.rs) gates on
 // `policy.allow_matches(&source.name)`, and `source.name` is the FULL extended
 // identity (`Source::compute_name`), unlike the initial `meld` gate, which
 // checks `source.base_identity()` directly (LNK-11) and so needed no fix. This

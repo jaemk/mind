@@ -345,7 +345,7 @@ fn config_lobes_add_backfill_warn_is_one_document() {
 // deleting the progress lines would satisfy the parse and lose the output.
 // ---------------------------------------------------------------------------
 
-/// `commands.rs` (`run_install_hooks`, reached by `meld`):
+/// `commands/hooks.rs` (`run_install_hooks`, reached by `meld`):
 /// `println!("running install hook '{}' for {}", ...)`.
 #[test]
 fn meld_running_install_hook_is_one_document() {
@@ -376,7 +376,7 @@ fn meld_running_install_hook_is_one_document() {
     );
 }
 
-/// `commands.rs` (`run_uninstall_hooks`, reached by `unmeld`):
+/// `commands/hooks.rs` (`run_uninstall_hooks`, reached by `unmeld`):
 /// `println!("running uninstall hook '{}' for {}", ...)`.
 #[test]
 fn unmeld_running_uninstall_hook_is_one_document() {
@@ -446,7 +446,7 @@ fn learn_running_build_hook_is_one_document() {
 
 /// `install.rs` (`run_item_hook`, reached by `learn`):
 /// `println!("running {event} hook for {key}", ...)` for an item's own
-/// install hook (distinct from the source-level hook in `commands.rs`).
+/// install hook (distinct from the source-level hook in `commands/`).
 #[test]
 fn learn_running_item_install_hook_is_one_document() {
     // spec: CLI-217 CLI-153
