@@ -338,7 +338,7 @@ pub(super) fn json_confirmation_action(base: impl std::fmt::Display, json: bool)
 /// spans more than one source (CLI-233; extended from `sync <filter>
 /// --upgrade`-only to `upgrade <item>` too by CLI-234). `names` is the union
 /// of every scoping mechanism in play, computed once by the caller
-/// (`upgrade_inner_scoped`'s `scope_names`); a filter (unlike `unmeld`'s/
+/// (`plan_upgrade`'s `scope_names`); a filter (unlike `unmeld`'s/
 /// `upgrade`'s ref-style SOURCE selection, CLI-20) intentionally allows more
 /// than one match, so a name like `mind sync skills --upgrade` or `mind
 /// upgrade 'suffix#*'` can silently widen to upgrading -- and re-running the

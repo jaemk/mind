@@ -58,51 +58,13 @@ pub(super) fn new_items() -> NewItems {
     }
 }
 
-/// `mind upgrade [--yes] [item]` — report and optionally apply upgrades.
+/// `mind upgrade` as the invoked verb: run one pass (see [`UpgradeOpts`]) and
+/// print its `--json` result.
 ///
-/// Syncs first by default (CLI-169).
-pub fn upgrade(
-    paths: &Paths,
-    yes: bool,
-    item_ref: Option<&str>,
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner(paths, yes, item_ref, false, accept)?)
-}
-
-/// `mind upgrade --no-sync` — skip the pre-upgrade source fetch (CLI-169).
-pub fn upgrade_no_sync(
-    paths: &Paths,
-    yes: bool,
-    item_ref: Option<&str>,
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner(paths, yes, item_ref, true, accept)?)
-}
-
-/// `mind upgrade --source <filter> [item]` — the upgrade pass scoped to the
-/// melded sources the filter matches (CLI-244). The pre-pass sync fetches only
-/// those sources (unless `no_sync`), and the pass upgrades, re-runs hooks for,
-/// and re-expands profiles of only those sources, exactly as `sync <filter>
-/// --upgrade` does (CLI-232). An `item_ref` narrows it further.
-// spec: CLI-244
-pub fn upgrade_source(
-    paths: &Paths,
-    yes: bool,
-    item_ref: Option<&str>,
-    source_selector: &str,
-    no_sync: bool,
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner_scoped(
-        paths,
-        UpgradeOpts {
-            item_ref,
-            no_sync,
-            sources: SourceScope::Filter(source_selector),
-            ..UpgradeOpts::new(yes, accept)
-        },
-    )?)
+/// Callers that fold the pass into a result of their own (`sync --upgrade`,
+/// `learn`, the homes move) call [`upgrade_pass`] instead.
+pub fn upgrade(paths: &Paths, opts: UpgradeOpts<'_>) -> Result<()> {
+    emit_upgrade_result(upgrade_pass(paths, opts)?)
 }
 
 /// Resolve `upgrade`'s positional target (CLI-262): an item filter as before
@@ -152,76 +114,12 @@ pub fn upgrade_target(
     Ok((None, Some(target.to_string())))
 }
 
-/// An upgrade pass restricted to a set of SOURCE identities, with the pre-pass
-/// fetch already done by the caller (`no_sync`).
-///
-/// What `curate` applies for its `upgrade` changes (curate.md CUR-6): the
-/// ordinary pass (CLI-53), scoped so an item installed from a directly-melded
-/// source is never touched by a command about curated ones. `sync <source>
-/// --upgrade` reaches the same scoped pass through `source_scope` (CLI-232);
-/// this wrapper differs only in skipping the fetch, which `curate` has already
-/// performed for the whole curated set (CUR-2).
-pub(crate) fn upgrade_sources_no_sync(
-    paths: &Paths,
-    yes: bool,
-    sources: &[String],
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner_scoped(
-        paths,
-        UpgradeOpts {
-            no_sync: true,
-            sources: SourceScope::Names(sources, None),
-            ..UpgradeOpts::new(yes, accept)
-        },
-    )?)
-}
-
-/// A no-sync upgrade restricted to an explicit set of item KEYS (`kind:name`),
-/// exact match rather than the glob `item_ref` restricts by (TUI-72, TUI-73).
-///
-/// This is what the TUI's `u` action applies: `app.rs`'s `initiate_upgrade`
-/// stashes the exact keys its confirm modal listed onto the pending action, and
-/// this is what applies exactly that set, so the applied set equals the
-/// confirmed set BY CONSTRUCTION rather than by two independent computations
-/// (the confirm-time recompute and the apply-time re-hash) happening to agree.
-/// Never fetches (`no_sync = true`, mirroring `upgrade_no_sync`): the TUI
-/// offers `s` (Sync) and a ~1s re-poll separately, so refreshing drift is not
-/// this call's job.
-///
-/// A confirmed key that is no longer applicable by the time this runs -- no
-/// longer installed (forgotten), no longer has a matching catalog item (its
-/// source was unmelded), or no longer out of date (already resolved by a
-/// concurrent upgrade, or the edit that caused the drift was reverted) -- is
-/// silently skipped, exactly like an out-of-scope item is for a glob-filtered
-/// `mind upgrade <item>`: the confirm-to-apply window is real and a benign
-/// race must not abort the whole batch. The report (and the TUI's captured
-/// status line) simply reflects whatever subset of `keys` is still applicable;
-/// when that subset is empty this prints the ordinary "everything is up to
-/// date" the CLI already uses, not an error.
-// spec: TUI-72 TUI-73
-pub fn upgrade_no_sync_keys(
-    paths: &Paths,
-    yes: bool,
-    keys: &[String],
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner_scoped(
-        paths,
-        UpgradeOpts {
-            no_sync: true,
-            keys: Some(keys),
-            ..UpgradeOpts::new(yes, accept)
-        },
-    )?)
-}
-
 /// Emit an upgrade pass's result when `upgrade` was the verb the user invoked.
 ///
-/// `upgrade_inner` RETURNS its `--json` result rather than printing it, because
-/// it is also the `--upgrade` pass inside `sync`, where the caller invoked
-/// `sync` and CLI-217 allows exactly one document. Only these two wrappers --
-/// the real `upgrade` verb -- print it.
+/// [`upgrade_pass`] RETURNS its `--json` result rather than printing it,
+/// because it is also the `--upgrade` pass inside `sync`, where the caller
+/// invoked `sync` and CLI-217 allows exactly one document. Only [`upgrade`] --
+/// the real `upgrade` verb -- prints it.
 // spec: CLI-217
 fn emit_upgrade_result(result: Option<MutationResult>) -> Result<()> {
     match result {
@@ -230,36 +128,19 @@ fn emit_upgrade_result(result: Option<MutationResult>) -> Result<()> {
     }
 }
 
-/// The upgrade pass. Returns the `--json` result object (`None` in text mode,
-/// or when the pass ended on a path with nothing to report) for the caller to
-/// emit or fold into its own; see [`emit_upgrade_result`].
-pub(super) fn upgrade_inner(
-    paths: &Paths,
-    yes: bool,
-    item_ref: Option<&str>,
-    no_sync: bool,
-    accept: crate::hook::Accept,
-) -> Result<Option<MutationResult>> {
-    upgrade_inner_scoped(
-        paths,
-        UpgradeOpts {
-            item_ref,
-            no_sync,
-            ..UpgradeOpts::new(yes, accept)
-        },
-    )
-}
-
 /// Which sources an upgrade pass may touch (CLI-232, CLI-244).
 #[derive(Clone, Copy)]
-pub(super) enum SourceScope<'a> {
+pub(crate) enum SourceScope<'a> {
     /// Every source: an unscoped `mind upgrade`.
     All,
     /// Names the caller already resolved, plus the filter text that produced
     /// them when there is one (`sync <source> --upgrade`; `curate` has none).
+    /// `curate` passes its curated set (CUR-6), so an item installed from a
+    /// directly-melded source is never touched by a command about curated
+    /// ones.
     Names(&'a [String], Option<&'a str>),
-    /// An `upgrade --source` filter, resolved against the registry the pass
-    /// itself loads (CLI-231 matching).
+    /// An `upgrade --source <filter>` (CLI-244), resolved against the registry
+    /// the pass itself loads (CLI-231 matching).
     Filter(&'a str),
 }
 
@@ -269,26 +150,38 @@ pub(super) enum SourceScope<'a> {
 /// --source` cannot silently upgrade items from (or re-run install hooks
 /// for) a source the caller never named. Its filter text, when there is one,
 /// is echoed in the CLI-234/CLI-235 disclosure (M19), alongside `item_ref`,
-/// which doubles as its own filter text. `keys` is the analogous restriction
-/// by exact item KEY (`kind:name`), threaded from the TUI's confirmed-set
-/// apply (`upgrade_no_sync_keys`, TUI-72, TUI-73); `None` is unrestricted.
+/// which doubles as its own filter text.
 #[derive(Clone, Copy)]
-pub(super) struct UpgradeOpts<'a> {
-    pub(super) yes: bool,
-    pub(super) item_ref: Option<&'a str>,
-    /// Skip the pre-pass fetch (CLI-169).
-    pub(super) no_sync: bool,
-    pub(super) sources: SourceScope<'a>,
-    pub(super) keys: Option<&'a [String]>,
-    pub(super) accept: crate::hook::Accept,
+pub(crate) struct UpgradeOpts<'a> {
+    pub(crate) yes: bool,
+    pub(crate) item_ref: Option<&'a str>,
+    /// Skip the pre-pass fetch (CLI-169): `--no-sync`, or a caller that has
+    /// already fetched (`curate`, CUR-2; `sync --upgrade`).
+    pub(crate) no_sync: bool,
+    pub(crate) sources: SourceScope<'a>,
+    /// Restrict the pass to these exact item KEYS (`kind:name`) rather than
+    /// the glob `item_ref` restricts by; `None` is unrestricted.
+    ///
+    /// The TUI's `u` action applies through this (TUI-72, TUI-73): `app.rs`'s
+    /// `initiate_upgrade` stashes the exact keys its confirm modal listed, so
+    /// the applied set equals the confirmed set BY CONSTRUCTION rather than by
+    /// two independent computations happening to agree. A confirmed key that
+    /// is no longer applicable by the time the pass runs (forgotten, its
+    /// source unmelded, or no longer out of date) is silently skipped, exactly
+    /// like an out-of-scope item is for a glob-filtered `mind upgrade <item>`:
+    /// the confirm-to-apply window is real and a benign race must not abort
+    /// the whole batch.
+    // spec: TUI-72 TUI-73
+    pub(crate) keys: Option<&'a [String]>,
+    pub(crate) accept: crate::hook::Accept,
     /// `upgrade --dry-run` (CLI-263): report what the pass would do, from the
     /// current checkouts, and change nothing.
-    pub(super) preview: bool,
+    pub(crate) preview: bool,
 }
 
 impl<'a> UpgradeOpts<'a> {
-    /// An unscoped, applying pass.
-    pub(super) fn new(yes: bool, accept: crate::hook::Accept) -> Self {
+    /// An unscoped, applying pass that syncs first (CLI-169).
+    pub(crate) fn new(yes: bool, accept: crate::hook::Accept) -> Self {
         UpgradeOpts {
             yes,
             item_ref: None,
@@ -301,34 +194,12 @@ impl<'a> UpgradeOpts<'a> {
     }
 }
 
-/// `mind upgrade --dry-run [item] [--source <filter>]` (CLI-263): the pass
-/// against the current checkouts, without a fetch, reporting and changing
-/// nothing.
-pub fn upgrade_preview(
-    paths: &Paths,
-    item: Option<&str>,
-    source: Option<&str>,
-    accept: crate::hook::Accept,
-) -> Result<()> {
-    emit_upgrade_result(upgrade_inner_scoped(
-        paths,
-        UpgradeOpts {
-            item_ref: item,
-            no_sync: true,
-            sources: source.map_or(SourceScope::All, SourceScope::Filter),
-            preview: true,
-            ..UpgradeOpts::new(false, accept)
-        },
-    )?)
-}
-
 /// The upgrade pass: [`plan_upgrade`] computes what is pending, then
 /// [`preview_upgrade`] reports it (`--dry-run`) or [`apply_upgrade`] confirms
-/// and applies it.
-pub(super) fn upgrade_inner_scoped(
-    paths: &Paths,
-    opts: UpgradeOpts<'_>,
-) -> Result<Option<MutationResult>> {
+/// and applies it. Returns the `--json` result object (`None` in text mode, or
+/// when the pass ended on a path with nothing to report) for the caller to
+/// emit or fold into its own; see [`emit_upgrade_result`].
+pub(super) fn upgrade_pass(paths: &Paths, opts: UpgradeOpts<'_>) -> Result<Option<MutationResult>> {
     // spec: HOOK-181 -- the plan's answer lasts for this pass only.
     let _answers = crate::consent::scope();
     let plan = plan_upgrade(paths, &opts)?;
@@ -2032,7 +1903,7 @@ fn upgrade_item_disposition(
     // spec: TUI-72 TUI-73 - the TUI's confirmed-set apply scope: `None` means
     // unrestricted by key (every non-TUI caller); `Some(set)` restricts
     // consideration to installed items whose exact key (`kind:name`) is in
-    // `set`, so `upgrade_no_sync_keys` acts on precisely the confirmed items.
+    // `set`, so `UpgradeOpts::keys` acts on precisely the confirmed items.
     key_scope: Option<&HashSet<String>>,
     policy: Option<&Policy>,
     registry: &Registry,
@@ -2625,9 +2496,9 @@ mod tests {
 
     // spec: TUI-72 TUI-73
     #[test]
-    fn upgrade_no_sync_keys_skips_inapplicable_confirmed_keys_without_aborting() {
-        // The TUI's confirm-to-apply window is real: by the time
-        // `upgrade_no_sync_keys` runs, a confirmed key may no longer be
+    fn a_key_scoped_upgrade_skips_inapplicable_confirmed_keys_without_aborting() {
+        // The TUI's confirm-to-apply window is real: by the time the
+        // key-scoped pass runs, a confirmed key may no longer be
         // applicable -- its drift already resolved, or the item never existed
         // at all (forgotten, or a stale reference). Neither case may abort the
         // batch; each confirmed key is considered independently and an
@@ -2747,11 +2618,13 @@ mod tests {
         // out of date (see above).
         let confirmed_keys = vec!["skill:applies".to_string(), "skill:ghost".to_string()];
 
-        let result = upgrade_no_sync_keys(
+        let result = upgrade(
             &paths,
-            true,
-            &confirmed_keys,
-            crate::hook::Accept::default(),
+            UpgradeOpts {
+                no_sync: true,
+                keys: Some(&confirmed_keys),
+                ..UpgradeOpts::new(true, crate::hook::Accept::default())
+            },
         );
         assert!(
             result.is_ok(),

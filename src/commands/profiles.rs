@@ -34,6 +34,10 @@ pub(crate) struct ProfileInstallOutcome {
     /// false for a declined prompt, a non-TTY run without `--yes`, a `--json`
     /// run without `--yes`, and an empty enabled set (PROF-10).
     pub applied: bool,
+    /// Under `--json` without `--yes`: the items left to install, the union of
+    /// the expansion, the `--learn` matches, and their closures, each once
+    /// (PROF-18). Zero otherwise.
+    pub pending: usize,
 }
 
 /// One item of a profile install batch.
@@ -608,6 +612,11 @@ pub(crate) fn note_profile_leftovers(paths: &Paths, source_name: &str) {
 
 /// [`install_source_profiles`] without the leftovers note, for a caller that
 /// prints it later (`curate`, after its upgrade pass may have pruned them).
+///
+/// Under `--json` it prints nothing and never prompts: `--yes` installs, and
+/// without it the outcome carries the pending count (CLI-156, PROF-18).
+/// Nothing is recorded without `--yes`.
+// spec: PROF-18 CLI-156
 pub(crate) fn install_source_profiles_once(
     paths: &Paths,
     req: &ProfileInstall<'_>,
@@ -667,15 +676,17 @@ pub(crate) fn install_source_profiles_once(
         return Ok(outcome);
     }
     let remedy = profile_remedy(req.source_name, &plan);
-    if json || !crate::hook::is_tty() {
-        if !json {
-            println!(
-                "note: registered only, nothing installed (not a TTY); {} has {} item(s) to \
-                 install; run `{remedy}` (or re-meld with --yes)",
-                strip_ansi(req.source_name),
-                plan.pending.len()
-            );
-        }
+    if json {
+        outcome.pending = plan.pending.len();
+        return Ok(outcome);
+    }
+    if !crate::hook::is_tty() {
+        println!(
+            "note: registered only, nothing installed (not a TTY); {} has {} item(s) to \
+             install; run `{remedy}` (or re-meld with --yes)",
+            strip_ansi(req.source_name),
+            plan.pending.len()
+        );
         return Ok(outcome);
     }
     print_profile_preview(paths, &plan)?;
@@ -736,39 +747,6 @@ fn source_keys_plan(
         accept,
     ));
     Ok(plan)
-}
-
-/// The `--json` twin of [`install_source_profiles`] (CLI-156, PROF-18):
-/// installs silently under `--yes` and returns the outcome plus the pending
-/// count, which without `--yes` is the union of the expansion, the `--learn`
-/// matches, and their closures, each item once. Nothing is recorded without
-/// `--yes`.
-// spec: PROF-18 CLI-156
-pub(crate) fn install_source_profiles_for_json(
-    paths: &Paths,
-    req: &ProfileInstall<'_>,
-    flow: InstallFlow,
-) -> Result<(ProfileInstallOutcome, usize)> {
-    let plan = plan_profile_install(paths, req)?;
-    let mut outcome = ProfileInstallOutcome {
-        enabled: plan.enabled.clone(),
-        ..ProfileInstallOutcome::default()
-    };
-    if plan.members.is_empty() && plan.enabled.is_empty() {
-        // spec: PROF-40 -- a replacing selection that enables nothing still
-        // clears the recorded set.
-        if plan.replace {
-            apply_profile_plan(paths, req.source_name, &plan, flow, true)?;
-            outcome.applied = true;
-        }
-        return Ok((outcome, 0));
-    }
-    if plan.pending.is_empty() || flow.yes {
-        outcome.installed_keys = apply_profile_plan(paths, req.source_name, &plan, flow, true)?;
-        outcome.applied = true;
-        return Ok((outcome, 0));
-    }
-    Ok((outcome, plan.pending.len()))
 }
 
 /// Resolve a CLI-36 source selector (no `#` part) to exactly one registered

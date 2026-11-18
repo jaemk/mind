@@ -665,7 +665,7 @@ fn apply(
                 match refs {
                     Some(list) => commands::install_source_items_subset(paths, source, list, flow)?,
                     None => commands::install_source_items(paths, source, flow)?,
-                }
+                };
                 applied.push(format!("install:{source}"));
             }
             Action::InstallProfiles {
@@ -766,7 +766,15 @@ fn apply(
     if !upgrade_scope.is_empty() {
         // Already fetched by CUR-2 (or deliberately not, under --no-sync), so
         // the pass never re-fetches here.
-        commands::upgrade_sources_no_sync(paths, true, &upgrade_scope, flags.accept)?;
+        // spec: CUR-6 -- scoped to the curated set.
+        commands::upgrade(
+            paths,
+            commands::UpgradeOpts {
+                no_sync: true,
+                sources: commands::SourceScope::Names(&upgrade_scope, None),
+                ..commands::UpgradeOpts::new(true, flags.accept)
+            },
+        )?;
     }
     // spec: PROF-41 PROF-39 -- the leftovers note reads the state after the
     // upgrade pass, so a pruning source the pass cleaned up prints nothing.
@@ -844,8 +852,10 @@ fn install_declared(
         }
     }
     match declared_installs(entry) {
-        Some(Some(refs)) => commands::install_source_items_subset(paths, source, &refs, flow),
-        Some(None) => commands::install_source_items(paths, source, flow),
+        Some(Some(refs)) => {
+            commands::install_source_items_subset(paths, source, &refs, flow).map(drop)
+        }
+        Some(None) => commands::install_source_items(paths, source, flow).map(drop),
         None => Ok(()),
     }
 }
@@ -960,14 +970,7 @@ fn install_entry_profiles(
         // spec: PROF-41 -- the entry's selection is the source's whole set.
         replace: true,
     };
-    let applied = if crate::render::ctx().json {
-        commands::install_source_profiles_for_json(paths, &req, flow)?
-            .0
-            .applied
-    } else {
-        commands::install_source_profiles_once(paths, &req, flow)?.applied
-    };
-    Ok(applied)
+    Ok(commands::install_source_profiles_once(paths, &req, flow)?.applied)
 }
 
 // ---------------------------------------------------------------------------

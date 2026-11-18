@@ -254,7 +254,7 @@ fn reinstall_moved_items(
         .collect();
     if !keys.is_empty() {
         // The meld's own result is the one `--json` document (CLI-217).
-        upgrade_inner_scoped(
+        upgrade_pass(
             paths,
             UpgradeOpts {
                 no_sync: true,

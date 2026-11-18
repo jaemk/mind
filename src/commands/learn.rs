@@ -511,7 +511,7 @@ pub(crate) fn set_lobe(
     if !keys.is_empty() {
         let family = vec![name.to_string()];
         // The verb's own result is the one `--json` document (CLI-217).
-        upgrade_inner_scoped(
+        upgrade_pass(
             paths,
             UpgradeOpts {
                 no_sync: true,
@@ -908,7 +908,7 @@ pub(super) fn learn_selected(
 }
 
 /// Like `learn()` but installs silently and returns the installed keys instead
-/// of emitting a JSON result. Used by `install_source_items_for_json` so the
+/// of emitting a JSON result. Used by `install_source_items` under `--json` so the
 /// meld dispatcher can fold the install outcome into ONE combined JSON object
 /// (CLI-156) rather than letting `learn` emit its own separate result.
 ///
@@ -1027,13 +1027,49 @@ pub(super) fn learn_collecting_selected(
     }
 }
 
+/// What a post-meld install pass did, for the caller's `--json` result
+/// (CLI-156). In text mode the pass narrates as it goes and this stays empty.
+#[derive(Debug, Default)]
+pub(crate) struct InstallOutcome {
+    /// Effective keys installed, closure items included (`--json` only).
+    pub installed: Vec<String>,
+    /// Under `--json` without `--yes`: the items left to install, counted
+    /// without prompting. Zero otherwise.
+    pub pending: usize,
+}
+
+impl InstallOutcome {
+    fn installed(installed: Vec<String>) -> Self {
+        InstallOutcome {
+            installed,
+            pending: 0,
+        }
+    }
+
+    fn pending(pending: usize) -> Self {
+        InstallOutcome {
+            installed: Vec::new(),
+            pending,
+        }
+    }
+}
+
 /// Run the post-meld auto-install flow (CLI-23) for one registered source by its
 /// name: preview and prompt to install its items (`<source>#*`), or install
 /// directly under `--yes`. Used for the top-level source and, via
 /// `install_curated_sources`, for nested sources installed with `--recursive`
 /// (DSC-55) or a curator `install = true` (DSC-58).
-// spec: CLI-23
-pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow) -> Result<()> {
+///
+/// Under `--json` it installs silently (no `learn` document) and never
+/// prompts: `--yes` installs and returns the keys, and without it the outcome
+/// carries the pending count, so the caller folds both into ONE object
+/// (CLI-156).
+// spec: CLI-23 CLI-156
+pub(crate) fn install_source_items(
+    paths: &Paths,
+    source_name: &str,
+    flow: InstallFlow,
+) -> Result<InstallOutcome> {
     let item_ref = format!("{source_name}#*");
     // spec: CLI-225 -- `item_ref` embeds the source-influenced `source_name`
     // and lands in pasteable `mind learn` remedies below, so it is
@@ -1045,24 +1081,30 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
     // "nothing to install" rather than an error.
     let plan = match learn_preview(paths, &item_ref) {
         Ok(plan) => plan,
-        Err(MindError::ItemNotFound { .. }) => return Ok(()),
+        Err(MindError::ItemNotFound { .. }) => return Ok(InstallOutcome::default()),
         Err(e) => return Err(e),
     };
     if plan.install_count == 0 {
-        return Ok(());
+        return Ok(InstallOutcome::default());
     }
 
+    if json_mode() {
+        return Ok(if flow.yes {
+            InstallOutcome::installed(learn_collecting(paths, &item_ref, flow)?)
+        } else {
+            InstallOutcome::pending(plan.install_count)
+        });
+    }
     if flow.yes {
-        return learn(paths, &item_ref, false, flow);
+        learn(paths, &item_ref, false, flow)?;
+        return Ok(InstallOutcome::default());
     }
     if !crate::hook::is_tty() {
-        if !json_mode() {
-            println!(
-                "note: registered only, nothing installed (not a TTY); {source_name} has {} item(s) to install; run `mind learn {quoted_item_ref}` (or re-meld with --yes)",
-                plan.install_count
-            );
-        }
-        return Ok(());
+        println!(
+            "note: registered only, nothing installed (not a TTY); {source_name} has {} item(s) to install; run `mind learn {quoted_item_ref}` (or re-meld with --yes)",
+            plan.install_count
+        );
+        return Ok(InstallOutcome::default());
     }
 
     // Interactive: show the install preview (the dry-run list), then the plan.
@@ -1081,13 +1123,13 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
         }),
         plan.hooks(paths, flow.accept)?,
     )? {
-        PlanOutcome::Proceed => learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow }),
+        PlanOutcome::Proceed => learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow })?,
         PlanOutcome::Cancel => {
             println!("skipped; run `mind learn {quoted_item_ref}` to install later");
-            Ok(())
         }
-        PlanOutcome::Abort => Ok(()),
+        PlanOutcome::Abort => {}
     }
+    Ok(InstallOutcome::default())
 }
 
 /// spec: CLI-236 -- `--learn` scopes the install to the melded source's own
@@ -1242,24 +1284,46 @@ pub(super) fn learn_targets(
 ///
 /// Unlike that offer, a pattern matching nothing in the source is an error: the
 /// user named it explicitly, so a typo must not pass as "nothing to install".
-// spec: CLI-236
-pub fn install_source_items_matching(
+///
+/// Under `--json` it is silent like [`install_source_items`]. The pending count
+/// is the UNION of the matched items and their closures, not the sum over
+/// patterns: without `--yes` nothing installs between patterns, so summing
+/// would double-count an item two patterns both match, or a dependency shared
+/// by two of them.
+// spec: CLI-236 CLI-156
+pub(crate) fn install_source_items_matching(
     paths: &Paths,
     source_name: &str,
     patterns: &[String],
     flow: InstallFlow,
-) -> Result<()> {
+) -> Result<InstallOutcome> {
     let (matched, fresh) = learn_targets(paths, source_name, patterns)?;
+    let json = json_mode();
     if fresh.is_empty() {
         // Every match is already installed (CLI-157), reported once for the
         // batch rather than once per pattern.
-        if !json_mode() {
+        if !json {
             println!(
                 "already installed; nothing to do ({} item(s))",
                 matched.len()
             );
         }
-        return Ok(());
+        return Ok(InstallOutcome::default());
+    }
+    if json {
+        if flow.yes {
+            let mut installed: Vec<String> = Vec::new();
+            for target in &fresh {
+                installed.extend(learn_collecting_exact(paths, target, flow)?);
+            }
+            return Ok(InstallOutcome::installed(installed));
+        }
+        // Union each matched item's closure so a shared dependency counts once.
+        let mut pending: BTreeSet<String> = BTreeSet::new();
+        for target in &fresh {
+            pending.extend(learn_plan(paths, Selection::Exact(target))?.keys);
+        }
+        return Ok(InstallOutcome::pending(pending.len()));
     }
     // spec: CLI-225 -- each printed target embeds the source-influenced source
     // name and an item name, and lands in a pasteable `mind learn` remedy, so
@@ -1283,17 +1347,16 @@ pub fn install_source_items_matching(
         Ok(())
     };
     if flow.yes {
-        return install_all(flow);
+        install_all(flow)?;
+        return Ok(InstallOutcome::default());
     }
     if !crate::hook::is_tty() {
-        if !json_mode() {
-            println!(
-                "note: registered only, nothing installed (not a TTY); {} item(s) match --learn; \
-                 run `{quoted}` (or re-meld with --yes)",
-                fresh.len(),
-            );
-        }
-        return Ok(());
+        println!(
+            "note: registered only, nothing installed (not a TTY); {} item(s) match --learn; \
+             run `{quoted}` (or re-meld with --yes)",
+            fresh.len(),
+        );
+        return Ok(InstallOutcome::default());
     }
     // Interactive: preview the whole batch (the dry-run list, dependency
     // closures included), then the plan, asked once.
@@ -1315,48 +1378,11 @@ pub fn install_source_items_matching(
         }),
         hooks,
     )? {
-        PlanOutcome::Proceed => install_all(InstallFlow { yes: true, ..flow }),
-        PlanOutcome::Cancel => {
-            println!("skipped; run `{quoted}` to install later");
-            Ok(())
-        }
-        PlanOutcome::Abort => Ok(()),
+        PlanOutcome::Proceed => install_all(InstallFlow { yes: true, ..flow })?,
+        PlanOutcome::Cancel => println!("skipped; run `{quoted}` to install later"),
+        PlanOutcome::Abort => {}
     }
-}
-
-/// The `--json` twin of [`install_source_items_matching`] (CLI-236): installs
-/// silently and returns `(installed_keys, pending_count)` so the meld
-/// dispatcher folds the outcome into ONE object (CLI-156).
-///
-/// `pending` counts the UNION of the matched items and their closures, not the
-/// sum over patterns: without `--yes` nothing installs between patterns, so
-/// summing would double-count an item two patterns both match, or a dependency
-/// shared by two of them.
-// spec: CLI-236 CLI-156
-pub(crate) fn install_source_items_matching_for_json(
-    paths: &Paths,
-    source_name: &str,
-    patterns: &[String],
-    flow: InstallFlow,
-) -> Result<(Vec<String>, usize)> {
-    let (_matched, fresh) = learn_targets(paths, source_name, patterns)?;
-    if fresh.is_empty() {
-        return Ok((Vec::new(), 0));
-    }
-    if flow.yes {
-        let mut installed: Vec<String> = Vec::new();
-        for target in &fresh {
-            installed.extend(learn_collecting_exact(paths, target, flow)?);
-        }
-        return Ok((installed, 0));
-    }
-    // No --yes in json mode: report the pending count without prompting. Union
-    // each matched item's closure so a shared dependency counts once.
-    let mut pending: BTreeSet<String> = BTreeSet::new();
-    for target in &fresh {
-        pending.extend(learn_plan(paths, Selection::Exact(target))?.keys);
-    }
-    Ok((Vec::new(), pending.len()))
+    Ok(InstallOutcome::default())
 }
 
 /// Run the post-meld install flow (CLI-23) for a named subset of a registered
@@ -1364,28 +1390,29 @@ pub(crate) fn install_source_items_matching_for_json(
 /// strings in source truth) are offered; the source's other items remain
 /// registered and available. The same preview-and-prompt path as
 /// `install_source_items` is used, so `--yes` and `--link-only` behave
-/// identically (CLI-23). An empty `bare_refs` slice installs nothing.
-pub fn install_source_items_subset(
+/// identically (CLI-23). An empty `bare_refs` slice installs nothing. Under
+/// `--json` it is silent like [`install_source_items`].
+pub(crate) fn install_source_items_subset(
     paths: &Paths,
     source_name: &str,
     bare_refs: &[String],
     flow: InstallFlow,
-) -> Result<()> {
+) -> Result<InstallOutcome> {
     if bare_refs.is_empty() {
-        return Ok(());
+        return Ok(InstallOutcome::default());
     }
 
     // Scan only the named source to get its items.
     let registry = Registry::load(paths)?;
     let Some(source) = registry.find(source_name) else {
-        return Ok(());
+        return Ok(InstallOutcome::default());
     };
     let source_items = catalog::scan(paths, &single(source))?;
 
     // Filter to only the listed bare refs.
     let subset: Vec<&CatalogItem> = select_by_bare_refs(&source_items, bare_refs);
     if subset.is_empty() {
-        return Ok(());
+        return Ok(InstallOutcome::default());
     }
 
     // Build a manifest of already-installed keys to exclude them (DEP-23).
@@ -1400,7 +1427,7 @@ pub fn install_source_items_subset(
         .collect();
 
     if to_install.is_empty() {
-        return Ok(());
+        return Ok(InstallOutcome::default());
     }
 
     // Build a ref string that installs exactly the subset. We install each
@@ -1414,37 +1441,44 @@ pub fn install_source_items_subset(
         .map(|it| format!("{source_name}#{}", it.key().as_str()))
         .collect();
 
+    if json_mode() {
+        if !flow.yes {
+            return Ok(InstallOutcome::pending(count));
+        }
+        let mut installed: Vec<String> = Vec::new();
+        for item_ref in &refs {
+            installed.extend(learn_collecting(paths, item_ref, flow)?);
+        }
+        return Ok(InstallOutcome::installed(installed));
+    }
+
     if flow.yes {
         for item_ref in &refs {
             learn(paths, item_ref, false, flow)?;
         }
-        return Ok(());
+        return Ok(InstallOutcome::default());
     }
 
     if !crate::hook::is_tty() {
-        let ref_list = refs.join(", ");
-        if !json_mode() {
-            // spec: CLI-225 -- each candidate ref embeds `source_name` and an
-            // item name from `it.key()`, neither restricted against shell
-            // metacharacters, and lands in a pasteable `mind learn` remedy,
-            // so it is shell-quoted before printing rather than framed in
-            // bare single quotes.
-            // spec: DSC-95 -- `shell_quote` neutralizes shell metacharacters
-            // only; it does not strip an ANSI escape, which can still ride
-            // out inside the single quotes it wraps `ref_str` in. Sanitize
-            // first, then shell-quote the already-sanitized string.
-            let ref_str = if refs.len() == 1 {
-                strip_ansi(&refs[0])
-            } else {
-                format!("{source_name}#*")
-            };
-            let quoted_ref = crate::error::shell_quote(&ref_str);
-            println!(
-                "note: registered only, nothing installed (not a TTY); {source_name} has {count} item(s) to install; run `mind learn {quoted_ref}` (or re-meld with --yes)"
-            );
-            let _ = ref_list; // suppress unused warning
-        }
-        return Ok(());
+        // spec: CLI-225 -- each candidate ref embeds `source_name` and an
+        // item name from `it.key()`, neither restricted against shell
+        // metacharacters, and lands in a pasteable `mind learn` remedy, so it
+        // is shell-quoted before printing rather than framed in bare single
+        // quotes.
+        // spec: DSC-95 -- `shell_quote` neutralizes shell metacharacters only;
+        // it does not strip an ANSI escape, which can still ride out inside
+        // the single quotes it wraps `ref_str` in. Sanitize first, then
+        // shell-quote the already-sanitized string.
+        let ref_str = if refs.len() == 1 {
+            strip_ansi(&refs[0])
+        } else {
+            format!("{source_name}#*")
+        };
+        let quoted_ref = crate::error::shell_quote(&ref_str);
+        println!(
+            "note: registered only, nothing installed (not a TTY); {source_name} has {count} item(s) to install; run `mind learn {quoted_ref}` (or re-meld with --yes)"
+        );
+        return Ok(InstallOutcome::default());
     }
 
     // Interactive: preview, then the plan.
@@ -1479,7 +1513,7 @@ pub fn install_source_items_subset(
         }
         PlanOutcome::Abort => {}
     }
-    Ok(())
+    Ok(InstallOutcome::default())
 }
 
 // ----- Install profiles (spec/profiles.md) -----
@@ -1577,35 +1611,6 @@ pub fn install_provisioned_items(
         }
     }
     (installed_keys, failures)
-}
-
-/// Install `source_name`'s items silently (no JSON emitted by `learn`) and
-/// return `(installed_keys, pending_count)`. Used in `--json` mode so the
-/// meld dispatcher can emit ONE combined JSON object (CLI-156).
-///
-/// - `flow.yes = true`: installs everything, returns `(keys, 0)`.
-/// - `flow.yes = false`: returns `([], N)` where N is the pending item count
-///   without prompting (json mode is always non-interactive).
-pub(crate) fn install_source_items_for_json(
-    paths: &Paths,
-    source_name: &str,
-    flow: InstallFlow,
-) -> Result<(Vec<String>, usize)> {
-    let item_ref = format!("{source_name}#*");
-    let plan = match learn_preview(paths, &item_ref) {
-        Ok(plan) => plan,
-        Err(MindError::ItemNotFound { .. }) => return Ok((vec![], 0)),
-        Err(e) => return Err(e),
-    };
-    if plan.install_count == 0 {
-        return Ok((vec![], 0));
-    }
-    if flow.yes {
-        let keys = learn_collecting(paths, &item_ref, flow)?;
-        return Ok((keys, 0));
-    }
-    // No --yes in json mode: report the pending count without prompting.
-    Ok((vec![], plan.install_count))
 }
 
 /// If two selected items would install under the same `kind:name`, return that
