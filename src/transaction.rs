@@ -46,23 +46,72 @@ pub(crate) const TX_JOURNAL: &str = ".tx-journal.json";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Intent {
-    /// A rename. Undo moves it back.
-    Move { from: PathBuf, to: PathBuf },
+    /// A rename. Undo moves it back. `identity` is the moved entry's
+    /// (device, inode) where the platform has one, so undo never moves an
+    /// entry this transaction did not put there (LIFE-64).
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<FileId>,
+    },
     /// A symlink at `path` to `target` was created. Undo removes it.
     CreateLink { path: PathBuf, target: PathBuf },
     /// mind's own symlink at `path` (to `target`) was removed. Undo recreates it.
     RemoveLink { path: PathBuf, target: PathBuf },
     /// The intended manifest bytes are retained in the journal so replay can
     /// verify a destination even if a completed rename consumed the stage.
+    /// `prior` is the destination before this transaction: publishing never
+    /// overwrites a file that changed since (LIFE-64).
     Manifest {
         staged: PathBuf,
         destination: PathBuf,
         contents: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prior: Option<Prior>,
     },
     /// A hook started. Its effects are not undone (LIFE-62).
     Hook { label: String },
     /// The most recent [`Intent::Hook`] finished.
     HookDone,
+}
+
+/// A filesystem entry's (device, inode). A rename keeps it.
+pub(crate) type FileId = (u64, u64);
+
+#[cfg(unix)]
+fn file_id(meta: &fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_meta: &fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// The identity of the entry at `path` (not following a symlink), if any.
+fn identity_of(path: &Path) -> Option<FileId> {
+    fs::symlink_metadata(path).ok().as_ref().and_then(file_id)
+}
+
+/// A file's state before a transaction replaced it (LIFE-64).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Prior {
+    Absent,
+    /// [`crate::hash::fingerprint_bytes`] of its contents.
+    Contents(String),
+}
+
+impl Prior {
+    pub(crate) fn of(path: &Path) -> io::Result<Self> {
+        match fs::read(path) {
+            Ok(bytes) => Ok(Self::Contents(crate::hash::fingerprint_bytes(&bytes))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::Absent),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +181,7 @@ impl Journal {
                 "a committed transaction cannot be undone",
             ));
         }
+        self.check_undo(start)?;
         while self.intents.len() > start {
             let last = self.intents.last().expect("non-empty").clone();
             undo(&last)?;
@@ -153,6 +203,19 @@ impl Journal {
                 "transaction is not committed",
             ));
         }
+        // spec: LIFE-64 -- check every destination before publishing any, so
+        // a manifest changed by another mind stops the commit whole.
+        for intent in &self.intents {
+            if let Intent::Manifest {
+                destination,
+                contents,
+                prior: Some(prior),
+                ..
+            } = intent
+            {
+                check_unchanged(destination, contents, prior)?;
+            }
+        }
         for intent in &self.intents {
             if let Intent::Manifest {
                 destination,
@@ -162,6 +225,83 @@ impl Journal {
             {
                 publish(destination, contents)?;
                 crash_point();
+            }
+        }
+        Ok(())
+    }
+
+    /// Check that undoing every intent past `start`, newest first, finds each
+    /// path in the state this transaction left (LIFE-64). The steps are
+    /// replayed on a view of the files, since each undo changes what the
+    /// next one finds; nothing on disk is touched.
+    fn check_undo(&self, start: usize) -> io::Result<()> {
+        use std::collections::HashMap;
+        // `None`: absent. `Some(id)`: present, with its identity if known.
+        let mut view: HashMap<PathBuf, Option<Option<FileId>>> = HashMap::new();
+        let state = |view: &HashMap<PathBuf, Option<Option<FileId>>>, path: &Path| {
+            if let Some(state) = view.get(path) {
+                return Ok((*state, true));
+            }
+            match fs::symlink_metadata(path) {
+                Ok(meta) => Ok((Some(file_id(&meta)), false)),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((None, false)),
+                Err(e) => Err(e),
+            }
+        };
+        for intent in self.intents[start..].iter().rev() {
+            match intent {
+                Intent::Move { from, to, identity } => {
+                    match (state(&view, from)?.0, state(&view, to)?.0) {
+                        (Some(_), None) => {}
+                        (None, Some(found)) => {
+                            if let (Some(want), Some(found)) = (identity, found)
+                                && *want != found
+                            {
+                                return Err(ambiguous(format!(
+                                    "'{}' is no longer what this transaction moved there (another mind may have changed it)",
+                                    to.display()
+                                )));
+                            }
+                            view.insert(from.clone(), Some(found));
+                            view.insert(to.clone(), None);
+                        }
+                        _ => {
+                            return Err(ambiguous(format!(
+                                "cannot tell whether '{}' was moved to '{}'",
+                                from.display(),
+                                to.display()
+                            )));
+                        }
+                    }
+                }
+                Intent::CreateLink { path, target } => {
+                    let (found, simulated) = state(&view, path)?;
+                    if found.is_some()
+                        && !simulated
+                        && fs::read_link(path).ok().as_ref() != Some(target)
+                    {
+                        return Err(ambiguous(format!(
+                            "'{}' is no longer the link this transaction created",
+                            path.display()
+                        )));
+                    }
+                    view.insert(path.clone(), None);
+                }
+                Intent::RemoveLink { path, target } => {
+                    let (found, simulated) = state(&view, path)?;
+                    if found.is_some()
+                        && !simulated
+                        && fs::read_link(path).ok().as_ref() != Some(target)
+                    {
+                        return Err(ambiguous(format!(
+                            "'{}' is occupied; cannot restore its link to '{}'",
+                            path.display(),
+                            target.display()
+                        )));
+                    }
+                    view.insert(path.clone(), Some(None));
+                }
+                Intent::Manifest { .. } | Intent::Hook { .. } | Intent::HookDone => {}
             }
         }
         Ok(())
@@ -315,9 +455,17 @@ impl Journal {
 /// before nor the after of the step fails closed.
 fn undo(intent: &Intent) -> io::Result<()> {
     match intent {
-        Intent::Move { from, to } => match (path_present(from)?, path_present(to)?) {
+        Intent::Move { from, to, identity } => match (path_present(from)?, path_present(to)?) {
             (true, false) => Ok(()), // Not started, or already undone.
             (false, true) => {
+                if let (Some(want), Some(found)) = (identity, identity_of(to))
+                    && *want != found
+                {
+                    return Err(ambiguous(format!(
+                        "'{}' is no longer what this transaction moved there (another mind may have changed it)",
+                        to.display()
+                    )));
+                }
                 fs::rename(to, from)?;
                 sync_parent(from)?;
                 if from.parent() != to.parent() {
@@ -365,6 +513,24 @@ fn ambiguous(msg: String) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("{msg}; retained for diagnosis"),
     )
+}
+
+/// Fail closed unless `destination` holds `contents` already or is still as
+/// `prior` records (LIFE-64).
+fn check_unchanged(destination: &Path, contents: &[u8], prior: &Prior) -> io::Result<()> {
+    let now = match fs::read(destination) {
+        Ok(existing) if existing == *contents => return Ok(()),
+        Ok(existing) => Prior::Contents(crate::hash::fingerprint_bytes(&existing)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Prior::Absent,
+        Err(e) => return Err(e),
+    };
+    if now == *prior {
+        return Ok(());
+    }
+    Err(ambiguous(format!(
+        "'{}' changed after this transaction began (another mind may have written it); publishing would overwrite that change",
+        destination.display()
+    )))
 }
 
 /// Write `contents` to `destination` atomically, unless it already holds them.
@@ -893,6 +1059,7 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> Result<()> {
             Intent::Move {
                 from: from.clone(),
                 to: to.clone(),
+                identity: identity_of(&from),
             },
             None,
         )?;
@@ -1018,11 +1185,13 @@ pub(crate) fn commit_manifests(writes: &[(PathBuf, Vec<u8>)]) -> Result<bool> {
     }
     for (destination, contents) in writes {
         let destination = normalize_home(destination);
+        let prior = Prior::of(&destination).map_err(|e| MindError::io(&destination, e))?;
         tx.record(
             Intent::Manifest {
                 staged: destination.clone(),
                 destination,
                 contents: contents.clone(),
+                prior: Some(prior),
             },
             None,
         )?;
@@ -1225,7 +1394,7 @@ impl Roots {
             // the store) or into its trash (a store copy, a lobe entry); undo
             // moves back. A crafted journal must not move a mind-controlled
             // file into a lobe, nor have the commit delete in one.
-            Intent::Move { from, to } => {
+            Intent::Move { from, to, .. } => {
                 if !Self::under(from, &[&self.stores, &self.tmps, &self.lobes]) {
                     return Err(outside(from));
                 }
@@ -1312,6 +1481,7 @@ mod tests {
         let intent = Intent::Move {
             from: dir.join("old"),
             to: dir.join("backup"),
+            identity: Some((1, 2)),
         };
         journal.record(intent.clone()).unwrap();
         assert_eq!(Journal::load(&file).unwrap().intents, vec![intent]);
@@ -1321,7 +1491,8 @@ mod tests {
             journal
                 .record(Intent::Move {
                     from: dir.join("a"),
-                    to: dir.join("b")
+                    to: dir.join("b"),
+                    identity: None,
                 })
                 .is_err()
         );
@@ -1360,6 +1531,7 @@ mod tests {
             staged: dir.join("stage"),
             destination: dir.join("manifest"),
             contents: vec![b'0'; MAX_JOURNAL_BYTES / 3 + 1],
+            prior: None,
         });
         assert!(result.is_err());
         assert_eq!(fs::read(&file).unwrap(), before);
@@ -1372,6 +1544,7 @@ mod tests {
             .record(Intent::Move {
                 from: from.to_path_buf(),
                 to: to.to_path_buf(),
+                identity: identity_of(from),
             })
             .unwrap();
         fs::rename(from, to).unwrap();
@@ -1476,6 +1649,9 @@ mod tests {
                     staged: destination.with_extension("stage"),
                     destination: destination.to_path_buf(),
                     contents: b"committed manifest".to_vec(),
+                    prior: Some(Prior::Contents(crate::hash::fingerprint_bytes(
+                        b"old manifest",
+                    ))),
                 })
                 .unwrap();
         }
@@ -1488,6 +1664,79 @@ mod tests {
         assert_eq!(fs::read(first).unwrap(), b"committed manifest");
         assert_eq!(fs::read(second).unwrap(), b"committed manifest");
         assert!(journal.undo_to(0).is_err(), "a commit is never undone");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // spec: LIFE-64
+    #[test]
+    fn a_manifest_changed_since_the_commit_is_not_overwritten() {
+        let dir = dir();
+        let file = dir.join("journal.json");
+        let first = dir.join("manifest-one");
+        let second = dir.join("manifest-two");
+        fs::write(&first, b"old one").unwrap();
+        fs::write(&second, b"old two").unwrap();
+        let mut journal = Journal::begin(&file).unwrap();
+        for destination in [&first, &second] {
+            journal
+                .record(Intent::Manifest {
+                    staged: destination.clone(),
+                    destination: destination.clone(),
+                    contents: b"new".to_vec(),
+                    prior: Some(Prior::of(destination).unwrap()),
+                })
+                .unwrap();
+        }
+        journal.commit().unwrap();
+        // Another mind writes the second manifest before recovery.
+        fs::write(&second, b"written by another mind").unwrap();
+        let err = journal.finish_prevalidated_manifests().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("changed after"), "{err}");
+        // Checked before publishing any: the first is untouched too.
+        assert_eq!(fs::read(&first).unwrap(), b"old one");
+        assert_eq!(fs::read(&second).unwrap(), b"written by another mind");
+        // A destination missing when it had contents is a change as well.
+        fs::write(&second, b"old two").unwrap();
+        fs::remove_file(&first).unwrap();
+        assert!(journal.finish_prevalidated_manifests().is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // spec: LIFE-64
+    #[cfg(unix)]
+    #[test]
+    fn a_rollback_stops_before_moving_an_entry_it_did_not_put_there() {
+        let dir = dir();
+        let file = dir.join("journal.json");
+        let store = dir.join("store");
+        let trash = dir.join("trash");
+        let staging = dir.join("staging");
+        let link = dir.join("link");
+        fs::write(&store, b"old copy").unwrap();
+        fs::write(&staging, b"new copy").unwrap();
+        let mut journal = Journal::begin(&file).unwrap();
+        moved(&mut journal, &store, &trash);
+        moved(&mut journal, &staging, &store);
+        journal
+            .record(Intent::CreateLink {
+                path: link.clone(),
+                target: store.clone(),
+            })
+            .unwrap();
+        make_symlink(&store, &link).unwrap();
+        // Another mind reinstalls the store copy: a different entry.
+        let theirs = dir.join("theirs");
+        fs::write(&theirs, b"their copy").unwrap();
+        fs::rename(&theirs, &store).unwrap();
+        let mut journal = Journal::load(&file).unwrap();
+        let err = journal.undo_to(0).unwrap_err();
+        assert!(err.to_string().contains("no longer what"), "{err}");
+        // Nothing was undone, not even the link undone first.
+        assert_eq!(fs::read_link(&link).unwrap(), store);
+        assert_eq!(fs::read(&store).unwrap(), b"their copy");
+        assert_eq!(fs::read(&trash).unwrap(), b"old copy");
+        assert_eq!(Journal::load(&file).unwrap().intents.len(), 3);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1565,6 +1814,7 @@ mod tests {
         let mv = |from: &str, to: &str| Intent::Move {
             from: dir.join(from),
             to: dir.join(to),
+            identity: None,
         };
         for (from, to) in [
             ("home/.tmp/staging/skill/a", "home/store/skill/a"),

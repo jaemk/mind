@@ -431,6 +431,46 @@ fn an_upgrade_moving_homes_killed_at_any_step_keeps_a_whole_item() {
     }
 }
 
+// spec: LIFE-64
+#[test]
+fn recovery_refuses_to_overwrite_a_manifest_another_mind_changed() {
+    // Find a crash after the commit decision, before the manifest is written.
+    let mut n = 1;
+    let (sb, journal) = loop {
+        let sb = Sandbox::new();
+        let src = sb.source("src", "alpha", "v1");
+        sb.ok(&["--yes", "meld", src.to_str().unwrap()]);
+        sb.change(&src, "alpha", "v2");
+        assert!(
+            sb.crash(n, &["--yes", "upgrade"]).is_some(),
+            "no crash after the commit decision"
+        );
+        let journal = sb.default_home.join(".tx-journal.json");
+        let committed = fs::read(&journal).ok().is_some_and(|bytes| {
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            v["decision"] == "Commit"
+        });
+        if committed {
+            break (sb, journal);
+        }
+        n += 1;
+        assert!(n < MAX_STEPS);
+    };
+    // An older mind, which ignores journals, saves the manifest meanwhile.
+    let manifest = sb.default_home.join("manifest.json");
+    let theirs = "{\"version\":1,\"items\":{}}";
+    fs::write(&manifest, theirs).unwrap();
+    let r = sb.mind(None, &["recall"]);
+    assert_ne!(r.code, Some(0));
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("changed after this transaction began"),
+        "{out}"
+    );
+    assert_eq!(fs::read_to_string(&manifest).unwrap(), theirs);
+    assert!(journal.exists(), "the journal is kept for diagnosis");
+}
+
 // spec: LIFE-61
 #[test]
 fn a_journal_naming_a_path_outside_mind_is_refused_and_kept() {

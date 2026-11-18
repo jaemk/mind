@@ -422,6 +422,9 @@ impl Manifest {
         // their previous versions.
         for (file, json, _, home) in writes {
             let journal_file = home.join(".manifest-journal.json");
+            // spec: LIFE-64
+            let prior =
+                crate::transaction::Prior::of(&file).map_err(|e| MindError::io(&file, e))?;
             let mut journal = crate::transaction::Journal::begin(&journal_file)
                 .map_err(|e| MindError::io(&journal_file, e))?;
             journal
@@ -429,6 +432,7 @@ impl Manifest {
                     staged: file.clone(),
                     destination: file,
                     contents: json,
+                    prior: Some(prior),
                 })
                 .map_err(|e| MindError::io(&journal_file, e))?;
             journal

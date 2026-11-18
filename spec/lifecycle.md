@@ -325,3 +325,14 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   recovery is itself killed at each of its steps and retried, and the tests
   assert the manifest entries, store copies, links, and foreign targets are
   consistent and no journal or trash is left.
+- `LIFE-64` A mind that predates journals ignores them, so after an
+  interruption it can change state before a journal is recovered. Recovery
+  acts only on the state the transaction left. Each recorded manifest notes
+  the file it replaces (absent, or its length and hash), and every manifest
+  is published only if each destination still holds that or already holds
+  the recorded bytes. Each recorded move notes the identity of what it moved
+  (device and inode, on unix), and a rollback first replays every undo step
+  against the current files; a step that would act on an entry the
+  transaction did not put there stops it before anything changes. Either
+  check failing leaves the journal in place and reports `transaction-journal`
+  (`manifest-journal` for a per-home manifest journal).
