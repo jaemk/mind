@@ -525,9 +525,17 @@ fn scan_catalog_with(
 /// startup). Returns an error if the lock cannot be acquired.
 // spec: TUI-25
 pub fn load(paths: &Paths) -> Result<Snapshot> {
-    let lock = lock::open(paths)?;
-    let _guard = lock.read()?;
-    load_inner(paths, Refresh::All)
+    let mut lock = lock::open(paths)?;
+    loop {
+        {
+            let _guard = lock.read()?;
+            if !crate::transaction::pending(paths)? {
+                return load_inner(paths, Refresh::All);
+            }
+        }
+        let _guard = lock.write()?;
+        crate::transaction::recover(paths)?;
+    }
 }
 
 /// Try to load a refreshed snapshot under a NON-BLOCKING shared lock.
@@ -536,7 +544,7 @@ pub fn load(paths: &Paths) -> Result<Snapshot> {
 /// [`try_poll_focused`].
 // spec: TUI-15 TUI-25
 pub fn try_poll(paths: &Paths) -> Option<Snapshot> {
-    try_poll_with(paths, Refresh::All)
+    try_poll_with(paths, Refresh::All).ok().flatten()
 }
 
 /// [`try_poll`] for the poll tick: only the sources in `on_screen` are read
@@ -545,14 +553,25 @@ pub fn try_poll(paths: &Paths) -> Option<Snapshot> {
 pub fn try_poll_focused(
     paths: &Paths,
     on_screen: &std::collections::HashSet<String>,
-) -> Option<Snapshot> {
+) -> Result<Option<Snapshot>> {
     try_poll_with(paths, Refresh::Focused(on_screen))
 }
 
-fn try_poll_with(paths: &Paths, refresh: Refresh<'_>) -> Option<Snapshot> {
-    let lock = lock::open(paths).ok()?;
-    let _guard = lock.try_read()?;
-    load_inner(paths, refresh).ok()
+fn try_poll_with(paths: &Paths, refresh: Refresh<'_>) -> Result<Option<Snapshot>> {
+    let mut lock = lock::open(paths)?;
+    {
+        let Some(_guard) = lock.try_read() else {
+            return Ok(None);
+        };
+        if !crate::transaction::pending(paths)? {
+            return load_inner(paths, refresh).map(Some);
+        }
+    }
+    let Some(_guard) = lock.try_write() else {
+        return Ok(None);
+    };
+    crate::transaction::recover(paths)?;
+    Ok(None)
 }
 
 /// Sanitize a set of dependency keys (`kind:name`) through the same TUI-60

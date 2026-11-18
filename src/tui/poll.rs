@@ -39,6 +39,7 @@ pub struct Poller {
     on_screen: OnScreen,
     stop: Option<mpsc::Sender<()>>,
     rx: mpsc::Receiver<Polled>,
+    errors: mpsc::Receiver<String>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -47,7 +48,7 @@ impl Poller {
     /// since the caller has just loaded the initial snapshot itself.
     // spec: TUI-86 TUI-87
     pub fn start(paths: &Paths, interval: Duration) -> Self {
-        Self::start_with(interval, {
+        Self::start_with_result(interval, {
             let paths = paths.clone();
             move |on_screen| data::try_poll_focused(&paths, on_screen)
         })
@@ -55,9 +56,17 @@ impl Poller {
 
     /// [`Poller::start`] with the load supplied, so tests can drive it. The
     /// load is given the sources last published by [`Poller::set_on_screen`].
+    #[cfg(test)]
     fn start_with<F>(interval: Duration, mut load: F) -> Self
     where
         F: FnMut(&HashSet<String>) -> Option<Snapshot> + Send + 'static,
+    {
+        Self::start_with_result(interval, move |on_screen| Ok(load(on_screen)))
+    }
+
+    fn start_with_result<F>(interval: Duration, mut load: F) -> Self
+    where
+        F: FnMut(&HashSet<String>) -> crate::error::Result<Option<Snapshot>> + Send + 'static,
     {
         let epoch = Arc::new(AtomicU64::new(0));
         let on_screen: OnScreen = Arc::default();
@@ -67,6 +76,7 @@ impl Poller {
         // suspended for one) loads that find it full are dropped rather than
         // queued, so a long action does not pile up snapshots.
         let (tx, rx) = mpsc::sync_channel(1);
+        let (error_tx, errors) = mpsc::sync_channel(1);
         let shared = epoch.clone();
         let handle = std::thread::spawn(move || {
             // Wakes on the interval; a stop message or a dropped sender ends it.
@@ -74,8 +84,13 @@ impl Poller {
                 let epoch = shared.load(Ordering::Acquire);
                 let on_screen = shown.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 // try_poll skips (None) while a writer holds the lock (TUI-25).
-                let Some(snapshot) = load(&on_screen) else {
-                    continue;
+                let snapshot = match load(&on_screen) {
+                    Ok(Some(snapshot)) => snapshot,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        let _ = error_tx.try_send(crate::sanitize::strip_ansi(&error.to_string()));
+                        continue;
+                    }
                 };
                 if let Err(mpsc::TrySendError::Disconnected(_)) =
                     tx.try_send(Polled { epoch, snapshot })
@@ -89,6 +104,7 @@ impl Poller {
             on_screen,
             stop: Some(stop_tx),
             rx,
+            errors,
             handle: Some(handle),
         }
     }
@@ -114,6 +130,10 @@ impl Poller {
             .last()
             .map(|p| p.snapshot)
     }
+
+    pub fn latest_error(&self) -> Option<String> {
+        self.errors.try_iter().last()
+    }
 }
 
 impl Drop for Poller {
@@ -136,6 +156,30 @@ mod tests {
             source_names: vec![name.to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn invalid_recovery_journal_reaches_the_ui() {
+        let base = std::env::temp_dir().join(format!("mind-poll-journal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(".manifest-journal.json"), b"{").unwrap();
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let poller = Poller::start(&paths, Duration::from_millis(1));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = loop {
+            if let Some(error) = poller.latest_error() {
+                break error;
+            }
+            assert!(Instant::now() < deadline, "poll error was never delivered");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(error.contains("manifest-journal"), "{error}");
+        drop(poller);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// Wait (bounded) for the poller to deliver something under `epoch`.

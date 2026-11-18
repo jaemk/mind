@@ -364,6 +364,10 @@ EXAMPLES:
         #[arg(long, alias = "unlink-only")]
         keep_items: bool,
 
+        /// Preview the sources and items to remove, without running hooks.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
         /// Supply or override the source's uninstall hook: a shell command run
         /// in the clone before the source is removed. Replaces the source's
         /// declared uninstall hook(s); the override is shown loudly in the prompt.
@@ -570,6 +574,10 @@ EXAMPLES:
         #[arg(short = 'f', long)]
         force: bool,
 
+        /// Preview the selected removals without changing files or running hooks.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
         // spec: CLI-227 CLI-250
         #[command(flatten)]
         accept: AcceptHooksArgs,
@@ -607,6 +615,10 @@ EXAMPLES:
         /// installed from, so a source unmelded with `--keep-items` still
         /// matches.
         source: Option<String>,
+
+        /// Preview the selected removals without changing files or running hooks.
+        #[arg(short = 'n', long)]
+        dry_run: bool,
 
         // spec: CLI-250 PROF-38
         #[command(flatten)]
@@ -715,6 +727,10 @@ EXAMPLES:
         // spec: CLI-169
         #[arg(long)]
         no_sync: bool,
+
+        /// Preview changes against the current checkouts without fetching or running hooks.
+        #[arg(short = 'n', long, conflicts_with = "allow_breaking")]
+        dry_run: bool,
 
         /// Take every breaking release a version-pinned source has (a release
         /// outside its range, such as 2.0.0 under `^1.4`) without prompting:

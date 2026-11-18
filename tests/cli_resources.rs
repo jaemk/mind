@@ -3,13 +3,13 @@
 //! `mind` binary against a hermetic fixture (a local git repo melded by path,
 //! isolated MIND_HOME/CLAUDE_HOME). No network.
 
+mod common;
+
+use common::{fixture_dir, git, write_file};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::Value;
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct Sandbox {
     base: PathBuf,
@@ -27,9 +27,7 @@ struct Run {
 impl Sandbox {
     /// An empty source directory; the caller writes files, then [`commit`].
     fn new() -> Sandbox {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-res-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = fixture_dir("res");
         let source = base.join("lib");
         std::fs::create_dir_all(&source).unwrap();
         Sandbox {
@@ -69,9 +67,7 @@ impl Sandbox {
     }
 
     fn write(&self, rel: &str, contents: &str) {
-        let path = self.source.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
+        write_file(&self.source.join(rel), contents);
     }
 
     fn commit(&self) {
@@ -82,14 +78,7 @@ impl Sandbox {
             vec!["add", "-A"],
             vec!["commit", "-qm", "fixture"],
         ] {
-            let status = Command::new("git")
-                .args(&args)
-                .current_dir(&self.source)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .expect("run git");
-            assert!(status.success(), "git {args:?}");
+            git(&self.source, &args);
         }
     }
 

@@ -6,10 +6,12 @@
 //! 1. Build the new copy in a staging dir and expand its `{{ns:}}`/path-token
 //!    references there, in every markdown file (NS-53). The likeliest failure
 //!    (a bad reference) happens here, while the live install is untouched.
-//! 2. Move any existing store copy aside to a backup, then move staging into
-//!    place and ensure the symlink.
-//! 3. On any failure during the swap, restore from the backup. On success,
-//!    drop the backup.
+//! 2. Move any existing store copy (and, under force, a foreign link target)
+//!    aside into the transaction's trash, then move staging into place and
+//!    create the symlink. Each step is journaled first (`transaction.rs`).
+//! 3. On any failure during the swap, undo the item's journaled steps. On
+//!    success, the trash is emptied when the transaction commits; a crash in
+//!    between is recovered by the next command (LIFE-59..63).
 //!
 //! Uninstall is driven by the per-item file registry recorded in the manifest
 //! (`store` + `links`), so it removes exactly what was installed.
@@ -71,7 +73,6 @@ pub fn install(
     // the item's source's mind home, so the swap is a rename within one tree.
     let store = paths.store_item_of(&item.source, kind, &name);
     let staging = paths.staging_path_of(&item.source, kind, &name);
-    let backup = paths.backup_path_of(&item.source, kind, &name);
 
     // 0. Resolve where this item will link, and refuse up front to overwrite any
     //    target that is not mind's own symlink (a user's file/dir/foreign link).
@@ -180,112 +181,68 @@ pub fn install(
         return Err(e);
     }
 
-    // 2. Swap staging into the store, holding any prior copy in backup.
+    // 2. Swap staging into the store. Every step from here is recorded in the
+    //    transaction (LIFE-59): the prior store copy moves to the trash rather
+    //    than being deleted, so any failure (or an interruption, on the next
+    //    run) moves it back. Dropping `scope` unfinished rolls back exactly
+    //    this install's steps (LIFE-4, LIFE-43).
+    let scope = crate::transaction::scope();
+    let home = paths.home_of(&item.source);
     if let Some(parent) = store.parent() {
         mkdir_p(parent)?;
     }
-    let had_backup = store.exists();
-    if had_backup {
-        remove_path(&backup)?;
-        if let Some(parent) = backup.parent() {
-            mkdir_p(parent)?;
-        }
-        rename(&store, &backup)?;
+    if std::fs::symlink_metadata(&store).is_ok() {
+        crate::transaction::move_aside(&store, &home)?;
     }
-    if let Err(e) = rename(&staging, &store) {
-        if had_backup {
-            let _ = rename(&backup, &store); // restore previous version
-        }
-        return Err(e);
-    }
+    crate::transaction::move_path(&staging, &store)?;
 
     // 3. Link the store copy into every agent home (targets were checked free in
-    //    step 0, or force was given). Under force, any pre-existing foreign target
-    //    is stashed before ensure_link removes it so rollback can restore it
-    //    (LIFE-43). On any failure, undo the links made so far (restoring their
-    //    stashes) and roll the store back.
-    // `links` is every link the item records; `made` (with `stashes`) only
-    // those this install created, which a rollback removes. A link that
-    // already pointed at the store copy is recorded but never made, so a
-    // rollback leaves it, valid again once the store is restored.
+    //    step 0, or force was given). mind's own old link is removed (recorded
+    //    with its target, so rollback recreates it); under force a pre-existing
+    //    foreign target moves to the trash, so rollback restores it (LIFE-43).
+    // `links` is every link the item records. A link that already pointed at
+    // the store copy is recorded but never touched, so a rollback leaves it,
+    // valid again once the store is restored.
     let mut links: Vec<std::path::PathBuf> = Vec::new();
-    let mut made: Vec<std::path::PathBuf> = Vec::new();
-    let mut stashes: Vec<Option<std::path::PathBuf>> = Vec::new();
     for (i, link) in planned_links.into_iter().enumerate() {
-        // Under force, move any pre-existing foreign target to a stash so it
-        // can be restored on rollback. A missing target or mind's own symlink
-        // needs no stash. (LIFE-43)
-        let stash = if force {
-            let sp = paths
-                .home_of(&item.source)
-                .join(".tmp")
-                .join("foreign-stash")
-                .join(i.to_string());
-            match maybe_stash_foreign(&store_roots, &link, &sp) {
-                Ok(true) => Some(sp),
-                Ok(false) => None,
-                Err(e) => {
-                    // Stashing failed: roll back links and store made so far.
-                    for (made, s) in made.iter().zip(stashes.iter()) {
-                        let _ = remove_path(made);
-                        if let Some(s) = s {
-                            let _ = rename(s, made);
-                        }
-                    }
-                    let _ = remove_path(&store);
-                    if had_backup {
-                        let _ = rename(&backup, &store);
-                    }
-                    return Err(e);
-                }
-            }
-        } else {
-            None
-        };
-
         // spec: LOBE-6 -- a link that already points at the store copy is
         // left as it is, so an in-place reinstall writes nothing in the lobe.
-        if stash.is_none() && std::fs::read_link(&link).is_ok_and(|t| t == store) {
+        if std::fs::read_link(&link).is_ok_and(|t| t == store) {
             links.push(link);
             continue;
         }
-        if let Err(e) = ensure_link(&store, &link) {
-            // spec: LOBE-6 -- a lobe that cannot be written (a sandbox denying
-            // it) is skipped with a note; the item installs without that link.
-            if e.is_unwritable() && stash.is_none() {
-                note_unwritable_lobe_once(&planned_lobes[i]);
-                continue;
-            }
-            // Rollback: remove symlinks made so far, restore their stashes, then
-            // restore the store. Also restore the current link's stash if any.
-            for (made, s) in made.iter().zip(stashes.iter()) {
-                let _ = remove_path(made);
-                if let Some(s) = s {
-                    let _ = rename(s, made);
+        let mut stashed = false;
+        let replaced = (|| -> Result<()> {
+            match std::fs::symlink_metadata(&link) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(MindError::io(&link, e)),
+                Ok(meta) if meta.file_type().is_symlink() && links_into(&link, &store_roots) => {
+                    crate::transaction::remove_link(&link)?;
+                }
+                Ok(_) => {
+                    crate::transaction::move_aside(&link, &home)?;
+                    stashed = true;
                 }
             }
-            if let Some(s) = &stash {
-                let _ = rename(s, &link);
+            crate::transaction::create_link(&store, &link)
+        })();
+        match replaced {
+            Ok(()) => links.push(link),
+            // spec: LOBE-6 -- a lobe that cannot be written (a sandbox denying
+            // it) is skipped with a note; the item installs without that link.
+            Err(e) if e.is_unwritable() && !stashed => {
+                note_unwritable_lobe_once(&planned_lobes[i]);
             }
-            let _ = remove_path(&store);
-            if had_backup {
-                let _ = rename(&backup, &store);
-            }
-            return Err(e);
+            // Dropping `scope` undoes the links made so far, restores any
+            // stashed target, and puts the prior store copy back.
+            Err(e) => return Err(e),
         }
-        made.push(link.clone());
-        links.push(link);
-        stashes.push(stash);
     }
 
-    // 4. Success: drop the backup and any foreign-target stashes (the new
-    //    symlinks have taken their place; LIFE-43).
-    if had_backup {
-        let _ = remove_path(&backup);
-    }
-    for s in stashes.iter().flatten() {
-        let _ = remove_path(s);
-    }
+    // 4. Success. Inside a command transaction the trash (the prior store
+    //    copy, stashed targets) is emptied when the manifest commits; with no
+    //    command transaction, now.
+    scope.done()?;
 
     Ok(InstalledItem {
         kind,
@@ -350,6 +307,12 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
         .collect();
     let root_refs: Vec<&Path> = canonical_roots.iter().map(|p| p.as_path()).collect();
 
+    // spec: LIFE-59 -- each removal is recorded in the transaction: a link is
+    // removed with its target noted, a store copy (or a non-link entry) moves
+    // to the trash, so an interruption or a later failure in the same command
+    // puts the item back whole.
+    let scope = crate::transaction::scope();
+    let home = paths.home_of_item_store(&item.store);
     for link in &item.links {
         let p = Path::new(link);
         let canon_p = canonicalize_link_parent(p);
@@ -373,7 +336,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
         }
         // spec: LOBE-6 -- a link in a lobe that cannot be written is left in
         // place with a note rather than failing the removal.
-        match remove_path(p) {
+        match remove_recorded(p, &home) {
             Err(e) if e.is_unwritable() => {
                 note_unwritable_lobe_once(p.parent().unwrap_or(p));
             }
@@ -387,10 +350,30 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
             "mind: warning: skipping removal of '{}' -- path is outside the mind store root",
             crate::sanitize::display_path(&store_path)
         );
-        return Ok(());
+        return scope.done();
     }
-    remove_path(&store_path)?;
-    Ok(())
+    remove_recorded(&store_path, &home)?;
+    scope.done()
+}
+
+/// Remove `path` inside the transaction (LIFE-59): a symlink is removed with
+/// its target recorded, anything else moves to the trash in `home`. A missing
+/// path is already gone. An entry on another filesystem than `home` cannot
+/// move to its trash, so it is removed outright, as before transactions.
+fn remove_recorded(path: &Path, home: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(MindError::io(path, e)),
+        Ok(meta) if meta.file_type().is_symlink() => crate::transaction::remove_link(path),
+        Ok(_) => match crate::transaction::move_aside(path, home) {
+            Err(MindError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::CrossesDevices =>
+            {
+                remove_path(path)
+            }
+            other => other,
+        },
+    }
 }
 
 /// After a re-install of `old` as `new` (same item), remove the old store copy
@@ -549,35 +532,6 @@ pub fn link_into_new_lobes(
         }
     }
     (created, failed)
-}
-
-/// Under a forced install, move a pre-existing foreign target at `link` to
-/// `stash` so it can be restored on rollback (LIFE-43). Returns `true` when
-/// the target was moved (a stash was created). Returns `false` when the link
-/// is absent or is already mind's own symlink into the store (no stash needed).
-///
-/// Uses the same "is mind's own" predicate as `ensure_unoccupied`: a symlink
-/// pointing into one of `store_roots` is ours; everything else (regular file,
-/// directory, symlink to another location) is foreign.
-///
-/// Called only when `force` is true. The non-force path uses `ensure_unoccupied`
-/// which refuses to touch foreign targets at all.
-fn maybe_stash_foreign(store_roots: &[PathBuf], link: &Path, stash: &Path) -> Result<bool> {
-    let meta = match std::fs::symlink_metadata(link) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(MindError::io(link, e)),
-        Ok(m) => m,
-    };
-    // Mind's own symlink: no stash needed.
-    if meta.file_type().is_symlink() && links_into(link, store_roots) {
-        return Ok(false);
-    }
-    // Foreign target: move it to the stash so rollback can rename it back.
-    if let Some(parent) = stash.parent() {
-        mkdir_p(parent)?;
-    }
-    rename(link, stash)?;
-    Ok(true)
 }
 
 /// Lobe paths already reported unreachable this process (HARN-16), so the note
@@ -1264,10 +1218,6 @@ fn collect_files_at(dir: &Path, out: &mut Vec<std::path::PathBuf>, depth: usize)
         }
     }
     Ok(())
-}
-
-fn rename(from: &Path, to: &Path) -> Result<()> {
-    std::fs::rename(from, to).map_err(|e| MindError::io(to, e))
 }
 
 /// Best-effort removal of a file, dir, or symlink; "not found" is success.
@@ -2263,71 +2213,6 @@ mod tests {
     }
 
     // ---- LIFE-43: forced-install transactional stash/restore ---------------
-
-    /// `maybe_stash_foreign` moves a foreign regular file to the stash (returning
-    /// true) and leaves an absent path or a mind-owned symlink untouched (false).
-    /// Renaming the stash back to the original path recovers the file intact.
-    #[cfg(unix)]
-    #[test]
-    fn maybe_stash_foreign_moves_foreign_file_and_restores_correctly() {
-        // spec: LIFE-43
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let base =
-            std::env::temp_dir().join(format!("mind-stash-helper-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-
-        let store_root = vec![base.join("store")];
-        let link = base.join("link-target.md");
-        let stash0 = base.join("stash").join("0");
-
-        // Case 1: absent path -> no stash, returns false.
-        let got = maybe_stash_foreign(&store_root, &link, &stash0).unwrap();
-        assert!(!got, "absent link must not be stashed (LIFE-43)");
-        assert!(
-            !stash0.exists(),
-            "no stash must be created for an absent link"
-        );
-
-        // Case 2: foreign regular file -> stashed, returns true.
-        let foreign_content = b"original foreign content";
-        std::fs::write(&link, foreign_content).unwrap();
-        let got = maybe_stash_foreign(&store_root, &link, &stash0).unwrap();
-        assert!(got, "foreign file must be stashed (LIFE-43)");
-        assert!(!link.exists(), "original path must be vacated after stash");
-        assert!(stash0.exists(), "stash file must exist");
-        assert_eq!(
-            std::fs::read(&stash0).unwrap(),
-            foreign_content,
-            "stash must preserve original content"
-        );
-
-        // Simulate rollback: rename stash back to original location.
-        rename(&stash0, &link).unwrap();
-        assert!(link.exists(), "restored path must exist");
-        assert_eq!(
-            std::fs::read(&link).unwrap(),
-            foreign_content,
-            "restored file must have original content (LIFE-43)"
-        );
-
-        // Case 3: mind's own symlink -> not stashed, returns false.
-        std::fs::create_dir_all(&store_root[0]).unwrap();
-        let store_file = store_root[0].join("agent").join("myagent");
-        std::fs::create_dir_all(store_file.parent().unwrap()).unwrap();
-        std::fs::write(&store_file, b"mind managed").unwrap();
-        std::fs::remove_file(&link).unwrap();
-        std::os::unix::fs::symlink(&store_file, &link).unwrap();
-
-        let stash1 = base.join("stash").join("1");
-        let got = maybe_stash_foreign(&store_root, &link, &stash1).unwrap();
-        assert!(!got, "mind's own symlink must not be stashed (LIFE-43)");
-        assert!(!stash1.exists(), "no stash for mind's own symlink");
-        // Symlink is untouched.
-        assert!(std::fs::symlink_metadata(&link).is_ok());
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
 
     /// A forced install that clobbers a foreign file at the first link target
     /// but fails on a later link must leave the original foreign file restored

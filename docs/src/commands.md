@@ -138,6 +138,7 @@ confirmation and is required without a terminal.
 | flag | effect |
 |------|--------|
 | `--keep-items` | drop the source, leave its items installed |
+| `-n`, `--dry-run` | preview selected sources, items, and hooks without removing or running them |
 | `--uninstall-hook <CMD>` | supply or replace the source's uninstall hooks |
 | `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
@@ -203,6 +204,7 @@ Uninstall items: the store copy and every link. Alias `uninstall`, `unlearn`.
 | `--unmanaged` | act on unmanaged lobe items only; with no `ITEM`, all of them |
 | `--dropped` | remove items their source no longer offers, or whose source is no longer melded; `ITEM` narrows them (the same as [`prune`](#prune)) |
 | `-f`, `--force` | skip the confirmation when other items depend on the one removed |
+| `-n`, `--dry-run` | show selected items, paths, dependents, and hooks without removing them; with `--profile`, show the profile disable plan |
 | `--accept-hooks[=EVENTS]` | run uninstall hooks without asking |
 
 A glob matching several items asks once; `--yes` skips that and the dependents
@@ -247,6 +249,8 @@ More than one item asks once; `--yes` skips that. A dropped item's uninstall
 hooks went with it, so none run; an installed item that still requires a
 dropped one is left installed. A leftover's uninstall hooks run after a
 prompt, or without one under `--accept-hooks`.
+`--dry-run` previews the removals, paths, dependents, and known hooks without
+removing items or running hooks.
 
 ```
 mind prune
@@ -336,8 +340,16 @@ mind upgrade owner/repo            # one source
 |------|--------|
 | `--source <filter>` | fetch and upgrade only the matching sources; combines with `ITEM` |
 | `--no-sync` | skip the fetch; compare against the clones on disk |
+| `-n`, `--dry-run` | preview against current checkouts without fetching, running hooks, or changing installed items |
 | `--allow-breaking` | take a version-pinned source's breaking release (the next major) without a prompt; see [Follow release versions](pinning.md#follow-release-versions) |
 | `--accept-hooks[=EVENTS]` | run hooks without asking: all, or only the listed events |
+
+The preview also lists breaking releases it would leave unapplied, source
+moves a newly declared `mind-home` would make, and the dependencies and install
+hooks of new items. It does not predict content diffs or build output. Run
+`mind sync` first to preview a newer checkout; `--allow-breaking` cannot be
+combined with `--dry-run`. Like other read-only commands, a first run may
+create the mind home and lock file for concurrency control.
 
 See [Keep everything up to date](updating.md).
 

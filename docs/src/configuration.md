@@ -118,7 +118,8 @@ every other kind an over-cap file fails the scan of its source.
   auto-update.log               every auto-update run's moves, prunes, holds,
                                 and failures
   .tmp/staging/                 scratch for new copies during transactional installs
-  .tmp/backup/                  previous copy held during a swap, for rollback
+  .tmp/tx/                      previous copies held until a change commits, for rollback
+  .tx-journal.json              journal of an unfinished change, recovered by the next command
   .lock                         global advisory lock
   .lock.holder                  the command holding .lock exclusively, while it runs
 ```
@@ -263,9 +264,10 @@ lock, so a hook cannot run `mind`; see
 ## Install and upgrade are transactional
 
 A failed `learn` or `upgrade` never leaves you worse off. The new copy is built
-in a staging directory first; the previous version is moved to a backup and only
-dropped after the swap succeeds. A failure at any point restores the previous
-version from backup.
+in a staging directory first; the previous version is moved aside and only
+deleted after the change commits. A failure at any point restores the previous
+version. If `mind` is killed mid-change, the next command finds the journal it
+left and rolls the change back, or finishes it if it had committed.
 
 When an installed item's effective name changes, `upgrade` reports
 `rename old -> new` and handles it the same way: the new name is installed

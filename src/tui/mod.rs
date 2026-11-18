@@ -144,6 +144,10 @@ fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
             app.apply_snapshot_if_changed(snapshot);
             dirty = true;
         }
+        if let Some(error) = poller.latest_error() {
+            app.set_error(format!("Refresh failed: {error}"));
+            dirty = true;
+        }
     }
 
     Ok(())
@@ -485,7 +489,16 @@ pub(crate) fn action_needs_suspension(kind: &crate::tui::app::ActionKind) -> boo
 /// error inline (TUI-24): a `NamespaceLocked` error means items are installed.
 // spec: TUI-53 NS-30
 fn run_set_namespace(paths: &Paths, app: &mut app::App, source: String, new_alias: Option<String>) {
-    match crate::commands::set_source_namespace(paths, &source, new_alias) {
+    let result = (|| {
+        let mut lock = crate::lock::open(paths)?;
+        let _guard = lock.write()?;
+        crate::transaction::recover(paths)?;
+        let tx = crate::transaction::begin(paths);
+        let result = crate::commands::set_source_namespace(paths, &source, new_alias);
+        tx.settle(&result)?;
+        result
+    })();
+    match result {
         Ok(()) => {
             app.set_status("Namespace updated.".to_string());
             // Reload so the tree + dialog show the updated effective prefix.
@@ -505,6 +518,7 @@ fn run_set_namespace(paths: &Paths, app: &mut app::App, source: String, new_alia
 fn run_profile_preview(paths: &Paths, app: &mut app::App, req: &app::ProfilePreviewRequest) {
     let preview = crate::lock::open(paths).and_then(|lock| {
         let _guard = lock.read()?;
+        crate::transaction::refuse_pending(paths)?;
         match (req.enable, req.profiles.as_slice()) {
             (true, profiles) => {
                 crate::commands::profiles_install_preview(paths, &req.source, profiles)

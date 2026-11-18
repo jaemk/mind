@@ -34,6 +34,7 @@ mod sanitize;
 mod scaffold;
 mod selfupdate;
 mod source;
+mod transaction;
 mod tui;
 mod unmanaged;
 mod version;
@@ -352,6 +353,11 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
             action: AutoUpdateCmd::Run { .. },
         } => LockMode::None,
 
+        Command::Upgrade { dry_run: true, .. }
+        | Command::Unmeld { dry_run: true, .. }
+        | Command::Forget { dry_run: true, .. }
+        | Command::Prune { dry_run: true, .. } => LockMode::Shared,
+
         // Mutating commands.
         Command::Meld(_)
         // curate registers, installs, re-pins, upgrades, and (with --prune)
@@ -531,17 +537,47 @@ fn run(cli: Cli) -> Result<()> {
     // spec: STO-40 STO-41 STO-42
     // Completions and man touch no persisted state: skip the lock. All other
     // commands acquire the lock (shared or exclusive) before reading or writing.
+    let dry_run = matches!(
+        cli.command,
+        Command::Upgrade { dry_run: true, .. }
+            | Command::Unmeld { dry_run: true, .. }
+            | Command::Forget { dry_run: true, .. }
+            | Command::Prune { dry_run: true, .. }
+            | Command::Learn { dry_run: true, .. }
+    );
     match lock_mode(&cli.command, cli.json, cli.ascii) {
         LockMode::None => dispatch(cli, &paths),
         LockMode::Exclusive => {
             let mut lock = lock::open(&paths)?;
             let _guard = lock.write()?;
-            dispatch(cli, &paths)
+            // spec: STO-87 LIFE-61
+            if dry_run {
+                transaction::refuse_pending(&paths)?;
+            }
+            transaction::recover(&paths)?;
+            // spec: LIFE-59 LIFE-62 -- one transaction per mutating command:
+            // committed by each manifest save and at a successful end, rolled
+            // back when the command fails.
+            let tx = transaction::begin(&paths);
+            let result = dispatch(cli, &paths);
+            tx.settle(&result)?;
+            result
         }
         LockMode::Shared => {
-            let lock = lock::open(&paths)?;
-            let _guard = lock.read()?;
-            dispatch(cli, &paths)
+            let mut lock = lock::open(&paths)?;
+            loop {
+                {
+                    let _guard = lock.read()?;
+                    if !transaction::pending(&paths)? {
+                        return dispatch(cli, &paths);
+                    }
+                    if dry_run {
+                        transaction::refuse_pending(&paths)?;
+                    }
+                }
+                let _guard = lock.write()?;
+                transaction::recover(&paths)?;
+            }
         }
     }
 }
@@ -737,6 +773,9 @@ fn items_settle(
             accept,
             ..
         } => ("learn", Scope::Touched, accept.accept()),
+        Command::Forget { dry_run: true, .. } | Command::Prune { dry_run: true, .. } => {
+            return None;
+        }
         Command::Forget { accept, .. } => ("forget", Scope::Touched, accept.accept()),
         Command::Prune { accept, .. } => ("prune", Scope::Touched, accept.accept()),
         Command::Curate {
@@ -754,6 +793,7 @@ fn items_settle(
             ..
         } => ("sync", Scope::Pending(source.clone()), accept.accept()),
         Command::Sync { accept, .. } => ("sync", Scope::Touched, accept.accept()),
+        Command::Upgrade { dry_run: true, .. } => return None,
         Command::Upgrade {
             item: Some(_),
             source: None,
@@ -790,16 +830,23 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Unmeld {
             name,
             keep_items,
+            dry_run,
             uninstall_hook,
             accept,
-        } => commands::unmeld(
-            paths,
-            &name,
-            keep_items,
-            yes,
-            accept.accept(),
-            uninstall_hook,
-        ),
+        } => {
+            if dry_run {
+                commands::unmeld_preview(paths, &name, keep_items, accept.accept(), uninstall_hook)
+            } else {
+                commands::unmeld(
+                    paths,
+                    &name,
+                    keep_items,
+                    yes,
+                    accept.accept(),
+                    uninstall_hook,
+                )
+            }
+        }
         Command::Learn {
             item,
             all,
@@ -927,10 +974,23 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             unmanaged,
             force: _,
+            dry_run,
             dropped: _,
             profile: Some(profile),
             accept,
-        } if !unmanaged => commands::forget_source_profile(
+        } if !unmanaged && dry_run => commands::forget_source_profile_preview(
+            paths,
+            item.as_deref().unwrap_or_default(),
+            &profile,
+            accept.accept(),
+        ),
+        Command::Forget {
+            item,
+            unmanaged: false,
+            profile: Some(profile),
+            accept,
+            ..
+        } => commands::forget_source_profile(
             paths,
             item.as_deref().unwrap_or_default(),
             &profile,
@@ -941,21 +1001,42 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             unmanaged,
             force,
+            dry_run,
             dropped,
             profile: _,
             accept,
-        } => commands::forget(
-            paths,
-            item.as_deref(),
-            unmanaged,
-            dropped,
-            yes,
-            force,
-            accept.accept(),
-        ),
+        } => {
+            if dry_run {
+                commands::forget_preview(
+                    paths,
+                    item.as_deref(),
+                    unmanaged,
+                    dropped,
+                    accept.accept(),
+                )
+            } else {
+                commands::forget(
+                    paths,
+                    item.as_deref(),
+                    unmanaged,
+                    dropped,
+                    yes,
+                    force,
+                    accept.accept(),
+                )
+            }
+        }
         // spec: CLI-261
-        Command::Prune { source, accept } => {
-            commands::prune(paths, source.as_deref(), yes, accept.accept())
+        Command::Prune {
+            source,
+            dry_run,
+            accept,
+        } => {
+            if dry_run {
+                commands::prune_preview(paths, source.as_deref(), accept.accept())
+            } else {
+                commands::prune(paths, source.as_deref(), yes, accept.accept())
+            }
         }
         Command::Sync {
             source,
@@ -972,6 +1053,7 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             source,
             no_sync,
+            dry_run,
             allow_breaking,
             skip_new,
             ignore_new,
@@ -979,13 +1061,21 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
         } => {
             let accept = accept.accept();
             // spec: AUP-21
-            if !json {
+            if !json && !dry_run {
                 auto_update::show_unshown(paths);
             }
             // spec: VER-63
             commands::set_allow_breaking(allow_breaking);
             // spec: LIFE-55
             commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
+            if dry_run {
+                return commands::upgrade_preview(
+                    paths,
+                    item.as_deref(),
+                    source.as_deref(),
+                    accept,
+                );
+            }
             // spec: CLI-262 - `dispatch` already resolved a target naming no
             // installed item but a melded source to that `--source` filter.
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.

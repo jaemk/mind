@@ -54,6 +54,9 @@ fn execute_inner(
     // spec: STO-40 STO-41 TUI-25
     let mut lock = lock::open(paths)?;
     let _guard = lock.write()?;
+    crate::transaction::recover(paths)?;
+    // spec: LIFE-62 -- a TUI action is one transaction, like a CLI verb.
+    let tx = crate::transaction::begin(paths);
 
     let (result, captured) = if capture {
         // Run the verb with stdout captured so nothing leaks onto the alt-screen.
@@ -70,6 +73,7 @@ fn execute_inner(
             String::new(),
         )
     };
+    tx.settle(&result)?;
     result?;
 
     // Drop the exclusive lock BEFORE calling data::load. data::load acquires

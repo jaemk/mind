@@ -12,10 +12,12 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   references are expanded there, before the live install is touched.
 - `LIFE-2` A failure during staging or expansion (e.g. `BadReference`) aborts the
   install and leaves any previously installed version untouched.
-- `LIFE-3` After staging succeeds, an existing store copy is moved to a backup,
-  staging is moved into the store, and the symlink is ensured.
+- `LIFE-3` After staging succeeds, an existing store copy is moved aside into
+  the transaction's trash (`<home>/.tmp/tx/<id>/<n>`), staging is moved into the
+  store, and the symlink is ensured.
 - `LIFE-4` A failure during the swap restores the previous version from the
-  backup. On success the backup is dropped.
+  trash. On success the trash is emptied when the transaction commits
+  (LIFE-59).
 - `LIFE-5` Install records the item in the manifest: effective name, bare name,
   source, current commit, hash of the source content, store path, link path(s),
   and description.
@@ -51,11 +53,11 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 - `LIFE-43` A forced install (`learn --force`, CLI-35) that replaces a
   pre-existing foreign target at one link path and then fails on a later link
   leaves every clobbered foreign target restored to its original content. Before
-  `ensure_link` removes a foreign target under force, the target is moved to a
-  transactional stash inside `~/.mind/.tmp/foreign-stash/`. On any failure
-  during the link loop, each stashed target is renamed back to its original link
-  path as part of the rollback (alongside removing the partial symlinks and
-  restoring the store backup). On success, the stashes are dropped. The
+  a foreign target is replaced under force, it is moved into the transaction's
+  trash in the item's mind home. On any failure during the link loop, each
+  stashed target is renamed back to its original link path as part of the
+  rollback (alongside removing the partial symlinks and restoring the store
+  copy). On success, the trash is emptied when the transaction commits. The
   non-force path is unchanged: `ensure_unoccupied` prevents any foreign target
   from being touched, so no stashing is needed there.
 
@@ -277,3 +279,45 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   stored hash; after upgrading `mind`, all previously-installed items will report
   drift on the next `recall` or `upgrade` run until they are re-installed or
   upgraded (a one-time event).
+
+## Recovery after interruption
+
+- `LIFE-59` Each mutating command (and each TUI action) runs one transaction,
+  opened under the exclusive state lock. Before each store swap, link creation,
+  link removal, or forced foreign-target stash, the transaction appends an
+  intent to a durable journal (`.tx-journal.json`, written, synced, renamed,
+  and its directory synced). The journal lives in the mind home of the
+  transaction's first change, so work confined to an extra home writes nothing
+  in the default home (HOME-1). A replaced path is moved into a
+  transaction-unique trash (`<home>/.tmp/tx/<id>/<n>`) rather than deleted, so
+  every intent can be undone, and undone again after an interrupted undo.
+  Each item install or uninstall is a savepoint: its failure undoes only its
+  own intents (LIFE-4, LIFE-43). A failed command rolls back everything since
+  the last manifest save.
+- `LIFE-60` A manifest save inside a transaction is its commit point: every
+  changed home's manifest is recorded in the journal, then the commit decision,
+  then each manifest is published and the trash is emptied. Before the
+  decision, recovery undoes the recorded intents in reverse order; after it,
+  recovery finishes publishing every recorded manifest and empties the trash,
+  so a save spanning multiple homes is all or nothing. An interrupted recovery
+  can be retried without losing a pre-existing foreign target or a committed
+  item.
+- `LIFE-61` Before reading or changing state, CLI commands, the TUI, and
+  `auto-update run` detect an unfinished journal in any configured home and
+  recover it while holding the exclusive state lock; a dry run refuses with
+  `recovery-pending` instead. Recovery validates every recorded path before
+  touching any: it must lie inside a configured home's store or `.tmp` tree,
+  or a known lobe, with no symlinked ancestor escaping that root, and a
+  manifest destination must be a configured home's `manifest.json`. A journal
+  that is invalid, unreadable, oversized, or names a path outside those roots
+  fails closed with `transaction-journal` and is retained for diagnosis.
+- `LIFE-62` Hooks run inside the transaction are recorded when they start and
+  finish. Their external side effects are not undone or replayed: when
+  recovery rolls back a transaction with a hook that had started and not
+  finished, it names the hook so the user can inspect its effects.
+- `LIFE-63` Recovery is verified by killing the real binary at each journaled
+  step (`MIND_TEST_CRASH_AT`, debug builds only): upgrades, a forced `learn`
+  over a foreign target, and an upgrade spanning two homes. After each crash,
+  recovery is itself killed at each of its steps and retried, and the tests
+  assert the manifest entries, store copies, links, and foreign targets are
+  consistent and no journal or trash is left.
