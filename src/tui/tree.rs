@@ -566,7 +566,7 @@ fn empty_state_row(group: &str, search: &str, no_sources_melded: bool) -> Option
         // ungrouped `no items match '{q}'` (CLI-187).
         format!("no {group} items match '{search}'")
     } else if no_sources_melded {
-        // spec: CLI-187 (commands.rs `no sources melded; run ...`)
+        // spec: CLI-187 (commands/ `no sources melded; run ...`)
         "no sources melded; run `mind meld <owner/repo>` to add one".to_string()
     } else {
         return None;

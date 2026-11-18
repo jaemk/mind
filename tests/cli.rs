@@ -344,7 +344,7 @@ fn melded() -> Sandbox {
 // and cannot reach `crate::error::shell_quote` (`pub(crate)`). Kept a
 // byte-for-byte mirror of the production algorithm in `src/error.rs` and the
 // `shell_split`/round-trip technique `tests/cli_hooks.rs` uses for the
-// HOOK-106 family, applied here to the CLI-225 sites in `commands.rs`/
+// HOOK-106 family, applied here to the CLI-225 sites in `commands/`/
 // `install.rs`.
 // ---------------------------------------------------------------------------
 
@@ -423,7 +423,7 @@ fn remedy_argv(text: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// CLI-225: printed-remedy shell-quoting at commands.rs/install.rs sites
+// CLI-225: printed-remedy shell-quoting at commands/ and install.rs sites
 // (the error.rs remedies were already covered by HOOK-106's tests).
 // ---------------------------------------------------------------------------
 
@@ -1120,7 +1120,7 @@ fn recall_degrades_past_a_vanished_linked_source_instead_of_hard_failing() {
 #[test]
 fn introspect_reports_a_vanished_linked_source_as_an_issue_not_a_hard_error() {
     // spec: CLI-212 -- introspect's existing CLI-210 per-source loop picks up
-    // LinkedSourceGone for free, with no commands.rs change needed.
+    // LinkedSourceGone for free, with no commands/ change needed.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
@@ -1631,7 +1631,7 @@ fn hostile_unmanaged_item_name_is_skipped_via_unm9() {
 }
 
 // M7: `absorb`'s reported `kind:name` key (`absorb_effective_key` in
-// `src/commands.rs`) is built from the unmanaged item's on-disk NAME, which
+// `src/commands/`) is built from the unmanaged item's on-disk NAME, which
 // comes off the lobe filesystem and is NOT DSC-96-gated (that gate only runs
 // at catalog-scan time for a managed source's items, not for an unmanaged
 // lobe entry `absorb` claims). A CLI-level drive of this with a genuinely
@@ -1641,7 +1641,7 @@ fn hostile_unmanaged_item_name_is_skipped_via_unm9() {
 // success path this key is built for (confirmed: driving `absorb` on such a
 // name here fails with `ItemNotFound`, not a leaked escape). The fix is
 // covered directly instead by the `absorb_effective_key_sanitizes_a_hostile_name`
-// unit test in `src/commands.rs` (spec: DSC-95).
+// unit test in `src/commands/` (spec: DSC-95).
 
 /// DSC-96: a source shipping an item whose on-disk name carries a control
 /// byte, an ANSI escape, or a bidi/zero-width code point is skipped at
@@ -2294,11 +2294,11 @@ fn a_curated_entry_that_shadows_a_local_directory_is_noted_exactly_once() {
     // than to act on it must use `parse_spec_quiet`". These callers all parse an
     // already-decided `[discover].sources` entry purely to derive its identity,
     // and every one of them used to print:
-    //   src/commands.rs  the DSC-68/69 auth-failure arm  (fires below)
-    //   src/commands.rs  install_curated_sources' walk   (fires below)
-    //   src/commands.rs  the DSC-79 clone-failure arm    (same shape)
-    //   src/commands.rs  the DSC-63 install_items check  (same shape)
-    //   src/commands.rs  the json twin of the walk       (same shape)
+    //   src/commands/  the DSC-68/69 auth-failure arm  (fires below)
+    //   src/commands/meld.rs  install_curated_sources' walk   (fires below)
+    //   src/commands/  the DSC-79 clone-failure arm    (same shape)
+    //   src/commands/  the DSC-63 install_items check  (same shape)
+    //   src/commands/  the json twin of the walk       (same shape)
     // Concretely: standing in a directory that contains `skills/greet`, melding
     // a curator whose entry is `source = "skills/greet"` printed
     //   note: 'skills/greet' is also a directory here; ... use './skills/greet'
@@ -2358,8 +2358,8 @@ fn a_top_level_shadowing_spec_is_noted_exactly_once() {
     // own spec ran before the clone, and all four printed:
     //   main.rs   `instance_name` (for the post-meld install target)
     //   main.rs   `is_melded` -> `instance_name` (the fresh/re-meld routing)
-    //   commands.rs `meld`'s identity parse (STO-58 source_name)
-    //   commands.rs `meld_recursive`'s parse -- the one that actually clones
+    //   commands/meld.rs `meld`'s identity parse (STO-58 source_name)
+    //   commands/meld.rs `meld_recursive`'s parse -- the one that actually clones
     // Only the last decides a reading, so the first three are CLI-216
     // "answering a question" parses. Three passes over this class each looked
     // only at the curated/nested sites and missed this one, which is the one an
@@ -15262,7 +15262,7 @@ fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
     // CLI-217 binds "every line a verb may print", with no exemption for a hook
     // that was consented to. Three sites on this one path wrote to stdout
     // unconditionally:
-    //   src/commands.rs  `println!("running install hook '{}' for {}", ...)`
+    //   src/commands/hooks.rs  `println!("running install hook '{}' for {}", ...)`
     //   src/hook.rs      `println!("====== (hook-stdout: {label}) ======")`
     //                    plus `print!("{stdout_str}")` -- the hook's own output
     //   src/hook.rs      the same pair for the hook's stderr, also on stdout
@@ -15415,7 +15415,7 @@ fn remeld_json_of_a_curator_emits_one_document_not_two() {
     //                                      //    -> learn's own print_json
     //     ...
     //     if out.json { return print_json(already-melded) }   // a SECOND doc
-    // (src/commands.rs, `remeld`, the `!link_only` block). `meld`'s fresh-meld
+    // (src/commands/meld.rs, `remeld`, the `!link_only` block). `meld`'s fresh-meld
     // branch avoids this by routing through `install_source_items_for_json`
     // (main.rs, CLI-156); the re-meld branch has now been given the same
     // treatment, so `mind meld <curator> --yes --json | jq .` no longer trips
@@ -15496,7 +15496,7 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
     );
 
     // The skip is reported to the user with the exact note `meld_recursive`
-    // prints on the HOOK-22 skip path (commands.rs); the source name in the
+    // prints on the HOOK-22 skip path (commands/); the source name in the
     // middle is the full `host/owner/repo` identity, so assert the two stable
     // fragments around it. A regression that drops or rewords the note fails
     // here rather than passing on any bare "skipped".
@@ -15652,7 +15652,7 @@ fn recall_sources_shows_install_hook_marker() {
     let sources = sb.mind(&["recall", "--sources"]);
     assert!(sources.success, "recall failed: {}", sources.stderr);
     // The marker is the ` hook` token inside the bracketed commit/alias column
-    // (commands.rs `recall`), e.g. `[<commit> hook]`. Assert the exact bracketed
+    // (commands/recall.rs `recall`), e.g. `[<commit> hook]`. Assert the exact bracketed
     // token so a regression that drops the marker (or renames the column) fails.
     assert!(
         sources.stdout.contains(" hook]"),
@@ -22668,7 +22668,7 @@ fn recall_tree_json_not_installed_item_errors_like_non_json() {
     // `recall <item> --tree --json` for an item that is NOT installed at all must
     // error the same way the non-json `recall <item> --tree` does (NotInstalled
     // via resolve_installed), NOT emit a null/empty object. The DepNode::normal
-    // fallback in commands.rs is only reached AFTER resolve_installed succeeds
+    // fallback in commands/ is only reached AFTER resolve_installed succeeds
     // (item present in the manifest), so an absent item never reaches it.
     let sb = dep61_fixture(); // skill:review and agent:reviewer installed
 
@@ -22713,7 +22713,7 @@ fn recall_tree_json_not_installed_item_errors_like_non_json() {
 #[test]
 fn recall_tree_json_installed_but_orphaned_item_falls_back_to_normal_node() {
     // spec: DEP-63
-    // The `DepNode::normal(key, [])` fallback in commands.rs: an item that IS in
+    // The `DepNode::normal(key, [])` fallback in commands/: an item that IS in
     // the manifest (resolve_installed succeeds) but is NOT a node in the graph
     // (it was removed upstream, so the catalog no longer carries it, and
     // subtree_node returns None). The scoped `recall <item> --tree --json` must
@@ -24222,11 +24222,11 @@ fn marketplace_plugin_description_and_version_recorded() {
 fn marketplace_plugin_description_strips_bidi_directional_and_zero_width() {
     // spec: MKT-9, DSC-69 -- a plugin.json `description` is untrusted,
     // attacker-controlled content. It used to reach display through a private
-    // copy of `strip_ansi` in commands.rs that only blocked the bidi-override
+    // copy of `strip_ansi` in commands/ that only blocked the bidi-override
     // range and line/paragraph separators; the shared, hardened
     // `crate::sanitize::strip_ansi` (CLI-224) additionally blocks the
     // directional marks U+200E/U+200F/U+061C and the zero-width characters
-    // U+200B/U+2060/U+FEFF. Now that commands.rs routes through the one
+    // U+200B/U+2060/U+FEFF. Now that commands/ routes through the one
     // shared implementation, all of those must be stripped here too, in both
     // plain-text and `--json` output.
     let sb = Sandbox::bare("quote-plugin");

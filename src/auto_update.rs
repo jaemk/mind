@@ -1,7 +1,7 @@
 //! Auto-update (spec/auto-update.md): the level a source updates at
 //! unattended, the run's state and report, and the harness trigger.
 //!
-//! The run itself lives in `commands.rs` (`auto_update_run`), next to the
+//! The run itself lives in `commands/auto_update.rs` (`auto_update_run`), next to the
 //! sync and upgrade machinery it drives. This module holds the parts that do
 //! not need it.
 

@@ -452,7 +452,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   same identity in surrounding English prose (naming *what* is wrong, not a
   command to run) is not quoted; only the runnable command is. The rule is not
   limited to a `MindError` variant: an ordinary `println!`/`eprintln!` note in
-  `commands.rs`/`install.rs` that offers a pasteable remedy is the same class
+  `commands/` and `install.rs` that offers a pasteable remedy is the same class
   and is quoted the same way -- the re-meld ignored-flags note (`mind unmeld
   <name>`), the emptied item-link forget hint (`mind unmeld <link-id>`), the
   `learn` not-found hint (`mind probe <query>`, echoing the user's own

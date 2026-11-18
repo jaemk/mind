@@ -1087,7 +1087,7 @@ mod tests {
     }
 
     /// `note`/`warn` are the single chokepoint CLI-217 rests on, and seven call
-    /// sites across `install.rs` and `commands.rs` were converted onto them.
+    /// sites across `install.rs` and `commands/` were converted onto them.
     /// Every other test of that conversion is end-to-end through one caller, so
     /// none of them pins the helper's own contract; a helper that always wrote
     /// to stderr, or that dropped the warn marker, would satisfy all of them

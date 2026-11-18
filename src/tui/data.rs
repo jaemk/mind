@@ -105,7 +105,7 @@ pub struct SnapshotInstalled {
     /// Whether `upgrade` would act on this item: its source content hash has
     /// drifted from the recorded manifest hash, or its effective name has
     /// changed (a rename, e.g. a prefix change). Mirrors the CLI-75 outdated
-    /// check (commands.rs, three call sites) at the TUI snapshot boundary so
+    /// check (commands/, three call sites) at the TUI snapshot boundary so
     /// the browse tree and item dialog can show the same drift a user would
     /// see from `recall`, without re-deriving the comparison at draw time.
     // spec: TUI-63
@@ -593,7 +593,7 @@ fn sanitize_dep_keys(keys: Vec<String>) -> Vec<String> {
 /// (`namespace::item_expands_tokens`, NS-53/NS-57/WF-25), so a `{{ns:sibling}}`
 /// token in a file install never expands does not draw a dependency edge here
 /// that install would never create either. Kept local (rather than shared with
-/// `commands.rs`) so data.rs stays independent of that module.
+/// `commands/`) so data.rs stays independent of that module.
 fn read_item_text(item: &catalog::CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {

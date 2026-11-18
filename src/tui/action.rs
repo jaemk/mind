@@ -1101,7 +1101,7 @@ mod tests {
         // is INDISTINGUISHABLE for a hermetic local source because it is read
         // live from its working tree (CLI-27 `is_linked`). That claim is wrong:
         // `sync` still re-reads and records the linked source's live HEAD into
-        // the registry (`commands.rs`, the `source.is_linked()` branch), and
+        // the registry (`commands/`, the `source.is_linked()` branch), and
         // `upgrade`'s per-item pass records whatever commit is CURRENTLY in the
         // registry at that moment (`registry.find(&installed.source)...commit`),
         // not a fresh read of its own. So:
@@ -2155,7 +2155,7 @@ mod tests {
 
         // The blocked target must not be recorded as a link either: only
         // links `link_into_new_lobes` actually created are appended to the
-        // manifest (src/commands.rs backfill_new_lobes), so a failed target
+        // manifest (src/commands/lobes.rs backfill_new_lobes), so a failed target
         // leaves no trace there. (The prose report naming `--force` goes to
         // the verb's real stdout, which under `cargo test` is intercepted by
         // libtest's own per-test capture before the TUI's fd-level
@@ -2195,7 +2195,7 @@ mod tests {
         // This shard owns only src/tui/action.rs and spec/tui.md; the guard
         // itself (`ensure_unoccupied` / `link_into_new_lobes`'s `force` check)
         // lives in src/install.rs, and the hardcoded `force = false` the TUI
-        // relies on lives in commands::lobe_add (src/commands.rs), neither of
+        // relies on lives in commands::lobe_add (src/commands/lobes.rs), neither of
         // which this shard may edit. So instead of using `Edit` to invert the
         // guard's condition in place, this test flips the exact boolean the
         // TUI's dispatch hardcodes to `false` -- by calling the SAME public

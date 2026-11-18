@@ -201,7 +201,7 @@ pub(crate) fn reachable(
 /// `ItemKey`, and not sanitized). A caller MUST sanitize (`strip_ansi` /
 /// `.display()`) before putting any of them on a display surface (terminal,
 /// JSON meant for a terminal, etc.) -- the same discipline every current
-/// caller (`commands.rs`, `tui/data.rs`'s `sanitize_dep_keys`) already
+/// caller (`commands/`, `tui/data.rs`'s `sanitize_dep_keys`) already
 /// applies. This function does not do it for you.
 ///
 /// A sibling-lookup index over one catalog slice, built once and reused for

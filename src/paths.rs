@@ -1573,7 +1573,7 @@ fn resolve_broken_link_display(
 /// `MIND_HOME`, `CLAUDE_HOME`, `GITHUB_TOKEN`, `GH_TOKEN`, `PATH`, ...).
 ///
 /// `std::env::set_var`/`remove_var` soundness is process-wide, not
-/// module-wide: this crate's test binary runs `src/paths.rs`, `src/commands.rs`,
+/// module-wide: this crate's test binary runs `src/paths.rs`, `src/commands/`,
 /// and `src/selfupdate.rs` tests concurrently on multiple threads, and several
 /// of them spawn a real `git`/`curl` child process, which snapshots `environ` at
 /// spawn time. A per-module lock only protects a module's tests against

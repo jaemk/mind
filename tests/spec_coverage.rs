@@ -64,12 +64,12 @@ const ALLOWLIST: &[&str] = &[
     //   cited from src/unmanaged.rs and tests/cli.rs; removed from the allowlist.
     //   absorb (see spec/absorb.md): claim an unmanaged lobe item into a
     //   version-controlled source and install it managed (ABS-1..10) is now
-    //   implemented and cited from src/commands.rs, src/git.rs, and
+    //   implemented and cited from src/commands/, src/git.rs, and
     //   tests/cli_absorb.rs; no longer allowlisted. `dump` (spec/dump.md,
     //   DUMP-1..8), the nested-source `install_items` subset directive
     //   (DSC-62/63/64, discovery.md) that dump emits and the install flow honors,
     //   and the authoritative nested-entry pin (DSC-65) dump relies on are now
-    //   implemented and cited from src/dump.rs, src/mindfile.rs, src/commands.rs,
+    //   implemented and cited from src/dump.rs, src/mindfile.rs, src/commands/,
     //   tests/cli_install_items.rs, tests/cli_dump.rs, and tests/cli.rs; no longer
     //   allowlisted.
     //   explicit item dependencies (see spec/dependencies.md): an optional
@@ -142,7 +142,7 @@ const ALLOWLIST: &[&str] = &[
     //   (parse/resolve/disclosure/run) from src/hook.rs, the data/error/parse
     //   pieces from src/source.rs, src/error.rs, src/mindfile.rs, the `review`
     //   advisory from src/review.rs, the meld/upgrade wiring (run/skip/abort,
-    //   re-run gating, recording) from tests/cli.rs and src/commands.rs. No HOOK
+    //   re-run gating, recording) from tests/cli.rs and src/commands/. No HOOK
     //   IDs remain allowlisted.
     //   enterprise managed policy (see spec/policy.md) is fully cited: the core
     //   (parse/locate/allow_matches/validate) from src/policy.rs, the enforcement
@@ -196,9 +196,9 @@ const ALLOWLIST: &[&str] = &[
     "HARN-19",
     //   cross-source skill/rule/tool collision detection: NS-43 (detection) and
     //   NS-45 (non-interactive error) are now implemented and cited from
-    //   src/error.rs and src/commands.rs. NS-44 (interactive TTY prompt, prompt
+    //   src/error.rs and src/commands/. NS-44 (interactive TTY prompt, prompt
     //   parsing, and abort sentinel) is now cited from unit tests in
-    //   src/commands.rs.
+    //   src/commands/.
     //   rename mindfile `as` key to `namespace` in [discover].sources entries;
     //   `as` stays as a backwards-compatible alias (DSC-78): implemented and cited.
     // Namespace ergonomics: CLI-159 (--namespace flag), NS-30, and CLI-161

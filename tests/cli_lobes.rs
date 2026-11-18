@@ -3653,12 +3653,12 @@ fn harn15_lobe_path_occupied_by_a_file_fails_without_registering() {
 fn harn17_backfill_has_no_interactive_or_deferral_branch() {
     // spec: HARN-17
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/lobes.rs"),
     )
-    .expect("read src/commands.rs");
+    .expect("read src/commands/lobes.rs");
     let start = src
         .find("fn backfill_new_lobes(")
-        .expect("backfill_new_lobes must exist in src/commands.rs");
+        .expect("backfill_new_lobes must exist in src/commands/lobes.rs");
     let body = &src[start..];
     let end = body.find("\n}\n").expect("end of backfill_new_lobes");
     let body = &body[..end];

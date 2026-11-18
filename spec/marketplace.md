@@ -198,7 +198,7 @@ curated super-source, so it reuses that machinery.
   scanned conventionally from the plugin root's `agents/` directory (DSC-11). A
   `marketplace.json` is authoritative for its source: when found, convention
   discovery is skipped (same as a `plugin.json` per MKT-2). External entries in the
-  marketplace are not scanned by `catalog.rs`; they are sub-melded by `commands.rs`.
+  marketplace are not scanned by `catalog.rs`; they are sub-melded by `commands/`.
 
 ## Plugin repos as nested sources
 

@@ -1299,7 +1299,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
 /// The persisted registry of melded sources.
 ///
 /// Schema version is checked during `load` via a private wrapper type (STO-50):
-/// the public struct is unchanged so `commands.rs` struct literals continue to
+/// the public struct is unchanged so `commands/` struct literals continue to
 /// compile. `save` always writes `"version": 1`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Registry {

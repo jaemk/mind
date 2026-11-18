@@ -77,14 +77,18 @@ maintained by hand.
 
 ## Layout
 
-Grouped by concern. Each verb starts in `commands.rs` (or `dump.rs`/`review.rs`/
+Grouped by concern. Each verb starts in `src/commands/` (or `dump.rs`/`review.rs`/
 `curate.rs`/`hooks_cmd.rs`) and fans out to the modules below.
 
 CLI surface and output:
 - `src/cli.rs` - clap command/flag definitions (the `Command` enum). Doc comments here are the `--help` text.
-- `src/commands.rs` - the per-verb implementations (one function per CLI verb).
+- `src/commands/` - the per-verb implementations, one submodule per verb (`meld.rs`, `learn.rs`,
+  `upgrade.rs`, ...) plus shared helpers (`pin.rs`, `homes.rs`, `hooks.rs`, `link.rs`,
+  `tracking.rs`, `warnings.rs`, `shared.rs`). `mod.rs` re-exports every submodule and each one
+  starts with `use super::*`, so helpers are reachable across verbs without a path. Unit tests
+  live in each submodule; fixtures shared between them are in `test_support.rs`.
 - `src/hooks_cmd.rs` - `hooks run`/`hooks list`: on-demand hook execution and inspection, outside meld/learn/forget/upgrade.
-- `src/main.rs` - entrypoint: parse, acquire the lock, dispatch (`match cli.command`) to `commands.rs`, map errors to exit codes.
+- `src/main.rs` - entrypoint: parse, acquire the lock, dispatch (`match cli.command`) to `commands`, map errors to exit codes.
 - `src/render.rs` - output context: color, Unicode glyphs, and the `--json` emitter.
 - `src/sanitize.rs` - ANSI/control/bidi stripping for source-derived strings (shared by CLI and TUI).
 - `src/tui/` - the interactive `probe` TUI (`app`, `event`, `render`, `tree`, `preview`, ...).
