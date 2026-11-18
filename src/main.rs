@@ -620,25 +620,23 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
             commands::set_allow_breaking(allow_breaking);
             // spec: LIFE-55
             commands::set_new_items(commands::NewItems::from_flags(skip_new, ignore_new));
-            if dry_run {
-                return commands::upgrade_preview(
-                    paths,
-                    item.as_deref(),
-                    source.as_deref(),
-                    accept,
-                );
-            }
             // spec: CLI-262 - `dispatch` already resolved a target naming no
             // installed item but a melded source to that `--source` filter.
-            // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
-            if let Some(source) = source {
-                // spec: CLI-244 - scope the sync and the pass to one source.
-                commands::upgrade_source(paths, yes, item.as_deref(), &source, no_sync, accept)
-            } else if no_sync {
-                commands::upgrade_no_sync(paths, yes, item.as_deref(), accept)
-            } else {
-                commands::upgrade(paths, yes, item.as_deref(), accept)
-            }
+            commands::upgrade(
+                paths,
+                commands::UpgradeOpts {
+                    item_ref: item.as_deref(),
+                    // spec: CLI-169 - default syncs first; --no-sync skips the
+                    // fetch, and a dry run reads the current checkouts (CLI-263).
+                    no_sync: no_sync || dry_run,
+                    // spec: CLI-244 - scope the sync and the pass to one source.
+                    sources: source
+                        .as_deref()
+                        .map_or(commands::SourceScope::All, commands::SourceScope::Filter),
+                    preview: dry_run,
+                    ..commands::UpgradeOpts::new(yes && !dry_run, accept)
+                },
+            )
         }
         Command::Evolve { check, version } => selfupdate::run(check, yes, version),
         Command::Recall {

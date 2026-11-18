@@ -376,7 +376,7 @@ manifest, and store.
   of being remembered.
 - `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) for a NON-EMPTY
   confirmed key set runs the NO-SYNC, KEY-SCOPED upgrade
-  (`commands::upgrade_no_sync_keys`, extending CLI-169's no-sync form with an
+  (`commands::UpgradeOpts::keys`, extending CLI-169's no-sync form with an
   exact-key restriction), never the plain sync-first `upgrade`: a sync-first
   apply could pull new upstream commits between the confirm and the apply and
   act on an item the modal never named. (An EMPTY confirmed set takes a
@@ -433,15 +433,15 @@ manifest, and store.
 - `TUI-76` When `initiate_upgrade`'s TUI-74 recompute finds nothing stale, it
   still arms a confirm ("nothing is out of date since the last sync ... Proceed
   with upgrade anyway?", TUI-73) with an EMPTY `upgrade_keys`. Applying that
-  confirm runs the UNSCOPED no-sync upgrade (`commands::upgrade_no_sync(..,
-  None, ..)`), never the KEY-SCOPED form (TUI-73): a key-scoped apply given an
+  confirm runs the UNSCOPED no-sync upgrade (`keys: None`), never the
+  KEY-SCOPED form (TUI-73): a key-scoped apply given an
   empty key set builds `key_scope = Some(<empty set>)`, under which every
   installed item is out of scope, so "anyway" would be a guaranteed no-op
   regardless of what had actually drifted on disk. The unscoped call
   re-derives staleness itself at apply time, so it can still catch and apply a
   drift the last poll/sync missed -- restoring what "anyway" meant before
-  TUI-72/TUI-73 introduced the key-scoped path (the prior form was a bare
-  `upgrade_no_sync(paths, true, None, ..)`, unconditionally). A NON-empty
+  TUI-72/TUI-73 introduced the key-scoped path (the prior form was an
+  unscoped no-sync upgrade, unconditionally). A NON-empty
   `upgrade_keys` always takes the TUI-73 key-scoped path instead.
 - `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
   binding grouped by category (navigation, actions, general); any key closes it,

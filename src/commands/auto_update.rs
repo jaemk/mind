@@ -494,7 +494,7 @@ pub fn auto_update_run(
             // since a background run has no one watching.
             let before = Manifest::load(paths)?;
             // The ordinary pass, scoped to what moved, with --yes and no prompts.
-            let pass = upgrade_inner_scoped(
+            let pass = upgrade_pass(
                 paths,
                 UpgradeOpts {
                     no_sync: true,

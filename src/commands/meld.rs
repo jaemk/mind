@@ -2157,40 +2157,36 @@ pub fn remeld(
             only_missing_from_snapshot: false,
             replace,
         };
-        if out.json {
-            let (outcome, pending) = install_source_profiles_for_json(paths, &req, flow)?;
-            let mut installed = outcome.installed_keys;
-            if learn_patterns.is_empty() {
-                installed.extend(install_curated_sources_for_json(
-                    paths,
-                    &source_name,
-                    recursive,
-                    flow,
-                )?);
-            }
-            let mut result = MutationResult::new("meld", &source_name, "already-melded");
-            result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
-            if pending > 0 {
-                result.pending_items = Some(pending);
-            }
-            result.profiles = Some(outcome.enabled);
-            // spec: PROF-40 -- the json twin of the leftovers note.
-            if replace && outcome.applied {
-                result.profile_leftovers = source_profile_leftovers(paths, &source_name)
-                    .0
-                    .iter()
-                    .map(|k| strip_ansi(k))
-                    .collect();
-            }
-            return print_json(&result);
-        }
-        install_source_profiles(paths, &req, flow)?;
+        let outcome = install_source_profiles(paths, &req, flow)?;
+        let mut installed = outcome.installed_keys;
         if learn_patterns.is_empty() {
-            install_curated_sources(paths, &source_name, recursive, flow)?;
+            installed.extend(install_curated_sources(
+                paths,
+                &source_name,
+                recursive,
+                flow,
+            )?);
         } else {
             note_learn_ignores_recursive(recursive);
         }
-        return source_status(paths, &source_name);
+        if !out.json {
+            return source_status(paths, &source_name);
+        }
+        let mut result = MutationResult::new("meld", &source_name, "already-melded");
+        result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
+        if outcome.pending > 0 {
+            result.pending_items = Some(outcome.pending);
+        }
+        result.profiles = Some(outcome.enabled);
+        // spec: PROF-40 -- the json twin of the leftovers note.
+        if replace && outcome.applied {
+            result.profile_leftovers = source_profile_leftovers(paths, &source_name)
+                .0
+                .iter()
+                .map(|k| strip_ansi(k))
+                .collect();
+        }
+        return print_json(&result);
     }
     if !link_only {
         // spec: CLI-217 CLI-156 -- the `--json` re-meld installs through the
@@ -2203,26 +2199,26 @@ pub fn remeld(
             // spec: CLI-236 -- a re-meld honors `--learn` too: the named subset
             // installs instead of the whole set, and the curated chain
             // (DSC-54/55/58) is left alone.
-            let (installed, pending) = if learn_patterns.is_empty() {
-                let (mut inst, pend) = install_source_items_for_json(paths, &source_name, flow)?;
-                inst.extend(install_curated_sources_for_json(
+            let outcome = if learn_patterns.is_empty() {
+                let mut outcome = install_source_items(paths, &source_name, flow)?;
+                outcome.installed.extend(install_curated_sources(
                     paths,
                     &source_name,
                     recursive,
                     flow,
                 )?);
-                (inst, pend)
+                outcome
             } else {
-                install_source_items_matching_for_json(paths, &source_name, learn_patterns, flow)?
+                install_source_items_matching(paths, &source_name, learn_patterns, flow)?
             };
             let mut result = MutationResult::new("meld", &source_name, "already-melded");
             // spec: DSC-95 -- `installed` rides straight off `learn_collecting`'s
             // raw keys, each embedding a source-controlled bare name; sanitize
             // every one before it lands in the `--json` envelope, the same way
             // `emit_meld_json_result` and `learn()` do for their own.
-            result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
-            if pending > 0 {
-                result.pending_items = Some(pending);
+            result.installed = outcome.installed.iter().map(|k| strip_ansi(k)).collect();
+            if outcome.pending > 0 {
+                result.pending_items = Some(outcome.pending);
             }
             return print_json(&result);
         }
@@ -2275,19 +2271,24 @@ pub fn remeld(
 /// When `install-items` is present it governs; when absent `install` governs.
 /// Reads each source's clone `mind.toml`; cycle-safe via a visited set; only
 /// touches registered sources.
-pub fn install_curated_sources(
+///
+/// Under `--json` every install is silent and the installed keys are returned,
+/// so the meld dispatcher folds them into ONE object (CLI-156); in text mode
+/// the list is empty.
+pub(crate) fn install_curated_sources(
     paths: &Paths,
     super_name: &str,
     all: bool,
     flow: InstallFlow,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     // spec: HOOK-183 -- an aborted plan stops the meld before the chain.
     if meld_aborted() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let registry = Registry::load(paths)?;
     let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
     let mut queue: Vec<String> = vec![super_name.to_string()];
+    let mut all_keys: Vec<String> = Vec::new();
     while let Some(name) = queue.pop() {
         let Some(source) = registry.find(&name) else {
             continue;
@@ -2321,8 +2322,8 @@ pub fn install_curated_sources(
                 // - `install_items` Some(list): install exactly that subset
                 //   (empty list = install nothing, like install = false)
                 // - `install = true`: install all of the nested source
-                if all {
-                    install_source_items(paths, &spec.name, flow)?;
+                let keys = if all {
+                    install_source_items(paths, &spec.name, flow)?.installed
                 } else if let Some(selection) =
                     curated_profile_selection(paths, &registry, &ns, &spec.name, &name)?
                 {
@@ -2344,14 +2345,18 @@ pub fn install_curated_sources(
                             replace: false,
                         },
                         flow,
-                    )?;
+                    )?
+                    .installed_keys
                 } else if let Some(refs) = &ns.install_items {
                     // DSC-62: install_items governs; refs is the subset to offer.
-                    install_source_items_subset(paths, &spec.name, refs, flow)?;
+                    install_source_items_subset(paths, &spec.name, refs, flow)?.installed
                 } else if ns.install {
                     // DSC-58: install all of this nested source.
-                    install_source_items(paths, &spec.name, flow)?;
-                }
+                    install_source_items(paths, &spec.name, flow)?.installed
+                } else {
+                    Vec::new()
+                };
+                all_keys.extend(keys);
                 queue.push(spec.name);
             }
         }
@@ -2365,13 +2370,13 @@ pub fn install_curated_sources(
             }
             if registry.find(&spec.name).is_some() {
                 if all || in_repo {
-                    install_source_items(paths, &spec.name, flow)?;
+                    all_keys.extend(install_source_items(paths, &spec.name, flow)?.installed);
                 }
                 queue.push(spec.name);
             }
         }
     }
-    Ok(())
+    Ok(all_keys)
 }
 
 /// Resolve the marketplace sub-sources a source curates (MKT-7): each
@@ -2405,106 +2410,10 @@ pub(crate) fn marketplace_subsources(
     Ok(out)
 }
 
-/// Walk the curated source chain and install each nested source's items
-/// silently, returning all installed keys. Mirrors `install_curated_sources`
-/// but collects keys instead of printing JSON results, so the meld dispatcher
-/// can fold them into ONE combined JSON object (CLI-156).
-pub(crate) fn install_curated_sources_for_json(
-    paths: &Paths,
-    super_name: &str,
-    all: bool,
-    flow: InstallFlow,
-) -> Result<Vec<String>> {
-    let registry = Registry::load(paths)?;
-    let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
-    let mut queue: Vec<String> = vec![super_name.to_string()];
-    let mut all_keys: Vec<String> = Vec::new();
-    while let Some(name) = queue.pop() {
-        let Some(source) = registry.find(&name) else {
-            continue;
-        };
-        // spec: LNK-8 -- an item-link instance curates nothing.
-        if source.item_path.is_some() {
-            continue;
-        }
-        let nested = MindToml::load(&source.clone_dir(paths))?
-            .and_then(|m| m.discover)
-            .map(|d| d.sources)
-            .unwrap_or_default();
-        for ns in nested {
-            // spec: CLI-216 -- the json twin of the install walk above; quiet for
-            // the same reason.
-            let Ok(mut spec) = parse_spec_quiet(&ns.source) else {
-                continue;
-            };
-            // spec: STO-58 -- resolve the nested source under its effective alias.
-            spec.apply_alias(ns.effective_alias());
-            if !visited.insert(spec.name.clone()) {
-                continue;
-            }
-            if registry.find(&spec.name).is_some() {
-                if all {
-                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
-                    all_keys.extend(keys);
-                } else if let Some(selection) =
-                    curated_profile_selection(paths, &registry, &ns, &spec.name, &name)?
-                {
-                    // spec: PROF-26 -- the json twin of the profile branch above.
-                    let patterns = curated_install_item_patterns(
-                        paths,
-                        &registry,
-                        &spec.name,
-                        ns.install_items.as_ref(),
-                    )?;
-                    let (outcome, _) = install_source_profiles_for_json(
-                        paths,
-                        &ProfileInstall {
-                            source_name: &spec.name,
-                            selection: &selection,
-                            learn_patterns: &patterns,
-                            only_missing_from_snapshot: false,
-                            replace: false,
-                        },
-                        flow,
-                    )?;
-                    all_keys.extend(outcome.installed_keys);
-                } else if let Some(refs) = &ns.install_items {
-                    if !refs.is_empty() && flow.yes {
-                        for item_ref in refs {
-                            let qualified = format!("{}#{}", spec.name, item_ref);
-                            let keys = learn_collecting(paths, &qualified, flow)?;
-                            all_keys.extend(keys);
-                        }
-                    }
-                } else if ns.install {
-                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
-                    all_keys.extend(keys);
-                }
-                queue.push(spec.name);
-            }
-        }
-        // MKT-7: marketplace sub-sources (in-repo install by default, external
-        // only under `--recursive`). Mirrors `install_curated_sources`.
-        for (spec, in_repo) in marketplace_subsources(paths, source)? {
-            if !visited.insert(spec.name.clone()) {
-                continue;
-            }
-            if registry.find(&spec.name).is_some() {
-                if all || in_repo {
-                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
-                    all_keys.extend(keys);
-                }
-                queue.push(spec.name);
-            }
-        }
-    }
-    Ok(all_keys)
-}
-
 /// Build and emit the single meld JSON result (CLI-153, CLI-156).
 ///
 /// Called by the dispatcher in `main.rs` after both the registration step
-/// (`meld()`) and the post-meld install step (`install_source_items_for_json`)
+/// (`meld()`) and the post-meld install step (`install_source_items`)
 /// have completed, so ONE object covers both outcomes.
 ///
 /// `installed` contains the effective keys installed in this call.
@@ -2967,73 +2876,48 @@ pub fn meld_verb(paths: &Paths, args: crate::cli::MeldArgs, yes: bool, json: boo
                 only_missing_from_snapshot: false,
                 replace: false,
             };
-            if json {
-                let (outcome, pend) = install_source_profiles_for_json(paths, &req, flow)?;
-                let mut inst = outcome.installed_keys;
-                if learn_patterns.is_empty() {
-                    inst.extend(install_curated_sources_for_json(
-                        paths,
-                        &source_ident,
-                        recursive,
-                        flow,
-                    )?);
-                }
-                emit_meld_json_result(meld_sum, inst, pend, Some(outcome.enabled))?;
+            let outcome = install_source_profiles(paths, &req, flow)?;
+            let mut inst = outcome.installed_keys;
+            if learn_patterns.is_empty() {
+                inst.extend(install_curated_sources(
+                    paths,
+                    &source_ident,
+                    recursive,
+                    flow,
+                )?);
             } else {
-                install_source_profiles(paths, &req, flow)?;
-                if learn_patterns.is_empty() {
-                    install_curated_sources(paths, &source_ident, recursive, flow)?;
-                } else {
-                    note_learn_ignores_recursive(recursive);
-                }
+                note_learn_ignores_recursive(recursive);
+            }
+            if json {
+                emit_meld_json_result(meld_sum, inst, outcome.pending, Some(outcome.enabled))?;
             }
         } else if !register_only {
-            if json {
-                // Install silently (no separate JSON from learn), collect keys.
-                // spec: CLI-236 -- `--learn <glob>` narrows the install to
-                // the matching subset in place of the whole set.
-                let (mut inst, pend) = if learn_patterns.is_empty() {
-                    install_source_items_for_json(paths, &source_ident, flow)?
-                } else {
-                    // spec: STO-58 -- the same instance identity the
-                    // text arm installs against; the two arms of one
-                    // feature must not disagree on which identity they
-                    // trust, even where the two spellings coincide.
-                    // The two spellings are provably equal today, and
-                    // using one variable keeps a future change to
-                    // either derivation from breaking only the
-                    // `--learn` arm.
-                    install_source_items_matching_for_json(
-                        paths,
-                        &source_ident,
-                        &learn_patterns,
-                        flow,
-                    )?
-                };
-                // Also walk the curated chain silently (DSC-54/55/58) --
-                // but not under `--learn`, whose patterns are an
-                // explicit, top-source-scoped selection (CLI-236).
-                if learn_patterns.is_empty() {
-                    let curated =
-                        install_curated_sources_for_json(paths, &source_ident, recursive, flow)?;
-                    inst.extend(curated);
-                }
-                emit_meld_json_result(meld_sum, inst, pend, None)?;
-            } else if !learn_patterns.is_empty() {
+            // Under `--json` every install below is silent and returns its
+            // keys, folded into the one meld result (CLI-156).
+            let outcome = if learn_patterns.is_empty() {
+                let mut outcome = install_source_items(paths, &source_ident, flow)?;
+                // DSC-54 installs only the top-level source by default. Walk the
+                // curated chain and install each nested source the curator
+                // flagged `install = true` (DSC-58), or every nested source with
+                // `--recursive` (DSC-55).
+                outcome.installed.extend(install_curated_sources(
+                    paths,
+                    &source_ident,
+                    recursive,
+                    flow,
+                )?);
+                outcome
+            } else {
                 // spec: CLI-236 -- the named subset only: the curated
                 // chain (DSC-54/55/58) is not walked, since a pattern
                 // selects within the source being melded. Say so when
                 // `--recursive` was passed, rather than dropping it
                 // silently (the CLI-206 ignored-flag discipline).
                 note_learn_ignores_recursive(recursive);
-                install_source_items_matching(paths, &source_ident, &learn_patterns, flow)?;
-            } else {
-                install_source_items(paths, &source_ident, flow)?;
-                // DSC-54 installs only the top-level source by default. Walk the
-                // curated chain and install each nested source the curator
-                // flagged `install = true` (DSC-58), or every nested source with
-                // `--recursive` (DSC-55).
-                install_curated_sources(paths, &source_ident, recursive, flow)?;
+                install_source_items_matching(paths, &source_ident, &learn_patterns, flow)?
+            };
+            if json {
+                emit_meld_json_result(meld_sum, outcome.installed, outcome.pending, None)?;
             }
         } else if json {
             // register-only + json: register only, emit the meld result now.

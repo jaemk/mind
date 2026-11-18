@@ -25,7 +25,7 @@ pub struct PendingAction {
     /// For `ActionKind::Upgrade` only: the exact item keys (`kind:name`) the
     /// confirm modal listed and the user consented to, computed by
     /// `initiate_upgrade`'s authoritative (memo-bypassing) recompute. The apply
-    /// is scoped to exactly this set (`commands::upgrade_no_sync_keys`), so the
+    /// is scoped to exactly this set (`commands::UpgradeOpts::keys`), so the
     /// applied set equals the confirmed set BY CONSTRUCTION rather than by two
     /// independent computations happening to agree (TUI-72, TUI-73). Unused
     /// (left empty) for every other action kind.
@@ -1211,7 +1211,7 @@ impl App {
             // reports "nothing to upgrade" rather than silently no-op'ing).
             // spec: TUI-73 - the recompute above bypasses the TUI-72 memo, but
             // it is still only as fresh as the last SYNC: `u` itself never
-            // fetches (`upgrade_no_sync_keys`), so a bare "nothing is out of
+            // fetches (a `no_sync` upgrade), so a bare "nothing is out of
             // date" would read as "you are current" even when upstream has
             // moved and nobody has synced yet. Name the qualifier and the
             // remedy explicitly.
@@ -3340,7 +3340,7 @@ mod tests {
         // say so rather than silently listing nothing (which would look
         // identical to the old blind "Upgrade all pending items?" prompt), AND
         // must qualify that against the last sync/poll: `u` itself never
-        // fetches (upgrade_no_sync, TUI-73), so a bare "nothing is out of
+        // fetches (a `no_sync` upgrade, TUI-73), so a bare "nothing is out of
         // date" would misleadingly read as "you are current" even when
         // upstream has moved and the user has not pressed `s` yet.
         let mut app = App::new(String::new(), None, None);

@@ -243,19 +243,20 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String], force: boo
         // (`key_scope = Some(<empty set>)` makes every item `OutOfScope`), so
         // routing it there would make "anyway" a guaranteed no-op -- silently
         // different from what it meant before TUI-72/73 (a plain
-        // `upgrade_no_sync(.., None, ..)`, which re-derives staleness at apply
+        // no-sync `upgrade` with no `keys`, which re-derives staleness at apply
         // time and so COULD catch a drift the snapshot had missed). Route the
         // empty case through that unscoped call instead, restoring "anyway"'s
         // actual meaning; keep the key-scoped call for the named, non-empty set.
         // spec: TUI-76
-        ActionKind::Upgrade if upgrade_keys.is_empty() => {
-            commands::upgrade_no_sync(paths, true, None, crate::hook::Accept::default())?
-        }
-        ActionKind::Upgrade => commands::upgrade_no_sync_keys(
+        // Never fetches: the TUI offers `s` (Sync) and a ~1s re-poll
+        // separately, so refreshing drift is not this call's job.
+        ActionKind::Upgrade => commands::upgrade(
             paths,
-            true,
-            upgrade_keys,
-            crate::hook::Accept::default(),
+            commands::UpgradeOpts {
+                no_sync: true,
+                keys: (!upgrade_keys.is_empty()).then_some(upgrade_keys),
+                ..commands::UpgradeOpts::new(true, crate::hook::Accept::default())
+            },
         )?,
         // spec: TUI-23 CLI-112
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
@@ -833,7 +834,7 @@ mod tests {
         // recompute found nothing stale, and the confirm text is "nothing is
         // out of date since the last sync ... Proceed with upgrade anyway?".
         // Before this fix, `dispatch` always routed ANY `ActionKind::Upgrade`
-        // through the KEY-SCOPED `upgrade_no_sync_keys`, so an empty key set
+        // through a KEY-SCOPED upgrade (`keys: Some(..)`), so an empty key set
         // built `key_scope = Some(<empty set>)`: every item is `OutOfScope` by
         // construction, and "anyway" provably applied nothing, no matter what
         // had drifted on disk. This seeds a real, on-disk content edit AFTER
@@ -841,7 +842,7 @@ mod tests {
         // text's own scenario, drift the last poll/sync missed -- and applies
         // it. The pre-fix behavior would leave the manifest hash unchanged;
         // the fix (routing the empty case through the UNSCOPED
-        // `commands::upgrade_no_sync`, which re-derives staleness at apply
+        // no-sync `commands::upgrade` with `keys: None`, which re-derives staleness at apply
         // time) must actually upgrade the item.
         use std::process::Command;
 
@@ -957,7 +958,7 @@ mod tests {
         // confirmed) but leave `skill:beta` untouched (it was never named),
         // even though `skill:beta` is independently stale by the time the apply
         // runs. Before TUI-72/TUI-73, `dispatch` called
-        // `commands::upgrade_no_sync(paths, true, None, ..)`, which re-derives
+        // an unscoped no-sync `commands::upgrade`, which re-derives
         // the stale set at apply time and would have upgraded BOTH.
         use std::process::Command;
 
@@ -1224,8 +1225,11 @@ mod tests {
         make_stale_fixture(&sync_paths, &_td2);
         let old_commit_2 = recorded_commit(&sync_paths);
 
-        commands::upgrade(&sync_paths, true, None, crate::hook::Accept::default())
-            .expect("sync-first upgrade should succeed");
+        commands::upgrade(
+            &sync_paths,
+            commands::UpgradeOpts::new(true, crate::hook::Accept::default()),
+        )
+        .expect("sync-first upgrade should succeed");
         let sync_commit = recorded_commit(&sync_paths);
         assert_ne!(
             sync_commit, old_commit_2,

@@ -11,7 +11,7 @@ use super::*;
 ///
 /// spec: LIFE-49 -- M1: `yes` is the same global `--yes` the CLI already
 /// threads into `mind upgrade`/`mind forget`; it is forwarded to the
-/// `--upgrade` pass's `upgrade_inner` call below instead of being hardcoded to
+/// `--upgrade` pass's `upgrade_pass` call below instead of being hardcoded to
 /// `false`, so `sync --upgrade --yes` (and, since B1/LIFE-45, `sync --upgrade
 /// --json --yes`) actually skips the confirmation instead of silently
 /// cancelling or refusing.
@@ -602,8 +602,8 @@ pub fn sync_with_selector(
         // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
         // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
         // (CLI-169).
-        // spec: CLI-217 -- `upgrade_inner_scoped` (not the `upgrade_no_sync`
-        // wrapper) so the pass does not emit its own document: the caller
+        // spec: CLI-217 -- `upgrade_pass` (not the `upgrade` verb) so the
+        // pass does not emit its own document: the caller
         // invoked `sync`, and what the pass applied is folded into sync's one
         // object below.
         // spec: CLI-232 -- H2 fix: thread `selected` (the `[source]` selector
@@ -614,7 +614,7 @@ pub fn sync_with_selector(
         // spec: CLI-235 -- also thread the raw `source_selector` TEXT (not
         // just the names it resolved to) so the multi-source disclosure can
         // echo the filter that did the matching (M19).
-        let pass = upgrade_inner_scoped(
+        let pass = upgrade_pass(
             paths,
             UpgradeOpts {
                 no_sync: true,
@@ -650,7 +650,7 @@ pub fn sync_with_selector(
         // spec: DSC-95 -- `provisioned_keys` rides off `learn_collecting`'s
         // raw (unsanitized) keys (via `install_provisioned_items`); sanitize
         // before assigning to the `--json` field. `upgraded` is already
-        // sanitized (`upgrade_inner_scoped` pushes `display_key()`).
+        // sanitized (`upgrade_pass` pushes `display_key()`).
         result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
         result.removed = pruned;

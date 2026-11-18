@@ -577,10 +577,9 @@ fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
 fn remeld_json_stdout_is_one_document_when_it_installs_pending_items() {
     // spec: CLI-217 CLI-153 CLI-12
     // `remeld` (the already-melded branch) used to be the one `--json` path that
-    // did NOT route its install through the silent
-    // `install_source_items_for_json` helper `meld` uses: it called
-    // `install_source_items` directly, which under `--yes` calls `learn`, which
-    // emits its OWN CLI-153 object and returns before remeld's. Register-only
+    // did NOT install silently the way `meld` does: under `--yes` its install
+    // called `learn`, which emits its OWN CLI-153 object and returns before
+    // remeld's. Register-only
     // first so items are genuinely pending, then re-meld with --yes so that path
     // is taken.
     let sb = Sandbox::new();
@@ -680,8 +679,7 @@ fn remeld_json_of_a_curator_emits_one_document_not_two() {
     //     ...
     //     if out.json { return print_json(already-melded) }   // a SECOND doc
     // (src/commands/meld.rs, `remeld`, the `!link_only` block). `meld`'s fresh-meld
-    // branch avoids this by routing through `install_source_items_for_json`
-    // (main.rs, CLI-156); the re-meld branch has now been given the same
+    // branch avoids this by installing silently under `--json` (CLI-156); the re-meld branch has now been given the same
     // treatment, so `mind meld <curator> --yes --json | jq .` no longer trips
     // over a trailing object.
     // spec: CLI-217 CLI-153 CLI-156
@@ -1301,7 +1299,7 @@ fn json_sync_upgrade_emits_one_document_for_the_invoked_verb() {
     //
     // A seventh instance of the same class as this round's fixes, and one no
     // previous pass looked at, because it was hiding behind a passing test that
-    // asserted the defect. The upgrade pass no longer prints: `upgrade_inner`
+    // asserted the defect. The upgrade pass no longer prints: `upgrade_pass`
     // returns its result, the real `upgrade` verb prints it, and `sync` folds
     // what the pass applied into its own `installed`.
     let sb = melded();
@@ -1345,7 +1343,7 @@ fn json_sync_upgrade_emits_one_document_for_the_invoked_verb() {
 
 #[test]
 fn json_upgrade_verb_still_emits_its_own_object() {
-    // The guard on the refactor above: `upgrade_inner` stopped printing, so the
+    // The guard on the refactor above: `upgrade_pass` stopped printing, so the
     // real `upgrade` verb must print the result it now returns. Every outcome
     // token comes from the same place, so the up-to-date branch (the one a
     // caller polls) is checked alongside the applied branch.
