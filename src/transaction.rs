@@ -10,8 +10,9 @@
 //! Two journal sites exist:
 //!
 //! - `<mind home>/.tx-journal.json` (this module): one per command, in the
-//!   default home. Every install and uninstall step joins it ([`scope`]); a
-//!   manifest save commits it ([`commit_manifests`]), across every home at once.
+//!   home of its first change (HOME-1). Every install and uninstall step joins
+//!   it ([`scope`]); a manifest save commits it ([`commit_manifests`]), across
+//!   every home at once.
 //! - `<home>/.manifest-journal.json` (`manifest.rs`, STO-87): a manifest save
 //!   made outside a command transaction publishes each home on its own.
 //!
@@ -37,7 +38,7 @@ const VERSION: u32 = 1;
 const MAX_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-/// The command transaction's journal, in the default mind home.
+/// The command transaction's journal file name, in the home of its first change.
 pub(crate) const TX_JOURNAL: &str = ".tx-journal.json";
 
 /// An intent is recorded before its filesystem operation is attempted. Undo is
@@ -509,17 +510,17 @@ pub(crate) fn lexically_contained(path: &Path, root: &Path) -> bool {
         && path.starts_with(root)
 }
 
-/// True when `path`'s existing parent, with every symlink resolved, is still
-/// under `root` (also resolved): no ancestor redirects the path elsewhere. A
-/// parent or root that does not exist cannot redirect anything.
+/// True when the nearest existing ancestor of `path`, with every symlink
+/// resolved, is still under `root` (also resolved): no ancestor redirects the
+/// path elsewhere. A root that does not exist cannot redirect anything.
 fn ancestors_confined(path: &Path, root: &Path) -> bool {
     let Ok(root) = root.canonicalize() else {
         return true;
     };
-    match path.parent().map(Path::canonicalize) {
-        Some(Ok(parent)) => parent.starts_with(&root),
-        _ => true,
-    }
+    path.ancestors()
+        .skip(1)
+        .find_map(|a| a.canonicalize().ok())
+        .is_some_and(|existing| existing.starts_with(&root))
 }
 
 // ---------------------------------------------------------------------------
@@ -895,19 +896,20 @@ pub(crate) fn move_path(from: &Path, to: &Path) -> Result<()> {
             },
             None,
         )?;
-        let moved = fs::rename(&from, &to).and_then(|()| {
-            sync_parent(&from)?;
+        if let Err(e) = fs::rename(&from, &to) {
+            // A failed rename changed nothing, so the intent goes too.
+            tx.unrecord();
+            return Err(MindError::io(&to, e));
+        }
+        // A failed sync after the rename did change something: the intent
+        // stays, so a rollback moves it back.
+        let synced = sync_parent(&from).and_then(|()| {
             if from.parent() != to.parent() {
                 sync_parent(&to)?;
             }
             Ok(())
         });
-        if let Err(e) = moved {
-            // A failed rename changed nothing, so the intent goes too; a
-            // failed sync after a rename did change something, so it stays.
-            if path_present(&from).unwrap_or(false) && !path_present(&to).unwrap_or(true) {
-                tx.unrecord();
-            }
+        if let Err(e) = synced {
             return Err(MindError::io(&to, e));
         }
         crash_point();
@@ -1219,11 +1221,32 @@ impl Roots {
             )
         };
         match intent {
+            // A transaction only moves within mind's own trees (staging into
+            // the store) or into its trash (a store copy, a lobe entry); undo
+            // moves back. A crafted journal must not move a mind-controlled
+            // file into a lobe, nor have the commit delete in one.
             Intent::Move { from, to } => {
-                for p in [from, to] {
-                    if !Self::under(p, &[&self.stores, &self.tmps, &self.lobes]) {
-                        return Err(outside(p));
-                    }
+                if !Self::under(from, &[&self.stores, &self.tmps, &self.lobes]) {
+                    return Err(outside(from));
+                }
+                if !Self::under(to, &[&self.stores, &self.tmps]) {
+                    return Err(format!(
+                        "'{}' is outside every store and .tmp tree",
+                        to.display()
+                    ));
+                }
+                let into_trash = Self::under(to, &[&self.tmps]) && is_trash(to);
+                if is_trash(to) && !into_trash {
+                    return Err(format!(
+                        "trash '{}' is outside every .tmp tree",
+                        to.display()
+                    ));
+                }
+                if !Self::under(from, &[&self.stores, &self.tmps]) && !into_trash {
+                    return Err(format!(
+                        "lobe entry '{}' may only move into a .tmp trash",
+                        from.display()
+                    ));
                 }
                 Ok(())
             }
@@ -1231,7 +1254,10 @@ impl Roots {
                 if !Self::under(path, &[&self.lobes]) {
                     return Err(format!("link '{}' is outside every lobe", path.display()));
                 }
-                if !self.stores.iter().any(|s| lexically_contained(target, s)) {
+                // A relative MIND_HOME writes link targets relative to the
+                // working directory, as the store path itself was.
+                let target = normalize_home(target);
+                if !self.stores.iter().any(|s| lexically_contained(&target, s)) {
                     return Err(format!(
                         "link target '{}' is outside every store",
                         target.display()
@@ -1515,7 +1541,68 @@ mod tests {
         fs::create_dir(&outside).unwrap();
         make_symlink(&outside, &root.join("hop")).unwrap();
         assert!(!ancestors_confined(&root.join("hop/x"), &root));
+        // A missing directory below the symlink does not hide it.
+        assert!(!ancestors_confined(&root.join("hop/missing/x"), &root));
         assert!(ancestors_confined(&root.join("x"), &root));
+        assert!(ancestors_confined(&root.join("missing/x"), &root));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn roots(dir: &Path) -> Roots {
+        Roots {
+            homes: vec![dir.join("home")],
+            stores: vec![dir.join("home/store")],
+            tmps: vec![dir.join("home/.tmp")],
+            lobes: vec![dir.join("lobe")],
+        }
+    }
+
+    // spec: LIFE-61
+    #[test]
+    fn recovery_admits_only_the_moves_a_transaction_makes() {
+        let dir = dir();
+        let roots = roots(&dir);
+        let mv = |from: &str, to: &str| Intent::Move {
+            from: dir.join(from),
+            to: dir.join(to),
+        };
+        for (from, to) in [
+            ("home/.tmp/staging/skill/a", "home/store/skill/a"),
+            ("home/store/skill/a", "home/.tmp/tx/1-2/1"),
+            ("lobe/skills/a", "home/.tmp/tx/1-2/2"),
+        ] {
+            assert!(roots.check(&mv(from, to)).is_ok(), "{from} -> {to}");
+        }
+        for (from, to) in [
+            // Undo would move a mind-controlled file into a lobe.
+            ("home/store/skill/a", "lobe/skills/a"),
+            ("lobe/skills/a", "lobe/skills/b"),
+            // A lobe entry outside the trash would not be restored by undo.
+            ("lobe/skills/a", "home/store/skill/a"),
+            // A commit deletes trash: never in a store or a lobe.
+            ("home/store/skill/a", "home/store/.tmp/tx/1-2/1"),
+            ("home/store/skill/a", "outside/x"),
+        ] {
+            assert!(roots.check(&mv(from, to)).is_err(), "{from} -> {to}");
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    // spec: LIFE-59
+    #[test]
+    fn a_failed_rename_is_forgotten_and_rolls_back_cleanly() {
+        let dir = dir();
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        fs::write(to.join("occupied"), b"x").unwrap();
+        let scope = scope();
+        // Renaming a directory onto a non-empty one fails, changing nothing.
+        assert!(move_path(&from, &to).is_err());
+        assert_eq!(active().as_ref().unwrap().len(), 0);
+        drop(scope);
+        assert!(active().is_none());
+        assert!(from.exists() && to.join("occupied").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

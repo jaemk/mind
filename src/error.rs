@@ -1347,7 +1347,7 @@ pub enum MindError {
     /// Recovery fails closed and keeps the journal for diagnosis.
     // spec: LIFE-61
     #[error(
-        "cannot recover the interrupted change recorded in '{}': {reason}; the journal was kept for diagnosis",
+        "cannot recover the interrupted change recorded in '{}': {reason}; the journal was kept for diagnosis (inspect the paths it names, then remove it to go on without recovering; anything it moved aside is under that home's .tmp/tx)",
         path.display()
     )]
     TransactionJournal { path: PathBuf, reason: String },

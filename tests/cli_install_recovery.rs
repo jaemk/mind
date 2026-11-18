@@ -282,6 +282,76 @@ fn a_forced_learn_killed_at_any_step_keeps_or_replaces_the_foreign_target() {
     }
 }
 
+// spec: LIFE-59 LIFE-63
+#[test]
+fn a_forget_killed_at_any_step_keeps_or_removes_the_whole_item() {
+    let mut n = 1;
+    loop {
+        let sb = Sandbox::new();
+        let src = sb.source("src", "alpha", "v1");
+        sb.ok(&["--yes", "meld", src.to_str().unwrap()]);
+        let args = ["--yes", "forget", "alpha"];
+        let crashed = sb.crash(n, &args).is_some();
+        if crashed {
+            sb.recover();
+        }
+        sb.settled();
+        match sb.installed("alpha") {
+            Some(body) => assert!(body.contains("v1"), "step {n}"),
+            None => {
+                let store = sb.default_home.join("store/skill/alpha");
+                assert!(!store.exists(), "step {n}: store copy left behind");
+            }
+        }
+        if !crashed {
+            assert!(n > 1);
+            return;
+        }
+        n += 1;
+        assert!(n < MAX_STEPS);
+    }
+}
+
+// spec: LIFE-61 LIFE-63
+#[cfg(unix)]
+#[test]
+fn a_forget_over_a_repointed_link_recovers_instead_of_failing_closed() {
+    let mut n = 1;
+    loop {
+        let sb = Sandbox::new();
+        let src = sb.source("src", "alpha", "v1");
+        sb.ok(&["--yes", "meld", src.to_str().unwrap()]);
+        // The user points the recorded link somewhere of their own.
+        let elsewhere = sb.base.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let link = sb.claude.join("skills/alpha");
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        let args = ["--yes", "forget", "alpha"];
+        let crashed = sb.crash(n, &args).is_some();
+        if crashed {
+            sb.recover();
+        }
+        sb.settled();
+        let still = sb.manifest_items().iter().any(|(k, _)| k == "skill:alpha");
+        if still {
+            assert_eq!(fs::read_link(&link).unwrap(), elsewhere, "step {n}");
+        } else {
+            assert!(fs::symlink_metadata(&link).is_err(), "step {n}");
+        }
+        assert!(
+            elsewhere.exists(),
+            "step {n}: the link's target is untouched"
+        );
+        if !crashed {
+            assert!(n > 1);
+            return;
+        }
+        n += 1;
+        assert!(n < MAX_STEPS);
+    }
+}
+
 // spec: LIFE-60 LIFE-63
 #[test]
 fn an_upgrade_across_two_homes_commits_both_or_neither() {
@@ -342,6 +412,7 @@ fn a_journal_naming_a_path_outside_mind_is_refused_and_kept() {
     let r = sb.mind(None, &["--json", "recall"]);
     assert_ne!(r.code, Some(0));
     assert!(r.stdout.contains("\"transaction-journal\""), "{}", r.stdout);
+    assert!(r.stdout.contains("remove it to go on"), "{}", r.stdout);
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
     assert!(journal.exists(), "the journal is kept for diagnosis");
 }

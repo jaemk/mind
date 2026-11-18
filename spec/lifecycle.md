@@ -307,10 +307,12 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   recover it while holding the exclusive state lock; a dry run refuses with
   `recovery-pending` instead. Recovery validates every recorded path before
   touching any: it must lie inside a configured home's store or `.tmp` tree,
-  or a known lobe, with no symlinked ancestor escaping that root, and a
-  manifest destination must be a configured home's `manifest.json`. A journal
-  that is invalid, unreadable, oversized, or names a path outside those roots
-  fails closed with `transaction-journal` and is retained for diagnosis.
+  or a known lobe, with no symlinked ancestor escaping that root. A move ends
+  in a store or `.tmp` tree, and one out of a lobe only into the trash; a link
+  target lies in a store; a manifest destination is a configured home's
+  `manifest.json`. A journal that is invalid, unreadable, oversized, or names
+  a path outside those roots fails closed with `transaction-journal`, is
+  retained for diagnosis, and the error says how to discard it.
 - `LIFE-62` Hooks run inside the transaction are recorded when they start and
   finish. Their external side effects are not undone or replayed: when
   recovery rolls back a transaction with a hook that had started and not

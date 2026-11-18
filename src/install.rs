@@ -336,7 +336,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
         }
         // spec: LOBE-6 -- a link in a lobe that cannot be written is left in
         // place with a note rather than failing the removal.
-        match remove_recorded(p, &home) {
+        match remove_recorded(paths, p, &home) {
             Err(e) if e.is_unwritable() => {
                 note_unwritable_lobe_once(p.parent().unwrap_or(p));
             }
@@ -352,19 +352,34 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
         );
         return scope.done();
     }
-    remove_recorded(&store_path, &home)?;
+    remove_recorded(paths, &store_path, &home)?;
     scope.done()
 }
 
-/// Remove `path` inside the transaction (LIFE-59): a symlink is removed with
-/// its target recorded, anything else moves to the trash in `home`. A missing
-/// path is already gone. An entry on another filesystem than `home` cannot
-/// move to its trash, so it is removed outright, as before transactions.
-fn remove_recorded(path: &Path, home: &Path) -> Result<()> {
+/// Remove `path` inside the transaction (LIFE-59): mind's own symlink into a
+/// store is removed with its target recorded; anything else (a file, a
+/// directory, a symlink pointing elsewhere) moves to the trash in `home`. A
+/// missing path is already gone. An entry on another filesystem than `home`
+/// cannot move to its trash, so it is removed outright, as before
+/// transactions.
+fn remove_recorded(paths: &Paths, path: &Path, home: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(MindError::io(path, e)),
-        Ok(meta) if meta.file_type().is_symlink() => crate::transaction::remove_link(path),
+        Ok(meta)
+            if meta.file_type().is_symlink()
+                && std::fs::read_link(path).is_ok_and(|t| {
+                    let t = crate::paths::normalize_home(&t);
+                    paths.all_homes().iter().any(|h| {
+                        crate::transaction::lexically_contained(
+                            &t,
+                            &crate::paths::normalize_home(h).join("store"),
+                        )
+                    })
+                }) =>
+        {
+            crate::transaction::remove_link(path)
+        }
         Ok(_) => match crate::transaction::move_aside(path, home) {
             Err(MindError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::CrossesDevices =>
