@@ -7,7 +7,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     let out = crate::render::ctx();
     paths.ensure_config()?;
     let file = paths.config_file();
-    let cfg = Config::load(paths)?;
+    let cfg = paths.settings().config()?;
     // spec: CLI-241 -- the effective cap, not the config key: the flag and the
     // environment outrank it (DSC-104), so reporting the key alone would name a
     // value that is not the one in force.
@@ -151,7 +151,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             "note: hook-log and hook-log-keep are set by --hook-log / --hook-log-keep for this run"
         );
     }
-    if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
+    if let Some(env) = paths.settings().env().agent_homes() {
         println!(
             "note: MIND_AGENT_HOMES is set and overrides lobes: {}",
             env.to_string_lossy()
@@ -179,7 +179,7 @@ fn metadata_cap_origin(origin: Option<&crate::config::MetadataLimitOrigin>) -> O
         )),
         MetadataLimitOrigin::Env(raw) => Some(format!(
             "{} is set and overrides the max-metadata-size config key: {}",
-            crate::config::MAX_METADATA_SIZE_ENV,
+            crate::settings::MIND_MAX_METADATA_SIZE,
             crate::sanitize::strip_ansi(raw)
         )),
         MetadataLimitOrigin::Config(_) | MetadataLimitOrigin::Default => None,
@@ -234,7 +234,7 @@ mod tests {
         let note = metadata_cap_origin(Some(&MetadataLimitOrigin::Env("4KiB".into())))
             .expect("the environment must be named");
         assert!(
-            note.contains(crate::config::MAX_METADATA_SIZE_ENV) && note.contains("4KiB"),
+            note.contains(crate::settings::MIND_MAX_METADATA_SIZE) && note.contains("4KiB"),
             "{note}"
         );
     }

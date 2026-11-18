@@ -34,6 +34,7 @@ mod review;
 mod sanitize;
 mod scaffold;
 mod selfupdate;
+mod settings;
 mod source;
 mod transaction;
 mod tui;
@@ -46,9 +47,9 @@ mod workflow_meta;
 use clap::{CommandFactory, Parser};
 
 use cli::{AutoUpdateCmd, Cli, Command, ConfigCmd, HooksCmd, LobesCmd, OnOff};
-use config::MAX_METADATA_SIZE_ENV;
 use error::{MindError, Result};
 use paths::Paths;
+use settings::MIND_MAX_METADATA_SIZE;
 use verb::{
     LockMode, is_dry_run, items_settle, json_reserves_stdout, lock_mode, probe_launches_tui,
     verb_name,
@@ -137,7 +138,7 @@ fn run(cli: Cli) -> Result<()> {
     // verbs that do read it report the parse error themselves, with the context
     // this early in the run does not have. (`recall` is NOT in that list: it
     // reads config through `unmanaged::scan` -> `Paths::agent_homes` ->
-    // `Config::load`.)
+    // `Settings::config`.)
     //
     // An empty `MIND_MAX_METADATA_SIZE=` reads as unset, the shell convention,
     // rather than as an unparseable value. A value that is PRESENT but not
@@ -213,15 +214,13 @@ fn configure_hook_log(cli: &Cli, paths: &Paths) {
     // spec: HOOK-164 -- not every verb reads config for anything else (a
     // source's `hooks run` does not), so when the file names a hook key, say
     // here that it was not applied rather than drop it silently.
-    let cfg = config::Config::load(paths).unwrap_or_else(|e| {
-        let names_hook_key = std::fs::read_to_string(paths.config_file())
-            .map(|t| {
-                t.contains("hook-history")
-                    || t.contains("hook_history")
-                    || t.contains("hook-log")
-                    || t.contains("hook_log")
-            })
-            .unwrap_or(false);
+    let cfg = paths.settings().config().unwrap_or_else(|e| {
+        let names_hook_key = paths.settings().config_text().is_some_and(|t| {
+            t.contains("hook-history")
+                || t.contains("hook_history")
+                || t.contains("hook-log")
+                || t.contains("hook_log")
+        });
         if names_hook_key {
             eprintln!("warning: hook settings in config.toml not applied, using the defaults: {e}");
         }
@@ -272,7 +271,7 @@ fn owned_dir(paths: &Paths) -> std::path::PathBuf {
 /// config key (DSC-104), install it, and record where it came from (CLI-241).
 /// Warns when a zero-valued spelling turned the cap off (DSC-110).
 fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
-    let env_raw = std::env::var_os(MAX_METADATA_SIZE_ENV);
+    let env_raw = paths.settings().env().max_metadata_size();
     let env = match &env_raw {
         None => None,
         Some(raw) => match raw.to_str() {
@@ -282,7 +281,7 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
             // same fate a junk-but-decodable value meets.
             None if cli.max_metadata_size.is_none() => {
                 return Err(MindError::BadMetadataSize {
-                    origin: MAX_METADATA_SIZE_ENV.to_string(),
+                    origin: MIND_MAX_METADATA_SIZE.to_string(),
                     msg: "the value is not valid UTF-8".to_string(),
                 });
             }
@@ -290,16 +289,16 @@ fn install_metadata_limit(cli: &Cli, paths: &Paths) -> Result<()> {
         },
     };
     let configured = if cli.max_metadata_size.is_none() && env.is_none() {
-        match config::Config::load(paths) {
+        match paths.settings().config() {
             Ok(c) => c.max_metadata_size,
             // spec: DSC-104 -- a config that will not parse falls back to the
             // default cap, unless it names the cap key: then it is the origin
             // that would have been used, and silently applying the default
             // under a value the operator set is refused (DSC-105).
             Err(e) => {
-                let names_cap = std::fs::read_to_string(paths.config_file())
-                    .map(|t| t.contains("max-metadata-size") || t.contains("max_metadata_size"))
-                    .unwrap_or(false);
+                let names_cap = paths.settings().config_text().is_some_and(|t| {
+                    t.contains("max-metadata-size") || t.contains("max_metadata_size")
+                });
                 if names_cap {
                     return Err(e);
                 }
@@ -644,7 +643,7 @@ fn dispatch_verb(cli: Cli, paths: &Paths) -> Result<()> {
                 },
             )
         }
-        Command::Evolve { check, version } => selfupdate::run(check, yes, version),
+        Command::Evolve { check, version } => selfupdate::run(paths, check, yes, version),
         Command::Recall {
             sources,
             item,

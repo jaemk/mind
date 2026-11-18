@@ -9,15 +9,7 @@ pub(super) fn out_ctx() -> crate::render::OutputCtx {
 
 /// Expand a leading `~` in `path` to the home directory.
 pub(crate) fn expand_tilde(path: &str) -> std::path::PathBuf {
-    if path == "~" {
-        return dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
-    }
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    std::path::PathBuf::from(path)
+    crate::settings::Env.expand_tilde(path)
 }
 
 /// `mind completions <shell>` — write a shell completion script to stdout.

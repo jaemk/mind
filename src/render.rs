@@ -131,7 +131,7 @@ impl OutputCtx {
     pub fn detect(json: bool, ascii: bool, verbose: bool) -> Self {
         use std::io::IsTerminal;
         let is_tty = std::io::stdout().is_terminal();
-        let no_color = std::env::var_os("NO_COLOR").is_some();
+        let no_color = crate::settings::Env.no_color();
         let utf8_locale = detect_utf8_locale();
         Self {
             verbose,
@@ -360,9 +360,7 @@ pub fn visible_width(s: &str) -> usize {
 /// bogus value still leaves room for a prefix and a word.
 pub fn term_width() -> usize {
     use std::io::IsTerminal;
-    let env = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok());
+    let env = crate::settings::Env.columns();
     let tty = || {
         std::io::stdout()
             .is_terminal()
@@ -402,20 +400,9 @@ pub fn wrap_tokens<S: AsRef<str>>(
     lines
 }
 
-/// Detect whether the active locale advertises UTF-8.
-///
-/// Checks `LC_ALL`, `LC_CTYPE`, `LANG` in that order (first set wins).
-/// Returns `false` when none is set (conservative ASCII default).
+/// Whether the active locale advertises UTF-8 ([`crate::settings::Env::utf8_locale`]).
 pub(crate) fn detect_utf8_locale() -> bool {
-    for var in &["LC_ALL", "LC_CTYPE", "LANG"] {
-        if let Ok(val) = std::env::var(var)
-            && !val.is_empty()
-        {
-            let lower = val.to_lowercase();
-            return lower.contains("utf-8") || lower.contains("utf8");
-        }
-    }
-    false
+    crate::settings::Env.utf8_locale()
 }
 
 #[cfg(test)]

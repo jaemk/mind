@@ -1253,7 +1253,9 @@ pub fn history(paths: &Paths, q: &HistoryQuery) -> Result<()> {
         records.drain(..drop);
     }
 
-    let cap = crate::config::Config::load(paths)
+    let cap = paths
+        .settings()
+        .config()
         .ok()
         .and_then(|c| c.hook_history)
         .unwrap_or(crate::hook_log::DEFAULT_HISTORY);

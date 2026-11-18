@@ -598,7 +598,7 @@ pub(super) fn learn_selected(
     // spec: HOOK-181 -- the plan's answer lasts for this verb only.
     let _answers = crate::consent::scope();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     let out = crate::render::ctx();
     // The selection as text: the `--json` `target` field and the messages
     // below. Read by a human, never re-parsed by mind.
@@ -941,7 +941,7 @@ pub(super) fn learn_collecting_selected(
     let InstallFlow {
         clobber, accept, ..
     } = flow;
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     let (registry, items, resolution) = resolve_learn(paths, selection)?;
 
     let order = resolution.install_order();

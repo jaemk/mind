@@ -242,7 +242,7 @@ fn plan_upgrade(paths: &Paths, opts: &UpgradeOpts<'_>) -> Result<UpgradePlan> {
     } = *opts;
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     // spec: LIFE-53 -- before the fetch below can bring in new items, mark the
     // sources whose items are all installed, so those items read as new.
     if !preview {
@@ -2289,7 +2289,11 @@ mod tests {
             "allow = [\"github.com/me/allowed-src\"]\n",
         );
         let (_guard, base) = with_policy(policy_toml);
-        let policy = Policy::load().unwrap().expect("policy should load");
+        let policy = Paths::new(base.clone(), base.join("claude"))
+            .settings()
+            .policy()
+            .unwrap()
+            .expect("policy should load");
         assert!(policy.lock());
 
         // The user scopes to an item from the allowed source.
@@ -2343,7 +2347,11 @@ mod tests {
             "allow = [\"github.com/me/allowed-src\"]\n",
         );
         let (_guard, base) = with_policy(policy_toml);
-        let policy = Policy::load().unwrap().expect("policy should load");
+        let policy = Paths::new(base.clone(), base.join("claude"))
+            .settings()
+            .policy()
+            .unwrap()
+            .expect("policy should load");
 
         // A link instance and an aliased instance of the allowed repo, both
         // registered under their extended identities.
@@ -2410,7 +2418,11 @@ mod tests {
             "allow = [\"github.com/me/allowed-src\"]\n",
         );
         let (_guard, base) = with_policy(policy_toml);
-        let policy = Policy::load().unwrap().expect("policy should load");
+        let policy = Paths::new(base.clone(), base.join("claude"))
+            .settings()
+            .policy()
+            .unwrap()
+            .expect("policy should load");
 
         // A registered, but disallowed, source: PolicyBlocked.
         let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
@@ -2458,7 +2470,11 @@ mod tests {
             "allow = [\"github.com/me/allowed-src\"]\n",
         );
         let (_guard, base) = with_policy(policy_toml);
-        let policy = Policy::load().unwrap().expect("policy should load");
+        let policy = Paths::new(base.clone(), base.join("claude"))
+            .settings()
+            .policy()
+            .unwrap()
+            .expect("policy should load");
 
         let selected = item("blocked-item", "github.com/them/blocked-src");
         let filter = parse_item_ref("blocked-item").unwrap();

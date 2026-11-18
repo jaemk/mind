@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub mod src_scan;
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Reserve a per-process path for a fixture. The owning sandbox removes it on drop.

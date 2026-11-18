@@ -32,11 +32,11 @@ const SYSTEM_PATH_FIXED: &str = "/Library/Application Support/mind/policy.toml";
 const SYSTEM_PATH_FIXED: &str = "/etc/mind/policy.toml";
 
 /// The fixed per-OS system policy path (POL-1).
-fn system_path() -> PathBuf {
+pub(crate) fn system_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        let base = std::env::var_os("PROGRAMDATA")
-            .map(PathBuf::from)
+        let base = crate::settings::Env
+            .program_data()
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
         return base.join("mind").join("policy.toml");
     }
@@ -45,9 +45,6 @@ fn system_path() -> PathBuf {
         PathBuf::from(SYSTEM_PATH_FIXED)
     }
 }
-
-/// The environment variable honored only when no system file exists (POL-2).
-const ENV_VAR: &str = "MIND_POLICY_FILE";
 
 /// One `[[sources.auto_meld]]` entry: an org-provisioned source plus its pin
 /// (POL-30). The pin is normalized to the shared [`Pin`] enum so enforcement
@@ -295,33 +292,20 @@ impl RawAutoMeld {
     }
 }
 
-impl Policy {
-    /// Load the managed policy, or `None` when none is configured (POL-4 inert).
-    ///
-    /// Reads the fixed per-OS system path; falls back to `$MIND_POLICY_FILE` only
-    /// when no system file exists (POL-1, POL-2). A parse error, unknown key, or
-    /// failed [`validate`](Policy::validate) is `Err` (POL-5 fail closed).
-    ///
-    /// When the policy is loaded from the real system path, emits warnings to
-    /// stderr if the file or its parent directory is not securely owned/permissioned
-    /// (POL-64). The check is skipped for `$MIND_POLICY_FILE` paths (POL-65).
-    pub fn load() -> Result<Option<Policy>> {
-        let env = std::env::var_os(ENV_VAR).map(PathBuf::from);
-        let system = system_path();
-        match locate_existing(&system, env.as_deref()) {
-            Some(path) => {
-                // spec: POL-65 -- permission check only for the real system path.
-                let is_system = path == system;
-                let (policy, warnings) = load_and_check(&path, is_system)?;
-                for w in &warnings {
-                    eprintln!("{w}");
-                }
-                Ok(Some(policy))
-            }
-            None => Ok(None),
-        }
+/// Load the policy at `path`, located by [`crate::settings::Settings::policy`].
+///
+/// A file loaded from the real system path emits warnings to stderr when it or
+/// its parent directory is not securely owned/permissioned (POL-64); the check
+/// is skipped for a `$MIND_POLICY_FILE` path (POL-65).
+pub(crate) fn load_at(path: &Path, is_system: bool) -> Result<Policy> {
+    let (policy, warnings) = load_and_check(path, is_system)?;
+    for w in &warnings {
+        eprintln!("{w}");
     }
+    Ok(policy)
+}
 
+impl Policy {
     /// Does `identity` match an `allow` pattern? `*` matches within a single
     /// path segment (POL-10).
     ///
@@ -546,7 +530,7 @@ fn check_policy_file_permissions(_path: &Path) -> Vec<String> {
     Vec::new()
 }
 
-/// Internal load used by `Policy::load`, with the `is_system_path` flag that
+/// Internal load used by [`load_at`], with the `is_system_path` flag that
 /// gates the permission check (POL-64/POL-65). Factored out so tests can verify
 /// the check is skipped for the `$MIND_POLICY_FILE` path without needing to
 /// create a real `/etc/mind/policy.toml`.
@@ -575,7 +559,7 @@ fn locate_with(system: Option<&Path>, env: Option<&Path>) -> Option<PathBuf> {
 /// system path when present (POL-1), else `$MIND_POLICY_FILE` when present (POL-2).
 /// A set-but-missing env path is treated as no policy (POL-4 inert), not a hard
 /// error, mirroring the system-path existence check. Pure over its arguments.
-fn locate_existing(system: &Path, env: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn locate_existing(system: &Path, env: Option<&Path>) -> Option<PathBuf> {
     let system = system.exists().then(|| system.to_path_buf());
     let env = env.filter(|p| p.exists());
     locate_with(system.as_deref(), env)

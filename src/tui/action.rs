@@ -1893,7 +1893,7 @@ mod tests {
         assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
 
         // Verify the lobe was persisted to config.
-        let cfg = crate::config::Config::load(&paths).unwrap();
+        let cfg = paths.settings().config().unwrap();
         assert!(
             cfg.lobes.iter().any(|e| e.path() == lobe_path),
             "lobe must appear in config after LobeAdd: {:?}",
@@ -1936,7 +1936,7 @@ mod tests {
             result.err()
         );
 
-        let cfg = crate::config::Config::load(&paths).unwrap();
+        let cfg = paths.settings().config().unwrap();
         assert!(
             !cfg.lobes.iter().any(|e| e.path() == lobe_path),
             "lobe must be absent from config after LobeRemove: {:?}",
@@ -1992,7 +1992,7 @@ mod tests {
             execute(&paths, action).expect("LobeAdd must succeed");
         }
 
-        let cfg = crate::config::Config::load(&paths).unwrap();
+        let cfg = paths.settings().config().unwrap();
         let count = cfg.lobes.iter().filter(|e| e.path() == lobe_path).count();
         assert_eq!(
             count, 1,

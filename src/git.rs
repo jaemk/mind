@@ -266,19 +266,15 @@ fn noninteractive_here() -> bool {
 /// of them git would have used, or a configured key or proxy is silently
 /// dropped.
 fn ssh_setup(cwd: Option<&Path>) -> SshSetup {
-    let var = |k| {
-        std::env::var(k)
-            .ok()
-            .filter(|v: &String| !v.trim().is_empty())
-    };
+    let env = crate::settings::Env;
     let config = config_ssh(cwd);
     SshSetup {
         command: resolve_ssh_base(
-            var("GIT_SSH_COMMAND"),
+            env.git_ssh_command(),
             || config.command.clone(),
-            var("GIT_SSH"),
+            env.git_ssh(),
         ),
-        variant: var("GIT_SSH_VARIANT").or(config.variant),
+        variant: env.git_ssh_variant().or(config.variant),
     }
 }
 

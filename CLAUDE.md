@@ -120,8 +120,9 @@ Install, lifecycle, and state:
 
 Foundations and cross-cutting:
 - `src/error.rs` - structured errors (`thiserror`). No `anyhow`; every fallible path returns `MindError`.
+- `src/settings.rs` - every settings read: `Env` (one method per environment variable, plus the home dir) and `Settings` (`paths.settings()`: `config()`, `save_config()`, `policy()`, `policy_path()`). Reads are live, not cached. `tests/settings_reads.rs` fails on a direct `std::env::var*`, `dirs::home_dir`, or config/policy load elsewhere in production code; add a method here instead.
 - `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` / `CLAUDE_HOME`, used for test isolation).
-- `src/config.rs` - user config at `~/.mind/config.toml` (`lobes`, `ssh`, `absorb-to`, `max-metadata-size`).
+- `src/config.rs` - the `config.toml` schema (`lobes`, `ssh`, `absorb-to`, `max-metadata-size`); read and written through `Settings`.
 - `src/lock.rs` - advisory file-lock + atomic registry writes guarding all persisted state.
 - `src/policy.rs` - enterprise managed policy (trusted sources, pins, lobe lock, self-update control).
 - `src/curate.rs` - `curate`: reconcile the melded state with what the registered curators declare.

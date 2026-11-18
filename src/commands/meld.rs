@@ -69,9 +69,9 @@ pub(crate) fn meld_with_profiles(
     }
     // POL-3: the managed policy is authoritative over user intent. Load it once
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
-    let policy = Policy::load()?;
+    let policy = paths.settings().policy()?;
     // CLI-19: prefer SSH for remotes when the user's config asks for it.
-    let prefer_ssh = Config::load(paths)?.ssh;
+    let prefer_ssh = paths.settings().config()?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
     // spec: STO-58 -- the reported identity includes the consumer alias, so the
@@ -485,9 +485,9 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
         // precedes the allow-pattern check so the error message names the
         // allow-local reason rather than a pattern miss.
         if policy.lock() && !policy.allow_local() && is_local {
-            if let Some(path) = effective_policy_path() {
+            if let Some(path) = paths.settings().policy_path() {
                 // spec: POL-37 (same hint pattern as SourceNotAllowed)
-                eprintln!("hint: managed policy at {path}");
+                eprintln!("hint: managed policy at {}", path.display());
             }
             return Err(MindError::LocalMeldForbidden { identity });
         }
@@ -496,9 +496,9 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
         if policy.lock() && !allowed {
             // spec: POL-11, POL-36 -- refused before any clone or dir creation.
             // Print the policy file path so the developer knows where to look.
-            if let Some(path) = effective_policy_path() {
+            if let Some(path) = paths.settings().policy_path() {
                 // spec: POL-37
-                eprintln!("hint: managed policy at {path}");
+                eprintln!("hint: managed policy at {}", path.display());
             }
             return Err(MindError::SourceNotAllowed { identity });
         }
@@ -1684,40 +1684,6 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     }
 
     Ok(added)
-}
-
-/// Return the path of the managed policy file currently in effect, if any.
-///
-/// Mirrors the POL-1/POL-2 precedence of `Policy::load()`: the system path when
-/// it exists, else `$MIND_POLICY_FILE` when set and the file exists. Used to
-/// name the policy file in `SourceNotAllowed` output (POL-37) without requiring
-/// the `Policy` struct to carry a path field.
-pub(super) fn effective_policy_path() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    const SYSTEM_FIXED: &str = "/Library/Application Support/mind/policy.toml";
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    const SYSTEM_FIXED: &str = "/etc/mind/policy.toml";
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let sys = std::path::Path::new(SYSTEM_FIXED);
-        if sys.exists() {
-            return Some(SYSTEM_FIXED.to_string());
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var_os("PROGRAMDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
-        let sys = base.join("mind").join("policy.toml");
-        if sys.exists() {
-            return Some(sys.display().to_string());
-        }
-    }
-    // Fall back to $MIND_POLICY_FILE when set and the file exists (POL-2).
-    let env_path = std::env::var_os("MIND_POLICY_FILE").map(std::path::PathBuf::from)?;
-    env_path.exists().then(|| env_path.display().to_string())
 }
 
 /// Derive a suggested namespace prefix from a source URL or local path.

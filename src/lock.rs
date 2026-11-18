@@ -326,14 +326,11 @@ fn wait_while_busy(lock_path: &std::path::Path, mut busy: impl FnMut() -> bool) 
     }
 }
 
-/// Set to `1` on every hook `mind` runs (HOOK-144).
-pub const IN_HOOK_ENV: &str = "MIND_IN_HOOK";
-
 /// Refuse to wait on a busy lock from inside a hook (HOOK-144): the holder is
 /// the `mind` that ran the hook, which waits for the hook in turn.
 // spec: HOOK-144
 fn refuse_nested(busy: bool) -> Result<()> {
-    if busy && std::env::var_os(IN_HOOK_ENV).is_some_and(|v| v == "1") {
+    if busy && crate::settings::Env.in_hook() {
         return Err(MindError::NestedInHook);
     }
     Ok(())

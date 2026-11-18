@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use cached::Cached as _;
 
 use crate::catalog;
-use crate::config::Config;
 use crate::error::{ItemKind, Result};
 use crate::lock;
 use crate::manifest::Manifest;
@@ -791,7 +790,9 @@ fn load_inner(paths: &Paths, refresh: Refresh<'_>) -> Result<Snapshot> {
 
     // Load configured lobes for TUI-23. Falls back to empty (default lobe used).
     // spec: TUI-23
-    let lobes = Config::load(paths)
+    let lobes = paths
+        .settings()
+        .config()
         .map(|c| c.lobes.iter().map(|e| e.path().to_string()).collect())
         .unwrap_or_default();
 

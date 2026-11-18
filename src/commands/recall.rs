@@ -99,7 +99,7 @@ pub fn recall(
 
     if sources {
         let registry = Registry::load(paths)?;
-        let policy = policy_for_display();
+        let policy = policy_for_display(paths);
         if json {
             // spec: PROF-29 -- each source carries its declared profiles and
             // the enabled ones; a source without profiles is unchanged.
@@ -472,7 +472,7 @@ pub fn recall(
         // Fall through: unmanaged lobe items are still worth showing (UNM-2).
     }
 
-    let display_policy = policy_for_display();
+    let display_policy = policy_for_display(paths);
     for s in &registry.sources {
         if !source_shown(s) {
             continue;

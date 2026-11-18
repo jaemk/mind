@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
-use crate::policy::Policy;
+use crate::settings::Env;
 
 thread_local! {
     /// The active `--local` install scope (HARN-20): when set, [`Paths::agent_homes`]
@@ -481,14 +481,12 @@ impl Paths {
 
     /// Resolve roots from the environment, falling back to the home directory.
     pub fn resolve() -> Result<Self> {
-        let mind_home = match std::env::var_os("MIND_HOME") {
-            Some(p) => PathBuf::from(p),
+        let mind_home = match Env.mind_home() {
+            Some(p) => p,
             None => home()?.join(".mind"),
         };
         // spec: CLI-170 - MIND_DEFAULT_LOBE takes precedence over CLAUDE_HOME.
-        let claude_home = match std::env::var_os("MIND_DEFAULT_LOBE")
-            .or_else(|| std::env::var_os("CLAUDE_HOME"))
-        {
+        let claude_home = match Env.default_lobe() {
             Some(p) => PathBuf::from(p),
             None => home()?.join(".claude"),
         };
@@ -504,7 +502,7 @@ impl Paths {
     /// HOME-17) take their place.
     // spec: HOME-2 HOME-17
     pub fn extra_homes(&self) -> Vec<PathBuf> {
-        let cfg = Config::load(self).ok();
+        let cfg = self.settings().config().ok();
         let user = self.user_homes_in(cfg.as_ref());
         if !user.is_empty() {
             return user;
@@ -522,12 +520,12 @@ impl Paths {
     /// The extra homes the user set (HOME-2): `$MIND_HOMES`, then the
     /// `mind-homes` config key.
     pub fn user_homes(&self) -> Vec<PathBuf> {
-        self.user_homes_in(Config::load(self).ok().as_ref())
+        self.user_homes_in(self.settings().config().ok().as_ref())
     }
 
     fn user_homes_in(&self, cfg: Option<&Config>) -> Vec<PathBuf> {
         let mut raw: Vec<PathBuf> = Vec::new();
-        if let Some(v) = std::env::var_os("MIND_HOMES") {
+        if let Some(v) = Env.mind_homes() {
             raw.extend(
                 std::env::split_paths(&v)
                     .map(|p| p.to_string_lossy().into_owned())
@@ -583,9 +581,9 @@ impl Paths {
                 why: self.restricted_why(),
             });
         }
-        let mut cfg = Config::load(self)?;
+        let mut cfg = self.settings().config()?;
         cfg.source_homes.push(home.display().to_string());
-        cfg.save(self)?;
+        self.settings().save_config(&cfg)?;
         let out = crate::render::ctx();
         let line = format!(
             "{} is melded into {}, a new mind home, recorded under source-homes in {}",
@@ -773,7 +771,7 @@ impl Paths {
         let Some(root) = self.source_lobe(source)? else {
             return Ok(None);
         };
-        if Policy::load()?.is_some_and(|p| p.lobes_lock()) {
+        if self.settings().policy()?.is_some_and(|p| p.lobes_lock()) {
             return Ok(None);
         }
         Ok(Some(root))
@@ -986,7 +984,7 @@ impl Paths {
         // Compute the user's normal homes (pre-policy).
         let user_homes: Vec<Lobe> = {
             let mut h: Vec<Lobe> = Vec::new();
-            if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
+            if let Some(raw) = Env.agent_homes() {
                 // Env-var homes are all-kinds (HARN-2): they preserve the
                 // pre-feature behavior of `$MIND_AGENT_HOMES`.
                 let parsed = raw
@@ -1000,7 +998,7 @@ impl Paths {
                 }
             }
             if h.is_empty() {
-                let configured = Config::load(self)?.lobes;
+                let configured = self.settings().config()?.lobes;
                 if !configured.is_empty() {
                     h = configured
                         .iter()
@@ -1022,7 +1020,7 @@ impl Paths {
         // Apply managed-policy lobe rules when a policy is in effect.
         // spec: POL-40
         // spec: POL-41
-        match Policy::load()? {
+        match self.settings().policy()? {
             Some(policy) if policy.lobes_lock() => {
                 // POL-40: locked - use exactly the policy targets, ignoring user homes.
                 let targets = policy.lobes_targets();
@@ -1158,8 +1156,8 @@ impl Paths {
     /// set (so tests stay hermetic without mutating process HOME), else the home
     /// directory.
     pub fn detect_base() -> Result<PathBuf> {
-        match std::env::var_os("MIND_DETECT_HOME") {
-            Some(p) => Ok(PathBuf::from(p)),
+        match Env.detect_home() {
+            Some(p) => Ok(p),
             None => home(),
         }
     }
@@ -1189,7 +1187,7 @@ impl Paths {
     /// if set, else `~/.claude`.
     pub fn default_lobe(&self) -> String {
         // spec: CLI-170 - MIND_DEFAULT_LOBE takes precedence over CLAUDE_HOME.
-        match std::env::var_os("MIND_DEFAULT_LOBE").or_else(|| std::env::var_os("CLAUDE_HOME")) {
+        match Env.default_lobe() {
             Some(v) => v.to_string_lossy().into_owned(),
             None => "~/.claude".to_string(),
         }
@@ -1198,11 +1196,10 @@ impl Paths {
     /// Create `config.toml` with default values if it does not exist yet.
     pub fn ensure_config(&self) -> Result<()> {
         if !self.config_file().exists() {
-            Config {
+            self.settings().save_config(&Config {
                 lobes: vec![crate::config::LobeEntry::bare(self.default_lobe())],
                 ..Default::default()
-            }
-            .save(self)?;
+            })?;
         }
         Ok(())
     }
@@ -1283,20 +1280,12 @@ impl Paths {
 }
 
 fn home() -> Result<PathBuf> {
-    dirs::home_dir().ok_or(MindError::HomeDirNotFound)
+    Env.home_dir().ok_or(MindError::HomeDirNotFound)
 }
 
 /// Expand a leading `~` / `~/` to the home directory; other paths pass through.
 fn expand_home(path: &str) -> PathBuf {
-    if path == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
-    }
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(h) = dirs::home_dir()
-    {
-        return h.join(rest);
-    }
-    PathBuf::from(path)
+    Env.expand_tilde(path)
 }
 
 /// Expand `~` and then resolve a relative agent-home path to an absolute one.
@@ -1389,8 +1378,7 @@ pub(crate) fn resolve_lobe(
     // present, and the caller may legitimately supply "~").
     let check_base = |base_str: &str| -> Result<PathBuf> {
         let expanded = expand_home(base_str);
-        let home = dirs::home_dir();
-        let is_home = home.as_deref().is_some_and(|h| expanded == h);
+        let is_home = Env.home_dir().is_some_and(|h| expanded == h);
         if !is_home && !expanded.exists() {
             return Err(MindError::LobeBaseMissing { path: expanded });
         }

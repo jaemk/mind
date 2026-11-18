@@ -324,7 +324,12 @@ fn homebrew_exe() -> Option<std::path::PathBuf> {
 /// latest release is fetched from the GitHub API. `--check` reports the decision
 /// and returns without downloading. Otherwise, unless `--yes`, it prompts before
 /// replacing the binary.
-pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
+pub fn run(
+    paths: &crate::paths::Paths,
+    check: bool,
+    yes: bool,
+    mut version: Option<String>,
+) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -334,7 +339,7 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
 
     // Load the managed policy and check the self-update control before any network
     // call (POL-51..POL-54). A machine with no policy file behaves exactly as today.
-    let policy = crate::policy::Policy::load()?;
+    let policy = paths.settings().policy()?;
     let policy_pin_active =
         if let Some(pin) = check_policy_for_evolve(policy.as_ref(), version.as_deref())? {
             // Policy pins to a specific version; behave as if --version <pin> was passed.
@@ -900,22 +905,16 @@ fn maybe_proxy_hint(reason: &str) -> String {
     }
 }
 
-/// The environment variables the updater's token lookup reads, in its precedence
-/// order (STO-57: `gh`'s order, first set and non-empty wins).
-///
-/// The crate's own list is `pub(crate)`, so it is mirrored here rather than
-/// imported. It is only ever used to decide WHICH hint to print -- the lookup
-/// that actually authorizes the request is the crate's `auth_token_from_env`.
-const AUTH_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
-
 /// Whether the environment supplied a token the updater would have sent.
+///
+/// Only decides WHICH hint to print; the lookup that authorizes the request is
+/// the updater crate's `auth_token_from_env`, whose variable list
+/// [`crate::settings::GITHUB_TOKEN_VARS`] mirrors.
 ///
 /// Matches the crate's emptiness rule (a variable set to whitespace is no token),
 /// so the hint does not claim the request was authenticated when it was not.
 fn auth_token_in_env() -> bool {
-    AUTH_TOKEN_ENV_VARS
-        .iter()
-        .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+    crate::settings::Env.github_token_set()
 }
 
 /// The remedy line for a refused request (STO-80), chosen by whether the
@@ -1068,11 +1067,7 @@ pub(crate) fn clamp_http_timeout(raw: Option<u64>) -> u64 {
 /// Read the connect-timeout from `MIND_HTTP_TIMEOUT_SECS` (STO-52).
 /// Falls back to 15 on a missing, non-numeric, or zero value.
 fn http_timeout_secs() -> u64 {
-    clamp_http_timeout(
-        std::env::var("MIND_HTTP_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok()),
-    )
+    clamp_http_timeout(crate::settings::Env.http_timeout_secs())
 }
 
 /// The ceiling on the artifact download (STO-52), matching the `--max-time 600`
@@ -1123,6 +1118,13 @@ mod tests {
     /// snapshots `environ`. Using one shared lock here instead of a
     /// module-local one closes that gap.
     use crate::paths::ENV_LOCK;
+    use crate::settings::GITHUB_TOKEN_VARS as AUTH_TOKEN_ENV_VARS;
+
+    /// Paths for [`run`], which reads only the managed policy through them.
+    fn run_paths() -> crate::paths::Paths {
+        let dir = std::env::temp_dir();
+        crate::paths::Paths::new(dir.clone(), dir)
+    }
 
     #[test]
     // spec: STO-76 STO-77
@@ -1143,6 +1145,7 @@ mod tests {
         }
 
         let result = run(
+            &run_paths(),
             true,
             false,
             Some("1/../../../../attacker/mind/releases/download/v1".to_string()),
@@ -1215,7 +1218,7 @@ mod tests {
             std::env::set_var("MIND_TTY", "0");
         }
 
-        let result = run(false, false, Some(target.clone()));
+        let result = run(&run_paths(), false, false, Some(target.clone()));
 
         // SAFETY: ENV_LOCK is still held.
         unsafe {
@@ -1261,7 +1264,7 @@ mod tests {
             std::env::remove_var("MIND_POLICY_FILE");
         }
 
-        let result = run(true, false, Some("1.0.0-../..".to_string()));
+        let result = run(&run_paths(), true, false, Some("1.0.0-../..".to_string()));
 
         // SAFETY: ENV_LOCK is still held.
         unsafe {
@@ -1315,7 +1318,7 @@ mod tests {
             std::env::remove_var("MIND_POLICY_FILE");
         }
 
-        let result = run(true, false, Some("1.0.0-..".to_string()));
+        let result = run(&run_paths(), true, false, Some("1.0.0-..".to_string()));
 
         // SAFETY: ENV_LOCK is still held.
         unsafe {
