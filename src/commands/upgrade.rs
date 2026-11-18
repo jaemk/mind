@@ -96,12 +96,12 @@ pub fn upgrade_source(
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
-        yes,
-        item_ref,
-        no_sync,
-        SourceScope::Filter(source_selector),
-        None,
-        accept,
+        UpgradeOpts {
+            item_ref,
+            no_sync,
+            sources: SourceScope::Filter(source_selector),
+            ..UpgradeOpts::new(yes, accept)
+        },
     )?)
 }
 
@@ -169,12 +169,11 @@ pub(crate) fn upgrade_sources_no_sync(
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
-        yes,
-        None,
-        true,
-        SourceScope::Names(sources, None),
-        None,
-        accept,
+        UpgradeOpts {
+            no_sync: true,
+            sources: SourceScope::Names(sources, None),
+            ..UpgradeOpts::new(yes, accept)
+        },
     )?)
 }
 
@@ -209,12 +208,11 @@ pub fn upgrade_no_sync_keys(
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
-        yes,
-        None,
-        true,
-        SourceScope::All,
-        Some(keys),
-        accept,
+        UpgradeOpts {
+            no_sync: true,
+            keys: Some(keys),
+            ..UpgradeOpts::new(yes, accept)
+        },
     )?)
 }
 
@@ -244,12 +242,11 @@ pub(super) fn upgrade_inner(
 ) -> Result<Option<MutationResult>> {
     upgrade_inner_scoped(
         paths,
-        yes,
-        item_ref,
-        no_sync,
-        SourceScope::All,
-        None,
-        accept,
+        UpgradeOpts {
+            item_ref,
+            no_sync,
+            ..UpgradeOpts::new(yes, accept)
+        },
     )
 }
 
@@ -264,9 +261,49 @@ pub(super) enum SourceScope<'a> {
     /// An `upgrade --source` filter, resolved against the registry the pass
     /// itself loads (CLI-231 matching).
     Filter(&'a str),
-    Preview(Option<&'a str>),
 }
 
+/// How one upgrade pass runs. `sources` restricts the pre-pass fetch, the
+/// per-item delta loop, AND the HOOK-11 install-hook re-run to the scoped
+/// sources (CLI-232, CLI-244), so `sync <source> --upgrade` or `upgrade
+/// --source` cannot silently upgrade items from (or re-run install hooks
+/// for) a source the caller never named. Its filter text, when there is one,
+/// is echoed in the CLI-234/CLI-235 disclosure (M19), alongside `item_ref`,
+/// which doubles as its own filter text. `keys` is the analogous restriction
+/// by exact item KEY (`kind:name`), threaded from the TUI's confirmed-set
+/// apply (`upgrade_no_sync_keys`, TUI-72, TUI-73); `None` is unrestricted.
+#[derive(Clone, Copy)]
+pub(super) struct UpgradeOpts<'a> {
+    pub(super) yes: bool,
+    pub(super) item_ref: Option<&'a str>,
+    /// Skip the pre-pass fetch (CLI-169).
+    pub(super) no_sync: bool,
+    pub(super) sources: SourceScope<'a>,
+    pub(super) keys: Option<&'a [String]>,
+    pub(super) accept: crate::hook::Accept,
+    /// `upgrade --dry-run` (CLI-263): report what the pass would do, from the
+    /// current checkouts, and change nothing.
+    pub(super) preview: bool,
+}
+
+impl<'a> UpgradeOpts<'a> {
+    /// An unscoped, applying pass.
+    pub(super) fn new(yes: bool, accept: crate::hook::Accept) -> Self {
+        UpgradeOpts {
+            yes,
+            item_ref: None,
+            no_sync: false,
+            sources: SourceScope::All,
+            keys: None,
+            accept,
+            preview: false,
+        }
+    }
+}
+
+/// `mind upgrade --dry-run [item] [--source <filter>]` (CLI-263): the pass
+/// against the current checkouts, without a fetch, reporting and changing
+/// nothing.
 pub fn upgrade_preview(
     paths: &Paths,
     item: Option<&str>,
@@ -275,45 +312,88 @@ pub fn upgrade_preview(
 ) -> Result<()> {
     emit_upgrade_result(upgrade_inner_scoped(
         paths,
-        false,
-        item,
-        true,
-        SourceScope::Preview(source),
-        None,
-        accept,
+        UpgradeOpts {
+            item_ref: item,
+            no_sync: true,
+            sources: source.map_or(SourceScope::All, SourceScope::Filter),
+            preview: true,
+            ..UpgradeOpts::new(false, accept)
+        },
     )?)
 }
 
-/// The upgrade pass, additionally restricted to a `source_scope` (CLI-232, H2
-/// fix, and CLI-244) and/or a `key_scope` (TUI-72, TUI-73). `source_scope`
-/// restricts the pre-pass fetch, the per-item delta loop, AND the HOOK-11
-/// install-hook re-run to the scoped sources, so `sync <source> --upgrade` or
-/// `upgrade --source` cannot silently upgrade items from (or re-run install
-/// hooks for, HOOK-11) a source the caller never named. Its filter text, when
-/// there is one, is echoed in the CLI-234/CLI-235 disclosure below (M19),
-/// alongside `item_ref`, which doubles as its own filter text. `key_scope` is
-/// the analogous restriction by exact item KEY (`kind:name`) rather than by
-/// source or by `item_ref` glob, threaded from the TUI's confirmed-set apply
-/// (`upgrade_no_sync_keys`); `None` means unrestricted by key (every other
-/// caller, unchanged).
-#[allow(clippy::too_many_arguments)]
+/// The upgrade pass: [`plan_upgrade`] computes what is pending, then
+/// [`preview_upgrade`] reports it (`--dry-run`) or [`apply_upgrade`] confirms
+/// and applies it.
 pub(super) fn upgrade_inner_scoped(
     paths: &Paths,
-    yes: bool,
-    item_ref: Option<&str>,
-    no_sync: bool,
-    source_scope: SourceScope<'_>,
-    key_scope: Option<&[String]>,
-    accept: crate::hook::Accept,
+    opts: UpgradeOpts<'_>,
 ) -> Result<Option<MutationResult>> {
     // spec: HOOK-181 -- the plan's answer lasts for this pass only.
     let _answers = crate::consent::scope();
+    let plan = plan_upgrade(paths, &opts)?;
+    // spec: CLI-263 -- stop before consent or any hooks or installs. The
+    // tracking routines in the plan compute the same selections without
+    // saving them.
+    if opts.preview {
+        preview_upgrade(paths, opts.accept, plan)?;
+        return Ok(None);
+    }
+    apply_upgrade(paths, &opts, plan)
+}
+
+/// What an upgrade pass found pending, computed by [`plan_upgrade`] before
+/// anything is confirmed, and consumed by [`preview_upgrade`] or
+/// [`apply_upgrade`].
+struct UpgradePlan {
+    policy: Option<Policy>,
+    registry: Registry,
+    manifest: Manifest,
+    catalog: Vec<CatalogItem>,
+    unscannable: Vec<String>,
+    hook_scope: Option<HashSet<String>>,
+    multi_source_note: Option<String>,
+    source_plan: Vec<crate::consent::PlannedHook>,
+    tracking: ProfileTracking,
+    whole: WholeTracking,
+    ignored: Vec<NewItem>,
+    pending: Vec<Upgrade>,
+    prunes: Vec<crate::manifest::InstalledItem>,
+    left_prunes: Vec<crate::manifest::InstalledItem>,
+    version_rows: Vec<SourceVersionJson>,
+    breaking_moves: Vec<BreakingMoveJson>,
+    home_moves: Vec<HomeMoveJson>,
+}
+
+/// The sources whose pending items hooks a plan lists (HOOK-198): the
+/// HOOK-11 scope, or every source.
+fn sources_in_scope(registry: &Registry, hook_scope: Option<&HashSet<String>>) -> Vec<String> {
+    registry
+        .sources
+        .iter()
+        .map(|s| s.name.clone())
+        .filter(|n| hook_scope.is_none_or(|s| s.contains(n)))
+        .collect()
+}
+
+/// Settle breaking releases, follow declared homes, track profiles and whole
+/// sources, and compute each in-scope item's delta. Under `opts.preview`
+/// nothing is saved.
+fn plan_upgrade(paths: &Paths, opts: &UpgradeOpts<'_>) -> Result<UpgradePlan> {
+    let UpgradeOpts {
+        yes,
+        item_ref,
+        no_sync,
+        sources: source_scope,
+        keys: key_scope,
+        accept,
+        preview,
+    } = *opts;
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     // spec: LIFE-53 -- before the fetch below can bring in new items, mark the
     // sources whose items are all installed, so those items read as new.
-    let preview = matches!(source_scope, SourceScope::Preview(_));
     if !preview {
         record_whole_sources(paths, None)?;
     }
@@ -328,14 +408,6 @@ pub(super) fn upgrade_inner_scoped(
                 crate::resolve::validate_source_selector(sel)?;
                 let names = select_sources(&registry, sel)?;
                 (Some(names.into_iter().collect()), Some(sel))
-            }
-            SourceScope::Preview(None) => (None, None),
-            SourceScope::Preview(Some(sel)) => {
-                crate::resolve::validate_source_selector(sel)?;
-                (
-                    Some(select_sources(&registry, sel)?.into_iter().collect()),
-                    Some(sel),
-                )
             }
         };
 
@@ -450,16 +522,6 @@ pub(super) fn upgrade_inner_scoped(
             .next()
             .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
     };
-    // spec: HOOK-198 -- the sources whose pending items hooks the plan lists:
-    // the HOOK-11 scope, or every source.
-    let in_scope = |registry: &Registry| -> Vec<String> {
-        registry
-            .sources
-            .iter()
-            .map(|s| s.name.clone())
-            .filter(|n| hook_scope.as_ref().is_none_or(|s| s.contains(n)))
-            .collect()
-    };
     let scope_names: Vec<String> = {
         let mut v: Vec<String> = hook_scope.iter().flatten().cloned().collect();
         v.sort();
@@ -514,15 +576,6 @@ pub(super) fn upgrade_inner_scoped(
         hook_scope.as_ref(),
         policy.as_ref(),
     );
-    let run_source_pass = |registry: &mut Registry| {
-        rerun_source_hooks(
-            paths,
-            registry,
-            accept,
-            hook_scope.as_ref(),
-            policy.as_ref(),
-        )
-    };
 
     // spec: CLI-211 -- a source that cannot be scanned (missing clone, or any
     // other per-source scan failure) must not silently drop its items out of
@@ -796,6 +849,241 @@ pub(super) fn upgrade_inner_scoped(
     // `colliding_install` guard (DEP-23/NS-41): refuse rather than clobber
     // when the manifest already holds a DIFFERENT stable identity
     // `(source, kind, bare_name)` under the rename's target key.
+    Ok(UpgradePlan {
+        policy,
+        registry,
+        manifest,
+        catalog,
+        unscannable,
+        hook_scope,
+        multi_source_note,
+        source_plan,
+        tracking,
+        whole,
+        ignored,
+        pending,
+        prunes,
+        left_prunes,
+        version_rows,
+        breaking_moves,
+        home_moves,
+    })
+}
+
+/// Report what [`plan_upgrade`] found, with the hooks and dependencies the
+/// pass would run and install (CLI-263). Changes nothing.
+fn preview_upgrade(paths: &Paths, accept: crate::hook::Accept, plan: UpgradePlan) -> Result<()> {
+    let out = crate::render::ctx();
+    let UpgradePlan {
+        registry,
+        manifest,
+        catalog,
+        unscannable,
+        hook_scope,
+        source_plan,
+        tracking,
+        whole,
+        ignored,
+        pending,
+        prunes,
+        left_prunes,
+        breaking_moves,
+        home_moves,
+        ..
+    } = plan;
+    validate_upgrade_collisions(&pending, &manifest)?;
+    let mut hooks = source_plan.clone();
+    for up in &pending {
+        let is_update = up.new_name == up.old.name;
+        hooks.extend(item_install_plan(
+            paths, &registry, &up.cat, is_update, accept,
+        ));
+        if !is_update {
+            hooks.extend(item_uninstall_plan(
+                paths,
+                &up.old,
+                &up.cat.uninstall_hooks(),
+                &up.old.commit,
+                accept,
+            ));
+        }
+    }
+    for item in &left_prunes {
+        let item_hooks = item_catalog_match(&catalog, item)
+            .map(|c| c.uninstall_hooks())
+            .unwrap_or_default();
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
+        hooks.extend(item_uninstall_plan(
+            paths,
+            item,
+            &item_hooks,
+            &commit,
+            accept,
+        ));
+    }
+    // spec: CLI-263 -- the additions install through the learn path, so
+    // their dependency closures and install hooks are predicted from it.
+    let mut closure: Vec<CatalogItem> = Vec::new();
+    {
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut take = |it: CatalogItem| {
+            if seen.insert((it.source.clone(), it.key().as_str().to_string())) {
+                closure.push(it);
+            }
+        };
+        let targets: Vec<&LearnTarget> = whole.targets.iter().flat_map(|(_, t)| t.iter()).collect();
+        for plan in learn_plans(paths, &targets)? {
+            plan.items.into_iter().for_each(&mut take);
+        }
+        for (source_name, plan) in &tracking.plans {
+            for key in &plan.pending {
+                if let Some(it) = catalog
+                    .iter()
+                    .find(|c| c.source == *source_name && c.key().as_str() == key)
+                {
+                    take(it.clone());
+                }
+            }
+        }
+    }
+    let named: HashSet<(&str, &str)> = whole
+        .additions
+        .iter()
+        .map(|a| (a.source.as_str(), a.key.as_str()))
+        .chain(
+            tracking
+                .additions
+                .iter()
+                .map(|a| (a.source.as_str(), a.key.as_str())),
+        )
+        .collect();
+    let dependencies: Vec<String> = closure
+        .iter()
+        .filter(|it| !named.contains(&(it.source.as_str(), it.key().as_str())))
+        .map(CatalogItem::display_key)
+        .collect();
+    for it in &closure {
+        hooks.extend(item_install_plan(paths, &registry, it, false, accept));
+    }
+    let touched: HashSet<&str> = pending
+        .iter()
+        .map(|u| u.cat.source.as_str())
+        .chain(prunes.iter().chain(&left_prunes).map(|i| i.source.as_str()))
+        .chain(closure.iter().map(|it| it.source.as_str()))
+        .collect();
+    let scoped = sources_in_scope(&registry, hook_scope.as_ref());
+    for source in &registry.sources {
+        let when = if touched.contains(source.name.as_str()) {
+            crate::items_hook::PlanWhen::Touched
+        } else if scoped.contains(&source.name) {
+            crate::items_hook::PlanWhen::Pending
+        } else {
+            continue;
+        };
+        hooks.extend(crate::items_hook::planned(
+            paths,
+            &registry,
+            [source.name.as_str()],
+            when,
+            accept,
+        ));
+    }
+    if out.json {
+        let items: Vec<_> = pending.iter().map(|u| serde_json::json!({
+            "key": u.old.display_key(), "source": strip_ansi(&u.old.source),
+            "new_name": strip_ansi(&u.new_name), "links": u.old.links.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>()
+        })).collect();
+        let hook_rows: Vec<_> = hooks.iter().map(|h| serde_json::json!({
+            "source": strip_ansi(&h.key.source), "item": h.key.item.as_ref().map(|v| strip_ansi(v)),
+            "event": strip_ansi(&h.key.event), "command": strip_ansi(&h.label),
+        })).collect();
+        print_json(
+            &serde_json::json!({"schema": 1, "action": "upgrade", "outcome": "preview",
+            "basis": "current checkouts", "upgrades": items,
+            "prunes": prunes.iter().chain(&left_prunes).map(|i| i.display_key()).collect::<Vec<_>>(),
+            "profile_additions": tracking.additions, "profile_departures": tracking.departures,
+            "new_items": whole.additions, "ignored_new_items": ignored, "unscannable": unscannable.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>(),
+            "dependencies": dependencies, "breaking": breaking_moves, "home_moves": home_moves,
+            "hooks": hook_rows,
+            "limitations": "No fetch, content diff or build output is predicted."}),
+        )?;
+    } else {
+        println!("Preview based on current checkouts; no fetch or hooks run.");
+        print_upgrade_report(paths, &registry, &pending, &tracking);
+        print_whole_additions(&whole);
+        print_prunes(&prunes);
+        print_left_prunes(&left_prunes);
+        if !dependencies.is_empty() {
+            println!(
+                "Dependencies the additions would also install: {}",
+                dependencies.join(", ")
+            );
+        }
+        if !hooks.is_empty() {
+            print!("{}", crate::consent::render(&hooks));
+        }
+        if !unscannable.is_empty() {
+            println!(
+                "Could not check: {}",
+                unscannable
+                    .iter()
+                    .map(|s| strip_ansi(s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if pending.is_empty()
+            && prunes.is_empty()
+            && left_prunes.is_empty()
+            && !tracking.has_additions()
+            && whole.targets.is_empty()
+            && home_moves.is_empty()
+            && hooks.is_empty()
+            && unscannable.is_empty()
+        {
+            println!("everything is up to date");
+        }
+        println!("Not predicted: content diffs or build output.");
+    }
+    Ok(())
+}
+
+/// Confirm the plan (with its hooks), run the source hooks, then apply the
+/// upgrades, prunes, and additions, and report the result.
+fn apply_upgrade(
+    paths: &Paths,
+    opts: &UpgradeOpts<'_>,
+    plan: UpgradePlan,
+) -> Result<Option<MutationResult>> {
+    let out = crate::render::ctx();
+    let UpgradeOpts {
+        yes,
+        item_ref,
+        accept,
+        ..
+    } = *opts;
+    let UpgradePlan {
+        policy,
+        mut registry,
+        manifest,
+        catalog,
+        unscannable,
+        hook_scope,
+        multi_source_note,
+        source_plan,
+        tracking,
+        whole,
+        ignored,
+        pending,
+        prunes,
+        left_prunes,
+        version_rows,
+        breaking_moves,
+        home_moves: _,
+    } = plan;
     let target = item_ref.unwrap_or("all");
     let with_profiles = |mut r: MutationResult| {
         r.profile_additions = tracking.additions.clone();
@@ -807,173 +1095,6 @@ pub(super) fn upgrade_inner_scoped(
         r.breaking = breaking_moves.clone();
         r
     };
-
-    if preview {
-        validate_upgrade_collisions(&pending, &manifest)?;
-    }
-
-    // spec: CLI-263 -- stop before consent or any hooks or installs. The
-    // tracking routines above compute the same selections without saving them.
-    if preview {
-        let mut hooks = source_plan.clone();
-        for up in &pending {
-            let is_update = up.new_name == up.old.name;
-            hooks.extend(item_install_plan(
-                paths, &registry, &up.cat, is_update, accept,
-            ));
-            if !is_update {
-                hooks.extend(item_uninstall_plan(
-                    paths,
-                    &up.old,
-                    &up.cat.uninstall_hooks(),
-                    &up.old.commit,
-                    accept,
-                ));
-            }
-        }
-        for item in &left_prunes {
-            let item_hooks = item_catalog_match(&catalog, item)
-                .map(|c| c.uninstall_hooks())
-                .unwrap_or_default();
-            let commit = registry
-                .find(&item.source)
-                .and_then(|s| s.commit.clone())
-                .unwrap_or_default();
-            hooks.extend(item_uninstall_plan(
-                paths,
-                item,
-                &item_hooks,
-                &commit,
-                accept,
-            ));
-        }
-        // spec: CLI-263 -- the additions install through the learn path, so
-        // their dependency closures and install hooks are predicted from it.
-        let mut closure: Vec<CatalogItem> = Vec::new();
-        {
-            let mut seen: HashSet<(String, String)> = HashSet::new();
-            let mut take = |it: CatalogItem| {
-                if seen.insert((it.source.clone(), it.key().as_str().to_string())) {
-                    closure.push(it);
-                }
-            };
-            let targets: Vec<&LearnTarget> =
-                whole.targets.iter().flat_map(|(_, t)| t.iter()).collect();
-            for plan in learn_plans(paths, &targets)? {
-                plan.items.into_iter().for_each(&mut take);
-            }
-            for (source_name, plan) in &tracking.plans {
-                for key in &plan.pending {
-                    if let Some(it) = catalog
-                        .iter()
-                        .find(|c| c.source == *source_name && c.key().as_str() == key)
-                    {
-                        take(it.clone());
-                    }
-                }
-            }
-        }
-        let named: HashSet<(&str, &str)> = whole
-            .additions
-            .iter()
-            .map(|a| (a.source.as_str(), a.key.as_str()))
-            .chain(
-                tracking
-                    .additions
-                    .iter()
-                    .map(|a| (a.source.as_str(), a.key.as_str())),
-            )
-            .collect();
-        let dependencies: Vec<String> = closure
-            .iter()
-            .filter(|it| !named.contains(&(it.source.as_str(), it.key().as_str())))
-            .map(CatalogItem::display_key)
-            .collect();
-        for it in &closure {
-            hooks.extend(item_install_plan(paths, &registry, it, false, accept));
-        }
-        let touched: HashSet<&str> = pending
-            .iter()
-            .map(|u| u.cat.source.as_str())
-            .chain(prunes.iter().chain(&left_prunes).map(|i| i.source.as_str()))
-            .chain(closure.iter().map(|it| it.source.as_str()))
-            .collect();
-        let scoped = in_scope(&registry);
-        for source in &registry.sources {
-            let when = if touched.contains(source.name.as_str()) {
-                crate::items_hook::PlanWhen::Touched
-            } else if scoped.contains(&source.name) {
-                crate::items_hook::PlanWhen::Pending
-            } else {
-                continue;
-            };
-            hooks.extend(crate::items_hook::planned(
-                paths,
-                &registry,
-                [source.name.as_str()],
-                when,
-                accept,
-            ));
-        }
-        if out.json {
-            let items: Vec<_> = pending.iter().map(|u| serde_json::json!({
-                "key": u.old.display_key(), "source": strip_ansi(&u.old.source),
-                "new_name": strip_ansi(&u.new_name), "links": u.old.links.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>()
-            })).collect();
-            let hook_rows: Vec<_> = hooks.iter().map(|h| serde_json::json!({
-                "source": strip_ansi(&h.key.source), "item": h.key.item.as_ref().map(|v| strip_ansi(v)),
-                "event": strip_ansi(&h.key.event), "command": strip_ansi(&h.label),
-            })).collect();
-            print_json(
-                &serde_json::json!({"schema": 1, "action": "upgrade", "outcome": "preview",
-                "basis": "current checkouts", "upgrades": items,
-                "prunes": prunes.iter().chain(&left_prunes).map(|i| i.display_key()).collect::<Vec<_>>(),
-                "profile_additions": tracking.additions, "profile_departures": tracking.departures,
-                "new_items": whole.additions, "ignored_new_items": ignored, "unscannable": unscannable.iter().map(|s| strip_ansi(s)).collect::<Vec<_>>(),
-                "dependencies": dependencies, "breaking": breaking_moves, "home_moves": home_moves,
-                "hooks": hook_rows,
-                "limitations": "No fetch, content diff or build output is predicted."}),
-            )?;
-        } else {
-            println!("Preview based on current checkouts; no fetch or hooks run.");
-            print_upgrade_report(paths, &registry, &pending, &tracking);
-            print_whole_additions(&whole);
-            print_prunes(&prunes);
-            print_left_prunes(&left_prunes);
-            if !dependencies.is_empty() {
-                println!(
-                    "Dependencies the additions would also install: {}",
-                    dependencies.join(", ")
-                );
-            }
-            if !hooks.is_empty() {
-                print!("{}", crate::consent::render(&hooks));
-            }
-            if !unscannable.is_empty() {
-                println!(
-                    "Could not check: {}",
-                    unscannable
-                        .iter()
-                        .map(|s| strip_ansi(s))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            if pending.is_empty()
-                && prunes.is_empty()
-                && left_prunes.is_empty()
-                && !tracking.has_additions()
-                && whole.targets.is_empty()
-                && home_moves.is_empty()
-                && hooks.is_empty()
-                && unscannable.is_empty()
-            {
-                println!("everything is up to date");
-            }
-            println!("Not predicted: content diffs or build output.");
-        }
-        return Ok(None);
-    }
 
     if pending.is_empty()
         && prunes.is_empty()
@@ -988,12 +1109,18 @@ pub(super) fn upgrade_inner_scoped(
         source_plan.extend(crate::items_hook::planned(
             paths,
             &registry,
-            in_scope(&registry),
+            sources_in_scope(&registry, hook_scope.as_ref()),
             crate::items_hook::PlanWhen::Pending,
             accept,
         ));
         ask_plan(paths, None, source_plan)?;
-        run_source_pass(&mut registry)?;
+        rerun_source_hooks(
+            paths,
+            &mut registry,
+            accept,
+            hook_scope.as_ref(),
+            policy.as_ref(),
+        )?;
         // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
         // items it would have contributed were never compared. Report the
         // sources that could not be checked instead of the plain up-to-date line.
@@ -1109,7 +1236,7 @@ pub(super) fn upgrade_inner_scoped(
         .chain(prunes.iter().map(|it| it.source.as_str()))
         .chain(left_prunes.iter().map(|it| it.source.as_str()))
         .collect();
-    let scoped = in_scope(&registry);
+    let scoped = sources_in_scope(&registry, hook_scope.as_ref());
     for source in &registry.sources {
         let when = if touched.contains(source.name.as_str()) {
             crate::items_hook::PlanWhen::Touched
@@ -1144,7 +1271,13 @@ pub(super) fn upgrade_inner_scoped(
         }
     }
     // spec: HOOK-183 -- the source hooks run after the answer, before items.
-    run_source_pass(&mut registry)?;
+    rerun_source_hooks(
+        paths,
+        &mut registry,
+        accept,
+        hook_scope.as_ref(),
+        policy.as_ref(),
+    )?;
 
     let mut manifest = manifest;
     let mut applied: Vec<String> = Vec::new();

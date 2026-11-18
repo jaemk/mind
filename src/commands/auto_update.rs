@@ -496,12 +496,11 @@ pub fn auto_update_run(
             // The ordinary pass, scoped to what moved, with --yes and no prompts.
             let pass = upgrade_inner_scoped(
                 paths,
-                true,
-                None,
-                true,
-                SourceScope::Names(&moved_names, None),
-                None,
-                crate::hook::Accept::default(),
+                UpgradeOpts {
+                    no_sync: true,
+                    sources: SourceScope::Names(&moved_names, None),
+                    ..UpgradeOpts::new(true, crate::hook::Accept::default())
+                },
             );
             if let Ok(after) = Manifest::load(paths) {
                 report.pruned = removed_identities(&before, &after);
