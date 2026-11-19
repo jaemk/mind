@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.53.0] - 2026-11-18
+
+### Added
+
+- `upgrade --dry-run` previews against the current checkouts without fetching,
+  running hooks, or changing installed items. It lists the breaking releases it
+  would leave unapplied, the source moves a newly declared `mind-home` would
+  make, and the dependencies and install hooks of new items. It cannot be
+  combined with `--allow-breaking`.
+- `forget`, `prune`, and `unmeld` take `-n`/`--dry-run`, showing the selected
+  items, paths, dependents, and hooks without removing anything or running
+  hooks.
+- Installs, uninstalls, and hooks inside a command are journaled in
+  `<home>/.tx-journal.json`. If `mind` is killed mid-change, the next command
+  rolls the change back, or finishes it if it had committed. A journal naming
+  paths outside the configured homes, stores, and lobes, or one over state
+  another `mind` has since changed, is refused and kept; the error says how to
+  discard it. Previous copies are held in `.tmp/tx/` (was `.tmp/backup/`) until
+  the change commits.
+
 ### Changed
 
 - `evolve` verifies the downloaded archive's zipsign (ed25519) signature
@@ -2492,7 +2512,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.52.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.53.0...HEAD
+[0.53.0]: https://github.com/jaemk/mind/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/jaemk/mind/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/jaemk/mind/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/jaemk/mind/compare/v0.49.0...v0.50.0
