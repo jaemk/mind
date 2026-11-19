@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.53.1] - 2026-11-18
+
 ### Fixed
 
 - Frontmatter values resolve YAML quote escapes (`''` in single quotes; `\"`,
@@ -2546,7 +2548,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.53.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.53.1...HEAD
+[0.53.1]: https://github.com/jaemk/mind/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/jaemk/mind/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/jaemk/mind/compare/v0.51.0...v0.52.0
 [0.51.0]: https://github.com/jaemk/mind/compare/v0.50.0...v0.51.0
