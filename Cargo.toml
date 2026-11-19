@@ -15,7 +15,11 @@ documentation = "https://jaemk.github.io/mind/"
 readme = "README.md"
 keywords = ["agent", "ai", "cli", "automation", "tooling"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [".github", "docs/", ".claude", "rust-toolchain.toml"]
+exclude = [".github", "docs/", ".claude", "rust-toolchain.toml", "xtask/", ".cargo/"]
+
+# `xtask` holds the release signing tasks (`cargo xtask`, see .cargo/config.toml).
+[workspace]
+members = ["xtask"]
 
 [[bin]]
 name = "mind"
@@ -63,8 +67,11 @@ cached = { version = "4", default-features = false }
 # on every network whose proxy re-signs HTTPS with a company CA. curl read the system
 # store, so this is parity with the pre-0.26.0 downloader, not new behavior.
 #
-# 1.2 is the floor: `native-certs` (STO-78) landed there, `verify_archive` and
-# `checksum_from_asset` (STO-66, STO-47) in 1.1.
+# `signatures` is the zipsign check against the verifying key in `release.pub`
+# (STO-88).
+#
+# 1.2 is the floor: `native-certs` (STO-78) landed there, `checksum_from_asset`
+# (STO-47) in 1.1.
 self_update = { version = "1.2", default-features = false, features = [
     "ureq",
     "rustls",
@@ -74,4 +81,5 @@ self_update = { version = "1.2", default-features = false, features = [
     "archive-tar",
     "compression-tar-gz",
     "checksums",
+    "signatures",
 ] }

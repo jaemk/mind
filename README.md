@@ -141,5 +141,7 @@ so unmeld/forget before deleting `~/.mind` or those links dangle
 cargo test
 ```
 
-Releases are tag-driven: pushing `v*` builds per-platform binaries, creates the
-GitHub Release, and regenerates `Formula/mind.rb`.
+Merging a version bump to `main` is the release: it builds and signs
+per-platform binaries, creates the GitHub Release, and regenerates
+`Formula/mind.rb`. See [CONTRIBUTING.md](CONTRIBUTING.md#release-signing) for
+the signing key.

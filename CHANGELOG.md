@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `evolve` verifies the downloaded archive's zipsign (ed25519) signature
+  against the release key built into `mind` (`release.pub`), and no longer runs
+  `gh attestation verify`. A missing or bad signature aborts the swap with
+  `signature-verification-failed`, which replaces the
+  `attestation-verification-failed` error kind. No external tool is needed.
+  Release archives are still attested, so `gh attestation verify` and
+  `install.sh` keep working.
+
 ## [0.52.0] - 2026-11-13
 
 ### Changed

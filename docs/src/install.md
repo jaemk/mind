@@ -69,14 +69,11 @@ asset before swapping in the new binary. Unlike the install script, it makes the
 request itself rather than shelling out to `curl` or `wget`, so neither needs to
 be on `PATH`, and it verifies TLS against the machine's certificate store.
 
-If a `gh` binary is on `PATH`, `evolve` also verifies the downloaded archive's
-build-provenance attestation (`gh attestation verify`) before swapping. Without
-`gh`, this step is skipped and `evolve` proceeds as it always has. Unlike
-`install.sh` (which never blocks on this check), `evolve` aborts the swap,
-leaving the existing binary in place, when `gh` runs the check and reports the
-artifact does not verify; it still proceeds, with a note, when `gh` itself
-could not complete the check (no network, or a `gh` build without the
-`attestation` subcommand).
+`evolve` also verifies the archive's signature against the release key built
+into `mind`, with no external tool, and aborts the swap, leaving the existing
+binary in place, when the signature is missing or does not verify. Releases are
+also attested for `gh attestation verify`, which `install.sh` runs when `gh` is
+on `PATH`.
 
 A Homebrew install is updated with `brew upgrade mind`. `evolve` refuses to
 replace a binary that resolves into a Homebrew `Cellar`, and `evolve --check`

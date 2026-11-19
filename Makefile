@@ -11,8 +11,8 @@ help:
 	@echo "  build-release  release binary with an embedded SBOM (cargo auditable)"
 	@echo "  fmt        cargo fmt"
 	@echo "  fmt-check  cargo fmt --check"
-	@echo "  clippy     cargo clippy (all targets + features, warnings as errors)"
-	@echo "  test       cargo test (all features)"
+	@echo "  clippy     cargo clippy (workspace, all targets + features, warnings as errors)"
+	@echo "  test       cargo test (workspace, all features)"
 	@echo "  audit      cargo audit (RustSec advisories; skipped if not installed or SKIP_AUDIT=1)"
 	@echo "  check      local gate: fmt (fix) + clippy + test + audit"
 	@echo "  ci         CI gate: fmt-check + clippy + test + audit"
@@ -39,10 +39,10 @@ fmt-check:
 	cargo fmt --check
 
 clippy:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
-	cargo test --all-features
+	cargo test --workspace --all-features
 
 # Scan the locked dependency tree against the RustSec advisory database.
 #

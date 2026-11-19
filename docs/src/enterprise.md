@@ -191,18 +191,17 @@ broken.
 `SHA256SUMS` is fetched over the same HTTPS channel as the release artifact
 itself. The checksums verify integrity (no corruption or truncation in transit)
 but not origin: a host-trusted TLS-terminating proxy can substitute both the
-artifact and its matching checksums without triggering a mismatch. Releases are
-not code-signed.
+artifact and its matching checksums without triggering a mismatch.
 
-Origin is covered separately, and only when a `gh` binary is on `PATH`: `evolve`
-verifies the downloaded archive's GitHub build-provenance attestation before
-extracting it, and aborts the swap when `gh` reports the artifact does not
-verify. That check is anchored in a public transparency log rather than in the
-TLS channel, so an intercepting proxy cannot forge it. Without `gh` the step is
-skipped silently and checksums are the only gate.
+Origin is covered by a signature: each release archive is signed (zipsign,
+ed25519) in the release workflow, and `evolve` verifies it against the verifying
+key built into the running `mind` before extracting, aborting the swap when the
+signature is missing or does not verify. The key is not served over the TLS
+channel, so an intercepting proxy cannot substitute an archive that passes. The
+archives also carry a GitHub build-provenance attestation, which
+`gh attestation verify` checks; `evolve` does not need `gh`.
 
-For environments where egress goes through an intercepting proxy you do not fully
-trust, either require `gh` on the hosts that run `evolve`, or set
+To keep updates off the public release channel entirely, set
 `self-update = false` and distribute IT-built binaries through a separately
 audited channel.
 

@@ -182,7 +182,7 @@ and verified.
 | Metadata reads (`mind.toml`, item frontmatter, plugin and marketplace manifests) are size-capped at 8 MiB | done | DSC-91 |
 | The metadata cap is configurable per invocation, per environment, or per config, and reported by `config show` | done | DSC-103..107, CLI-240, CLI-241 |
 | `evolve` names the resolved release target triple before downloading, so a gnu to musl artifact change is visible up front | done | STO-65 |
-| `evolve` verifies the downloaded archive's build-provenance attestation with `gh` when present: a genuine verification failure aborts the swap, a tooling error or absent `gh` proceeds | done | STO-66 |
+| `evolve` verifies the downloaded archive's zipsign signature against the verifying key built into `mind` (`release.pub`), with no external tool; a missing or bad signature aborts the swap | done | STO-88 |
 | Bare `mind` prints help on stdout at exit 0 | done | CLI-207 |
 | `learn <source-name>` hints at `learn --all <source>` when the query names a melded source rather than an item | done | CLI-208 |
 | The fork note names the pre-existing instances by their registered identities, which are the handles `unmeld` accepts | done | STO-63 |

@@ -135,8 +135,6 @@ jobs:
       VERSION: ${{ needs.decide.outputs.version }}
     permissions:
       contents: read
-      id-token: write
-      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -197,17 +195,70 @@ jobs:
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/mind" "$dist/"
           tar -czf "${dist}.tar.gz" -C "$dist" mind
+      # Signed and attested by the `sign` job.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: mind-*.tar.gz
+
+  # Signs every archive with the zipsign key `mind evolve` checks
+  # (spec/storage.md STO-88), then attests the signed archives. Signing
+  # rewrites an archive, so it comes before the attestation, SHA256SUMS, and
+  # the Homebrew formula's checksums. Only this job holds the key: the
+  # `ZIPSIGN_KEY` secret of the `signing` environment, restricted to main.
+  sign:
+    needs: [decide, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: signing
+    env:
+      RUSTUP_TOOLCHAIN: "1.98.0"
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, pinned commit
+        with:
+          toolchain: "1.98.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: sign
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unsigned-*
+          path: dist
+          merge-multiple: true
+      # Compiling xtask runs its dependencies' build scripts and proc macros,
+      # so it happens before the key exists, in a step without the secret.
+      - name: build xtask
+        run: cargo build --locked --release -p xtask
+      # `xtask sign` refuses a key that is not the pair of release.pub, so a
+      # wrong secret fails here.
+      - name: sign the archives
+        env:
+          ZIPSIGN_KEY: ${{ secrets.ZIPSIGN_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$ZIPSIGN_KEY" | base64 -d > "$key"
+          target/release/xtask sign --key "$key" dist/*.tar.gz
+      # Not checked by `mind evolve`; resources/install.sh and users can verify
+      # it with `gh attestation verify`.
       - name: attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: mind-*.tar.gz
+          subject-path: dist/mind-*.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ matrix.target }}
-          path: mind-*.tar.gz
+          name: signed
+          path: dist/mind-*.tar.gz
 
   release:
-    needs: [decide, build]
+    needs: [decide, sign]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -218,8 +269,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: signed
           path: dist
-          merge-multiple: true
       - name: generate SHA256SUMS
         run: |
           cd dist
@@ -293,8 +344,8 @@ jobs:
         run: cargo publish --locked --no-verify
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: signed
           path: dist
-          merge-multiple: true
       - name: commit the formula and the next dev version
         # Pushes straight to main with the job's default GITHUB_TOKEN. If branch
         # protection is ever enabled on main (required reviews, required status

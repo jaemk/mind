@@ -8,8 +8,8 @@ cargo test
 ```
 
 `make ci-local` (alias `make check`) is the local gate: `cargo fmt` (in place)
-+ `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test
---all-features` + `cargo audit`. Run it before opening a PR; CI runs the
++ `cargo clippy --workspace --all-targets --all-features -- -D warnings` +
+`cargo test --workspace --all-features` + `cargo audit`. Run it before opening a PR; CI runs the
 read-only variant (`make ci`: `fmt --check` instead of `fmt`).
 
 The audit step scans the locked dependency tree against the RustSec advisory
@@ -25,6 +25,19 @@ and does not read that variable.
 dependency SBOM embedded by `cargo auditable` (install the pinned version:
 `cargo install cargo-auditable --version 0.7.5 --locked`). `cargo audit bin
 target/release/mind` then scans the built artifact without its source.
+
+## Release signing
+
+The release workflow's `sign` job signs each archive for `mind evolve`
+(spec/storage.md STO-88). It runs in the `signing` environment, which should
+allow deployments only from `main`. Its `ZIPSIGN_KEY` secret is the
+base64-encoded 64-byte signing key pair matching `release.pub`; `cargo xtask
+sign` refuses a mismatched key.
+
+`cargo xtask gen-key --out DIR` writes a new `release.key` and `release.pub`.
+Keep `release.key` outside the repository. Replacing an existing key needs the
+bridge release described in STO-88, or installed binaries cannot verify the
+next release.
 
 ## The spec
 

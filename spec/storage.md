@@ -428,7 +428,7 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   GitHub also publishes a per-asset digest in its release API, which the
   updater verifies by default in addition to the above. Both are integrity
   checks served by the same host as the artifact, so neither is a substitute
-  for the build-provenance check in STO-66.
+  for the signature check in STO-88.
 - `STO-76` The resolved `evolve` target version -- from an explicit `--to`, a
   managed-policy pin, or a fetched `releases/latest` `tag_name` -- is validated
   as safe to use as a single URL path segment
@@ -572,58 +572,38 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   so `fetch_to`'s own missing-downloader check is the only thing standing
   between a downloader-less environment and a misleading `download failed:
   <url>` error that hides the real cause.
-- `STO-66` `evolve`'s download path soft-verifies the downloaded release
-  archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
-  via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is
-  present on PATH, mirroring `resources/install.sh`'s `gh attestation verify`
-  step. It is wired in as the updater's pre-extraction archive hook
-  (`verify_archive`), which is what points `gh` at the downloaded `.tar.gz` --
-  the file the release workflow attests (`subject-path: mind-*.tar.gz`) -- and
-  not at the binary extracted from it, which has a different digest and no
-  attestation of its own. The check runs after the digest checks (STO-47) and
-  before extraction, inside the same transactional download-and-swap step
-  (STO-46): a failure here leaves the existing binary untouched, exactly like
-  every other failure in that step.
-  - `gh` absent from PATH: `evolve` proceeds silently, with no note, matching
-    install.sh's `if command -v gh` gate exactly.
-  - `gh` present but the check could not be attempted (a `gh` build with no
-    `attestation` subcommand, or a network-level failure reaching GitHub, e.g. DNS
-    or connection failure) -- classified as a TOOLING error, not a statement
-    about the artifact: `evolve` proceeds with a note and does not block.
-  - `gh` present, the check ran, and it reported a positive result: `evolve`
-    proceeds and prints a confirmation.
-  - `gh` present, the check ran, and it reported the artifact does NOT verify
-    (no matching attestation for the digest, a signer/repo mismatch, or an
-    explicit signature failure): `evolve` aborts with `AttestationVerificationFailed`
-    before extraction, leaving the existing binary in place.
-  - **Difference from `resources/install.sh`:** install.sh treats every
-    `gh attestation verify` failure, for any reason, as "could not be verified,
-    continuing" (fully soft, never blocks). `evolve` is deliberately narrower:
-    the failure classification above treats "no attestations found" (the
-    message `gh` also uses for the ordinary, benign case of an artifact
-    predating provenance attestations) as a GENUINE failure that aborts, not a
-    tooling error that proceeds. This is intentional, not an oversight: an
-    attacker who substitutes the release artifact cannot forge a validly signed
-    attestation for the new digest, so a substituted artifact surfaces through
-    the exact same "no attestations found" wording as a merely-absent
-    attestation -- there is no way to tell the two apart from `gh`'s output.
-    Treating that ambiguous case as a pass-through tooling error (as install.sh
-    does) would defeat the entire point of the check for the one case it exists
-    to catch, so `evolve` fails closed on it instead.
-  - Failing closed does not strand anyone on a release that predates
-    provenance: the download step is reached only on `Decision::Update`
-    (CLI-147 refuses a downgrade without downloading), and a release older than
-    provenance is by construction older than any binary carrying this check, so
-    it never reaches the verification. Every version this check can download is
-    one the release workflow attested.
-  - **Accepted risk:** the tooling-error classification is a hand-curated list
-    of `gh` output markers, so a `gh` version that words a tooling failure
-    differently is read as a genuine failure and aborts an upgrade that should
-    have proceeded. That is the safe direction (fail closed, with a message
-    naming the reason), and widening the list on speculation would trade a
-    refused upgrade for a missed substitution. The decision is to leave the list
-    as it stands and widen it against a real report rather than a hypothetical
-    one. Recorded so it is not re-raised as a finding.
+- `STO-88` Before extracting a release archive, `evolve` verifies that it
+  carries a zipsign (ed25519) signature, over its bytes with its file name as
+  the context, by a key whose verifying key is built into `mind` (`release.pub`
+  at the repo root, embedded as `KEYS` in `src/selfupdate.rs`). It is the
+  updater's `verifying_keys` check, run after the digest checks (STO-47) and
+  inside the same download-and-swap step (STO-46). A missing or bad signature
+  is `SignatureVerificationFailed` (`--json` kind
+  `signature-verification-failed`) and leaves the existing binary in place. No
+  external tool is needed.
+
+  The release workflow's `sign` job signs each archive with `cargo xtask sign`,
+  which refuses a key that is not the pair of `release.pub`. The key pair is
+  the `ZIPSIGN_KEY` secret (base64) of the `signing` environment, which only
+  `main` can deploy to. `cargo xtask gen-key --out DIR` writes a new pair; keep
+  `release.key` outside the repository. The archives are attested
+  (`actions/attest-build-provenance`) after signing, so
+  `gh attestation verify` still works on them, but `evolve` does not run it.
+
+  Releases up to 0.52.0 are unsigned and fail the check. That strands no one:
+  the download runs only on `Decision::Update` (CLI-147 refuses a downgrade
+  without downloading), and every release newer than a binary carrying this
+  check is signed.
+
+  Key rotation needs a bridge release: (1) list both the old and new verifying
+  keys in `KEYS`, keeping `release.pub` and `ZIPSIGN_KEY` on the old pair, and
+  release that signed with the old key; (2) for a later release, replace
+  `release.pub` and `ZIPSIGN_KEY` with the new pair. An installation that
+  skipped the bridge must run `mind evolve --to BRIDGE_VERSION` first, or
+  reinstall.
+- `STO-66` Removed, superseded by STO-88. Stated `evolve`'s soft check of the
+  archive's build-provenance attestation through `gh attestation verify` when
+  `gh` was on PATH. The number is retained so it is not reused.
 - `STO-48` `evolve` takes NO outer command lock (its `lock_mode` is `None`). It
   acquires the global exclusive lock itself inside the download-and-swap step
   (STO-46), only after the network-free decision/prompt phase, and `evolve

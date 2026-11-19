@@ -1,0 +1,25 @@
+[package]
+name = "xtask"
+description = "Release tasks for mind"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+getrandom = { version = "0.3", features = ["std"] }
+tempfile = "3"
+# Release archive signatures that `self_update`'s `signatures` feature verifies.
+zipsign-api = { version = "0.2.2", default-features = false, features = ["sign-tar"] }
+
+[dev-dependencies]
+flate2 = "1"
+# The verification `mind evolve` runs, to check what `sign` writes.
+self_update = { version = "1.3", default-features = false, features = [
+    "ureq",
+    "rustls",
+    "signatures",
+    "compression-tar-gz",
+] }
