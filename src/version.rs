@@ -156,13 +156,20 @@ fn valid_identifiers(s: &str, prerelease: bool) -> bool {
 /// Semver precedence between two prerelease identifier lists: pairwise, a
 /// numeric identifier compares numerically and sorts below an alphanumeric
 /// one; a shorter list that is a prefix of the longer sorts first.
+///
+/// A numeric identifier has no size limit in semver, so it is compared as a
+/// digit string (shorter is smaller once leading zeros are dropped) rather than
+/// parsed: one past `u64::MAX` is still numeric, not alphanumeric.
 fn pre_cmp(a: &[String], b: &[String]) -> Ordering {
+    fn numeric_id(s: &str) -> Option<&str> {
+        (!s.is_empty() && s.bytes().all(|c| c.is_ascii_digit())).then(|| s.trim_start_matches('0'))
+    }
     for (x, y) in a.iter().zip(b) {
-        let c = match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(xn), Ok(yn)) => xn.cmp(&yn),
-            (Ok(_), Err(_)) => Ordering::Less,
-            (Err(_), Ok(_)) => Ordering::Greater,
-            (Err(_), Err(_)) => x.cmp(y),
+        let c = match (numeric_id(x), numeric_id(y)) {
+            (Some(xn), Some(yn)) => xn.len().cmp(&yn.len()).then_with(|| xn.cmp(yn)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => x.cmp(y),
         };
         if c != Ordering::Equal {
             return c;
@@ -558,6 +565,27 @@ mod tests {
         }
         assert_eq!(v("1.2.3+a"), v("1.2.3+b"));
         assert_eq!(v("1.2.3+a"), v("1.2.3"));
+    }
+
+    #[test]
+    fn a_numeric_prerelease_past_u64_still_orders_numerically() {
+        // spec: VER-11 -- a numeric identifier has no size limit, so one that
+        // does not fit a u64 is still numeric: above a smaller number, below
+        // any alphanumeric identifier.
+        let ordered = [
+            "1.0.0-9",
+            "1.0.0-18446744073709551615",
+            "1.0.0-18446744073709551616",
+            "1.0.0-100000000000000000000",
+            "1.0.0-alpha",
+        ];
+        for w in ordered.windows(2) {
+            assert!(v(w[0]) < v(w[1]), "{} < {}", w[0], w[1]);
+        }
+        assert_eq!(
+            v("1.0.0-18446744073709551616"),
+            v("1.0.0-18446744073709551616+b")
+        );
     }
 
     #[test]

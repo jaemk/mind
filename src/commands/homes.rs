@@ -485,9 +485,22 @@ fn move_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    if let Err(e) = install::copy_tree_keeping_links(from, to) {
-        let _ = install::remove_path(to);
-        return Err(e);
+    match install::copy_tree_keeping_links(from, to) {
+        // spec: HOME-18 -- a socket or device node is not copied; say so.
+        Ok(skipped) => {
+            for path in skipped {
+                let msg = format!(
+                    "note: did not copy {} (a socket or device node) when moving {}",
+                    crate::sanitize::display_path(&path),
+                    crate::sanitize::display_path(from),
+                );
+                crate::progress::suspend(|| eprintln!("{msg}"));
+            }
+        }
+        Err(e) => {
+            let _ = install::remove_path(to);
+            return Err(e);
+        }
     }
     if let Err(e) = install::remove_path(from) {
         let msg = format!(

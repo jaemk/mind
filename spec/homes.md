@@ -101,6 +101,14 @@ as one set.
   source (HOME-3) is refused (`source-in-other-home`, exit 1). A lobe symlink
   into any allowed home's store is mind's own (LIFE-41). A move that fails
   partway puts back the clones it moved, and the registry with them.
+- `HOME-18` The HOME-8 copy (used when a rename across filesystems fails)
+  never opens an entry that is not a regular file, directory, or symlink. A
+  FIFO is recreated at the destination with its permission bits. A socket or
+  device node is not copied, and a `note:` on stderr names each one. Git stores
+  none of these, so each was made locally (a hook, a tool). The copy is
+  depth-capped at 1024 nested directories, far deeper than the 128 an item tree
+  allows (LIFE-52), since a clone holds a whole repository with its vendored
+  trees; a deeper clone fails the move with an `Io` error naming the path.
 - `HOME-15` An `upgrade` pass that is not limited to items (unscoped,
   `--source`, `sync --upgrade`, `curate`, `auto-update run`) moves a source
   whose own `[source] mind-home`, at the commit its clone is now on, names an

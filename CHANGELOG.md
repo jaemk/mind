@@ -6,6 +6,40 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Frontmatter values resolve YAML quote escapes (`''` in single quotes; `\"`,
+  `\\`, `\n`, `\t` in double quotes) and accept a `# comment` after the closing
+  quote. A value wrapped onto more-indented lines is read in full instead of
+  only its first line. This applies to descriptions and to the `install:` /
+  `update:` / `uninstall:` hook scalars.
+- A workflow's `meta` strings resolve `\xHH`, `\uHHHH` (including surrogate
+  pairs), `\u{H...}`, `\b`, `\f`, `\v`, and line continuations as JavaScript
+  does. A `meta.name` written with one of these no longer reads as its escape
+  text, which reported a false name divergence (WF-24).
+- An `ignore` entry with an interior `.` or empty component (`a/./b`, `a//b`,
+  `scratch/.`) is normalized and matches the path it spells instead of
+  matching nothing. An entry naming only the item root (`.`, `./`) is refused.
+- A numeric prerelease identifier too large for a 64-bit integer orders
+  numerically, below any alphanumeric identifier, instead of as alphanumeric.
+- A FIFO, socket, or device node in an item tree fails the install copy and
+  the content hash with an error naming it. A FIFO previously hung the command
+  while it held the lock.
+- Moving a source's clone to another mind home across filesystems recreates a
+  FIFO instead of hanging on it, skips a socket or device node with a note on
+  stderr, and caps the copy at 1024 nested directories.
+- Content hashing streams file contents instead of reading each item whole
+  into memory. A file that changes size while it is being hashed is read again,
+  then reported as an error. A file that keeps growing is read only one byte
+  past its stated size. Hash values are unchanged, except for a directory
+  holding two file names that differ only in bytes that are not valid UTF-8.
+- The install copy and the cross-filesystem clone copy open each file
+  non-blocking and check the opened handle, so an entry swapped for a FIFO
+  after the type check fails instead of hanging.
+- The `probe` TUI's change-detection walk is capped at 128 nested directories
+  like the content hash, so a pathological item tree is an error rather than a
+  stack overflow.
+
 ## [0.53.0] - 2026-11-18
 
 ### Added

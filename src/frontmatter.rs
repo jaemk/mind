@@ -7,7 +7,11 @@
 //!
 //! Supported value forms:
 //! - Plain scalars:  `key: some text`
-//! - Quoted scalars: `key: "some text"` or `key: 'some text'`
+//! - Quoted scalars: `key: "some text"` or `key: 'some text'`, with `''` in a
+//!   single-quoted value and `\"`, `\\`, `\n`, `\t`, `\/`, `\ ` in a
+//!   double-quoted one resolved; a `# comment` may follow the closing quote
+//! - Multi-line plain or quoted scalars: more-indented continuation lines are
+//!   trimmed and folded into the value with single spaces
 //! - Block scalars:  `key: >` / `key: >-` / `key: >+` (folded)
 //!   or              `key: |` / `key: |-` / `key: |+` (literal)
 //!
@@ -64,34 +68,60 @@ pub fn field(text: &str, key: &str) -> Option<String> {
             && let Some(value) = rest.strip_prefix(':')
         {
             let trimmed = value.trim();
+            // Collect subsequent lines until a column-zero non-empty line or
+            // `---`. The closing `---` is not consumed, so the outer loop would
+            // still see it as the delimiter.
+            let mut block_lines: Vec<&str> = Vec::new();
+            while let Some(&next) = lines.peek() {
+                let is_col0_nonempty =
+                    !next.is_empty() && !next.starts_with(' ') && !next.starts_with('\t');
+                if is_col0_nonempty {
+                    break;
+                }
+                lines.next();
+                block_lines.push(next);
+            }
             // Detect a block-scalar indicator: `>` or `|`, optional chomping.
             if let Some((style, chomp)) = parse_block_indicator(trimmed) {
-                // Collect subsequent lines until a column-zero non-empty line or `---`.
-                let mut block_lines: Vec<&str> = Vec::new();
-                loop {
-                    match lines.peek() {
-                        None => break,
-                        Some(&next) => {
-                            // A non-empty line at column zero ends the block.
-                            let is_col0_nonempty = !next.is_empty()
-                                && !next.starts_with(' ')
-                                && !next.starts_with('\t');
-                            if is_col0_nonempty {
-                                // Closing `---` also ends the block; don't consume it
-                                // so the outer loop can handle it as the delimiter.
-                                break;
-                            }
-                            lines.next(); // consume
-                            block_lines.push(next);
-                        }
-                    }
-                }
                 return Some(render_block(&block_lines, style, chomp));
             }
-            return Some(unquote(trimmed));
+            // An empty value followed by indented lines is a nested mapping
+            // (or something else this reader does not interpret, DSC-21).
+            if trimmed.is_empty() {
+                return Some(String::new());
+            }
+            // A plain or quoted scalar may continue on more-indented lines;
+            // YAML folds them into the value (DSC-21).
+            return Some(unquote(&fold_continuation(trimmed, &block_lines)));
         }
     }
     None
+}
+
+/// Fold a flow scalar's continuation lines into its first line: each line is
+/// trimmed and joined with a single space; a blank line is a line break.
+/// Trailing blank lines (between the value and the next key) are dropped.
+fn fold_continuation(first: &str, rest: &[&str]) -> String {
+    let end = rest
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    let mut out = first.to_string();
+    let mut after_break = false;
+    for line in &rest[..end] {
+        let line = line.trim();
+        if line.is_empty() {
+            out.push('\n');
+            after_break = true;
+        } else {
+            if !after_break {
+                out.push(' ');
+            }
+            out.push_str(line);
+            after_break = false;
+        }
+    }
+    out
 }
 
 /// Block style: folded (`>`) or literal (`|`).
@@ -215,16 +245,69 @@ fn apply_chomp(value: &str, chomp: Chomp) -> String {
     }
 }
 
+/// Strip a quoted scalar's quotes and resolve its escapes: `''` in a
+/// single-quoted value, backslash escapes in a double-quoted one. A comment
+/// may follow the closing quote. Anything that is not a well-formed quoted
+/// scalar is returned as written.
 fn unquote(s: &str) -> String {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2 {
-        let first = bytes[0];
-        let last = bytes[bytes.len() - 1];
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return s[1..s.len() - 1].to_string();
+    let parsed = match s.chars().next() {
+        Some('\'') => single_quoted(&s[1..]),
+        Some('"') => double_quoted(&s[1..]),
+        _ => None,
+    };
+    parsed.unwrap_or_else(|| s.to_string())
+}
+
+/// Whether the text after a closing quote is empty or a comment.
+fn only_comment_follows(rest: &str) -> bool {
+    let rest = rest.trim();
+    rest.is_empty() || rest.starts_with('#')
+}
+
+/// Body of a single-quoted scalar (after the opening quote): `''` is a literal
+/// quote, a lone `'` closes it.
+fn single_quoted(body: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = body.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\'' {
+            if chars.peek().is_some_and(|&(_, n)| n == '\'') {
+                chars.next();
+                out.push('\'');
+                continue;
+            }
+            return only_comment_follows(&body[i + 1..]).then_some(out);
+        }
+        out.push(c);
+    }
+    None
+}
+
+/// Body of a double-quoted scalar (after the opening quote): backslash escapes
+/// are resolved, an unescaped `"` closes it. An unknown escape is kept as
+/// written.
+fn double_quoted(body: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = body.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => return only_comment_follows(&body[i + 1..]).then_some(out),
+            '\\' => match chars.next()?.1 {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                '/' => out.push('/'),
+                ' ' => out.push(' '),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            },
+            _ => out.push(c),
         }
     }
-    s.to_string()
+    None
 }
 
 #[cfg(test)]
@@ -511,12 +594,13 @@ mod tests {
     }
 
     // A malformed indicator (`>x`) is NOT a block scalar: it falls back to a
-    // plain scalar (the literal text) without panicking.
+    // plain scalar (the literal text, with its continuation line folded in,
+    // DSC-21) without panicking.
     #[test]
     fn malformed_indicator_falls_back_to_plain_scalar() {
         let t = "---\ndescription: >x\n  not part of a block\n---\n";
         let result = field(t, "description").unwrap();
-        assert_eq!(result, ">x");
+        assert_eq!(result, ">x not part of a block");
         assert!(parse_block_indicator(">x").is_none());
     }
 
@@ -529,6 +613,87 @@ mod tests {
         assert_eq!(result, "> extra words");
         assert!(parse_block_indicator("> extra words").is_none());
         assert!(parse_block_indicator(">x").is_none());
+    }
+
+    // ---- DSC-21: quoted scalar escapes and multi-line flow scalars ----------
+
+    #[test]
+    fn single_quoted_doubled_quote_is_one_quote() {
+        // spec: DSC-21
+        let t = "---\ndescription: 'Use when the user''s diff is large'\n---\n";
+        assert_eq!(
+            field(t, "description").as_deref(),
+            Some("Use when the user's diff is large")
+        );
+    }
+
+    #[test]
+    fn double_quoted_escapes_are_resolved() {
+        // spec: DSC-21
+        let t = "---\ndescription: \"say \\\"hi\\\" via C:\\\\tmp\"\n---\n";
+        assert_eq!(
+            field(t, "description").as_deref(),
+            Some("say \"hi\" via C:\\tmp")
+        );
+    }
+
+    #[test]
+    fn double_quoted_unknown_escape_is_kept() {
+        // spec: DSC-21
+        let t = "---\ndescription: \"match \\d+\"\n---\n";
+        assert_eq!(field(t, "description").as_deref(), Some("match \\d+"));
+    }
+
+    #[test]
+    fn quoted_scalar_with_trailing_comment() {
+        // spec: DSC-21
+        let t = "---\ndescription: \"quoted\"  # note\nname: 'x' # y\n---\n";
+        assert_eq!(field(t, "description").as_deref(), Some("quoted"));
+        assert_eq!(field(t, "name").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn malformed_quoted_scalar_is_read_as_written() {
+        // spec: DSC-21
+        let t = "---\ndescription: \"open only\nname: 'a' b\n---\n";
+        assert_eq!(field(t, "description").as_deref(), Some("\"open only"));
+        assert_eq!(field(t, "name").as_deref(), Some("'a' b"));
+    }
+
+    #[test]
+    fn plain_scalar_continuation_lines_fold() {
+        // spec: DSC-21
+        let t = "---\ndescription: Use when the user asks\n  for a long thing,\n    wrapped twice\n\nname: x\n---\n";
+        assert_eq!(
+            field(t, "description").as_deref(),
+            Some("Use when the user asks for a long thing, wrapped twice")
+        );
+        assert_eq!(field(t, "name").as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn plain_scalar_continuation_blank_line_is_line_break() {
+        // spec: DSC-21
+        let t = "---\ndescription: first\n  part\n\n  second\n---\n";
+        assert_eq!(
+            field(t, "description").as_deref(),
+            Some("first part\nsecond")
+        );
+    }
+
+    #[test]
+    fn quoted_scalar_spanning_lines_folds() {
+        // spec: DSC-21
+        let t = "---\ndescription: \"a quoted\n  value\"\n---\n";
+        assert_eq!(field(t, "description").as_deref(), Some("a quoted value"));
+    }
+
+    #[test]
+    fn empty_value_with_nested_mapping_reads_empty() {
+        // spec: DSC-21 -- a nested mapping is not interpreted.
+        let t = "---\nmetadata:\n  type: user\ndescription: d\n---\n";
+        assert_eq!(field(t, "metadata").as_deref(), Some(""));
+        assert_eq!(field(t, "description").as_deref(), Some("d"));
     }
 
     // ---- DSC-23: UTF-8 BOM stripping ----------------------------------------
