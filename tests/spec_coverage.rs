@@ -135,6 +135,9 @@ const ALLOWLIST: &[&str] = &[
     // removed and superseded by STO-57, so the numbers are not reused; they have
     // no behavior and so no citing test.
     "STO-61", "STO-62",
+    // Tombstone: STO-66 (the `gh attestation verify` check), superseded by
+    // STO-88's signature check; no behavior, so no citing test.
+    "STO-66",
     //   evolve locking (STO-46): the serialization behavior needs two concurrent
     //   processes and a real binary swap, so it has no headless test. The lock
     //   acquisition site in src/selfupdate.rs carries a `// spec:` comment for

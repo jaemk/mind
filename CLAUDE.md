@@ -115,7 +115,8 @@ Install, lifecycle, and state:
 - `src/unmanaged.rs` - lobe items `mind` did not install (surfaced in `recall`/`probe`, removable via `forget`).
 - `src/workflow_check.rs` - the workflow unloadable / name-divergence / name-collision messages shared by `learn`, `upgrade`, `recall`, and `review`.
 - `src/hash.rs` - content hashing (drift detection). `src/git.rs` - the git CLI wrapper.
-- `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary.
+- `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary; checks the archive's signature against `release.pub` (STO-88).
+- `xtask/` - release tasks (`cargo xtask gen-key`, `cargo xtask sign`): the signing key pair and archive signing the release workflow runs.
 - `src/scaffold.rs` - pure helpers for `init-source` scaffolding.
 
 Foundations and cross-cutting:
@@ -296,7 +297,7 @@ live call, so ask; the answer is often yes, and the disclosure is what matters.
 Everything routine already has a hermetic path: `cargo test` builds local git
 repos in temp dirs, `scripts/probe.sh` drives a shipped `examples/<name>` in a
 throwaway home, and an external command is faked by putting a stub earlier on
-`PATH` (see the fake `curl`/`gh` tests in `src/selfupdate.rs`).
+`PATH` (see the fake `curl`/`gh` tests in `tests/install_sh.rs`).
 
 To capture real CLI output for docs without a permission prompt, this repo ships
 a gitignored `scripts/probe.sh` (recreated from the `hermetic-verify` skill) that

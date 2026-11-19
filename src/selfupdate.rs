@@ -6,7 +6,7 @@
 //! resolve (`mind-<version>-<target>.tar.gz`). What lives here is everything
 //! around that: the platform triple, the up-to-date/downgrade decision, the
 //! managed-policy check, the confirmation prompt, the `--json` result, and the
-//! build-provenance gate wired in as the crate's pre-extraction archive hook.
+//! verifying keys the crate checks the archive's signature against.
 //!
 //! The decision logic (target triple, version comparison, report text) is pure,
 //! so it is unit-testable with no network access. Only `run`'s tail, and the
@@ -14,7 +14,6 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use self_update::backends::github;
@@ -28,6 +27,11 @@ const REPO: &str = "jaemk/mind";
 
 /// The release asset carrying the published digests (STO-47).
 const SHA256SUMS_ASSET: &str = "SHA256SUMS";
+
+/// The zipsign verifying keys a release archive must be signed by (STO-88).
+/// The release workflow signs with the pair of `release.pub`; during a key
+/// rotation this lists the old key and the new one.
+const KEYS: [self_update::VerifyingKey; 1] = [*include_bytes!("../release.pub")];
 
 /// Whether the running binary needs replacing.
 #[derive(Debug, PartialEq, Eq)]
@@ -478,113 +482,6 @@ fn print_evolve_json(version: &str, outcome: &str, target_triple: &str) -> Resul
     }))
 }
 
-/// The result of a soft build-provenance verification attempt (STO-66).
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AttestationOutcome {
-    /// `gh attestation verify` succeeded: the archive matches a valid, signed
-    /// build-provenance attestation published by the release repo.
-    Verified,
-    /// `gh` could not even attempt the verification -- an old `gh` with no
-    /// `attestation` subcommand, or a network-level failure reaching GitHub --
-    /// which is not a statement about the artifact itself. Carries the
-    /// (sanitized) reason for the human-readable note.
-    ToolingError(String),
-    /// `gh` ran the check and reported the artifact does NOT verify: no
-    /// matching attestation, a signer/repo mismatch, or an explicit signature
-    /// failure. Deliberately fail-closed (see `is_gh_tooling_error`):
-    /// "no attestations found" is `gh`'s output both for "this release
-    /// predates build-provenance attestations" and for "this artifact was
-    /// substituted", and the two are not distinguishable from its output, so
-    /// both must abort rather than silently trusting an unverified artifact.
-    GenuineFailure(String),
-}
-
-/// The `gh` argv that verifies a downloaded archive's build-provenance
-/// attestation against the release repo (STO-66), matching
-/// `resources/install.sh`'s `gh attestation verify "$tmp/$asset" --repo "$REPO"`.
-/// Pure (no I/O) so it is unit-testable without spawning a process.
-pub(crate) fn gh_attestation_verify_args(archive_path: &str, repo: &str) -> Vec<String> {
-    vec![
-        "attestation".into(),
-        "verify".into(),
-        archive_path.into(),
-        "--repo".into(),
-        repo.into(),
-    ]
-}
-
-/// Classify `gh attestation verify`'s (sanitized) stderr as a TOOLING problem --
-/// `gh` itself could not run the check -- rather than a verification result
-/// (STO-66).
-///
-/// Deliberately narrow: anything not matched here is treated as a genuine
-/// verification failure and aborts the swap. The interesting failure mode (a
-/// substituted artifact has no valid attestation) surfaces through the exact
-/// same "no attestations found" / HTTP-404 wording that `gh` also uses for a
-/// merely-absent attestation (confirmed empirically: querying a real, unmodified
-/// artifact's digest under the wrong repo, and querying a tampered artifact's
-/// digest under the correct repo, both produce the same class of "not found"
-/// message). There is no reliable way to tell those two cases apart from `gh`'s
-/// output, so the ambiguity fails CLOSED here rather than silently passing an
-/// unverifiable artifact through.
-pub(crate) fn is_gh_tooling_error(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    const TOOLING_MARKERS: &[&str] = &[
-        // Old `gh` with no `attestation verify` subcommand/flag.
-        "unknown command",
-        "unknown flag",
-        // Network-level failures reaching the GitHub API -- `gh` never got an
-        // answer to verify against, so this says nothing about the artifact.
-        "dial tcp",
-        "no such host",
-        "connection refused",
-        "i/o timeout",
-        "context deadline exceeded",
-        "tls handshake",
-        "certificate signed by unknown authority",
-        // Auth required (e.g. a private repo, or an org policy) -- `gh` could
-        // not even ask the question.
-        "gh auth login",
-    ];
-    TOOLING_MARKERS.iter().any(|m| lower.contains(m))
-}
-
-/// Soft-verify a downloaded archive's build-provenance attestation (STO-66),
-/// mirroring `resources/install.sh`'s `gh attestation verify` step.
-///
-/// `gh_cmd` is the command name to invoke: `"gh"` in production. Tests point it
-/// at a name that resolves to nothing (simulating "`gh` absent" deterministically,
-/// without needing to hide the real `gh` from PATH) or at a fake script placed
-/// first on PATH (simulating a specific `gh` outcome), mirroring the fake-curl
-/// pattern used elsewhere in this file.
-///
-/// Returns `None` when `gh_cmd` is not on PATH: evolve proceeds silently,
-/// exactly like install.sh's `if command -v gh` gate (no note printed for a
-/// plain absence, only for a `gh` that ran but could not complete the check).
-fn attestation_step(gh_cmd: &str, archive: &Path) -> Option<AttestationOutcome> {
-    if !have(gh_cmd) {
-        return None;
-    }
-    let archive_str = archive.to_string_lossy();
-    let args = gh_attestation_verify_args(&archive_str, REPO);
-    let output = match Command::new(gh_cmd).args(&args).output() {
-        Ok(o) => o,
-        // A spawn failure after `have()` reported present (e.g. a TOCTOU race,
-        // or a `gh` that is on PATH but not executable) is itself a tooling
-        // problem, not a statement about the artifact.
-        Err(e) => return Some(AttestationOutcome::ToolingError(e.to_string())),
-    };
-    if output.status.success() {
-        return Some(AttestationOutcome::Verified);
-    }
-    let stderr = crate::sanitize::strip_ansi(String::from_utf8_lossy(&output.stderr).trim());
-    if is_gh_tooling_error(&stderr) {
-        Some(AttestationOutcome::ToolingError(stderr))
-    } else {
-        Some(AttestationOutcome::GenuineFailure(stderr))
-    }
-}
-
 /// The github updater for the `mind` release repo.
 ///
 /// Everything the crate would drive itself is turned off: `evolve` prints its own
@@ -601,8 +498,8 @@ fn attestation_step(gh_cmd: &str, archive: &Path) -> Option<AttestationOutcome> 
 /// - `checksum_from_asset("SHA256SUMS")` is STO-47: the digests published beside
 ///   the release are fetched and the entry for the selected artifact is verified
 ///   before anything is extracted.
-/// - `verify_archive` is STO-66: `gh attestation verify` over the downloaded
-///   archive, which is the file the release workflow attests.
+/// - `verifying_keys(KEYS)` is STO-88: the archive must carry a zipsign
+///   signature by a key built into this binary, checked before extraction.
 /// - `check_install_path_writable(true)` moves the "cannot replace this binary"
 ///   failure (STO-45) ahead of the download instead of after it.
 /// - `timeout` bounds each request the updater makes. It is a WHOLE-request
@@ -633,8 +530,8 @@ fn updater(
         .check_install_path_writable(true)
         // spec: STO-47
         .checksum_from_asset(SHA256SUMS_ASSET)
-        // spec: STO-66
-        .verify_archive(|archive: &Path| attestation_gate(archive));
+        // spec: STO-88
+        .verifying_keys(KEYS);
     if let Some(tag) = tag {
         builder.release_tag(format!("v{tag}"));
     }
@@ -687,47 +584,6 @@ fn latest_version(upd: &github::Update) -> Result<String> {
     Ok(release.version().to_string())
 }
 
-/// STO-66's build-provenance gate, as the crate's pre-extraction archive hook.
-///
-/// The hook runs on the downloaded archive, which is what
-/// `actions/attest-build-provenance` signs (the release workflow's
-/// `subject-path` is `mind-*.tar.gz`), so this is the file `gh` has to be
-/// pointed at. Absent `gh`, or a `gh` that could not complete the check, this
-/// proceeds with at most a note; a genuine verification failure returns `Err`,
-/// which aborts with nothing extracted and nothing replaced.
-fn attestation_gate(archive: &Path) -> std::result::Result<(), self_update::Error> {
-    let out = crate::render::ctx();
-    // spec: PRG-4
-    let outcome = {
-        let _step = crate::progress::step(VERIFY_STEP);
-        attestation_step("gh", archive)
-    };
-    match outcome {
-        None => Ok(()),
-        Some(AttestationOutcome::Verified) => {
-            if !out.json {
-                // spec: PRG-5 -- the download step is still live.
-                crate::progress::suspend(|| println!("{} build provenance verified", out.ok()));
-            }
-            Ok(())
-        }
-        Some(AttestationOutcome::ToolingError(reason)) => {
-            if !out.json {
-                crate::progress::suspend(|| {
-                    println!(
-                        "{} build provenance could not be verified ({reason}); continuing",
-                        out.warn()
-                    )
-                });
-            }
-            Ok(())
-        }
-        Some(AttestationOutcome::GenuineFailure(reason)) => {
-            Err(self_update::Error::archive_verification_rejected(reason))
-        }
-    }
-}
-
 /// Download the release archive, verify it, and replace the running executable.
 ///
 /// Holds the global exclusive lock (STO-46) for the entire download-and-swap
@@ -751,7 +607,7 @@ fn download_and_swap(
     }
 
     {
-        // spec: PRG-4 -- the checksum fetch, download, provenance check, and
+        // spec: PRG-4 -- the checksum fetch, download, signature check, and
         // swap; the crate prints nothing itself (`show_output(false)`).
         let _step = crate::progress::step(download_step(target_version));
         upd.update().map_err(map_update_error)?;
@@ -766,9 +622,6 @@ fn download_and_swap(
 
 /// The progress step over the latest-release lookup (PRG-4).
 const LOOKUP_STEP: &str = "checking for the latest mind release";
-
-/// The progress step over the archive's provenance check (PRG-4).
-const VERIFY_STEP: &str = "verifying build provenance";
 
 /// The progress step over the download and swap (PRG-4).
 fn download_step(target_version: &str) -> String {
@@ -798,8 +651,8 @@ fn download_banner(json: bool, target_version: &str, target_triple: &str) -> Opt
 /// Map an updater failure onto mind's structured errors (no stringly-typed
 /// errors leak out of this module).
 ///
-/// The mappings that matter are the ones a caller acts on: a rejected
-/// attestation (STO-66) and a digest mismatch (STO-47) keep their own variants
+/// The mappings that matter are the ones a caller acts on: a missing or bad
+/// signature (STO-88) and a digest mismatch (STO-47) keep their own variants
 /// and exit codes rather than collapsing into a generic download failure, and
 /// an unwritable target keeps the actionable "reinstall with privileges"
 /// wording (STO-45). Anything else is a download failure carrying the crate's
@@ -807,12 +660,12 @@ fn download_banner(json: bool, target_version: &str, target_triple: &str) -> Opt
 fn map_update_error(e: self_update::Error) -> MindError {
     let release_url = format!("https://github.com/{REPO}/releases");
     match e {
-        // spec: STO-66
-        self_update::Error::ArchiveVerificationRejected { reason, .. } => {
-            MindError::AttestationVerificationFailed {
-                reason: crate::sanitize::strip_ansi(&reason.unwrap_or_default()),
-            }
-        }
+        // spec: STO-88
+        ref bad @ (self_update::Error::Signature(_)
+        | self_update::Error::NoSignatures(_)
+        | self_update::Error::SignatureNonUTF8) => MindError::SignatureVerificationFailed {
+            reason: crate::sanitize::strip_ansi(&bad.to_string()),
+        },
         // spec: STO-47
         self_update::Error::ChecksumMismatch {
             expected, computed, ..
@@ -1090,18 +943,6 @@ fn lookup_timeout() -> std::time::Duration {
 /// (someone raising the knob wants more room, not less).
 fn download_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(http_timeout_secs().max(DOWNLOAD_TIMEOUT_CEILING_SECS))
-}
-
-/// Whether a command exists on PATH. `command -v` is a shell builtin, not an
-/// executable, so it must run inside a shell (`Command::new("command")` would
-/// just fail to spawn and report everything as missing).
-fn have(cmd: &str) -> bool {
-    Command::new("sh")
-        .arg("-c")
-        .arg(format!("command -v {cmd}"))
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -2102,18 +1943,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn have_detects_present_and_absent_commands() {
-        // `sh` is on PATH on every supported platform; a builtin like `command`
-        // is not an executable, so the old `Command::new("command")` probe wrongly
-        // reported everything missing. This guards that regression.
-        assert!(have("sh"), "`sh` must be detected on PATH");
-        assert!(
-            !have("mind-no-such-binary-xyzzy"),
-            "a nonexistent command must not be detected"
-        );
-    }
-
     // spec: CLI-243
     #[test]
     fn is_homebrew_install_matches_only_a_cellar_component() {
@@ -2522,12 +2351,51 @@ mod tests {
         );
     }
 
+    // spec: STO-88
+    #[test]
+    fn the_embedded_key_is_release_pub() {
+        let public = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/release.pub"))
+            .expect("read release.pub");
+        assert_eq!(
+            public.len(),
+            32,
+            "release.pub is a raw ed25519 verifying key"
+        );
+        assert_eq!(KEYS[..], [public.as_slice()]);
+    }
+
+    // spec: STO-88
+    #[test]
+    fn an_unsigned_archive_is_a_signature_verification_failure() {
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("mind-evolve-unsigned-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let archive = dir.join("mind-1.2.3-x86_64-unknown-linux-musl.tar.gz");
+        // A gzip stream with no zipsign signature in it.
+        std::fs::write(
+            &archive,
+            [
+                0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        )
+        .expect("write archive");
+        let err = self_update::verify_signature(&archive, &KEYS)
+            .expect_err("an unsigned archive must not verify");
+        let mapped = map_update_error(err);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(mapped, MindError::SignatureVerificationFailed { .. }),
+            "{mapped:?}"
+        );
+        assert_eq!(mapped.kind(), "signature-verification-failed");
+    }
+
     // spec: PRG-4
     #[test]
     fn evolve_steps_are_labeled_and_the_crate_draws_no_bar_of_its_own() {
         use self_update::UpdateConfig;
         assert_eq!(LOOKUP_STEP, "checking for the latest mind release");
-        assert_eq!(VERIFY_STEP, "verifying build provenance");
         assert_eq!(download_step("1.2.3"), "downloading mind 1.2.3");
         let upd = updater(
             "x86_64-unknown-linux-musl",
@@ -2675,268 +2543,6 @@ mod tests {
     // here: `print_evolve_json` writes straight to stdout via
     // `crate::render::print_json`, so a src/ unit test cannot observe its output
     // without capturing process stdout.
-
-    // ---- STO-66: soft build-provenance verification ---------------------------
-
-    #[test]
-    // spec: STO-66
-    fn gh_attestation_verify_args_builds_expected_argv() {
-        let args = gh_attestation_verify_args("/tmp/mind-0.3.0-x86_64.tar.gz", "jaemk/mind");
-        assert_eq!(
-            args,
-            vec![
-                "attestation".to_string(),
-                "verify".to_string(),
-                "/tmp/mind-0.3.0-x86_64.tar.gz".to_string(),
-                "--repo".to_string(),
-                "jaemk/mind".to_string(),
-            ],
-            "argv must match `gh attestation verify <archive> --repo <repo>`: {args:?}"
-        );
-    }
-
-    #[test]
-    // spec: STO-66
-    fn is_gh_tooling_error_classifies_known_tooling_markers() {
-        assert!(
-            is_gh_tooling_error("Error: unknown command \"attestation\" for \"gh\""),
-            "an unsupported subcommand (old gh) must classify as a tooling error"
-        );
-        assert!(
-            is_gh_tooling_error(
-                "Get \"https://api.github.com/...\": dial tcp: lookup api.github.com: no such host"
-            ),
-            "a DNS/network failure must classify as a tooling error"
-        );
-        assert!(
-            is_gh_tooling_error("Error: connection refused"),
-            "a connection-refused failure must classify as a tooling error"
-        );
-        assert!(
-            is_gh_tooling_error(
-                "To use GitHub CLI in a GitHub Actions workflow, run: gh auth login"
-            ),
-            "an auth-required message must classify as a tooling error"
-        );
-        // Case-insensitive.
-        assert!(is_gh_tooling_error("DIAL TCP: CONNECTION REFUSED"));
-    }
-
-    #[test]
-    // spec: STO-66
-    fn is_gh_tooling_error_does_not_classify_no_attestations_found_as_tooling() {
-        // The critical negative case: "no attestations found" (and the raw HTTP
-        // 404 wording gh also surfaces for the identical underlying condition)
-        // must NOT be treated as a tooling error, because it is exactly the
-        // signal a substituted artifact would also produce (the attacker cannot
-        // forge a valid signed attestation for a different digest). Treating it
-        // as a pass-through tooling error would defeat the entire check.
-        assert!(
-            !is_gh_tooling_error("Error: no attestations found"),
-            "'no attestations found' must be a genuine failure, not a tooling error"
-        );
-        assert!(
-            !is_gh_tooling_error(
-                "Error: HTTP 404: Not Found (https://api.github.com/repos/jaemk/mind/attestations/sha256:deadbeef)"
-            ),
-            "an HTTP 404 from the attestations endpoint must be a genuine failure, not a tooling error"
-        );
-    }
-
-    /// Write an executable fake `gh` at `dir/gh` that records its argv (one arg
-    /// per line, skipping the leading `attestation verify <path>` positional
-    /// args' exact values are still captured) to `capture_path`, then exits with
-    /// `exit_code` after printing `stderr_msg` to stderr. Mirrors
-    /// `write_fake_failing_curl`.
-    fn write_fake_gh(dir: &Path, capture_path: &Path, exit_code: i32, stderr_msg: &str) {
-        let script_path = dir.join("gh");
-        let script = format!(
-            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {:?}\nprintf '%s' {:?} >&2\nexit {exit_code}\n",
-            capture_path, stderr_msg
-        );
-        std::fs::write(&script_path, script).expect("write fake gh");
-        let mut perms = std::fs::metadata(&script_path)
-            .expect("stat fake gh")
-            .permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh");
-    }
-
-    #[test]
-    // spec: STO-66
-    fn attestation_step_returns_none_when_gh_is_absent() {
-        // A command name that resolves to nothing simulates "gh absent"
-        // deterministically, without needing to hide the real `gh` (which is
-        // present on this machine's PATH) from the process. No PATH mutation,
-        // no ENV_LOCK needed.
-        let archive = std::env::temp_dir().join("mind-evolve-attest-none-does-not-exist.tar.gz");
-        assert_eq!(
-            attestation_step("mind-no-such-gh-xyzzy", &archive),
-            None,
-            "attestation_step must return None (skip silently) when gh is absent"
-        );
-    }
-
-    #[test]
-    // spec: STO-66
-    fn attestation_step_verified_with_fake_gh_success() {
-        // A fake `gh` that exits 0 must yield Verified, and must have been
-        // invoked with the expected `attestation verify <archive> --repo
-        // jaemk/mind` argv (proving the wiring end-to-end, not just the pure
-        // arg builder in isolation).
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let scratch =
-            std::env::temp_dir().join(format!("mind-evolve-fake-gh-ok-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let capture_path = scratch.join("argv-capture.txt");
-        write_fake_gh(&scratch, &capture_path, 0, "");
-
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{orig_path}", scratch.display());
-        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
-        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
-        let result = attestation_step("gh", &archive);
-
-        // SAFETY: ENV_LOCK is still held.
-        unsafe {
-            std::env::set_var("PATH", &orig_path);
-        }
-        drop(guard);
-
-        assert_eq!(
-            result,
-            Some(AttestationOutcome::Verified),
-            "an exit-0 gh must yield Verified"
-        );
-
-        let argv = std::fs::read_to_string(&capture_path).expect("read captured argv");
-        let lines: Vec<&str> = argv.lines().collect();
-        assert_eq!(
-            lines,
-            vec![
-                "attestation",
-                "verify",
-                archive.to_string_lossy().as_ref(),
-                "--repo",
-                "jaemk/mind",
-            ],
-            "gh must be invoked with the expected argv: {lines:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    #[test]
-    // spec: STO-66
-    fn attestation_step_tooling_error_with_fake_gh_network_failure() {
-        // A fake `gh` that exits non-zero with a recognizably network-level
-        // stderr must classify as ToolingError, so evolve proceeds with a note
-        // rather than aborting -- gh never got to ask the question.
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let scratch = std::env::temp_dir().join(format!(
-            "mind-evolve-fake-gh-tooling-{}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let capture_path = scratch.join("argv-capture.txt");
-        write_fake_gh(
-            &scratch,
-            &capture_path,
-            1,
-            "dial tcp: lookup api.github.com: no such host",
-        );
-
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{orig_path}", scratch.display());
-        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
-        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
-        let result = attestation_step("gh", &archive);
-
-        // SAFETY: ENV_LOCK is still held.
-        unsafe {
-            std::env::set_var("PATH", &orig_path);
-        }
-        drop(guard);
-
-        match result {
-            Some(AttestationOutcome::ToolingError(reason)) => {
-                assert!(
-                    reason.contains("no such host"),
-                    "reason must carry gh's stderr: {reason}"
-                );
-            }
-            other => panic!("expected Some(ToolingError(_)), got {other:?}"),
-        }
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    #[test]
-    // spec: STO-66
-    fn attestation_step_genuine_failure_with_fake_gh_no_attestations_aborts() {
-        // A fake `gh` that exits non-zero reporting "no attestations found"
-        // must classify as GenuineFailure -- the exact case that must abort the
-        // swap rather than pass through, since it is indistinguishable (from
-        // gh's output) from a substituted artifact.
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let scratch = std::env::temp_dir().join(format!(
-            "mind-evolve-fake-gh-fail-{}-{n}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&scratch).expect("create scratch dir");
-        let capture_path = scratch.join("argv-capture.txt");
-        write_fake_gh(&scratch, &capture_path, 1, "Error: no attestations found");
-
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{orig_path}", scratch.display());
-        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
-        unsafe {
-            std::env::set_var("PATH", &new_path);
-        }
-
-        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
-        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
-        let result = attestation_step("gh", &archive);
-
-        // SAFETY: ENV_LOCK is still held.
-        unsafe {
-            std::env::set_var("PATH", &orig_path);
-        }
-        drop(guard);
-
-        match result {
-            Some(AttestationOutcome::GenuineFailure(reason)) => {
-                assert!(
-                    reason.contains("no attestations found"),
-                    "reason must carry gh's stderr: {reason}"
-                );
-                // Mirror what download_and_swap does with this outcome: it must
-                // map to AttestationVerificationFailed, which aborts (returns
-                // Err) rather than proceeding to extraction/swap.
-                let mapped = MindError::AttestationVerificationFailed { reason };
-                assert_eq!(mapped.kind(), "attestation-verification-failed");
-            }
-            other => panic!("expected Some(GenuineFailure(_)), got {other:?}"),
-        }
-
-        let _ = std::fs::remove_dir_all(&scratch);
-    }
 
     #[test]
     // spec: STO-80

@@ -1273,16 +1273,14 @@ pub enum MindError {
         actual: String,
     },
 
-    /// STO-66: `gh attestation verify` ran and reported the downloaded release
-    /// archive does not carry a valid, matching build-provenance attestation.
-    /// The swap is aborted and the existing binary is left in place.
+    /// STO-88: the downloaded release archive has no signature, or none by a
+    /// key built into this binary. The swap is aborted and the existing binary
+    /// is left in place.
     #[error(
-        "build provenance verification failed for the downloaded release archive: {reason}; \
-         evolve is aborting without replacing the running binary. If this release predates \
-         build-provenance attestations, install it another way (resources/install.sh or a \
-         manual download) instead of `mind evolve`"
+        "signature verification failed for the downloaded release archive: {reason}; \
+         evolve is aborting without replacing the running binary"
     )]
-    AttestationVerificationFailed { reason: String },
+    SignatureVerificationFailed { reason: String },
 
     /// POL-52/POL-53: `evolve` was refused or redirected by the managed policy.
     /// The `detail` field carries the human-readable reason: "self-update is
@@ -2025,7 +2023,7 @@ impl MindError {
             MindError::SkillCollision { .. } => "skill-collision",
             MindError::UnsafeName { .. } => "unsafe-name",
             MindError::DigestMismatch { .. } => "digest-mismatch",
-            MindError::AttestationVerificationFailed { .. } => "attestation-verification-failed",
+            MindError::SignatureVerificationFailed { .. } => "signature-verification-failed",
             MindError::SelfUpdatePolicy { .. } => "self-update-policy",
             MindError::HomebrewManaged { .. } => "homebrew-managed",
             MindError::SelfUpdateInvalidTarget { .. } => "self-update-invalid-target",
@@ -2984,21 +2982,21 @@ mod tests {
     }
 
     #[test]
-    fn attestation_verification_failed_names_reason_and_kind() {
-        // spec: STO-66
-        let e = MindError::AttestationVerificationFailed {
-            reason: "no attestations found".into(),
+    fn signature_verification_failed_names_reason_and_kind() {
+        // spec: STO-88
+        let e = MindError::SignatureVerificationFailed {
+            reason: "SignatureError: no matching signature".into(),
         };
         let msg = e.to_string();
         assert!(
-            msg.contains("no attestations found"),
+            msg.contains("no matching signature"),
             "must include the reason: {msg}"
         );
         assert!(
             msg.contains("aborting"),
             "must say evolve is aborting: {msg}"
         );
-        assert_eq!(e.kind(), "attestation-verification-failed");
+        assert_eq!(e.kind(), "signature-verification-failed");
     }
 
     #[test]

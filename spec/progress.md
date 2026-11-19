@@ -59,9 +59,8 @@ while a slow step runs (a clone, a fetch, a source refresh), so a verb like
     time as `12s`, `3m04s`, or `1h02m`;
   - `evolve`'s latest-release lookup, labeled
     `checking for the latest mind release`, and its download (checksum,
-    archive, extraction, and swap), labeled `downloading mind <version>`,
-    with the provenance check inside it labeled
-    `verifying build provenance`. The `self_update` crate's own download bar
+    archive, signature check, extraction, and swap), labeled
+    `downloading mind <version>`. The `self_update` crate's own download bar
     is off, so the download shows the same spinner as every other step.
 
 ## Sharing the terminal

@@ -3667,6 +3667,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xtask"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "flate2",
+ "getrandom 0.3.4",
+ "self_update",
+ "tempfile",
+ "zipsign-api",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
