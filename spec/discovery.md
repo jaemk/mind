@@ -88,8 +88,12 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   frontmatter of its `SKILL.md` (skill) or its `.md` (agent, rule, command).
 - `DSC-21` The frontmatter reader handles a leading `--- ... ---` block with
   top-level scalar keys and surrounding quotes, including block scalars (DSC-22).
-  Flow collections and nested mappings are not interpreted. No frontmatter yields
-  no description.
+  A quoted value resolves its escapes (`''` in single quotes; `\"`, `\\`, `\n`,
+  `\t`, `\/`, `\ ` in double quotes, any other backslash sequence kept as
+  written) and may be followed by a `# comment`. A plain or quoted value may
+  continue on more-indented lines, which are trimmed and folded into it with
+  single spaces (a blank line is a line break). Flow collections and nested
+  mappings are not interpreted. No frontmatter yields no description.
 - `DSC-22` The frontmatter reader interprets a top-level block scalar value: a
   folded scalar (`>`, `>-`, `>+`) or a literal scalar (`|`, `|-`, `|+`) introduced
   by the indicator after the colon. The value is the run of more-indented lines

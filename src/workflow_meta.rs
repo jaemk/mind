@@ -26,8 +26,11 @@
 //!   backtick template. A template containing `${` is skipped: the harness
 //!   rejects it, and mind is not going to evaluate it.
 //! - Backslash escapes in a string value: `\\`, `\'`, `\"`, `` \` ``, `\n`,
-//!   `\r`, `\t`, `\0`. Any other escape yields the escaped character itself,
-//!   so `\d` reads as `d`.
+//!   `\r`, `\t`, `\b`, `\f`, `\v`, `\0`, `\xHH`, `\uHHHH` (a surrogate pair
+//!   combines; a lone surrogate is U+FFFD), `\u{H...}`, and a backslash before
+//!   a line break (a line continuation, which contributes nothing). Any other
+//!   escape, including a malformed `\x` or `\u`, yields the escaped character
+//!   itself, so `\d` reads as `d`.
 //! - Any non-string value (a number, an array, a nested object, a call), by
 //!   skipping to the next top-level comma. A `name` key nested inside `phases`
 //!   is therefore invisible: only depth-1 keys are read.
@@ -236,7 +239,25 @@ impl<'a> Cursor<'a> {
                     Some('n') => out.push('\n'),
                     Some('r') => out.push('\r'),
                     Some('t') => out.push('\t'),
+                    Some('b') => out.push('\u{8}'),
+                    Some('f') => out.push('\u{c}'),
+                    Some('v') => out.push('\u{b}'),
                     Some('0') => out.push('\0'),
+                    Some('x') => match self.read_hex_digits(2) {
+                        Some(v) => out.push(char::from_u32(v).unwrap_or('\u{FFFD}')),
+                        None => out.push('x'),
+                    },
+                    Some('u') => match self.read_unicode_escape() {
+                        Some(ch) => out.push(ch),
+                        None => out.push('u'),
+                    },
+                    // A line continuation: the escaped line break is dropped.
+                    Some('\r') => {
+                        if self.peek() == Some('\n') {
+                            self.advance();
+                        }
+                    }
+                    Some('\n' | '\u{2028}' | '\u{2029}') => {}
                     Some(other) => out.push(other),
                     None => break,
                 },
@@ -251,6 +272,57 @@ impl<'a> Cursor<'a> {
             return None;
         }
         Some(out)
+    }
+
+    /// Consume exactly `n` hex digits and return their value, or consume
+    /// nothing and return `None` if the next `n` characters are not all hex.
+    fn read_hex_digits(&mut self, n: usize) -> Option<u32> {
+        let digits = self.rest().get(..n)?;
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let v = u32::from_str_radix(digits, 16).ok()?;
+        self.i += n;
+        Some(v)
+    }
+
+    /// The rest of a `\u` escape, the cursor sitting after the `u`: either
+    /// `XXXX` or `{X...}` (at most U+10FFFF). A high surrogate followed by a
+    /// `\uXXXX` low surrogate combines into one character; a lone surrogate is
+    /// U+FFFD. A malformed escape consumes nothing and yields `None`.
+    fn read_unicode_escape(&mut self) -> Option<char> {
+        if self.peek() == Some('{') {
+            let rest = self.rest();
+            // `{` + at most 8 digits + `}`: look no further, so a file full of
+            // unclosed `\u{` stays linear.
+            let close = rest.bytes().take(10).position(|b| b == b'}')?;
+            let digits = &rest[1..close];
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let ch = u32::from_str_radix(digits, 16)
+                .ok()
+                .and_then(char::from_u32)?;
+            self.i += close + 1;
+            return Some(ch);
+        }
+        let unit = self.read_hex_digits(4)?;
+        if !(0xD800..0xDC00).contains(&unit) {
+            return Some(char::from_u32(unit).unwrap_or('\u{FFFD}'));
+        }
+        // A high surrogate: combine with a following `\uDC00`-`\uDFFF`.
+        if self.rest().starts_with("\\u") {
+            let save = self.i;
+            self.i += 2;
+            if let Some(low) = self.read_hex_digits(4)
+                && (0xDC00..0xE000).contains(&low)
+            {
+                let cp = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+                return Some(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            }
+            self.i = save;
+        }
+        Some('\u{FFFD}')
     }
 
     /// Advance to the `{` of the `export const meta` initializer, consuming it.
@@ -680,6 +752,57 @@ mod tests {
         // `\\` -> a backslash, `\n`/`\t` -> the control characters, and the
         // unrecognized `\q` -> a bare `q`.
         assert_eq!(m.description.as_deref(), Some("a\\b\nc\tdqe"));
+    }
+
+    // spec: WF-5 WF-24 -- hex and Unicode escapes resolve as JavaScript
+    // resolves them, so a `meta.name` spelled with one is compared as the
+    // harness sees it rather than as its escape text.
+    #[test]
+    fn resolves_hex_and_unicode_escapes() {
+        let m = meta(
+            r"export const meta = { name: 'café', description: '\x41\u{1F680}🚀', whenToUse: '\b\f\v' }",
+        );
+        assert_eq!(m.name.as_deref(), Some("café"));
+        assert_eq!(m.description.as_deref(), Some("A🚀🚀"));
+        assert_eq!(m.when_to_use.as_deref(), Some("\u{8}\u{c}\u{b}"));
+    }
+
+    // spec: WF-5 -- a lone surrogate is U+FFFD, and a malformed `\x`/`\u`
+    // yields the escaped letter and leaves what follows as text.
+    #[test]
+    fn malformed_and_surrogate_escapes_degrade_without_failing() {
+        let m = meta(
+            r"export const meta = { name: '\uD83Dx\uDE80', description: '\xZ1\u12\u{110000}\u{', whenToUse: '\u{}' }",
+        );
+        assert_eq!(m.name.as_deref(), Some("\u{FFFD}x\u{FFFD}"));
+        assert_eq!(m.description.as_deref(), Some("xZ1u12u{110000}u{"));
+        assert_eq!(m.when_to_use.as_deref(), Some("u{}"));
+    }
+
+    // spec: WF-5 -- a backslash before a line break is a line continuation and
+    // contributes nothing, for each line terminator.
+    #[test]
+    fn a_line_continuation_contributes_nothing() {
+        for text in [
+            "export const meta = { name: 'a\\\nb' }",
+            "export const meta = { name: 'a\\\r\nb' }",
+            "export const meta = { name: 'a\\\rb' }",
+            "export const meta = { name: 'a\\\u{2028}b' }",
+        ] {
+            assert_eq!(meta(text).name.as_deref(), Some("ab"), "from {text:?}");
+        }
+    }
+
+    // spec: WF-5 -- the `\u{` lookahead is bounded, so many unclosed escapes
+    // stay linear rather than each scanning to end of file.
+    #[test]
+    fn many_unclosed_unicode_escapes_stay_linear() {
+        let text = format!(
+            "export const meta = {{ description: '{}', name: 'survivor' }}",
+            "\\u{".repeat(100_000)
+        );
+        let m = run_bounded("many unclosed \\u{", 20, move || parse(&text));
+        assert_eq!(m.name.as_deref(), Some("survivor"));
     }
 
     // spec: WF-5 -- only depth-1 keys are read. A real workflow's `phases`

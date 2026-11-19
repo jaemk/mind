@@ -1215,6 +1215,56 @@ pub(crate) fn depth_exceeded(path: &Path) -> MindError {
     )
 }
 
+/// The LIFE-65 error for an item-tree entry that is neither a regular file, a
+/// directory, nor a symlink (a FIFO, socket, or device node). Raised from the
+/// file type alone, before the entry is opened: opening a FIFO for reading
+/// blocks until a writer appears, which would hang the verb under the lock.
+pub(crate) fn not_regular_file(path: &Path) -> MindError {
+    MindError::io(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "item tree entry is not a regular file, directory, or symlink",
+        ),
+    )
+}
+
+/// Open `path` for reading as a regular file, refusing anything else from the
+/// opened handle's own type (LIFE-65). Callers have already checked the type,
+/// but the entry can be swapped between that check and this open; on unix the
+/// open is `O_NONBLOCK`, so a FIFO swapped in fails the check here rather than
+/// blocking the open. `O_NONBLOCK` has no effect on reading a regular file.
+pub(crate) fn open_regular(path: &Path) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(|e| MindError::io(path, e))?;
+    let meta = file.metadata().map_err(|e| MindError::io(path, e))?;
+    if !meta.is_file() {
+        return Err(not_regular_file(path));
+    }
+    Ok(file)
+}
+
+/// Copy the regular file `src` to `dst` with its permission bits, as
+/// `fs::copy` does, but from a handle [`open_regular`] checked: `fs::copy`
+/// opens `src` by path, so an entry swapped for a FIFO after the caller's type
+/// check would block it (LIFE-65, HOME-18).
+fn copy_regular_file(src: &Path, dst: &Path) -> Result<()> {
+    let mut from = open_regular(src)?;
+    let perms = from
+        .metadata()
+        .map_err(|e| MindError::io(src, e))?
+        .permissions();
+    let mut to = std::fs::File::create(dst).map_err(|e| MindError::io(dst, e))?;
+    std::io::copy(&mut from, &mut to).map_err(|e| MindError::io(dst, e))?;
+    to.set_permissions(perms).map_err(|e| MindError::io(dst, e))
+}
+
 /// Every file under `dir`, recursively, depth-capped (LIFE-52).
 ///
 /// `pub(crate)` so the LNK-18 pre-install reference scan in `commands/` walks
@@ -1332,33 +1382,115 @@ fn copy_recursive_at(
             copy_recursive_at(&from, &to, depth + 1, root, ignore)?;
         }
     } else {
+        // spec: LIFE-65 -- checked from the type alone before anything opens
+        // the source, since opening a FIFO for reading blocks.
+        if !meta.is_file() {
+            return Err(not_regular_file(src));
+        }
         if let Some(parent) = dst.parent() {
             mkdir_p(parent)?;
         }
-        std::fs::copy(src, dst).map_err(|e| MindError::io(dst, e))?;
+        copy_regular_file(src, dst)?;
     }
     Ok(())
 }
 
+/// Maximum directory nesting in a whole source clone copied by
+/// [`copy_tree_keeping_links`] (HOME-18).
+///
+/// Far deeper than [`MAX_ITEM_TREE_DEPTH`], because a clone is a whole
+/// repository rather than one item: vendored dependency trees
+/// (`node_modules`, `vendor/`, generated code) nest well past what an item
+/// layout does, and real repositories stay under a hundred levels or so. At
+/// 1024 levels a path is past Linux's 4096-byte `PATH_MAX` for any components
+/// longer than three bytes, so the cap only fires on a tree that is
+/// pathological on purpose (on macOS, whose `PATH_MAX` is 1024 bytes, the
+/// path limit fails such a walk first). The walk is iterative, so the cap
+/// bounds the work, not the stack.
+pub(crate) const MAX_CLONE_TREE_DEPTH: usize = 1024;
+
 /// Copy a whole tree (a source clone) to `dst`, recreating each symlink as a
 /// symlink rather than following it. For moving a clone between mind homes
 /// on different filesystems (HOME-8), where a rename fails.
-pub(crate) fn copy_tree_keeping_links(src: &Path, dst: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(src).map_err(|e| MindError::io(src, e))?;
-    if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(src).map_err(|e| MindError::io(src, e))?;
-        return symlink(&target, dst);
-    }
-    if meta.is_dir() {
-        mkdir_p(dst)?;
-        for entry in std::fs::read_dir(src).map_err(|e| MindError::io(src, e))? {
-            let entry = entry.map_err(|e| MindError::io(src, e))?;
-            copy_tree_keeping_links(&entry.path(), &dst.join(entry.file_name()))?;
+///
+/// spec: HOME-18 -- an entry that is not a regular file, directory, or symlink
+/// is never opened: opening a FIFO for reading blocks until a writer appears.
+/// A FIFO is recreated at the destination with its permission bits; a socket
+/// or device node cannot be (a socket is dead once its listener is gone, a
+/// device node needs root) and is skipped. Git stores none of these, so each
+/// was made locally (a hook, a tool) and a fresh clone would not have it
+/// either. The skipped paths are returned for the caller to report. The walk is
+/// depth-capped at [`MAX_CLONE_TREE_DEPTH`].
+pub(crate) fn copy_tree_keeping_links(src: &Path, dst: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut skipped = Vec::new();
+    let mut pending = vec![(src.to_path_buf(), dst.to_path_buf(), 0usize)];
+    while let Some((from, to, depth)) = pending.pop() {
+        let meta = std::fs::symlink_metadata(&from).map_err(|e| MindError::io(&from, e))?;
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&from).map_err(|e| MindError::io(&from, e))?;
+            symlink(&target, &to)?;
+        } else if ft.is_dir() {
+            if depth > MAX_CLONE_TREE_DEPTH {
+                return Err(MindError::io(
+                    &from,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("source clone exceeds {MAX_CLONE_TREE_DEPTH} nested directories"),
+                    ),
+                ));
+            }
+            mkdir_p(&to)?;
+            for entry in std::fs::read_dir(&from).map_err(|e| MindError::io(&from, e))? {
+                let entry = entry.map_err(|e| MindError::io(&from, e))?;
+                pending.push((entry.path(), to.join(entry.file_name()), depth + 1));
+            }
+        } else if ft.is_file() {
+            copy_regular_file(&from, &to)?;
+        } else if is_fifo(&ft) {
+            make_fifo(&to, &meta)?;
+        } else {
+            skipped.push(from);
         }
-        return Ok(());
     }
-    std::fs::copy(src, dst).map_err(|e| MindError::io(dst, e))?;
-    Ok(())
+    Ok(skipped)
+}
+
+#[cfg(unix)]
+fn is_fifo(ft: &std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    ft.is_fifo()
+}
+
+#[cfg(not(unix))]
+fn is_fifo(_ft: &std::fs::FileType) -> bool {
+    false
+}
+
+/// Create a FIFO at `path` with the permission bits of `like`.
+#[cfg(unix)]
+fn make_fifo(path: &Path, like: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        MindError::io(
+            path,
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path holds a NUL byte"),
+        )
+    })?;
+    let mode = (like.permissions().mode() & 0o7777) as libc::mode_t;
+    // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+    if unsafe { libc::mkfifo(c.as_ptr(), mode) } != 0 {
+        return Err(MindError::io(path, std::io::Error::last_os_error()));
+    }
+    // mkfifo applies the umask; set the recorded bits exactly.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode as u32))
+        .map_err(|e| MindError::io(path, e))
+}
+
+#[cfg(not(unix))]
+fn make_fifo(_path: &Path, _like: &std::fs::Metadata) -> Result<()> {
+    unreachable!("is_fifo is false off unix")
 }
 
 #[cfg(unix)]
@@ -2576,6 +2708,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dst);
         let _ = std::fs::remove_dir_all(&target);
         let _ = std::fs::remove_dir_all(&reference);
+    }
+
+    fn clone_copy_base(label: &str) -> std::path::PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-clonecopy-{label}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        base
+    }
+
+    /// Run a clone copy under a deadline, so a hang fails the test.
+    fn bounded_clone_copy(src: &Path, dst: &Path) -> Result<Vec<std::path::PathBuf>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (s, d) = (src.to_path_buf(), dst.to_path_buf());
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_tree_keeping_links(&s, &d));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the clone copy hung")
+    }
+
+    /// A clone copy recreates a FIFO with its permission bits, never opening
+    /// it, and skips a socket, returning its path for the caller to report.
+    /// Regular files, symlinks, and nested directories copy as before.
+    #[cfg(unix)]
+    #[test]
+    fn clone_copy_recreates_a_fifo_and_skips_a_socket() {
+        // spec: HOME-18
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let base = clone_copy_base("special");
+        let src = base.join("src");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("f.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink("sub/f.txt", src.join("link")).unwrap();
+        let pipe = std::ffi::CString::new(src.join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o640) }, 0, "mkfifo");
+        std::fs::set_permissions(src.join("pipe"), std::fs::Permissions::from_mode(0o640)).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(src.join("sock")).unwrap();
+
+        let dst = base.join("dst");
+        let skipped = bounded_clone_copy(&src, &dst).expect("the copy succeeds");
+
+        assert_eq!(
+            skipped,
+            vec![src.join("sock")],
+            "only the socket is skipped"
+        );
+        assert!(std::fs::symlink_metadata(dst.join("sock")).is_err());
+        let fifo = std::fs::symlink_metadata(dst.join("pipe")).unwrap();
+        assert!(
+            fifo.file_type().is_fifo(),
+            "the FIFO is recreated as a FIFO"
+        );
+        assert_eq!(fifo.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(
+            std::fs::read(dst.join("sub").join("f.txt")).unwrap(),
+            b"data"
+        );
+        assert_eq!(
+            std::fs::read_link(dst.join("link")).unwrap(),
+            Path::new("sub/f.txt")
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The clone copy's depth cap admits nesting far past the item cap, as a
+    /// whole repository needs, and refuses a tree past its own cap. Linux only:
+    /// the tree is built and walked by full path, and macOS's 1024-byte
+    /// `PATH_MAX` refuses a path this deep before the cap can be reached.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn clone_copy_depth_cap_admits_real_repos_and_stops_pathological_ones() {
+        // spec: HOME-18
+        let nest = |root: &Path, levels: usize| {
+            let mut p = root.to_path_buf();
+            for _ in 0..levels {
+                p.push("d");
+            }
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join("leaf.txt"), b"leaf").unwrap();
+            p
+        };
+
+        let base = clone_copy_base("deep-ok");
+        let src = base.join("src");
+        let levels = MAX_ITEM_TREE_DEPTH * 4;
+        let leaf = nest(&src, levels);
+        let dst = base.join("dst");
+        bounded_clone_copy(&src, &dst).expect("a tree past the item cap still copies");
+        let copied = dst.join(leaf.strip_prefix(&src).unwrap()).join("leaf.txt");
+        assert_eq!(std::fs::read(copied).unwrap(), b"leaf");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let base = clone_copy_base("deep-bad");
+        let src = base.join("src");
+        nest(&src, MAX_CLONE_TREE_DEPTH + 2);
+        let err = bounded_clone_copy(&src, &base.join("dst"))
+            .expect_err("a tree past the clone cap is refused");
+        assert!(err.to_string().contains("nested directories"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The file copy both tree copies use checks the handle it opened, so an
+    /// entry swapped for a FIFO after the walk's type check is refused rather
+    /// than blocking the open; a regular file keeps its permission bits.
+    #[cfg(unix)]
+    #[test]
+    fn copy_regular_file_refuses_a_swapped_in_fifo_and_keeps_modes() {
+        // spec: LIFE-65 HOME-18
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        let base = clone_copy_base("regular");
+        let src = base.join("src");
+        let pipe = src.join("pipe");
+        let c = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (s, d) = (pipe.clone(), base.join("out"));
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_regular_file(&s, &d));
+        });
+        let err = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("copying a FIFO hung")
+            .expect_err("a FIFO must be refused");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+
+        let exe = src.join("run.sh");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let out = base.join("run.sh");
+        copy_regular_file(&exe, &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"#!/bin/sh\n");
+        let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o750);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A FIFO in an item tree is refused by the install copy from its file type
+    /// alone. `fs::copy` opens its source before checking the type, and opening
+    /// a FIFO for reading blocks until a writer appears, so without the check
+    /// the copy never returns.
+    #[cfg(unix)]
+    #[test]
+    fn copy_refuses_a_fifo_without_opening_it() {
+        // spec: LIFE-65
+        use std::os::unix::ffi::OsStrExt;
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-fifo-copy-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), b"x").unwrap();
+        let pipe = std::ffi::CString::new(src.join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o644) }, 0, "mkfifo");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (s, d) = (src.clone(), base.join("dst"));
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_recursive_ignoring(&s, &d, &IgnoreSet::builtin()));
+        });
+        let res = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("copying a tree holding a FIFO hung");
+        let err = res.expect_err("a FIFO must be refused");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A directory-only ignore rule does NOT match a symlink pointing at a

@@ -12,6 +12,7 @@ use crate::error::{MindError, Result};
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+#[derive(Clone, Copy)]
 struct Fnv(u64);
 
 impl Fnv {
@@ -109,24 +110,33 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
     } else if meta.is_dir() {
         let mut files = Vec::new();
         collect_files(path, path, &mut files, ignore)?;
-        files.sort();
+        files.sort_by(entry_order);
         // spec: LIFE-35 - length-prefixed fields prevent (path, content) split
         // collisions across entries.
-        for (tag, rel, bytes) in files {
+        let mut buf = vec![0u8; READ_BUF];
+        for (tag, rel, content) in files {
             h.write(&[tag]);
             h.write(&(rel.len() as u64).to_le_bytes());
             h.write(rel.as_bytes());
-            h.write(&(bytes.len() as u64).to_le_bytes());
-            h.write(&bytes);
+            match content {
+                Content::Link(bytes) => {
+                    h.write(&(bytes.len() as u64).to_le_bytes());
+                    h.write(&bytes);
+                }
+                Content::File(file) => write_framed_file(&mut h, &file, &mut buf)?,
+            }
         }
     } else {
         // Plain file: type tag + raw content. No length-prefix on content needed
         // for single-file hashes since there is only one field; the type tag
         // still distinguishes the file hash from any symlink hash.
-        // spec: LIFE-35
-        let bytes = std::fs::read(path).map_err(|e| MindError::io(path, e))?;
+        // spec: LIFE-35 LIFE-65
+        if !meta.is_file() {
+            return Err(crate::install::not_regular_file(path));
+        }
+        let mut file = crate::install::open_regular(path)?;
         h.write(b"F");
-        h.write(&bytes);
+        stream_into(&mut h, &mut file, path, &mut vec![0u8; READ_BUF])?;
     }
     Ok(h.finish_hex())
 }
@@ -181,7 +191,7 @@ pub(crate) fn stat_fingerprint_ignoring(
         h.write(target_bytes.as_bytes());
     } else if meta.is_dir() {
         let mut entries = Vec::new();
-        collect_stats(path, path, &mut entries, ignore)?;
+        collect_stats(path, path, &mut entries, 0, ignore)?;
         entries.sort();
         for (tag, rel, mtime, size, ino, ctime) in entries {
             h.write(&[tag]);
@@ -243,13 +253,18 @@ fn mtime_nanos(meta: &std::fs::Metadata, path: &Path) -> Result<i128> {
 /// `read`. For a symlink entry the `size`/`ctime` slots double as a folded
 /// target-string digest / zero (safe because the type tag is hashed first, so
 /// a symlink entry can never be mistaken for a file entry regardless of what
-/// numbers land in those slots).
+/// numbers land in those slots). Depth-capped like [`collect_files_at`]
+/// (LIFE-52), so a pathological tree is an error here too, not a stack overflow.
 fn collect_stats(
     root: &Path,
     dir: &Path,
     out: &mut Vec<(u8, String, i128, u64, u64, i128)>,
+    depth: usize,
     ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
+    if depth > crate::install::MAX_ITEM_TREE_DEPTH {
+        return Err(crate::install::depth_exceeded(dir));
+    }
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
@@ -274,7 +289,7 @@ fn collect_stats(
             th.write(target_bytes.as_bytes());
             out.push((b'S', rel, 0, th.value(), 0, 0));
         } else if ft.is_dir() {
-            collect_stats(root, &path, out, ignore)?;
+            collect_stats(root, &path, out, depth + 1, ignore)?;
         } else {
             let (ino, ctime) = unix_stat_fields(&meta);
             out.push((
@@ -290,17 +305,116 @@ fn collect_stats(
     Ok(())
 }
 
-/// Walk `dir` and collect `(type_tag, relative_path_string, content_bytes)` triples.
+/// What one hashed entry contributes as its content field.
+enum Content {
+    /// A symlink's target string, which is small and read during the walk.
+    Link(Vec<u8>),
+    /// A regular file, streamed from this path when it is hashed.
+    File(std::path::PathBuf),
+}
+
+/// One hashed entry: `(type_tag, relative_path_string, content)`.
+type Entry = (u8, String, Content);
+
+/// The order entries are hashed in: by type tag (every file before every
+/// symlink), then relative path. That is the order the earlier sort over whole
+/// `(tag, path, content)` triples produced, so hash values are unchanged.
+///
+/// The path is the lossy UTF-8 string, so two non-UTF-8 names can share it
+/// (`a\xff` and `a\xfe` both read `a\u{FFFD}`). The tie is broken
+/// deterministically, never left to `read_dir` order: a symlink by its target,
+/// as the content sort did, and a file by its raw path bytes, which avoids
+/// reading both files to compare them.
+fn entry_order(a: &Entry, b: &Entry) -> std::cmp::Ordering {
+    (a.0, &a.1)
+        .cmp(&(b.0, &b.1))
+        .then_with(|| match (&a.2, &b.2) {
+            (Content::Link(x), Content::Link(y)) => x.cmp(y),
+            (Content::File(x), Content::File(y)) => x.as_os_str().cmp(y.as_os_str()),
+            // Equal tags imply equal variants: `S` is always a link, `F` a file.
+            _ => std::cmp::Ordering::Equal,
+        })
+}
+
+/// The read buffer for streaming a file into the hash.
+const READ_BUF: usize = 64 * 1024;
+
+/// Stream `reader` into `h` through `buf`, returning the number of bytes read.
+fn stream_into(
+    h: &mut Fnv,
+    reader: &mut impl std::io::Read,
+    path: &Path,
+    buf: &mut [u8],
+) -> Result<u64> {
+    let mut total = 0u64;
+    loop {
+        match reader.read(buf) {
+            Ok(0) => return Ok(total),
+            Ok(n) => {
+                h.write(&buf[..n]);
+                total += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(MindError::io(path, e)),
+        }
+    }
+}
+
+/// Write a file's length-prefixed content field (LIFE-35) into `h`, streaming
+/// the content rather than holding it.
+///
+/// The length goes into the hash before the content, so it is taken from the
+/// open file's metadata up front and checked against the bytes actually read.
+/// A mismatch means the file changed during the read: the hash is rolled back
+/// and the file read once more, and a second mismatch is an error naming the
+/// file, never a hash of a half-old, half-new file.
+fn write_framed_file(h: &mut Fnv, path: &Path, buf: &mut [u8]) -> Result<()> {
+    write_framed_with(h, path, buf, || {
+        let file = crate::install::open_regular(path)?;
+        let len = file.metadata().map_err(|e| MindError::io(path, e))?.len();
+        Ok((len, file))
+    })
+}
+
+/// [`write_framed_file`] over any opener yielding `(stated length, reader)`,
+/// so the changed-during-read path can be driven without a real race. The read
+/// stops one byte past the stated length: that is enough to see the file grew,
+/// without reading the rest of a file that keeps growing.
+fn write_framed_with<R: std::io::Read>(
+    h: &mut Fnv,
+    path: &Path,
+    buf: &mut [u8],
+    mut open: impl FnMut() -> Result<(u64, R)>,
+) -> Result<()> {
+    for _ in 0..2 {
+        let mut attempt = *h;
+        let (len, reader) = open()?;
+        attempt.write(&len.to_le_bytes());
+        let mut reader = std::io::Read::take(reader, len.saturating_add(1));
+        if stream_into(&mut attempt, &mut reader, path, buf)? == len {
+            *h = attempt;
+            return Ok(());
+        }
+    }
+    Err(MindError::io(
+        path,
+        std::io::Error::other("the file changed while it was being hashed"),
+    ))
+}
+
+/// Walk `dir` and collect one [`Entry`] per symlink and regular file.
 ///
 /// Uses `symlink_metadata` at every step so symlinks are never followed
 /// (LIFE-34). A symlink entry carries type tag `b'S'` and contributes its
 /// link-target string as its content; a regular file carries `b'F'`. The
 /// separate type tag prevents a file named `"symlink:foo"` from producing the
-/// same triple as a symlink named `"foo"` (LIFE-35).
+/// same triple as a symlink named `"foo"` (LIFE-35). A file's content is not
+/// read here: the caller streams it after sorting, so a walk holds paths, not
+/// file contents.
 fn collect_files(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(u8, String, Vec<u8>)>,
+    out: &mut Vec<Entry>,
     ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
     collect_files_at(root, dir, out, 0, ignore)
@@ -312,7 +426,7 @@ fn collect_files(
 fn collect_files_at(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(u8, String, Vec<u8>)>,
+    out: &mut Vec<Entry>,
     depth: usize,
     ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
@@ -342,19 +456,21 @@ fn collect_files_at(
             out.push((
                 b'S',
                 rel,
-                target.to_string_lossy().into_owned().into_bytes(),
+                Content::Link(target.to_string_lossy().into_owned().into_bytes()),
             ));
         } else if ft.is_dir() {
             collect_files_at(root, &path, out, depth + 1, ignore)?;
         } else {
-            // spec: LIFE-35
+            // spec: LIFE-35 LIFE-65
+            if !ft.is_file() {
+                return Err(crate::install::not_regular_file(&path));
+            }
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            let bytes = std::fs::read(&path).map_err(|e| MindError::io(&path, e))?;
-            out.push((b'F', rel, bytes));
+            out.push((b'F', rel, Content::File(path)));
         }
     }
     Ok(())
@@ -387,6 +503,209 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TmpDir(dir)
+    }
+
+    /// Create a FIFO at `p`. Opening one for reading blocks until a writer
+    /// appears, which is the hang LIFE-65 guards against.
+    #[cfg(unix)]
+    fn mkfifo(p: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo");
+    }
+
+    /// Run `f` under a deadline so a hang fails the test instead of the suite.
+    #[cfg(unix)]
+    fn bounded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what} hung"))
+    }
+
+    // spec: LIFE-65
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_an_item_tree_is_refused_not_opened() {
+        let dir = tmp("fifo-tree");
+        std::fs::write(dir.join("SKILL.md"), b"x").unwrap();
+        mkfifo(&dir.join("pipe"));
+        let root = dir.to_path_buf();
+        let err = bounded("hashing a tree holding a FIFO", move || {
+            hash_path_ignoring(&root, &crate::ignore::IgnoreSet::builtin())
+        })
+        .expect_err("a FIFO must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("pipe"), "the error names the entry: {msg}");
+        assert!(msg.contains("not a regular file"), "{msg}");
+        // An ignored FIFO is never looked at, like any ignored entry (IGN-10).
+        let ignore = crate::ignore::IgnoreSet::new(&["pipe".to_string()], "skill:t").unwrap();
+        let root = dir.to_path_buf();
+        bounded("hashing with the FIFO ignored", move || {
+            hash_path_ignoring(&root, &ignore)
+        })
+        .expect("an ignored FIFO is skipped");
+    }
+
+    // spec: LIFE-65
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_as_the_item_path_is_refused_not_opened() {
+        let dir = tmp("fifo-item");
+        let pipe = dir.join("rule.md");
+        mkfifo(&pipe);
+        let err = bounded("hashing a FIFO item", move || hash_path(&pipe))
+            .expect_err("a FIFO item must be refused");
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+    }
+
+    /// A fixed tree covering every entry kind the hash frames: an empty file, a
+    /// small file, a file larger than several read buffers, a nested
+    /// directory, and (on unix) a symlink.
+    fn golden_tree(dir: &Path) {
+        std::fs::write(dir.join("empty.txt"), b"").unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            b"---\ndescription: golden\n---\nbody\n",
+        )
+        .unwrap();
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i * 31 % 251) as u8).collect();
+        std::fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
+        std::fs::write(dir.join("sub").join("big.bin"), &big).unwrap();
+        std::fs::write(dir.join("sub").join("deeper").join("x"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("sub/deeper/x", dir.join("link")).unwrap();
+    }
+
+    // spec: LIFE-35 -- the hash's byte stream is pinned: these are the values
+    // the whole-file implementation produced before the walk was streamed, so
+    // a change to the framing or the read path that would make every recorded
+    // manifest hash read as drift fails here instead.
+    #[test]
+    fn hash_values_are_pinned() {
+        let dir = tmp("golden");
+        golden_tree(&dir);
+        let tree = hash_path_ignoring(&dir, &crate::ignore::IgnoreSet::builtin()).unwrap();
+        let file = hash_path(&dir.join("sub").join("big.bin")).unwrap();
+        #[cfg(unix)]
+        assert_eq!(tree, "34d773935e8a118f", "tree hash");
+        assert_eq!(file, "18f801807acd8e9b", "single-file hash");
+    }
+
+    /// The digest `write_framed_with` should leave for `content` under a
+    /// correct stated length: the length prefix, then the bytes.
+    fn framed_digest(content: &[u8]) -> u64 {
+        let mut h = Fnv::new();
+        h.write(&(content.len() as u64).to_le_bytes());
+        h.write(content);
+        h.value()
+    }
+
+    // spec: LIFE-35 -- a file whose size changed between the stat and the
+    // read is re-read once; the retry's hash replaces the first attempt's
+    // entirely, so the result is exactly the stable file's framing.
+    #[test]
+    fn a_file_that_changes_once_mid_hash_is_re_read() {
+        let mut calls = 0;
+        let mut h = Fnv::new();
+        write_framed_with(&mut h, Path::new("f"), &mut [0u8; 4], || {
+            calls += 1;
+            // First open: stated 3 bytes, reads 5 (it grew). Then stable.
+            let (len, bytes): (u64, &[u8]) = match calls {
+                1 => (3, b"hello"),
+                _ => (5, b"hello"),
+            };
+            Ok((len, bytes))
+        })
+        .expect("the retry reads a stable file");
+        assert_eq!(calls, 2);
+        assert_eq!(h.value(), framed_digest(b"hello"));
+    }
+
+    // spec: LIFE-35 -- two names that read the same once made lossy UTF-8 are
+    // ordered by their raw bytes, so the hash does not depend on the order the
+    // directory listing returns them in.
+    #[test]
+    fn entries_with_the_same_lossy_path_order_deterministically() {
+        let file = |raw: &str| (b'F', "a\u{FFFD}".to_string(), Content::File(raw.into()));
+        let link = |t: &[u8]| (b'S', "a\u{FFFD}".to_string(), Content::Link(t.to_vec()));
+        let names = |v: &[Entry]| -> Vec<String> {
+            v.iter()
+                .map(|e| match &e.2 {
+                    Content::File(p) => p.to_string_lossy().into_owned(),
+                    Content::Link(t) => String::from_utf8_lossy(t).into_owned(),
+                })
+                .collect()
+        };
+        let mut fwd = vec![file("/r/a2"), file("/r/a1"), link(b"y"), link(b"x")];
+        let mut rev = vec![link(b"x"), link(b"y"), file("/r/a1"), file("/r/a2")];
+        fwd.sort_by(entry_order);
+        rev.sort_by(entry_order);
+        assert_eq!(names(&fwd), ["/r/a1", "/r/a2", "x", "y"]);
+        assert_eq!(names(&fwd), names(&rev));
+    }
+
+    // spec: LIFE-35 -- the same tree of non-UTF-8 names hashes the same
+    // whatever order its entries were created (and so listed) in. A filesystem
+    // that refuses such names (APFS: `EILSEQ`) cannot hold the tie, so the
+    // test has nothing to check there.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_names_hash_the_same_in_any_creation_order() {
+        use std::os::unix::ffi::OsStrExt;
+        let make = |label: &str, order: [&[u8]; 2]| {
+            let dir = tmp(label);
+            for raw in order {
+                let name = std::ffi::OsStr::from_bytes(raw);
+                if let Err(e) = std::fs::write(dir.join(name), raw) {
+                    assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+                    return None;
+                }
+            }
+            Some(hash_path(&dir).unwrap())
+        };
+        let Some(a) = make("lossy-fwd", [b"a\xff", b"a\xfe"]) else {
+            return;
+        };
+        let b = make("lossy-rev", [b"a\xfe", b"a\xff"]).unwrap();
+        assert_eq!(a, b);
+    }
+
+    // spec: LIFE-35 -- a file that keeps growing is read only one byte past
+    // its stated length, so an endless writer cannot keep the hash reading.
+    #[test]
+    fn a_file_that_keeps_growing_is_not_read_to_the_end() {
+        let mut h = Fnv::new();
+        let err = write_framed_with(&mut h, Path::new("grow.log"), &mut [0u8; 64], || {
+            Ok::<_, MindError>((5u64, std::io::repeat(b'x')))
+        })
+        .expect_err("an endless file is refused, not read forever");
+        assert!(
+            err.to_string()
+                .contains("changed while it was being hashed")
+        );
+    }
+
+    // spec: LIFE-35 -- a file that keeps changing is an error naming it, never
+    // a hash of a torn read.
+    #[test]
+    fn a_file_that_keeps_changing_mid_hash_is_an_error() {
+        let mut h = Fnv::new();
+        let before = h.value();
+        let err = write_framed_with(&mut h, Path::new("busy.bin"), &mut [0u8; 4], || {
+            Ok::<_, MindError>((10u64, &b"short"[..]))
+        })
+        .expect_err("a persistent mismatch is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("busy.bin"), "{msg}");
+        assert!(msg.contains("changed while it was being hashed"), "{msg}");
+        assert_eq!(
+            h.value(),
+            before,
+            "a failed attempt leaves the hash untouched"
+        );
     }
 
     // spec: STO-70
@@ -647,6 +966,11 @@ mod tests {
             msg.contains("nested directories"),
             "error message must name the depth cap: {msg}"
         );
+        // The TUI-72 fingerprint walks the same tree, so it is capped too.
+        let msg = stat_fingerprint(&dir)
+            .expect_err("the fingerprint must refuse a tree deeper than the cap")
+            .to_string();
+        assert!(msg.contains("nested directories"), "{msg}");
     }
 
     /// A symlink's presence and its target must affect the hash so that adding,

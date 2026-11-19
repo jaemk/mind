@@ -82,21 +82,23 @@ impl IgnoreSet {
                 ));
             }
             let dir_only = entry.ends_with('/');
-            let mut body = entry.trim_end_matches('/');
-            // spec: IGN-4 -- `is_ignored` drops a `CurDir` component when
-            // rendering the real path being matched, so a pattern that keeps a
-            // leading "./" in its own text can never match anything: it reads
-            // like `scratch/` but is silently inert, exactly what IGN-4 exists
-            // to prevent. Normalize any number of leading "./" away instead of
-            // accepting a pattern that can never fire.
-            while let Some(stripped) = body.strip_prefix("./") {
-                body = stripped;
-            }
+            // spec: IGN-4 -- `is_ignored` matches against a path rendered from
+            // `Path::components()`, which never yields an empty or `.`
+            // component. A pattern that keeps one in its own text (`./scratch/`,
+            // `a/./b`, `a//b`, `scratch/.`) can never match anything: it reads
+            // like the path it spells but is silently inert, exactly what IGN-4
+            // exists to prevent. Drop those components instead of accepting a
+            // pattern that can never fire.
+            let body = entry
+                .split('/')
+                .filter(|c| !c.is_empty() && *c != ".")
+                .collect::<Vec<_>>()
+                .join("/");
             if body.is_empty() {
                 return Err(bad_ignore(
                     item,
                     raw,
-                    "it is empty after removing leading './' components",
+                    "it names only the item root after removing '.' and empty components",
                 ));
             }
             if body.split('/').any(|c| c == "..") {
@@ -106,7 +108,7 @@ impl IgnoreSet {
                     "it has a '..' component, which would reach outside the item",
                 ));
             }
-            let pattern = glob::Pattern::new(body)
+            let pattern = glob::Pattern::new(&body)
                 .map_err(|e| bad_ignore(item, raw, &format!("it is not a valid glob ({e})")))?;
             rules.push(Rule { pattern, dir_only });
         }
@@ -328,5 +330,38 @@ mod tests {
             s2.is_ignored(&PathBuf::from("nested/file.md"), false),
             "repeated leading './' components must all be stripped"
         );
+    }
+
+    /// Interior `.` and empty components are normalized the same way: the
+    /// path being matched never carries one, so a pattern that kept one could
+    /// never fire.
+    // spec: IGN-4
+    #[test]
+    fn interior_cur_dir_and_empty_components_are_normalized() {
+        let s = set(&["a/./b", "c//d", "scratch/.", "e/.//./f/"]);
+        assert!(s.is_ignored(&PathBuf::from("a/b"), false));
+        assert!(s.is_ignored(&PathBuf::from("c/d"), false));
+        assert!(s.is_ignored(&PathBuf::from("scratch"), true));
+        assert!(s.is_ignored(&PathBuf::from("e/f"), true));
+        assert!(
+            !s.is_ignored(&PathBuf::from("e/f"), false),
+            "the trailing `/` still marks a directory-only rule"
+        );
+    }
+
+    /// An entry that names only the item root (`.`, `./`, `.//.`) can never
+    /// match (the root is never ignored, IGN-5), so it is refused rather than
+    /// compiled into an inert rule.
+    // spec: IGN-4
+    #[test]
+    fn an_entry_naming_only_the_root_is_refused() {
+        for bad in [".", "./", ".//.", "././"] {
+            let err = IgnoreSet::new(&[bad.to_string()], "skill:t")
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert!(
+                matches!(err, MindError::BadIgnorePattern { .. }),
+                "{bad:?} must be a BadIgnorePattern, got {err}"
+            );
+        }
     }
 }

@@ -50,6 +50,14 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   structured `Io` error naming the offending path instead of overflowing the
   stack. LIFE-42's symlink rejection already prevents cycle-driven recursion;
   the cap covers plain deep nesting.
+- `LIFE-65` An item-tree entry that is neither a regular file, a directory, nor
+  a symlink (a FIFO, socket, or device node) fails the install copy
+  (`copy_recursive`) and the content hash (`hash_path`) with an `Io` error
+  naming the entry. The check is made from the file type before the entry is
+  opened: opening a FIFO for reading blocks until a writer appears, so reading
+  one would hang the command while it holds the lock. An entry the item's
+  ignore set excludes (IGN-10) is skipped before the check, like any ignored
+  entry.
 - `LIFE-43` A forced install (`learn --force`, CLI-35) that replaces a
   pre-existing foreign target at one link path and then fails on a later link
   leaves every clobbered foreign target restored to its original content. Before
@@ -279,6 +287,20 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   stored hash; after upgrading `mind`, all previously-installed items will report
   drift on the next `recall` or `upgrade` run until they are re-installed or
   upgraded (a one-time event).
+
+  File contents are streamed into the hash, not held in memory, so hashing an
+  item costs a fixed read buffer rather than the item's total size. A file's
+  content length is taken from its metadata before the read and checked
+  against the bytes read. On a mismatch (the file changed during the read) the
+  file is read once more, and a second mismatch fails with an `Io` error
+  naming the file rather than hashing a torn read. The read stops one byte past
+  the stated length, so a file that keeps growing cannot keep the hash reading.
+  Entries are hashed in `(type tag, path)` order. Paths are compared as lossy
+  UTF-8, so two names differing only in invalid UTF-8 bytes can tie; a tie is
+  broken by the raw name bytes for a file and by the target for a symlink, never
+  by directory-listing order. The byte stream, and so every hash value, is the
+  same as when contents were read whole, except for a tree holding such a tied
+  pair of files, which were ordered by content before.
 
 ## Recovery after interruption
 
