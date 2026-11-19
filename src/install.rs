@@ -1404,8 +1404,9 @@ fn copy_recursive_at(
 /// layout does, and real repositories stay under a hundred levels or so. At
 /// 1024 levels a path is past Linux's 4096-byte `PATH_MAX` for any components
 /// longer than three bytes, so the cap only fires on a tree that is
-/// pathological on purpose. The walk is iterative, so the cap bounds the work,
-/// not the stack.
+/// pathological on purpose (on macOS, whose `PATH_MAX` is 1024 bytes, the
+/// path limit fails such a walk first). The walk is iterative, so the cap
+/// bounds the work, not the stack.
 pub(crate) const MAX_CLONE_TREE_DEPTH: usize = 1024;
 
 /// Copy a whole tree (a source clone) to `dst`, recreating each symlink as a
@@ -2775,7 +2776,10 @@ mod tests {
     }
 
     /// The clone copy's depth cap admits nesting far past the item cap, as a
-    /// whole repository needs, and refuses a tree past its own cap.
+    /// whole repository needs, and refuses a tree past its own cap. Linux only:
+    /// the tree is built and walked by full path, and macOS's 1024-byte
+    /// `PATH_MAX` refuses a path this deep before the cap can be reached.
+    #[cfg(target_os = "linux")]
     #[test]
     fn clone_copy_depth_cap_admits_real_repos_and_stops_pathological_ones() {
         // spec: HOME-18

@@ -648,7 +648,9 @@ mod tests {
     }
 
     // spec: LIFE-35 -- the same tree of non-UTF-8 names hashes the same
-    // whatever order its entries were created (and so listed) in.
+    // whatever order its entries were created (and so listed) in. A filesystem
+    // that refuses such names (APFS: `EILSEQ`) cannot hold the tie, so the
+    // test has nothing to check there.
     #[cfg(unix)]
     #[test]
     fn non_utf8_names_hash_the_same_in_any_creation_order() {
@@ -657,12 +659,17 @@ mod tests {
             let dir = tmp(label);
             for raw in order {
                 let name = std::ffi::OsStr::from_bytes(raw);
-                std::fs::write(dir.join(name), raw).unwrap();
+                if let Err(e) = std::fs::write(dir.join(name), raw) {
+                    assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+                    return None;
+                }
             }
-            hash_path(&dir).unwrap()
+            Some(hash_path(&dir).unwrap())
         };
-        let a = make("lossy-fwd", [b"a\xff", b"a\xfe"]);
-        let b = make("lossy-rev", [b"a\xfe", b"a\xff"]);
+        let Some(a) = make("lossy-fwd", [b"a\xff", b"a\xfe"]) else {
+            return;
+        };
+        let b = make("lossy-rev", [b"a\xfe", b"a\xff"]).unwrap();
         assert_eq!(a, b);
     }
 
