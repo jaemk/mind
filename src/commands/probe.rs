@@ -193,7 +193,7 @@ pub fn probe(
         // catalog graph to render a subtree; each dependency line is indented
         // with two leading spaces so it reads as a child of the hit above.
         // Cycle back-edges are marked (cycle) by render_subtree/render_forest.
-        if let Some(subtree) = catalog_graph.render_subtree(it.key().as_str()) {
+        if let Some(subtree) = catalog_graph.render_item_subtree(it) {
             // The subtree includes the root (it.key()) at depth 0; skip it
             // and emit only the nested child lines (depth >= 1).
             for line in subtree.lines().skip(1) {
