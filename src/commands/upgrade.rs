@@ -1639,7 +1639,7 @@ pub(super) fn pending_update_hooks(
     clone_dir: &std::path::Path,
 ) -> PendingUpgradeHooks {
     let loaded = MindToml::load(clone_dir).ok().flatten();
-    let has_manifest = loaded.is_some();
+    let has_manifest = loaded.as_ref().is_some_and(|m| m.gates_curated_config());
     let declared = loaded
         .map(|mf| {
             mf.resolved_hooks(&clone_dir.join("mind.toml"))
@@ -1664,8 +1664,8 @@ pub(super) fn pending_update_hooks(
 /// covers the install AND the update event, so a source cannot escape it by
 /// moving the command to `event = "update"`).
 ///
-/// `has_manifest` is the DSC-60 gate: once the source ships a `mind.toml` of its
-/// own, curated values stop applying to it.
+/// `has_manifest` is the DSC-60 gate: once the source's own `mind.toml`
+/// declares its own discovery or hooks, curated values stop applying to it.
 // spec: HOOK-56 HOOK-121 HOOK-122 HOOK-124 HOOK-127
 fn select_upgrade_hooks(
     source: &crate::source::Source,

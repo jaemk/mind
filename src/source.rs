@@ -3086,7 +3086,8 @@ mod tests {
             .collect();
         assert_eq!(pending, vec!["still-declared", "curated.sh", "mine.sh"]);
 
-        // The DSC-60 gate closed (the source now ships its own mind.toml): the
+        // The DSC-60 gate closed (the source's mind.toml now declares its own
+        // discovery or hooks): the
         // curated record stops applying, the override does not.
         let pending: Vec<&str> = src
             .pending_install_hooks(Some("bbb"), &declared, false)

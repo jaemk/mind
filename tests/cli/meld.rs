@@ -274,7 +274,10 @@ fn curator_add_roots_warning_shell_quotes_a_metachar_nested_source_name() {
         "contrib/skills/addon/SKILL.md",
         "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
     );
-    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nroots = [\".\"]\n",
+    );
 
     let registry = Sandbox::bare("addroot-registry-quote-test");
     registry.write_and_commit(

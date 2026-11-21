@@ -509,12 +509,15 @@ run = "make build"
   and lets a generated super-source pin each source to a reproducible revision
   (DSC-65, DUMP-1).
 - `DSC-60` The curator-supplied `roots`, `add-roots` (DSC-88), `flat-skills`, and
-  `hooks` (DSC-59) apply only when the nested source ships no `mind.toml` of its
-  own. When the nested source has a `mind.toml`, that file is authoritative for
-  its roots, add-roots, flat-skills, and hooks and the curator-supplied values
-  are ignored (a warning is emitted, since the source has onboarded). The gate is
-  whole-file: a nested `mind.toml`, even one that does not declare
-  roots/add-roots/flat-skills/hooks, suppresses all four. The curator-supplied
+  `hooks` (DSC-59) apply only while the nested source's own `mind.toml`, if any,
+  declares none of its own discovery or hooks: `[[items]]` or `[discover]` item
+  globs (authoritative, DSC-3), `[source].roots`, `[source].flat-skills = true`,
+  or `[[hooks]]`. A `mind.toml` declaring any of those is authoritative for the
+  source's roots, add-roots, flat-skills, and hooks, and suppresses all four
+  curator-supplied values (a warning is emitted, since the source has
+  onboarded). A `mind.toml` with only `[source]` metadata (a `prefix`, a
+  `description`, a pin directive) or `[profiles]` leaves the curator-supplied
+  values in effect. The curator-supplied
   pin is NOT gated: it is authoritative regardless of the nested `mind.toml`
   (DSC-65). `as` (DSC-39) and `install` (DSC-58) are registry/consumer concerns
   and are likewise unaffected by this gate; they always apply.
@@ -540,8 +543,8 @@ run = "make build"
   per-entry `pin-ref` (DUMP-1, DUMP-4).
 - `DSC-88` A `[discover].sources` entry's `add-roots` (DSC-59, mirroring the
   consumer `--add-root` flag, DSC-84) is gated by DSC-60 exactly like `roots`,
-  `flat-skills`, and hooks: it applies only when the nested source ships no
-  `mind.toml` of its own, and is otherwise ignored with the DSC-60 warning. A
+  `flat-skills`, and hooks: it applies only while the DSC-60 gate is open, and
+  is otherwise ignored with the DSC-60 warning. A
   direct consumer `--add-root` (DSC-84) is never gated, and the asymmetry is
   deliberate: a consumer melding a source directly makes their own
   export-control decision for their own install, while a curator's entry acts on

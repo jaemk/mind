@@ -3396,9 +3396,13 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
     // and hooks) are still suppressed when the source has a mind.toml, and the
     // warning fires only because those gated fields are present.
     let nested = make_unonboarded_nested("onboarded");
-    // The nested source onboards with a metadata-only mind.toml (no pin/roots/
-    // hooks). It still ships the pkg-only item, which a root scan won't find.
-    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+    // The nested source onboards with a mind.toml declaring its own roots (the
+    // repo root), which closes the gate. It still ships the pkg-only item,
+    // which a root scan won't find.
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nroots = [\".\"]\n",
+    );
     // Point stable at the onboarded commit so the curator follow-branch can apply.
     git(&nested.source, &["branch", "-f", "stable"]);
 
@@ -3423,7 +3427,7 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
     // The warning must mention the source name and "ignored"; it need NOT mention
     // the pin (DSC-65 exempts the pin from the warning).
     assert!(
-        r.stderr.contains("ships its own mind.toml")
+        r.stderr.contains("declares its own discovery or hooks")
             && r.stderr.contains("ignored")
             && r.stderr.contains("onboarded"),
         "a DSC-60 warning must be emitted naming the onboarded source: {}",
@@ -3510,6 +3514,46 @@ fn curator_add_roots_applied_when_nested_has_no_mind_toml() {
 }
 
 #[test]
+fn curator_add_roots_applied_when_nested_mind_toml_has_only_metadata() {
+    // spec: DSC-60 DSC-88 -- a nested mind.toml with only `[source]` metadata
+    // declares no discovery or hooks of its own, so the gate stays open: the
+    // curator's add-roots composes, with no "ignored" warning.
+    let nested = Sandbox::bare("addroot-metadata");
+    nested.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: base skill\n---\n# base\n",
+    );
+    nested.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
+    );
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nprefix = \"md\"\n",
+    );
+    let registry = Sandbox::bare("addroot-registry-metadata");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\nadd-roots = [\"contrib\"]\n",
+            nested.source_spec()
+        ),
+    );
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.contains("ignored"),
+        "no DSC-60 warning: {}",
+        r.stderr
+    );
+    let probe = registry.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("base") && probe.contains("addon"),
+        "the curator add-roots must apply: {probe}"
+    );
+}
+
+#[test]
 fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
     // spec: DSC-60 DSC-88 -- a curator-supplied `add-roots` on a nested source
     // that ships its own mind.toml must be GATED exactly like
@@ -3517,8 +3561,8 @@ fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
     // direct-consumer `meld --add-root`, DSC-84, which is never gated). Without
     // this gate a curator could reach an item its author deliberately did not
     // export via an authoritative mind.toml (DSC-3): this is the C16 fix. A
-    // metadata-only (non-authoritative) mind.toml is enough to trip the
-    // whole-file DSC-60 gate; convention scanning still finds `base`.
+    // mind.toml declaring its own `roots` closes the gate; convention scanning
+    // of that root still finds `base`.
     let nested = Sandbox::bare("addroot-onboarded");
     nested.write_and_commit(
         "skills/base/SKILL.md",
@@ -3528,7 +3572,10 @@ fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
         "contrib/skills/addon/SKILL.md",
         "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
     );
-    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nroots = [\".\"]\n",
+    );
 
     let registry = Sandbox::bare("addroot-registry-gated");
     registry.write_and_commit(
@@ -3544,7 +3591,7 @@ fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
 
     // DSC-60: a warning fires because add-roots is a gated field and is present.
     assert!(
-        r.stderr.contains("ships its own mind.toml")
+        r.stderr.contains("declares its own discovery or hooks")
             && r.stderr.contains("ignored")
             && r.stderr.contains("onboarded"),
         "a DSC-60 warning must be emitted naming the onboarded source: {}",
@@ -3770,7 +3817,7 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
 
     // DSC-60: the warning fires because roots/hooks are present and gated.
     assert!(
-        r.stderr.contains("ships its own mind.toml")
+        r.stderr.contains("declares its own discovery or hooks")
             && r.stderr.contains("ignored")
             && r.stderr.contains("selfdeclared"),
         "a DSC-60 warning must name the onboarded source: {}",
@@ -4362,13 +4409,13 @@ fn curator_flat_skills_applies_when_nested_has_no_mind_toml() {
 fn curator_flat_skills_ignored_with_warning_when_nested_has_mind_toml() {
     // spec: DSC-77 DSC-60
     // When the nested source ships its own mind.toml, a curator-supplied
-    // `flat-skills = true` is gated out (the DSC-60 whole-file gate) and a warning
-    // fires. The nested source's metadata-only mind.toml does not declare
-    // flat-skills, so its root-level skill dirs are NOT discovered; its
-    // conventional agents/ item still is.
+    // `flat-skills = true` is gated out (the DSC-60 gate, closed by the
+    // mind.toml's own `roots`) and a warning fires. The nested mind.toml does
+    // not declare flat-skills, so its root-level skill dirs are NOT discovered;
+    // its conventional agents/ item still is.
     let nested = make_flat_source(
         "flat-onboarded",
-        Some("[source]\ndescription = \"onboarded\"\n"),
+        Some("[source]\ndescription = \"onboarded\"\nroots = [\".\"]\n"),
     );
     let registry = Sandbox::bare("registry-flat-gated");
     registry.write_and_commit(
@@ -4386,7 +4433,7 @@ fn curator_flat_skills_ignored_with_warning_when_nested_has_mind_toml() {
 
     // DSC-60: the warning fires (flat-skills is a gated field) and names the source.
     assert!(
-        r.stderr.contains("ships its own mind.toml")
+        r.stderr.contains("declares its own discovery or hooks")
             && r.stderr.contains("ignored")
             && r.stderr.contains("flat-onboarded"),
         "a DSC-60 warning must be emitted naming the onboarded source: {}",

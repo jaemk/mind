@@ -1334,6 +1334,18 @@ impl MindToml {
         !self.items.is_empty() || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
     }
 
+    /// The DSC-60 gate: whether this file declares its own discovery or hooks
+    /// (an authoritative inventory, `[source].roots`, `[source].flat-skills`,
+    /// or `[[hooks]]`), so a curator's roots, add-roots, flat-skills, and hooks
+    /// for the repo are ignored. A file with only `[source]` metadata (a
+    /// prefix, a description) leaves them in effect.
+    pub fn gates_curated_config(&self) -> bool {
+        self.is_authoritative()
+            || self.source.roots.is_some()
+            || self.source.flat_skills
+            || !self.hooks.is_empty()
+    }
+
     /// Whether the file relocates or reshapes convention discovery of the repo's
     /// OWN items via `[source].roots` or `[source].flat-skills` (as opposed to the
     /// authoritative `[[items]]`/`[discover]`-glob inventory, [`is_authoritative`]).
