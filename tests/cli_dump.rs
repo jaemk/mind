@@ -1760,6 +1760,54 @@ fn dump_add_root_over_authoritative_mindtoml_emits_but_is_gated_on_reroundtrip()
 }
 
 #[test]
+fn dump_leaves_out_an_installed_item_only_a_gated_add_root_reaches() {
+    // spec: DUMP-12 DUMP-7 DSC-63 -- the source's own mind.toml closes the
+    // DSC-60 gate, and a proper subset is installed. Naming the add-root item
+    // in `install-items` would fail the whole re-meld (DSC-63), so dump leaves
+    // it out with a warning and the output still melds.
+    let sb = Sandbox::bare("gated-subset-src");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"core\"\npath = \"skills/core\"\n\n\
+         [[items]]\nkind = \"skill\"\nname = \"extra\"\npath = \"skills/extra\"\n",
+    );
+    sb.write_and_commit(
+        "skills/core/SKILL.md",
+        "---\nname: core\ndescription: core\n---\n# core\n",
+    );
+    sb.write_and_commit(
+        "skills/extra/SKILL.md",
+        "---\nname: extra\ndescription: extra\n---\n# extra\n",
+    );
+    sb.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: addon\n---\n# addon\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--add-root", "contrib", "--yes"]);
+    assert!(meld.success, "meld: {} {}", meld.stdout, meld.stderr);
+    let f = sb.mind(&["forget", "skill:extra", "--yes"]);
+    assert!(f.success, "forget: {} {}", f.stdout, f.stderr);
+
+    let dr = sb.mind(&["dump"]);
+    assert!(dr.success, "dump: {} {}", dr.stdout, dr.stderr);
+    let entries = dump_entries(&dr.stdout);
+    assert_eq!(
+        str_list(&entries[0], "install-items"),
+        Some(vec!["skill:core".to_string()]),
+        "{}",
+        dr.stdout
+    );
+    assert!(
+        dr.stderr.contains("left out of the dump") && dr.stderr.contains("skill:addon"),
+        "the warning names the dropped item: {}",
+        dr.stderr
+    );
+
+    let fresh = remeld_dump(&sb, "gated-subset");
+    assert_eq!(installed_keys(&fresh), vec!["skill:core".to_string()]);
+}
+
+#[test]
 fn dump_emits_no_add_roots_key_when_source_has_none() {
     // spec: DUMP-11 — a source melded WITHOUT --add-root must emit no
     // `add-roots` key at all (end-to-end, not just the unit-level DumpEntry
@@ -2614,7 +2662,7 @@ fn installed_keys(mind_home: &Path) -> Vec<String> {
 
 #[test]
 fn dump_then_meld_reproduces_sources_and_installed_items() {
-    // spec: DUMP-1 DUMP-2 DUMP-4 DUMP-5 DUMP-7 DUMP-11 -- over a spread of meld
+    // spec: DUMP-1 DUMP-2 DUMP-4 DUMP-5 DUMP-7 DUMP-11 DSC-60 -- over a spread of meld
     // settings (own prefix or none, an identity alias or none, `--root` or
     // `--add-root`, any installed subset, a source HEAD that moved on), melding
     // the dump into a fresh home reproduces each source's identity, commit,
@@ -2637,12 +2685,11 @@ fn dump_then_meld_reproduces_sources_and_installed_items() {
         if g.one_in(2) {
             args.extend(["--namespace".into(), "ns".into()]);
         }
-        // A curator's roots and add-roots do not reach a source that ships
-        // its own mind.toml (DSC-60, DSC-88), so with the own-prefix
-        // mind.toml the reproduction could not hold them.
+        // A prefix-only mind.toml leaves the DSC-60 gate open, so the
+        // reproduction keeps the roots and add-roots either way.
         match g.next() % 3 {
-            0 if !own_prefix => args.extend(["--root".into(), "pkg".into()]),
-            1 if !own_prefix => args.extend(["--add-root".into(), "pkg".into()]),
+            0 => args.extend(["--root".into(), "pkg".into()]),
+            1 => args.extend(["--add-root".into(), "pkg".into()]),
             _ => {}
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();

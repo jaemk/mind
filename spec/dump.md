@@ -44,9 +44,9 @@ and the manifest are defined in [storage.md](storage.md).
   reoffers the items an added root contributes. This mirrors DUMP-4: only the
   recorded consumer override is emitted. Re-melding the generated super-source
   applies the emitted `add-roots` as a CURATOR value on that entry (DSC-59),
-  gated by DSC-60/DSC-88 exactly like `roots`: it composes only when the nested
-  source has no `mind.toml` of its own. A source without recorded add-roots
-  emits no `add-roots` key.
+  gated by DSC-60/DSC-88 exactly like `roots`: it composes only while the
+  nested source's `mind.toml`, if any, declares no discovery or hooks of its
+  own. A source without recorded add-roots emits no `add-roots` key.
 - `DUMP-1`/`DUMP-4` describe an ordinary melded source. A melded item-link
   instance (item-link.md LNK-4) is dumped as a differently-shaped entry: see
   item-link.md LNK-13 for the reconstructed deep-URL entry it emits instead.
@@ -74,6 +74,13 @@ and the manifest are defined in [storage.md](storage.md).
   is part of the installed set and is listed in `install-items` like any other, so
   the reproduction installs the same set without relying on dependency
   re-derivation at meld time.
+- `DUMP-12` Filtering compares against what a re-meld of the entry offers. When
+  the source's own `mind.toml` closes the DSC-60 gate, a re-meld ignores the
+  entry's `roots`, `add-roots`, and `flat-skills`, so an installed item only they
+  reach would not be offered, and naming it in `install-items` would fail the
+  re-meld (DSC-63). Such an item is left out of the directive (it counts as
+  neither offered nor installed), with a warning naming it, so the output still
+  melds (DUMP-7).
 - `DUMP-3` `--whole-sources` disables item filtering: every melded source is
   emitted with `install = true` regardless of how many of its items are installed,
   so the output offers each source's full inventory rather than the recorded

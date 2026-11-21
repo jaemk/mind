@@ -488,6 +488,26 @@ fn dump_namespace(paths: &Paths, source: &Source) -> Option<String> {
     (own.as_ref() != Some(alias)).then(|| alias.clone())
 }
 
+/// The source as a re-meld of its dump entry sees it, when that differs from
+/// the recorded source: the entry's roots, add-roots, and flat-skills are
+/// curator values on re-meld, which the source's own `mind.toml` can gate
+/// off (DSC-60). `None` when the re-meld applies them, or there are none.
+fn remeld_view(paths: &Paths, source: &Source) -> Option<Source> {
+    if source.roots.is_none() && source.add_roots.is_none() && !source.flat_skills {
+        return None;
+    }
+    let gated = MindToml::load(&source.clone_dir(paths))
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.gates_curated_config());
+    gated.then(|| Source {
+        roots: None,
+        add_roots: None,
+        flat_skills: false,
+        ..source.clone()
+    })
+}
+
 /// Compute the install directive for one source (DUMP-2).
 ///
 /// Returns `(install, install_items)` where exactly one is `Some`.
@@ -503,15 +523,45 @@ fn compute_install_directive(
     source: &Source,
     manifest: &Manifest,
 ) -> Result<(Option<bool>, Option<Vec<String>>)> {
-    // Scan the source to find its offered items (bare names).
-    let mut offered_items = Vec::new();
-    catalog::scan_source(paths, source, &mut offered_items)?;
+    let offered_by = |source: &Source| -> Result<BTreeSet<String>> {
+        let mut items = Vec::new();
+        catalog::scan_source(paths, source, &mut items)?;
+        Ok(items
+            .iter()
+            .map(|item| format!("{}:{}", item.kind.as_str(), item.name))
+            .collect())
+    };
 
-    // Build the set of offered bare "kind:name" refs from the catalog.
-    let offered: BTreeSet<String> = offered_items
-        .iter()
-        .map(|item| format!("{}:{}", item.kind.as_str(), item.name))
-        .collect();
+    // The bare "kind:name" refs the re-meld offers. spec: DUMP-12 -- when the
+    // source's own mind.toml closes the DSC-60 gate, the re-meld ignores the
+    // emitted roots, add-roots, and flat-skills, so it offers what the source
+    // offers without them; an installed item only they reach is left out.
+    let offered = match remeld_view(paths, source) {
+        None => offered_by(source)?,
+        Some(view) => {
+            let offered = offered_by(&view)?;
+            let lost: Vec<String> = offered_by(source)?
+                .into_iter()
+                .filter(|r| !offered.contains(r))
+                .filter(|r| {
+                    manifest.items.values().any(|i| {
+                        i.source == source.name
+                            && format!("{}:{}", i.kind.as_str(), i.bare_name) == *r
+                    })
+                })
+                .collect();
+            if !lost.is_empty() {
+                eprintln!(
+                    "warning: {}: left out of the dump: {}; only the recorded roots/\
+                     add-roots/flat-skills reach them, and the source's own mind.toml makes \
+                     a re-meld ignore those (DSC-60)",
+                    source.name,
+                    lost.join(", ")
+                );
+            }
+            offered
+        }
+    };
 
     // Build the set of installed bare "kind:name" refs from the manifest that
     // belong to this source.
