@@ -352,9 +352,9 @@ fn build_entry(
     // For local sources `source.url` holds the filesystem path (see parse_spec).
     let source_spec = source.url.clone();
 
-    // spec: DUMP-4 — effective prefix: consumer alias wins over the source's
-    // own [source].prefix (the same precedence as catalog::scan_source_at).
-    let effective_alias = effective_prefix(paths, source);
+    // spec: DUMP-4 STO-58 — the identity alias, or a display prefix the
+    // source would not pick up again by itself.
+    let effective_alias = dump_namespace(paths, source);
 
     // spec: DUMP-4 — scan roots recorded at meld time (STO-17).
     let roots = source.roots.clone();
@@ -464,29 +464,28 @@ fn profile_directive(
     (profiles, (!default_on).then_some(false), extras)
 }
 
-/// Compute the effective namespace prefix for a source, mirroring the
-/// precedence used in `catalog::scan_source_at` (DUMP-4).
+/// The `namespace` an entry emits (DUMP-4). A curated entry's `namespace` is
+/// an identity alias on re-meld (STO-58, DSC-78), so:
 ///
-/// Returns `None` when neither the consumer alias nor the source's own
-/// `[source].prefix` is set (or both are empty strings).
-fn effective_prefix(paths: &Paths, source: &Source) -> Option<String> {
-    // Consumer alias wins.
-    if let Some(alias) = &source.alias {
-        if !alias.is_empty() {
-            return Some(alias.clone());
-        }
-        // An explicit empty alias suppresses the source's own prefix.
-        return None;
+/// - an identity alias (`as_alias`) is emitted as is;
+/// - a display prefix equal to the source's own `[source].prefix` is not
+///   emitted: the re-meld reads it from the source again, and emitting it
+///   would give the reproduced source a different identity (`...@<prefix>`);
+/// - a display prefix that differs from the source's own (a custom answer to
+///   the CLI-24 or NS-44 prompt) is emitted, since no other key carries it;
+///   it re-melds as an identity alias.
+///
+/// An empty alias emits nothing.
+fn dump_namespace(paths: &Paths, source: &Source) -> Option<String> {
+    if let Some(alias) = &source.as_alias {
+        return Some(alias.clone());
     }
-    // Fall back to the source's own [source].prefix from its mind.toml.
-    let clone_root = source.clone_dir(paths);
-    if let Ok(Some(mt)) = MindToml::load(&clone_root)
-        && let Some(prefix) = mt.source.prefix
-        && !prefix.is_empty()
-    {
-        return Some(prefix);
-    }
-    None
+    let alias = source.alias.as_ref().filter(|a| !a.is_empty())?;
+    let own = MindToml::load(&source.clone_dir(paths))
+        .ok()
+        .flatten()
+        .and_then(|mt| mt.source.prefix);
+    (own.as_ref() != Some(alias)).then(|| alias.clone())
 }
 
 /// Compute the install directive for one source (DUMP-2).

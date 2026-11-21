@@ -116,7 +116,8 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
 
 /// The item name for a kind-dir entry, `Ok(None)` when the entry is not a
 /// well-formed item of that kind, or `Err(UnsafeName)` when a name derives but
-/// fails the safety check (UNM-9). A skill is the directory `skills/<name>`; an
+/// fails the safety check (UNM-9). A dot-entry is never an item (UNM-1). A
+/// skill is the directory `skills/<name>`; an
 /// agent/rule/command is the file `<name>.md`; a workflow the file `<name>.js`
 /// (WF-50). Only the immediate children of
 /// the kind directory are scanned (CMD-8): a nested `commands/<group>/<name>.md`
@@ -142,7 +143,9 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>
         return Ok(None);
     };
     let derived = match kind {
-        ItemKind::Skill => Some(name.to_string()),
+        // spec: UNM-1 -- a skill is a directory (or a link resolving to one);
+        // a plain file under `skills/` is not one the harness loads.
+        ItemKind::Skill => entry.path().is_dir().then(|| name.to_string()),
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
             name.strip_suffix(".md").map(str::to_string)
         }
@@ -161,12 +164,16 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>
     let Some(derived) = derived else {
         return Ok(None);
     };
-    if crate::catalog::is_safe_item_name(&derived) {
-        Ok(Some(derived))
-    } else {
+    if !crate::catalog::is_safe_item_name(&derived) {
         // spec: UNM-9
-        Err(MindError::UnsafeName { name: derived })
+        return Err(MindError::UnsafeName { name: derived });
     }
+    // spec: UNM-1 -- a dot-entry (`.git`, `.DS_Store`, `.draft.md`) is not an
+    // item, as in the catalog scan. Checked after UNM-9 so `...md` still warns.
+    if name.starts_with('.') {
+        return Ok(None);
+    }
+    Ok(Some(derived))
 }
 
 /// Select every unmanaged item matching the optional ref `r` (UNM-7).
@@ -545,6 +552,58 @@ mod tests {
             items[0].name, "deploy",
             "the well-formed sibling must still be listed: {items:?}"
         );
+    }
+
+    /// A dot-entry (`skills/.git`, `.DS_Store`, `agents/.draft.md`) is not an
+    /// item, and neither is a plain file under `skills/`: the scan lists
+    /// neither, so `forget --unmanaged` cannot delete them. Before, a
+    /// `skills/` kept as a git checkout listed `skill:.git`, and the bare
+    /// `forget --unmanaged` (or `'skill:*'`, whose `*` matches a leading dot)
+    /// removed the repository.
+    // spec: UNM-1
+    #[test]
+    fn scan_skips_dot_entries_and_a_file_under_skills() {
+        let _guard = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let home = std::env::temp_dir().join(format!("mind-unm-dot-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("skills/.git")).unwrap();
+        std::fs::create_dir_all(home.join("skills/real")).unwrap();
+        std::fs::write(home.join("skills/.DS_Store"), b"x").unwrap();
+        std::fs::write(home.join("skills/README.md"), b"x").unwrap();
+        std::fs::create_dir_all(home.join("agents")).unwrap();
+        std::fs::write(home.join("agents/.draft.md"), b"x").unwrap();
+        std::fs::write(home.join("agents/ok.md"), b"x").unwrap();
+        std::fs::create_dir_all(home.join("workflows")).unwrap();
+        std::fs::write(home.join("workflows/.wip.js"), b"x").unwrap();
+
+        let saved_agent_homes = std::env::var_os("MIND_AGENT_HOMES");
+        let saved_policy = std::env::var_os("MIND_POLICY_FILE");
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", home.to_str().unwrap());
+            std::env::remove_var("MIND_POLICY_FILE");
+        }
+        let paths = Paths::new(home.join("mind-home-unused"), home.clone());
+        let result = scan(&paths, &Manifest::default());
+        unsafe {
+            match saved_agent_homes {
+                Some(v) => std::env::set_var("MIND_AGENT_HOMES", v),
+                None => std::env::remove_var("MIND_AGENT_HOMES"),
+            }
+            if let Some(v) = saved_policy {
+                std::env::set_var("MIND_POLICY_FILE", v);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+
+        let keys: Vec<String> = result
+            .unwrap()
+            .iter()
+            .map(|it| it.key().as_str().to_string())
+            .collect();
+        assert_eq!(keys, ["skill:real", "agent:ok"]);
     }
 
     /// The `DirEntry` in `dir` whose file name is exactly `name`.

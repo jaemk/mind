@@ -1577,12 +1577,22 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             let entry_name = entry.name.clone();
             let entry_version = entry.version;
             let entry_description = entry.description;
+            // spec: MKT-9 -- the entry's pin applies like a curator pin
+            // (DSC-65), whether or not the plugin ships a mind.toml.
+            let entry_pin = match &entry.source {
+                plugin_manifest::PluginSource::External { pin, .. } => pin.clone(),
+                plugin_manifest::PluginSource::InRepo { .. } => None,
+            };
             // Recurse exactly like [discover].sources: cycle-safe
             // via visited, no consumer pin or roots, no install hook.
             match meld_recursive(
                 st,
                 MeldRequest {
                     alias: Some(entry_name.clone()),
+                    curated: entry_pin.map(|pin| CuratedConfig {
+                        pin: Some(pin),
+                        ..CuratedConfig::default()
+                    }),
                     // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
                     curated_by: Some(super_source_name.clone()),
                     ..MeldRequest::new(&repo_spec, &mut MeldProfiles::None)
@@ -1763,7 +1773,7 @@ pub(super) fn marketplace_entry_spec(
     clone_dir: &std::path::Path,
 ) -> String {
     match &entry.source {
-        plugin_manifest::PluginSource::External { spec } => spec.clone(),
+        plugin_manifest::PluginSource::External { spec, .. } => spec.clone(),
         plugin_manifest::PluginSource::InRepo { path } => {
             clone_dir.join(path).to_string_lossy().into_owned()
         }
@@ -3249,6 +3259,7 @@ mod tests {
             name: "my-plugin".to_string(),
             source: plugin_manifest::PluginSource::External {
                 spec: "owner/my-plugin".to_string(),
+                pin: None,
             },
             version: None,
             description: None,

@@ -83,6 +83,12 @@ computed it.
   every source, not just the offending one: `catalog::scan` degrades
   gracefully only for `LinkedSourceGone`. This is the deliberate inherited
   default already shared with `DuplicateItem` and `InvalidRoot`.
+- `IGN-6` An ignore entry whose first character is `!` is refused at scan,
+  the same as an IGN-4 violation. Ignore patterns have no negation: in
+  gitignore a leading `!` re-includes a path, but as a glob it is a literal
+  character, so `["*.log", "!keep.log"]` would still exclude `keep.log` and add
+  an entry that matches only a file named `!keep.log`. A `!` anywhere after the
+  first character is an ordinary character.
 - `IGN-5` An ignore entry may not exclude the item's own anchor file: a skill's
   `SKILL.md`, a tool's `TOOL.md`, or the single file that IS an agent or rule
   item. An entry that would is a hard error at scan. Without this an item could

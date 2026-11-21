@@ -81,6 +81,18 @@ impl IgnoreSet {
                      inside the item, so it must not start with '/' or '~'",
                 ));
             }
+            // spec: IGN-6 -- gitignore reads a leading `!` as "re-include";
+            // the glob crate reads it as a literal character, so `!keep.log`
+            // would match only a file named `!keep.log` and the file meant to
+            // be kept would stay excluded by the broader entry.
+            if entry.starts_with('!') {
+                return Err(bad_ignore(
+                    item,
+                    raw,
+                    "it starts with '!', but ignore patterns have no negation; \
+                     narrow the other entries so they do not match the file instead",
+                ));
+            }
             let dir_only = entry.ends_with('/');
             // spec: IGN-4 -- `is_ignored` matches against a path rendered from
             // `Path::components()`, which never yields an empty or `.`
@@ -265,6 +277,48 @@ mod tests {
             "`*` must not cross a `/`"
         );
         assert!(s.is_ignored(&PathBuf::from("docs/guide/x.md"), false));
+    }
+
+    /// The IGN-3 consequences as written: a no-slash entry anchors at the item
+    /// root, `**/name/` reaches every depth (the root included), and `foo/**`
+    /// matches the contents but not `foo` itself.
+    // spec: IGN-3
+    #[test]
+    fn documented_anchoring_and_double_star_consequences_hold() {
+        let s = set(&["target"]);
+        assert!(s.is_ignored(&PathBuf::from("target"), true));
+        assert!(!s.is_ignored(&PathBuf::from("sub/target"), true));
+
+        let any = set(&["**/target/"]);
+        assert!(any.is_ignored(&PathBuf::from("target"), true));
+        assert!(any.is_ignored(&PathBuf::from("sub/target"), true));
+        assert!(any.is_ignored(&PathBuf::from("a/b/target"), true));
+        assert!(!any.is_ignored(&PathBuf::from("a/b/target"), false));
+
+        let contents = set(&["foo/**"]);
+        assert!(!contents.is_ignored(&PathBuf::from("foo"), true));
+        assert!(contents.is_ignored(&PathBuf::from("foo/a.md"), false));
+        assert!(contents.is_ignored(&PathBuf::from("foo/x/a.md"), false));
+    }
+
+    /// A gitignore-style negation is refused rather than compiled into a
+    /// pattern that matches only a file literally named `!...`, which would
+    /// leave the file the author meant to keep excluded by the broader entry.
+    // spec: IGN-6
+    #[test]
+    fn a_leading_bang_negation_is_refused() {
+        for bad in ["!keep.log", " !keep.log", "!docs/"] {
+            let err = IgnoreSet::new(&["*.log".to_string(), bad.to_string()], "skill:t")
+                .expect_err(&format!("{bad:?} must be refused"));
+            assert!(
+                err.to_string().contains("negation"),
+                "{bad:?} must name negation, got {err}"
+            );
+        }
+        // A `!` that does not start the entry is an ordinary character.
+        let s = set(&["sub/!keep", "a!b"]);
+        assert!(s.is_ignored(&PathBuf::from("sub/!keep"), false));
+        assert!(s.is_ignored(&PathBuf::from("a!b"), false));
     }
 
     /// An ancestor match makes a nested file ignored, which is how the

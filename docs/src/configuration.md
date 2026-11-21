@@ -25,6 +25,7 @@ hook-log-keep = "all"
 | `hook-log-keep` | which logs to keep when logging is on: `all` (default) or `failed` | [Hook results and logs](install-hooks.md#hook-results-and-logs) |
 | `mind-homes` | extra mind homes a source may be melded into (relative to `~/.mind`); setting it restricts homes and lobes to this list | [Mind homes](#mind-homes) |
 | `source-homes` | mind homes `mind` recorded for sources while `mind-homes` and `MIND_HOMES` are unset | [Mind homes](#mind-homes) |
+| `known-lobes` | lobes of sources in other homes that `mind` linked items into; recovery trusts them | [Mind homes](#mind-homes) |
 
 The legacy spelling `absorb_to` is still read.
 
@@ -156,6 +157,13 @@ home:
 ```bash
 export MIND_HOMES=~/dev/project/.mind
 ```
+
+When `mind` first links items into the lobe of a source in another home, it
+records that lobe under `known-lobes` in `~/.mind/config.toml`. Recovery of
+an interrupted install or upgrade only touches lobes that are configured,
+recorded there, or named by `~/.mind` itself. A lobe named only by another
+home's files is refused, because whoever can write that home could name any
+directory.
 
 Note that without `--home` the source is cloned into `~/.mind` before its
 `mind.toml` is read, so where `~/.mind` is not writable pass `--home`.

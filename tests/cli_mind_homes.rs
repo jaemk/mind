@@ -1240,6 +1240,161 @@ fn configured_lobes_are_linked_for_a_source_in_another_home() {
     }
 }
 
+/// An extra home whose directory does not exist (a deleted project's
+/// `.mind`, or a listed home nothing was melded into yet) is not created by a
+/// command that only reads: locking skips it, so `recall` leaves no empty
+/// home and `.lock` behind.
+#[test]
+fn a_missing_extra_home_is_not_created_by_a_read() {
+    // spec: HOME-9
+    let sb = Sandbox::new(None);
+    let nested = sb.extra.join("project").join(".mind");
+    let r = sb.mind_env(
+        &std::env::current_dir().unwrap(),
+        &[("MIND_HOMES", &nested)],
+        &["recall", "--sources"],
+    );
+    assert!(r.ok(), "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !sb.extra.exists(),
+        "a read must not create a missing extra home: {}",
+        nested.display()
+    );
+}
+
+/// A transaction journal in an extra home is confined to known lobes, and an
+/// item's `lobe` recorded in that same home's `manifest.json` does not make a
+/// directory known: otherwise whoever can write the home could name any
+/// directory as a lobe and have recovery's undo rename a file of theirs into it.
+#[test]
+fn a_journal_cannot_widen_its_lobes_through_its_own_manifest() {
+    // spec: LIFE-61
+    let sb = Sandbox::new(None);
+    let victim = sb.base.join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let trash = sb.extra.join(".tmp/tx/1/0");
+    write(&trash, "planted\n");
+    let manifest = serde_json::json!({
+        "version": 1,
+        "items": {
+            "skill:x": {
+                "kind": "skill", "name": "x", "bare_name": "x",
+                "source": "local/x/src", "commit": "c", "hash": "h",
+                "store": "store/skill/x", "links": [],
+                "lobe": victim.to_string_lossy(),
+            }
+        }
+    });
+    write(&sb.extra.join("manifest.json"), &manifest.to_string());
+    let target = victim.join(".profile");
+    let journal = serde_json::json!({
+        "version": 1,
+        "decision": "Preparing",
+        "intents": [{"Move": {"from": target, "to": trash}}],
+    });
+    write(&sb.extra.join(".tx-journal.json"), &journal.to_string());
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !target.exists(),
+        "recovery must not write outside a configured lobe: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(!r.ok(), "the journal must fail closed: {}", r.stderr);
+    assert!(r.stderr.contains("outside every"), "{}", r.stderr);
+    assert!(trash.exists(), "nothing was moved");
+}
+
+/// A source lobe named only by an extra home's own registry is not a known
+/// lobe for that home's journal: whoever can write the home can set the
+/// source's `lobe` there, the same as the journal itself.
+#[test]
+fn a_journal_cannot_widen_its_lobes_through_its_own_source_lobe() {
+    // spec: LIFE-61
+    let mut sb = Sandbox::new(None);
+    sb.env_lists_extra = false;
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &sb.extra_str()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        config_json(&sb)["known_lobes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let victim = sb.base.join("victim");
+    std::fs::create_dir_all(&victim).unwrap();
+    let sources = sb.extra.join("sources.json");
+    let mut reg: Value = serde_json::from_str(&std::fs::read_to_string(&sources).unwrap()).unwrap();
+    reg["sources"][0]["lobe"] = Value::from(victim.to_string_lossy());
+    write(&sources, &reg.to_string());
+    let trash = sb.extra.join(".tmp/tx/1/0");
+    write(&trash, "planted\n");
+    let target = victim.join(".profile");
+    let journal = serde_json::json!({
+        "version": 1,
+        "decision": "Preparing",
+        "intents": [{"Move": {"from": target, "to": trash}}],
+    });
+    write(&sb.extra.join(".tx-journal.json"), &journal.to_string());
+
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !target.exists(),
+        "recovery must not write into an unrecorded source lobe: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(!r.ok(), "the journal must fail closed: {}", r.stderr);
+    assert!(r.stderr.contains("outside every"), "{}", r.stderr);
+    assert!(trash.exists(), "nothing was moved");
+}
+
+/// An install that links into an extra-home source's lobe records the lobe
+/// under `known-lobes` in the default home's config first, so recovery can
+/// still undo an interrupted transaction there.
+#[test]
+fn an_installed_source_lobe_is_recorded_and_recovered() {
+    // spec: LIFE-61
+    let lobe = std::env::temp_dir().join(format!(
+        "mind-homes-{}-{}-known",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _cleanup = Cleanup(lobe.clone());
+    let mut sb = Sandbox::new(Some(&format!(
+        "[source]\nlobe = {:?}\n",
+        lobe.to_string_lossy()
+    )));
+    sb.env_lists_extra = false;
+    let r = sb.mind(&["--yes", "meld", &sb.spec(), "--home", &sb.extra_str()]);
+    assert!(r.ok(), "meld: {}\n{}", r.stdout, r.stderr);
+    assert!(lobe.join("skills/alpha").exists());
+    assert_eq!(
+        config_json(&sb)["known_lobes"],
+        serde_json::json!([lobe.to_string_lossy()])
+    );
+
+    let trash = sb.extra.join(".tmp/tx/1/0");
+    write(&trash, "kept\n");
+    let target = lobe.join("notes.md");
+    let journal = serde_json::json!({
+        "version": 1,
+        "decision": "Preparing",
+        "intents": [{"Move": {"from": target, "to": trash}}],
+    });
+    write(&sb.extra.join(".tx-journal.json"), &journal.to_string());
+    let r = sb.mind(&["recall"]);
+    assert!(r.ok(), "recall: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept\n");
+
+    // A later upgrade records the lobe once.
+    let r = sb.mind(&["--yes", "upgrade"]);
+    assert!(r.ok(), "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(config_json(&sb)["known_lobes"].as_array().unwrap().len(), 1);
+}
+
 /// Removes a directory outside the sandbox base when the test ends.
 struct Cleanup(PathBuf);
 

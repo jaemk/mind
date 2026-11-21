@@ -23,8 +23,9 @@
 //!   (`//` and `/* */`) between the tokens.
 //! - Keys written bare (`name:`) or quoted (`'name':`).
 //! - String values in single quotes, double quotes, or an uninterpolated
-//!   backtick template. A template containing `${` is skipped: the harness
-//!   rejects it, and mind is not going to evaluate it.
+//!   backtick template. A template containing `${` is skipped through its own
+//!   closing backtick, nested templates included: the harness rejects it, and
+//!   mind is not going to evaluate it.
 //! - Backslash escapes in a string value: `\\`, `\'`, `\"`, `` \` ``, `\n`,
 //!   `\r`, `\t`, `\b`, `\f`, `\v`, `\0`, `\xHH`, `\uHHHH` (a surrogate pair
 //!   combines; a lone surrogate is U+FFFD), `\u{H...}`, and a backslash before
@@ -227,7 +228,6 @@ impl<'a> Cursor<'a> {
         };
         self.advance();
         let mut out = String::new();
-        let mut interpolated = false;
         let mut terminated = false;
         while let Some(c) = self.bump() {
             match c {
@@ -261,17 +261,79 @@ impl<'a> Cursor<'a> {
                     Some(other) => out.push(other),
                     None => break,
                 },
+                // An interpolated template is not a value: skip the rest of
+                // it, interpolations and nested templates included.
                 '$' if quote == '`' && self.peek() == Some('{') => {
-                    interpolated = true;
-                    out.push(c);
+                    self.advance();
+                    self.skip_template_tail();
+                    return None;
                 }
                 c => out.push(c),
             }
         }
-        if !terminated || interpolated {
+        if !terminated {
             return None;
         }
         Some(out)
+    }
+
+    /// Skip the rest of a template literal, the cursor sitting just inside a
+    /// `${`, through the template's closing backtick (WF-57). Inside an
+    /// interpolation, strings, comments and braces are code, and a backtick
+    /// opens a nested template, so a backtick in a string there (a code fence
+    /// in a prompt) does not close the outer template. The nesting is kept on
+    /// a heap stack, not recursed into, so no file can overflow the call
+    /// stack. An unterminated template runs to end of file.
+    fn skip_template_tail(&mut self) {
+        /// Template text, or the code of an interpolation with its count of
+        /// open braces.
+        enum Frame {
+            Text,
+            Code(usize),
+        }
+        let mut stack = vec![Frame::Text, Frame::Code(0)];
+        while let Some(top) = stack.last_mut() {
+            match top {
+                Frame::Text => match self.bump() {
+                    None => return,
+                    Some('\\') => self.advance(),
+                    Some('`') => {
+                        stack.pop();
+                    }
+                    Some('$') if self.peek() == Some('{') => {
+                        self.advance();
+                        stack.push(Frame::Code(0));
+                    }
+                    Some(_) => {}
+                },
+                Frame::Code(depth) => {
+                    self.skip_trivia();
+                    match self.peek() {
+                        None => return,
+                        Some('\'' | '"') => {
+                            let _ = self.read_string();
+                        }
+                        Some('{') => {
+                            *depth += 1;
+                            self.advance();
+                        }
+                        Some('}') if *depth > 0 => {
+                            *depth -= 1;
+                            self.advance();
+                        }
+                        Some('}') => {
+                            self.advance();
+                            stack.pop();
+                        }
+                        Some('`') => {
+                            self.advance();
+                            stack.push(Frame::Text);
+                        }
+                        Some(_) => self.advance(),
+                    }
+                }
+            }
+        }
     }
 
     /// Consume exactly `n` hex digits and return their value, or consume
@@ -1700,6 +1762,43 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
         let (value, at) = read_string_at("`a${b}c`, name: 'x'");
         assert_eq!(value, None);
         assert_eq!(at, 8, "the cursor sits on the comma after the template");
+    }
+
+    // spec: WF-5 WF-57 -- a backtick inside an interpolation (in a string, or
+    // opening a nested template) does not close the outer template. Before,
+    // the first backtick after `${` closed it, and the scan read the rest of
+    // the template text as code: a prompt holding a code fence hid the real
+    // declaration, and template text spelling a declaration was read as one.
+    #[test]
+    fn a_backtick_inside_an_interpolation_does_not_close_the_template() {
+        let real = "\nexport const meta = { name: 'real' }\n";
+        for prologue in [
+            "const fence = `${\"```\"}`;",
+            "const s = `${'`'}`;",
+            "const n = `a ${`b ${`c`} d`} e`;",
+            "const c = `${ /* ` */ x}`;",
+            "const o = `${ {a: '`'}.a }`;",
+            "const t = `${\"`\"}\"; export const meta = { name: 'decoy' }; `;",
+        ] {
+            let text = format!("{prologue}{real}");
+            assert_eq!(meta(&text).name.as_deref(), Some("real"), "{text}");
+        }
+        let (value, at) = read_string_at("`${\"`\"}`, name: 'x'");
+        assert_eq!(value, None);
+        assert_eq!(at, 8, "the cursor sits on the comma after the template");
+    }
+
+    // spec: WF-5 -- nested templates are tracked on a heap stack, so a file of
+    // deeply nested interpolations cannot overflow the call stack.
+    #[test]
+    fn deeply_nested_interpolations_do_not_overflow() {
+        let depth = 200_000;
+        let text = format!(
+            "const x = {}{};\nexport const meta = {{ name: 'real' }}\n",
+            "`${".repeat(depth),
+            "}`".repeat(depth)
+        );
+        assert_eq!(parse_bounded(&text).name.as_deref(), Some("real"));
     }
 
     // spec: WF-5 -- a literal ending in a dangling escape is unterminated, and

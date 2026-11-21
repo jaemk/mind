@@ -359,6 +359,13 @@ that mind depends on is called out at the requirement that depends on it.
   (WF-30), the harness loads it regardless, and nothing fails. The error this
   rule prevents is the other one, where mind reports a name the harness does not
   use.
+
+  A template literal ends at its own closing backtick, not at the first
+  backtick after `${`. Inside an interpolation the reader skips strings,
+  comments and braces as code, and a backtick there opens a nested template.
+  Otherwise a code fence in an interpolated prompt (`` `${"```"}` ``) left the
+  scan reading template text as code. That text could hide the real
+  declaration, or spell a decoy one that the scan read first.
 - `WF-58` A `meta.name` carrying a control or invisible code point is not a
   usable harness name: mind treats it as absent (no WF-24 divergence, no WF-29
   claim) and WF-30 reports it as its own reason.

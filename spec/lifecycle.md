@@ -295,12 +295,22 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   file is read once more, and a second mismatch fails with an `Io` error
   naming the file rather than hashing a torn read. The read stops one byte past
   the stated length, so a file that keeps growing cannot keep the hash reading.
-  Entries are hashed in `(type tag, path)` order. Paths are compared as lossy
-  UTF-8, so two names differing only in invalid UTF-8 bytes can tie; a tie is
-  broken by the raw name bytes for a file and by the target for a symlink, never
-  by directory-listing order. The byte stream, and so every hash value, is the
-  same as when contents were read whole, except for a tree holding such a tied
-  pair of files, which were ordered by content before.
+  Entries are hashed in `(type tag, path)` order. On unix, a path and a
+  symlink target contribute their raw bytes, so a rename or retarget between
+  two names differing only in invalid UTF-8 bytes changes the hash, and the
+  order never depends on directory-listing order. Off unix they contribute
+  their lossy UTF-8 form. For valid UTF-8 names the raw bytes are the UTF-8
+  bytes, so those hashes are unchanged; an installed item containing a
+  non-UTF-8 name or target reports drift once after upgrading `mind`. The
+  stat fingerprint (TUI-72) reads paths and targets the same way.
+- `LIFE-66` A regular file with any execute bit set is hashed under the type
+  tag `X` instead of `F`, in both the directory and the single-file hash. The
+  install copy preserves permission bits (tooling.md), so an upstream
+  `chmod +x` (or `-x`) with unchanged content is a content-hash change that
+  `upgrade` offers and `introspect` reports. A non-executable file keeps the
+  `F` tag, so its hash is unchanged; an installed item holding an executable
+  file reports drift once after upgrading `mind`, until it is upgraded. Off
+  unix, where there is no execute bit, every regular file is tagged `F`.
 
 ## Recovery after interruption
 
@@ -334,7 +344,15 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   or a known lobe, with no symlinked ancestor escaping that root. A move ends
   in a store or `.tmp` tree, and one out of a lobe only into the trash; a link
   target lies in a store; a manifest destination is a configured home's
-  `manifest.json`. A journal that is invalid, unreadable, oversized, or names
+  `manifest.json`. A known lobe is one of: a configured lobe; the lobe of a
+  default-home source as resolved now (LOBE-3); the lobe recorded on an item in
+  the default home's `manifest.json`; or a lobe listed under the `known-lobes`
+  config key. Before an install journals a link into the lobe of an
+  extra-home source, it records that lobe under `known-lobes`, and `config
+  show` lists the key. Recovery does not read lobes from an extra home's
+  `manifest.json` or `sources.json`, or from its clones' `[source] lobe`.
+  Whoever can write the home can write those files, the same as the journal.
+  A journal that is invalid, unreadable, oversized, or names
   a path outside those roots fails closed with `transaction-journal`, is
   retained for diagnosis, and the error says how to discard it.
 - `LIFE-62` Hooks run inside the transaction are recorded when they start and

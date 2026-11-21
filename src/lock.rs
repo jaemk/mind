@@ -98,6 +98,13 @@ fn open_one(
     lock_path: std::path::PathBuf,
     required: bool,
 ) -> Result<Option<OneLock>> {
+    // spec: HOME-9 -- an extra home that does not exist holds nothing to
+    // guard, and creating it here would recreate a deleted project's `.mind`
+    // (parents included) on every command, even a read. A command that melds
+    // into it creates it later, still serialized by the default home's lock.
+    if !required && !home.is_dir() {
+        return Ok(None);
+    }
     // The mind home must exist before we can create the lock file.
     let made = mkdir_p(home);
     let rw = OpenOptions::new()

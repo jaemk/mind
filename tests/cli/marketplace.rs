@@ -477,6 +477,35 @@ fn marketplace_catalog_external_plugin_registers() {
 }
 
 #[test]
+fn marketplace_external_plugin_pin_is_applied() {
+    // spec: MKT-9
+    // An external entry's pin key pins the sub-source like a curator pin: the
+    // plugin melds at the pinned tag, not the default branch tip.
+    let (extplugin, sha_v1, sha_v2) = make_pinnable_repo("pinned-ext");
+    let catalog = Sandbox::bare("pin-catalog");
+    let ext_url = format!("file://{}", extplugin.source_spec());
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(
+            r#"{{"name":"m","plugins":[{{"name":"ext","source":{{"url":"{ext_url}","pin-tag":"v1.0"}}}}]}}"#
+        ),
+    );
+    let r = catalog.mind(&["meld", &catalog.source_spec()]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let reg = parse_json(&read_sources_json(&catalog));
+    let sub = reg["sources"]
+        .as_array()
+        .expect("sources array")
+        .iter()
+        .find(|s| s["name"].as_str().is_some_and(|n| n.ends_with("@ext")))
+        .unwrap_or_else(|| panic!("ext sub-source registered: {reg}"));
+    assert_eq!(sub["commit"], sha_v1, "melded at the tag, not {sha_v2}");
+    assert_eq!(sub["pin"]["kind"], "tag", "{sub}");
+    assert_eq!(sub["pin"]["value"], "v1.0", "{sub}");
+}
+
+#[test]
 fn marketplace_yes_auto_installs_in_repo_plugins() {
     // spec: MKT-7
     // MKT-7: a marketplace catalog's in-repo plugins are offered for install on

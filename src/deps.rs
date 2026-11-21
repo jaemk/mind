@@ -680,50 +680,38 @@ pub fn installed_graph(
     installed: impl Fn(&CatalogItem) -> bool,
     read: impl Fn(&CatalogItem) -> String,
 ) -> InstalledGraph {
-    // Filter catalog to installed items only.
-    let nodes: Vec<CatalogItem> = items.iter().filter(|it| installed(it)).cloned().collect();
+    // The full-catalog index of each node, and its inverse. Nodes are tracked
+    // by catalog index, not by `kind:name`: `probe` makes every catalog item a
+    // node (DEP-62), and two sources can both offer an unprefixed
+    // `skill:review`, so a key alone would merge them.
+    let node_full: Vec<usize> = (0..items.len()).filter(|&i| installed(&items[i])).collect();
+    let full_to_node: HashMap<usize, usize> =
+        node_full.iter().enumerate().map(|(n, &f)| (f, n)).collect();
+    let nodes: Vec<CatalogItem> = node_full.iter().map(|&i| items[i].clone()).collect();
 
-    // Build key -> index for the installed node set.
-    // Used both for InstalledGraph::key_to_idx lookups and to translate
-    // full-catalog dep indices to installed-node indices (was previously two
-    // byte-identical maps; now one map serves both purposes).
-    let key_to_idx: HashMap<String, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(i, it)| (it.key().as_str().to_string(), i))
-        .collect();
+    // Key -> node index for the key-based queries (`dependents`,
+    // `render_subtree`); the first node with a key wins.
+    let mut key_to_idx: HashMap<String, usize> = HashMap::new();
+    for (i, it) in nodes.iter().enumerate() {
+        key_to_idx.entry(it.key().as_str().to_string()).or_insert(i);
+    }
 
-    // Build the full catalog by_name lookup (edges_of uses the full catalog for
-    // resolution; then we restrict targets to installed nodes).
     let by_name = make_by_name(items);
-
-    // For each installed node, compute its direct dependency edges, then keep
-    // only those that are also installed.
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-
-    // Build a map from installed node key -> full catalog index.
-    let installed_to_full: HashMap<String, usize> = items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| installed(it))
-        .map(|(full_i, it)| (it.key().as_str().to_string(), full_i))
-        .collect();
-
-    for (installed_i, node_item) in nodes.iter().enumerate() {
-        let full_i = match installed_to_full.get(node_item.key().as_str()) {
-            Some(&idx) => idx,
-            None => continue,
-        };
-        let text = read(node_item);
-        let dep_full_indices = item_edges(full_i, items, &by_name, &text);
-
-        for dep_full_idx in dep_full_indices {
-            let dep_key = items[dep_full_idx].key();
-            if let Some(&dep_installed_i) = key_to_idx.get(dep_key.as_str())
-                && dep_installed_i != installed_i
-                && !edges[installed_i].contains(&dep_installed_i)
+    for (node, &full_i) in node_full.iter().enumerate() {
+        let text = read(&items[full_i]);
+        for dep in item_edges(full_i, items, &by_name, &text) {
+            // The sibling itself when it is a node; otherwise the installed
+            // item holding the same `kind:name` (the one the reference reaches
+            // at runtime).
+            let target = full_to_node
+                .get(&dep)
+                .or_else(|| key_to_idx.get(items[dep].key().as_str()));
+            if let Some(&t) = target
+                && t != node
+                && !edges[node].contains(&t)
             {
-                edges[installed_i].push(dep_installed_i);
+                edges[node].push(t);
             }
         }
     }
@@ -858,13 +846,29 @@ impl InstalledGraph {
     /// beneath it, cycles marked `(cycle)`.
     pub fn render_subtree(&self, root_key: &str) -> Option<String> {
         let &root_idx = self.key_to_idx.get(root_key)?;
+        Some(self.render_subtree_at(root_idx))
+    }
+
+    /// [`render_subtree`](Self::render_subtree) for the node that is `item`
+    /// itself (same source, kind and bare name), so two sources' same-key
+    /// items each render their own subtree (DEP-62). `None` when `item` is not
+    /// a node.
+    pub fn render_item_subtree(&self, item: &CatalogItem) -> Option<String> {
+        let idx = self
+            .nodes
+            .iter()
+            .position(|n| n.source == item.source && n.kind == item.kind && n.name == item.name)?;
+        Some(self.render_subtree_at(idx))
+    }
+
+    fn render_subtree_at(&self, root_idx: usize) -> String {
         let mut out = String::new();
         let mut path = Vec::new();
         // DEP-64: fresh per call, since a single-subtree render starts its
         // own bounded output.
         let mut rendered: HashSet<usize> = HashSet::new();
         self.render_installed_node(root_idx, 0, &mut path, &mut out, &mut rendered);
-        Some(out)
+        out
     }
 
     /// Recursive (path-tracked) renderer for one installed node, reused by
@@ -2108,6 +2112,40 @@ mod tests {
             roots.len(),
             1,
             "one installed copy must yield one node, got {roots:?}"
+        );
+    }
+
+    #[test]
+    fn catalog_graph_keeps_same_key_items_of_two_sources_apart() {
+        // spec: DEP-62
+        // `probe` builds the graph over every catalog item. Two sources both
+        // offer an unprefixed skill:review with different dependencies; each
+        // review's subtree must show its own source's dependency.
+        let items = vec![
+            item(ItemKind::Skill, "review", "a"),
+            item(ItemKind::Skill, "helper", "a"),
+            item(ItemKind::Skill, "review", "b"),
+            item(ItemKind::Skill, "other", "b"),
+        ];
+        let read = |it: &CatalogItem| match (it.source.as_str(), it.name.as_str()) {
+            ("a", "review") => "{{ns:helper}}".to_string(),
+            ("b", "review") => "{{ns:other}}".to_string(),
+            _ => String::new(),
+        };
+        let g = installed_graph(&items, |_| true, read);
+        let a = g
+            .render_item_subtree(&items[0])
+            .expect("a's review is a node");
+        let b = g
+            .render_item_subtree(&items[2])
+            .expect("b's review is a node");
+        assert!(
+            a.contains("skill:helper") && !a.contains("skill:other"),
+            "{a}"
+        );
+        assert!(
+            b.contains("skill:other") && !b.contains("skill:helper"),
+            "{b}"
         );
     }
 

@@ -168,7 +168,10 @@ to the same guards as `mind.toml`:
   or a NUL byte is rejected. A melded marketplace cannot read files outside its
   clone or place a symlink outside a lobe.
 - An external plugin source is pinned and validated through the same path as a
-  `[discover].sources` spec.
+  `[discover].sources` spec. A source object's `sha`, `ref` or `pin-ref` pins a
+  commit, branch or tag; `pin-tag` pins a tag; `follow-branch` or `branch`
+  follows a branch, e.g.
+  `{"source": "github", "repo": "owner/plugin", "ref": "v1.2.0"}`.
 - Names and descriptions taken from a manifest have ANSI escapes and control
   characters stripped before display, so catalog-controlled text cannot inject
   terminal sequences.

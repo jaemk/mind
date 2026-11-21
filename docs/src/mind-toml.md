@@ -117,15 +117,13 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
 
   A pattern is matched item-relative, with `/` as the separator: `*` stops at a
   `/`, `**` crosses it, and a pattern with no `/` at all anchors at the ITEM
-  ROOT. That last rule means `ignore = ["target/"]` does NOT exclude
-  `sub/target/`: it excludes only a top-level `target/`. Verified against the
-  binary: with `ignore = ["target", "docs/**"]`, `sub/target/o.bin` was still
-  copied into the store and hashed, with no error and no warning. To exclude
-  build output at any depth, write `**/target/` and `**/node_modules/` instead
-  of `target/` and `node_modules/`. Also note `foo/` removes the directory
-  itself, while `foo/**` removes only its contents and leaves an empty `foo/`
-  in the store copy. `ignore` is a silent no-op on an agent or rule item: the
-  item's path IS a single file, so there is no path inside it for a pattern to
+  ROOT. So `ignore = ["target/"]` excludes only a top-level `target/`, not
+  `sub/target/`. To exclude build output at any depth, write `**/target/` and
+  `**/node_modules/`. Note that `foo/` removes the directory itself, while
+  `foo/**` removes only its contents and leaves an empty `foo/` in the store
+  copy. There is no gitignore-style negation: an entry starting with `!` is an
+  error. `ignore` is a no-op on an agent, rule, command, or workflow item: the
+  item's path is a single file, so there is no path inside it for a pattern to
   match. See
   [spec/ignore.md](https://github.com/jaemk/mind/blob/main/spec/ignore.md).
 - **`history`**: `"shallow"` (the default) or `"full"`. `mind` clones every

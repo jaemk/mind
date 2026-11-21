@@ -110,6 +110,17 @@ The rest of this document states these rules normatively.
   character is rejected the same as one carrying a bidi override. The
   broadened set is a strict superset of the original: every code point
   blocked before NS-73 is still blocked.
+- `NS-75` The security-blocked Unicode set (NS-73) covers every Unicode
+  `Default_Ignorable_Code_Point`, not only the Cf members NS-73 named:
+  including ZWNJ/ZWJ (U+200C/U+200D), the combining grapheme joiner
+  (U+034F), the Hangul fillers U+1160/U+FFA0, the Khmer inherent vowels
+  (U+17B4/U+17B5), the Mongolian free variation selectors
+  (U+180B--U+180D, U+180F), the shorthand and musical format controls, and
+  the reserved default-ignorables (U+2065, U+FFF0--U+FFF8,
+  U+E0080--U+E00FF, U+E01F0--U+E0FFF). Each renders as nothing, so a prefix
+  or item name carrying one would display identically to the name without it
+  while keying a distinct identity. `strip_ansi` drops the same set, so a
+  display string loses ZWJ emoji joins.
 - `NS-74` A kind-qualified item ref with no source selector (`workflow:review`)
   has two readings: the item `review` of that kind, and the item whose
   effective name is literally `<kind>:<name>` (a legacy prefix equal to a kind

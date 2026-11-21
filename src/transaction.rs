@@ -1350,14 +1350,32 @@ impl Roots {
         if let Ok(homes) = paths.agent_homes() {
             lobes.extend(homes.into_iter().map(|l| normalize_home(&l.path)));
         }
+        // spec: LIFE-61 -- the lobes recorded when an install linked into an
+        // extra-home source's lobe. These come from the default home's config.
+        lobes.extend(paths.known_lobes());
+        // spec: LIFE-61 -- a source's lobe is read only for a source in the
+        // default home. An extra-home source's lobe comes from that home's
+        // registry and clone (`--lobe`, `[source] lobe`). Whoever can write the
+        // home can write those files, the same as the journal being checked,
+        // so such a lobe is trusted only once `known-lobes` records it.
+        let default_home = normalize_home(&paths.mind_home);
         if let Ok(registry) = crate::source::Registry::load(paths) {
             for source in &registry.sources {
+                if normalize_home(&paths.home_of(&source.name)) != default_home {
+                    continue;
+                }
                 if let Ok(Some(lobe)) = paths.source_lobe(&source.name) {
                     lobes.push(normalize_home(&lobe));
                 }
             }
         }
-        if let Ok(manifest) = crate::manifest::Manifest::load(paths) {
+        // spec: LIFE-61 -- only the DEFAULT home's manifest: its items' lobes
+        // are as trusted as the config that lives beside it. An extra home's
+        // `manifest.json` is written by whoever can write that home, the same
+        // as the journal being checked, so its `lobe` values would let a
+        // crafted journal name any directory as a lobe and have undo rename a
+        // file into it.
+        if let Ok(manifest) = crate::manifest::Manifest::load_file(&paths.manifest_file()) {
             lobes.extend(
                 manifest
                     .items

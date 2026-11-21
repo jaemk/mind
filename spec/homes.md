@@ -157,4 +157,7 @@ as one set.
   lock file that cannot be opened for writing is locked through a read-only
   handle. A home, the default one included, whose lock file does not exist and
   cannot be created because writes are denied there is skipped; an extra home
-  whose lock fails to open for any other reason is skipped too.
+  whose lock fails to open for any other reason is skipped too. An extra home
+  whose directory does not exist is skipped without being created, so a
+  command never recreates a deleted home (or its missing parents); a meld into
+  it creates it.

@@ -371,7 +371,7 @@ impl Manifest {
         Ok(m)
     }
 
-    fn load_file(file: &std::path::Path) -> Result<Self> {
+    pub(crate) fn load_file(file: &std::path::Path) -> Result<Self> {
         let file = file.to_path_buf();
         match std::fs::read(&file) {
             Ok(bytes) => {
