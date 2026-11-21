@@ -103,10 +103,10 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
         // distinct from a regular file whose raw bytes happen to match.
         // spec: LIFE-35
         let target = std::fs::read_link(path).map_err(|e| MindError::io(path, e))?;
-        let target_bytes = target.to_string_lossy();
+        let target_bytes = os_bytes(target.as_os_str());
         h.write(b"S");
         h.write(&(target_bytes.len() as u64).to_le_bytes());
-        h.write(target_bytes.as_bytes());
+        h.write(&target_bytes);
     } else if meta.is_dir() {
         let mut files = Vec::new();
         collect_files(path, path, &mut files, ignore)?;
@@ -117,7 +117,7 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
         for (tag, rel, content) in files {
             h.write(&[tag]);
             h.write(&(rel.len() as u64).to_le_bytes());
-            h.write(rel.as_bytes());
+            h.write(&rel);
             match content {
                 Content::Link(bytes) => {
                     h.write(&(bytes.len() as u64).to_le_bytes());
@@ -135,7 +135,7 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
             return Err(crate::install::not_regular_file(path));
         }
         let mut file = crate::install::open_regular(path)?;
-        h.write(b"F");
+        h.write(&[file_tag(&meta)]);
         stream_into(&mut h, &mut file, path, &mut vec![0u8; READ_BUF])?;
     }
     Ok(h.finish_hex())
@@ -185,10 +185,10 @@ pub(crate) fn stat_fingerprint_ignoring(
     let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
     if meta.file_type().is_symlink() {
         let target = std::fs::read_link(path).map_err(|e| MindError::io(path, e))?;
-        let target_bytes = target.to_string_lossy();
+        let target_bytes = os_bytes(target.as_os_str());
         h.write(b"S");
         h.write(&(target_bytes.len() as u64).to_le_bytes());
-        h.write(target_bytes.as_bytes());
+        h.write(&target_bytes);
     } else if meta.is_dir() {
         let mut entries = Vec::new();
         collect_stats(path, path, &mut entries, 0, ignore)?;
@@ -196,7 +196,7 @@ pub(crate) fn stat_fingerprint_ignoring(
         for (tag, rel, mtime, size, ino, ctime) in entries {
             h.write(&[tag]);
             h.write(&(rel.len() as u64).to_le_bytes());
-            h.write(rel.as_bytes());
+            h.write(&rel);
             h.write(&mtime.to_le_bytes());
             h.write(&size.to_le_bytes());
             h.write(&ino.to_le_bytes());
@@ -248,9 +248,13 @@ fn mtime_nanos(meta: &std::fs::Metadata, path: &Path) -> Result<i128> {
     })
 }
 
-/// Walk `dir` and collect `(type_tag, relative_path, mtime_nanos, size, inode,
-/// ctime_nanos)` tuples: the [`collect_files`] walk with `stat` in place of
-/// `read`. For a symlink entry the `size`/`ctime` slots double as a folded
+/// One fingerprinted entry: `(type_tag, relative_path_bytes, mtime_nanos, size,
+/// inode, ctime_nanos)`.
+type StatEntry = (u8, Vec<u8>, i128, u64, u64, i128);
+
+/// Walk `dir` and collect one [`StatEntry`] per symlink and regular file: the
+/// [`collect_files`] walk with `stat` in place of `read`. For a symlink entry
+/// the `size`/`ctime` slots double as a folded
 /// target-string digest / zero (safe because the type tag is hashed first, so
 /// a symlink entry can never be mistaken for a file entry regardless of what
 /// numbers land in those slots). Depth-capped like [`collect_files_at`]
@@ -258,7 +262,7 @@ fn mtime_nanos(meta: &std::fs::Metadata, path: &Path) -> Result<i128> {
 fn collect_stats(
     root: &Path,
     dir: &Path,
-    out: &mut Vec<(u8, String, i128, u64, u64, i128)>,
+    out: &mut Vec<StatEntry>,
     depth: usize,
     ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
@@ -271,22 +275,18 @@ fn collect_stats(
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path).map_err(|e| MindError::io(&path, e))?;
         let ft = meta.file_type();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
+        let rel_path = path.strip_prefix(root).unwrap_or(&path);
         // spec: IGN-10 -- the fingerprint sees exactly the tree the hash does.
-        if ignore.is_ignored(path.strip_prefix(root).unwrap_or(&path), ft.is_dir()) {
+        if ignore.is_ignored(rel_path, ft.is_dir()) {
             continue;
         }
+        let rel = os_bytes(rel_path.as_os_str()).into_owned();
         if ft.is_symlink() {
             // Hash the target string, not a stat: a retarget changes it even when
             // the link's own mtime does not.
             let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
-            let target_bytes = target.to_string_lossy();
             let mut th = Fnv::new();
-            th.write(target_bytes.as_bytes());
+            th.write(&os_bytes(target.as_os_str()));
             out.push((b'S', rel, 0, th.value(), 0, 0));
         } else if ft.is_dir() {
             collect_stats(root, &path, out, depth + 1, ignore)?;
@@ -313,27 +313,32 @@ enum Content {
     File(std::path::PathBuf),
 }
 
-/// One hashed entry: `(type_tag, relative_path_string, content)`.
-type Entry = (u8, String, Content);
+/// One hashed entry: `(type_tag, relative_path_bytes, content)`.
+type Entry = (u8, Vec<u8>, Content);
 
-/// The order entries are hashed in: by type tag (every file before every
-/// symlink), then relative path. That is the order the earlier sort over whole
-/// `(tag, path, content)` triples produced, so hash values are unchanged.
-///
-/// The path is the lossy UTF-8 string, so two non-UTF-8 names can share it
-/// (`a\xff` and `a\xfe` both read `a\u{FFFD}`). The tie is broken
-/// deterministically, never left to `read_dir` order: a symlink by its target,
-/// as the content sort did, and a file by its raw path bytes, which avoids
-/// reading both files to compare them.
+/// The bytes a path or symlink target contributes to a hash (LIFE-35): the raw
+/// OS bytes on unix, so two names differing only in invalid UTF-8 (`a\xff`,
+/// `a\xfe`) stay distinct. Off unix, the lossy UTF-8 form. For a valid UTF-8
+/// name both are the UTF-8 bytes, the value hashed before this existed.
+fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::borrow::Cow::Borrowed(s.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::borrow::Cow::Owned(s.to_string_lossy().into_owned().into_bytes())
+    }
+}
+
+/// The order entries are hashed in: by type tag (`F` files, then `S` symlinks,
+/// then `X` executable files), then relative path bytes. For valid UTF-8
+/// paths, byte order is `String` order, so hash values match those recorded
+/// when the path was a lossy `String`. On unix two entries never share a path,
+/// so the order is total and never depends on `read_dir` order.
 fn entry_order(a: &Entry, b: &Entry) -> std::cmp::Ordering {
-    (a.0, &a.1)
-        .cmp(&(b.0, &b.1))
-        .then_with(|| match (&a.2, &b.2) {
-            (Content::Link(x), Content::Link(y)) => x.cmp(y),
-            (Content::File(x), Content::File(y)) => x.as_os_str().cmp(y.as_os_str()),
-            // Equal tags imply equal variants: `S` is always a link, `F` a file.
-            _ => std::cmp::Ordering::Equal,
-        })
+    (a.0, &a.1).cmp(&(b.0, &b.1))
 }
 
 /// The read buffer for streaming a file into the hash.
@@ -442,21 +447,18 @@ fn collect_files_at(
         // spec: IGN-10 -- the same exclusion the install copy applies, so what
         // is not installed is not hashed. A matching directory is skipped whole
         // and never descended into.
-        if ignore.is_ignored(path.strip_prefix(root).unwrap_or(&path), ft.is_dir()) {
+        let rel_path = path.strip_prefix(root).unwrap_or(&path);
+        if ignore.is_ignored(rel_path, ft.is_dir()) {
             continue;
         }
         if ft.is_symlink() {
             // spec: LIFE-34 LIFE-35
             let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
+            let rel = os_bytes(rel_path.as_os_str()).into_owned();
             out.push((
                 b'S',
                 rel,
-                Content::Link(target.to_string_lossy().into_owned().into_bytes()),
+                Content::Link(os_bytes(target.as_os_str()).into_owned()),
             ));
         } else if ft.is_dir() {
             collect_files_at(root, &path, out, depth + 1, ignore)?;
@@ -465,15 +467,30 @@ fn collect_files_at(
             if !ft.is_file() {
                 return Err(crate::install::not_regular_file(&path));
             }
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            out.push((b'F', rel, Content::File(path)));
+            let rel = os_bytes(rel_path.as_os_str()).into_owned();
+            out.push((file_tag(&meta), rel, Content::File(path)));
         }
     }
     Ok(())
+}
+
+/// The type tag a regular file is hashed under: `b'X'` when any execute bit
+/// is set, else `b'F'` (LIFE-66). The install copy carries permission bits into
+/// the store (spec/tooling.md), so an upstream `chmod +x` is a change the
+/// installed item must pick up; folding the bit into the tag makes it one. A
+/// non-executable file keeps the `b'F'` tag, so its hash is the value earlier
+/// releases recorded. Always `b'F'` off unix, where there is no execute bit.
+fn file_tag(meta: &std::fs::Metadata) -> u8 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return b'X';
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = meta;
+    b'F'
 }
 
 #[cfg(test)]
@@ -594,6 +611,42 @@ mod tests {
         assert_eq!(file, "18f801807acd8e9b", "single-file hash");
     }
 
+    // spec: LIFE-66 -- toggling an execute bit with unchanged content changes
+    // both the tree hash and the single-file hash, and clearing it restores the
+    // original value (the `F` hash `hash_values_are_pinned` pins).
+    #[cfg(unix)]
+    #[test]
+    fn execute_bit_changes_the_hash() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("execbit");
+        golden_tree(&dir);
+        let script = dir.join("sub").join("deeper").join("x");
+        let set_mode = |mode: u32| {
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set_mode(0o644);
+        let tree_before = hash_path(&dir).unwrap();
+        let file_before = hash_path(&script).unwrap();
+
+        set_mode(0o755);
+        assert_ne!(hash_path(&dir).unwrap(), tree_before, "tree hash");
+        assert_ne!(hash_path(&script).unwrap(), file_before, "single-file hash");
+        // Any execute bit counts, not only the owner's.
+        set_mode(0o645);
+        assert_ne!(hash_path(&script).unwrap(), file_before, "other-x only");
+        // Non-execute permission changes are not content.
+        set_mode(0o600);
+        assert_eq!(hash_path(&dir).unwrap(), tree_before, "rw bits ignored");
+
+        set_mode(0o644);
+        assert_eq!(hash_path(&dir).unwrap(), tree_before, "restored tree hash");
+        assert_eq!(
+            hash_path(&script).unwrap(),
+            file_before,
+            "restored file hash"
+        );
+    }
+
     /// The digest `write_framed_with` should leave for `content` under a
     /// correct stated length: the length prefix, then the bytes.
     fn framed_digest(content: &[u8]) -> u64 {
@@ -624,27 +677,38 @@ mod tests {
         assert_eq!(h.value(), framed_digest(b"hello"));
     }
 
-    // spec: LIFE-35 -- two names that read the same once made lossy UTF-8 are
-    // ordered by their raw bytes, so the hash does not depend on the order the
-    // directory listing returns them in.
+    // spec: LIFE-35 -- paths and symlink targets are hashed as raw bytes on
+    // unix, so renaming a file, or retargeting a symlink, between two names
+    // that differ only in invalid UTF-8 changes both the hash and the stat
+    // fingerprint. A filesystem that refuses such names (APFS: `EILSEQ`)
+    // cannot hold them, so the test has nothing to check there.
+    #[cfg(unix)]
     #[test]
-    fn entries_with_the_same_lossy_path_order_deterministically() {
-        let file = |raw: &str| (b'F', "a\u{FFFD}".to_string(), Content::File(raw.into()));
-        let link = |t: &[u8]| (b'S', "a\u{FFFD}".to_string(), Content::Link(t.to_vec()));
-        let names = |v: &[Entry]| -> Vec<String> {
-            v.iter()
-                .map(|e| match &e.2 {
-                    Content::File(p) => p.to_string_lossy().into_owned(),
-                    Content::Link(t) => String::from_utf8_lossy(t).into_owned(),
-                })
-                .collect()
-        };
-        let mut fwd = vec![file("/r/a2"), file("/r/a1"), link(b"y"), link(b"x")];
-        let mut rev = vec![link(b"x"), link(b"y"), file("/r/a1"), file("/r/a2")];
-        fwd.sort_by(entry_order);
-        rev.sort_by(entry_order);
-        assert_eq!(names(&fwd), ["/r/a1", "/r/a2", "x", "y"]);
-        assert_eq!(names(&fwd), names(&rev));
+    fn non_utf8_rename_and_retarget_change_the_hash() {
+        use std::os::unix::ffi::OsStrExt;
+        let name = |raw: &'static [u8]| std::ffi::OsStr::from_bytes(raw);
+        let dir = tmp("non-utf8-rename");
+        if let Err(e) = std::fs::write(dir.join(name(b"a\xff")), b"same") {
+            assert_eq!(e.raw_os_error(), Some(libc::EILSEQ), "{e}");
+            return;
+        }
+        let before = hash_path(&dir).unwrap();
+        let fp_before = stat_fingerprint(&dir).unwrap();
+        std::fs::rename(dir.join(name(b"a\xff")), dir.join(name(b"a\xfe"))).unwrap();
+        assert_ne!(hash_path(&dir).unwrap(), before, "file rename");
+        assert_ne!(stat_fingerprint(&dir).unwrap(), fp_before, "file rename");
+        std::fs::remove_file(dir.join(name(b"a\xfe"))).unwrap();
+
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(name(b"t\xff"), &link).unwrap();
+        let tree_before = hash_path(&dir).unwrap();
+        let single_before = hash_path(&link).unwrap();
+        let fp_before = stat_fingerprint(&dir).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(name(b"t\xfe"), &link).unwrap();
+        assert_ne!(hash_path(&dir).unwrap(), tree_before, "tree retarget");
+        assert_ne!(hash_path(&link).unwrap(), single_before, "single retarget");
+        assert_ne!(stat_fingerprint(&dir).unwrap(), fp_before, "fp retarget");
     }
 
     // spec: LIFE-35 -- the same tree of non-UTF-8 names hashes the same

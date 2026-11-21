@@ -138,6 +138,7 @@ and verified.
 | Uninstall confinement: recorded paths must resolve under the store or a configured lobe | done | LIFE-44 |
 | State-file schema versions in sources.json/manifest.json (absent = 1; newer errors) | done | STO-50, STO-51 |
 | Content-hash framing: length-prefixed fields, type-tagged symlinks | done | LIFE-35 |
+| Content hash covers the execute bit, so an upstream `chmod +x` is offered by `upgrade` | done | LIFE-66 |
 | TUI sanitization: source-derived strings stripped of ANSI/control/bidi at the model boundary | done | TUI-60 |
 | Managed-policy pin values validated as git refs | done | POL-33 |
 | Managed-policy `[binary].self-update` control: disable, pin to a version, or allow | done | POL-51, POL-52, POL-53, POL-54 |

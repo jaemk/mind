@@ -356,6 +356,38 @@ fn upgrade_yes_applies_and_is_then_idempotent() {
     assert!(idem.stdout.contains("up to date"), "{}", idem.stdout);
 }
 
+#[cfg(unix)]
+#[test]
+fn upgrade_picks_up_an_upstream_chmod_with_unchanged_content() {
+    // spec: LIFE-66 -- an upstream `chmod +x` on a skill's helper is a change:
+    // `upgrade` offers it and the re-copied store file is executable.
+    use std::os::unix::fs::PermissionsExt;
+    let sb = melded();
+    sb.write_and_commit("skills/review/run.sh", "#!/bin/sh\necho hi\n");
+    assert!(sb.mind(&["sync"]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    let stored = sb.mind_home.join("store/skill/review/run.sh");
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode();
+    assert_eq!(mode(&stored) & 0o111, 0, "installed non-executable");
+
+    let src = sb.source.join("skills/review/run.sh");
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(&sb.source, &["commit", "-aqm", "chmod +x run.sh"]);
+    assert!(sb.mind(&["sync"]).success);
+
+    let applied = sb.mind(&["upgrade", "--yes"]);
+    assert!(applied.success, "{}", applied.stderr);
+    assert!(
+        applied.stdout.contains("upgraded skill:review"),
+        "{}",
+        applied.stdout
+    );
+    assert_ne!(mode(&stored) & 0o111, 0, "store copy is now executable");
+
+    let idem = sb.mind(&["upgrade"]);
+    assert!(idem.stdout.contains("up to date"), "{}", idem.stdout);
+}
+
 #[test]
 fn upgrade_item_filter_limits_to_one() {
     // spec: CLI-63
