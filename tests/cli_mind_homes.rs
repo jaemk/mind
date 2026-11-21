@@ -1240,6 +1240,28 @@ fn configured_lobes_are_linked_for_a_source_in_another_home() {
     }
 }
 
+/// An extra home whose directory does not exist (a deleted project's
+/// `.mind`, or a listed home nothing was melded into yet) is not created by a
+/// command that only reads: locking skips it, so `recall` leaves no empty
+/// home and `.lock` behind.
+#[test]
+fn a_missing_extra_home_is_not_created_by_a_read() {
+    // spec: HOME-9
+    let sb = Sandbox::new(None);
+    let nested = sb.extra.join("project").join(".mind");
+    let r = sb.mind_env(
+        &std::env::current_dir().unwrap(),
+        &[("MIND_HOMES", &nested)],
+        &["recall", "--sources"],
+    );
+    assert!(r.ok(), "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !sb.extra.exists(),
+        "a read must not create a missing extra home: {}",
+        nested.display()
+    );
+}
+
 /// A transaction journal in an extra home is confined to known lobes, and an
 /// item's `lobe` recorded in that same home's `manifest.json` does not make a
 /// directory known: otherwise whoever can write the home could name any
