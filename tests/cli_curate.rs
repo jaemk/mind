@@ -430,6 +430,46 @@ fn a_curator_pin_version_resolves_and_a_changed_range_is_re_pinned() {
 }
 
 #[test]
+fn a_repin_upgrades_the_items_installed_from_the_source_in_the_same_run() {
+    // spec: CUR-10 CUR-5 CUR-6
+    // The items are current at plan time, so no `upgrade` change is planned;
+    // the repin moves the clone, and the upgrade pass must still land it.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    for (body, tag) in [("one", "v1.0.0"), ("two", "v2.0.0")] {
+        lib.write_and_commit(
+            "skills/review/SKILL.md",
+            &format!("---\ndescription: Review\n---\n# review\n{body}\n"),
+        );
+        git(&lib.path, &["tag", tag]);
+    }
+    let curator = env.repo("curator");
+    let entry = |range: &str| {
+        format!(
+            "{{ source = \"{}\", install = true, pin-version = \"{range}\" }}",
+            lib.spec()
+        )
+    };
+    curator.curate_list(&[entry("^1")]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let installed = env.claude_home.join("skills/review/SKILL.md");
+    assert!(std::fs::read_to_string(&installed).unwrap().contains("one"));
+
+    curator.curate_list(&[entry("^2")]);
+    let applied = env.mind(&["curate", "--yes"]);
+    assert!(applied.success, "{} {}", applied.stdout, applied.stderr);
+    let body = std::fs::read_to_string(&installed).unwrap();
+    assert!(
+        body.contains("two"),
+        "the repinned source's items must be upgraded: {body}\n{}",
+        applied.stdout
+    );
+    let again = env.mind(&["curate", "--check"]);
+    assert!(again.stdout.contains("up to date"), "{}", again.stdout);
+}
+
+#[test]
 fn an_outdated_curated_source_is_reported_and_upgraded() {
     // spec: CUR-6
     let env = Env::new();

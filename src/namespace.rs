@@ -763,6 +763,21 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
     Some((kind, name, rest))
 }
 
+/// [`parse_install_path`] with the source's own prefix taken off the item
+/// name: an installed item's directory carries the effective name
+/// (`jk:review`), which is what an author copying the path from disk writes.
+fn parse_ctx_path(path: &str, ctx: &PathCtx) -> Option<(crate::error::ItemKind, String, String)> {
+    let (kind, name, rest) = parse_install_path(path)?;
+    let name = match ctx.prefix.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => name
+            .strip_prefix(p)
+            .and_then(|n| n.strip_prefix(':'))
+            .map_or(name.clone(), str::to_string),
+        None => name,
+    };
+    Some((kind, name, rest))
+}
+
 /// Join a token with a path remainder: `{{self}}` + `resources/x` -> `{{self}}/resources/x`.
 fn join_token(token: &str, rest: &str) -> String {
     if rest.is_empty() {
@@ -775,7 +790,7 @@ fn join_token(token: &str, rest: &str) -> String {
 /// The token that should replace a hardcoded `path`, or `None` when it does not
 /// map confidently (a foreign name, an unrecognized layout like `~/.agents/resources/...`).
 fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
-    let (kind, name, rest) = parse_install_path(path)?;
+    let (kind, name, rest) = parse_ctx_path(path, ctx)?;
     // The item's own directory -> {{self}}.
     if kind == ctx.self_kind && name == ctx.self_name {
         return Some(join_token("{{self}}", &rest));
@@ -809,7 +824,7 @@ fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
 /// the class and the token that should replace it (if it maps confidently).
 fn classify_path(canonical: &str, ctx: &PathCtx) -> (HardcodedKind, Option<String>) {
     let suggestion = token_for_path(canonical, ctx);
-    let kind = match parse_install_path(canonical) {
+    let kind = match parse_ctx_path(canonical, ctx) {
         Some((k, name, _)) => {
             if k == ctx.self_kind && name == ctx.self_name {
                 HardcodedKind::OwnResource
@@ -852,6 +867,11 @@ fn scan_hardcoded(content: &str, ctx: &PathCtx) -> Vec<(usize, usize, HardcodedP
                 break;
             }
         }
+        // Punctuation closing the sentence the path ends is not part of it.
+        end = scan_from
+            + content[scan_from..end]
+                .trim_end_matches(['.', ':', '!', '?'])
+                .len();
         let matched = content[start..end].to_string();
         if let Some(canonical) = canonical_install_path(&matched) {
             let (kind, suggestion) = classify_path(&canonical, ctx);
@@ -1395,6 +1415,22 @@ impl Structure {
                     fill(&mut cells, range, Cell::Prose);
                 }
                 pulldown_cmark::Event::Code(_) => fill(&mut cells, range, Cell::Span),
+                // An HTML tag (or comment) is markup, not prose: an attribute
+                // value is a destination or an identifier, like link syntax
+                // (NS-52). Text between tags stays prose.
+                pulldown_cmark::Event::Html(_) | pulldown_cmark::Event::InlineHtml(_) => {
+                    let bytes = content.as_bytes();
+                    let mut i = range.start;
+                    while let Some(open) = bytes[i..range.end].iter().position(|&b| b == b'<') {
+                        let start = i + open;
+                        let end = bytes[start..range.end]
+                            .iter()
+                            .position(|&b| b == b'>')
+                            .map_or(range.end, |close| start + close + 1);
+                        fill(&mut cells, start..end, Cell::LinkSyntax);
+                        i = end;
+                    }
+                }
                 _ => {}
             }
         }
@@ -5615,5 +5651,93 @@ mod tests {
             expanded.contains("run.sh"),
             "expand_paths must still resolve the spaced tools: token: {expanded}"
         );
+    }
+
+    #[test]
+    fn templatize_leaves_an_html_tag_alone() {
+        // spec: NS-52
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("See <a href=\"dev\" title=\"dev\">the dev doc</a>.\n", &s);
+        assert_eq!(
+            (out.as_str(), n),
+            (
+                "See <a href=\"dev\" title=\"dev\">the {{ns:dev}} doc</a>.\n",
+                1
+            )
+        );
+        assert_eq!(
+            unguarded_refs("See <img alt=\"dev\" src=\"x.png\">.\n", &s),
+            Vec::<String>::new()
+        );
+        // An HTML block: the tag and a comment are syntax, the text is prose.
+        let (out, n) = templatize(
+            "<div id=\"dev\">\nHand off to dev.\n<!-- dev -->\n</div>\n",
+            &s,
+        );
+        assert_eq!(
+            (out.as_str(), n),
+            (
+                "<div id=\"dev\">\nHand off to {{ns:dev}}.\n<!-- dev -->\n</div>\n",
+                1
+            )
+        );
+        // A token in an attribute is misplaced, like one in a link destination.
+        assert_eq!(
+            contexts("See <a href=\"{{ns:dev}}\">x</a>.\n"),
+            vec![("dev".into(), NsContext::Path)]
+        );
+    }
+
+    // ---- properties ---------------------------------------------------------
+
+    /// A store path to a sibling, as the item's author sees it installed
+    /// (prefix applied), written in a sentence: rewriting it to a token and
+    /// expanding the token gives the same text back.
+    // spec: CLI-136 CLI-138 TOOL-10 TOOL-12 TOOL-16
+    #[test]
+    fn a_rewritten_store_path_expands_back_to_itself() {
+        use crate::test_gen::{Gen, cases};
+        let sibs = [
+            psib(ItemKind::Skill, "review", None),
+            psib(ItemKind::Tool, "detect", Some("bin/detect")),
+            psib(ItemKind::Resource, "templates", None),
+            psib(ItemKind::Agent, "dev", None),
+            psib(ItemKind::Rule, "style", None),
+        ];
+        let home = Path::new("/home/jk");
+        let store = Path::new("/home/jk/.mind/store");
+        cases(0x0a3e_0001, 2_000, |g: &mut Gen| {
+            let prefix = g.one_in(2).then(|| "jk".to_string());
+            let target = g.pick(&sibs);
+            let rest = match target.kind {
+                ItemKind::Tool => *g.pick(&["", "bin/detect", "lib/x.sh"]),
+                _ => *g.pick(&["", "resources/pr.py", "a/b.md"]),
+            };
+            let mut path = format!(
+                "~/.mind/store/{}/{}",
+                target.kind.as_str(),
+                apply(&target.name, &prefix)
+            );
+            if !rest.is_empty() {
+                path = format!("{path}/{rest}");
+            }
+            let after = *g.pick(&[" now", ".", ". Then", ":", ")", ",", ""]);
+            let text = format!("(run {path}{after}");
+            let c = PathCtx {
+                store_root: store,
+                home: Some(home),
+                prefix: &prefix,
+                self_kind: ItemKind::Skill,
+                self_name: "review",
+                siblings: &sibs,
+            };
+            let (rewritten, n) = rewrite_hardcoded_paths(&text, &c);
+            assert_eq!(n, 1, "{text:?} -> {rewritten:?}");
+            assert_eq!(
+                expand_paths(&rewritten, &c).unwrap(),
+                text,
+                "{text:?} -> {rewritten:?}"
+            );
+        });
     }
 }

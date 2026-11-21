@@ -1760,6 +1760,54 @@ fn dump_add_root_over_authoritative_mindtoml_emits_but_is_gated_on_reroundtrip()
 }
 
 #[test]
+fn dump_leaves_out_an_installed_item_only_a_gated_add_root_reaches() {
+    // spec: DUMP-12 DUMP-7 DSC-63 -- the source's own mind.toml closes the
+    // DSC-60 gate, and a proper subset is installed. Naming the add-root item
+    // in `install-items` would fail the whole re-meld (DSC-63), so dump leaves
+    // it out with a warning and the output still melds.
+    let sb = Sandbox::bare("gated-subset-src");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"core\"\npath = \"skills/core\"\n\n\
+         [[items]]\nkind = \"skill\"\nname = \"extra\"\npath = \"skills/extra\"\n",
+    );
+    sb.write_and_commit(
+        "skills/core/SKILL.md",
+        "---\nname: core\ndescription: core\n---\n# core\n",
+    );
+    sb.write_and_commit(
+        "skills/extra/SKILL.md",
+        "---\nname: extra\ndescription: extra\n---\n# extra\n",
+    );
+    sb.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: addon\n---\n# addon\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--add-root", "contrib", "--yes"]);
+    assert!(meld.success, "meld: {} {}", meld.stdout, meld.stderr);
+    let f = sb.mind(&["forget", "skill:extra", "--yes"]);
+    assert!(f.success, "forget: {} {}", f.stdout, f.stderr);
+
+    let dr = sb.mind(&["dump"]);
+    assert!(dr.success, "dump: {} {}", dr.stdout, dr.stderr);
+    let entries = dump_entries(&dr.stdout);
+    assert_eq!(
+        str_list(&entries[0], "install-items"),
+        Some(vec!["skill:core".to_string()]),
+        "{}",
+        dr.stdout
+    );
+    assert!(
+        dr.stderr.contains("left out of the dump") && dr.stderr.contains("skill:addon"),
+        "the warning names the dropped item: {}",
+        dr.stderr
+    );
+
+    let fresh = remeld_dump(&sb, "gated-subset");
+    assert_eq!(installed_keys(&fresh), vec!["skill:core".to_string()]);
+}
+
+#[test]
 fn dump_emits_no_add_roots_key_when_source_has_none() {
     // spec: DUMP-11 — a source melded WITHOUT --add-root must emit no
     // `add-roots` key at all (end-to-end, not just the unit-level DumpEntry
@@ -2546,4 +2594,146 @@ fn dump_roundtrips_a_disabled_default_profile() {
     assert!(!original.1.contains(&"rule:style".to_string()));
     let fresh = remeld_dump(&sb, "b");
     assert_eq!(recorded(&fresh), original);
+}
+
+// ---------------------------------------------------------------------------
+// Property: dump -> meld reproduces the melded state
+// ---------------------------------------------------------------------------
+
+/// A SplitMix64 stream, so the cases are fixed and a failure names its seed.
+struct Gen(u64);
+
+impl Gen {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn one_in(&mut self, n: u64) -> bool {
+        self.next().is_multiple_of(n)
+    }
+}
+
+/// What `dump` must carry for each melded source: its identity, the commit it
+/// sits on, its prefixes, and its consumer roots. Keyed by identity.
+fn source_state(mind_home: &Path) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(mind_home.join("sources.json")).unwrap())
+            .unwrap();
+    v["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            let pick = |k: &str| s.get(k).cloned().unwrap_or(serde_json::Value::Null);
+            let state = serde_json::json!({
+                "commit": pick("commit"),
+                "alias": pick("alias"),
+                "as_alias": pick("as_alias"),
+                "roots": pick("roots"),
+                "add_roots": pick("add_roots"),
+                "flat_skills": pick("flat_skills"),
+            });
+            (s["name"].as_str().unwrap().to_string(), state)
+        })
+        .collect()
+}
+
+/// The installed manifest keys of a home, empty when nothing was ever
+/// installed there (no `manifest.json`).
+fn installed_keys(mind_home: &Path) -> Vec<String> {
+    match std::fs::read_to_string(mind_home.join("manifest.json")) {
+        Ok(text) => {
+            let man: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let mut keys: Vec<String> = man["items"]
+                .as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+            keys.sort();
+            keys
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn dump_then_meld_reproduces_sources_and_installed_items() {
+    // spec: DUMP-1 DUMP-2 DUMP-4 DUMP-5 DUMP-7 DUMP-11 DSC-60 -- over a spread of meld
+    // settings (own prefix or none, an identity alias or none, `--root` or
+    // `--add-root`, any installed subset, a source HEAD that moved on), melding
+    // the dump into a fresh home reproduces each source's identity, commit,
+    // prefixes and roots, and the installed item set.
+    for case in 0..10u64 {
+        let seed = 0xd0_0d00 ^ case;
+        let mut g = Gen(seed);
+        let own_prefix = g.one_in(2);
+        let sb = Sandbox::new(&format!("prop-src-{case}"));
+        if own_prefix {
+            write_file(&sb.source.join("mind.toml"), "[source]\nprefix = \"sp\"\n");
+        }
+        write_file(
+            &sb.source.join("pkg/skills/packed/SKILL.md"),
+            "---\nname: packed\ndescription: Packed skill\n---\n# packed\n",
+        );
+        git_commit(&sb.source);
+
+        let mut args: Vec<String> = vec!["meld".into(), sb.source_spec(), "--yes".into()];
+        if g.one_in(2) {
+            args.extend(["--namespace".into(), "ns".into()]);
+        }
+        // A prefix-only mind.toml leaves the DSC-60 gate open, so the
+        // reproduction keeps the roots and add-roots either way.
+        match g.next() % 3 {
+            0 => args.extend(["--root".into(), "pkg".into()]),
+            1 => args.extend(["--add-root".into(), "pkg".into()]),
+            _ => {}
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let m = sb.mind(&args);
+        assert!(
+            m.success,
+            "seed {seed:#x} {args:?}: {} {}",
+            m.stdout, m.stderr
+        );
+
+        // Forget a random subset of what the meld installed.
+        let installed = installed_keys(&sb.mind_home);
+        for key in &installed {
+            if g.one_in(3) {
+                let f = sb.mind(&["forget", key, "--yes"]);
+                assert!(
+                    f.success,
+                    "seed {seed:#x} forget {key}: {} {}",
+                    f.stdout, f.stderr
+                );
+            }
+        }
+        // The source moves on; the dump still pins the recorded commit.
+        if g.one_in(2) {
+            sb.write_and_commit("rules/later.md", "---\ndescription: later\n---\n# later\n");
+        }
+
+        let want_sources = source_state(&sb.mind_home);
+        let want_items = installed_keys(&sb.mind_home);
+        let fresh = remeld_dump(&sb, &format!("prop-{case}"));
+        let got_sources = source_state(&fresh);
+        for (name, state) in &want_sources {
+            assert_eq!(
+                got_sources.get(name),
+                Some(state),
+                "seed {seed:#x} {args:?}: source {name} in {got_sources:#?}"
+            );
+        }
+        assert_eq!(
+            got_sources.len(),
+            want_sources.len() + 1,
+            "seed {seed:#x} {args:?}: only the dump itself is added: {got_sources:#?}"
+        );
+        let got_items = installed_keys(&fresh);
+        assert_eq!(got_items, want_items, "seed {seed:#x} {args:?}");
+    }
 }

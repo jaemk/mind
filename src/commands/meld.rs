@@ -176,9 +176,10 @@ pub(super) fn stamp_origin(
 
 /// Curator-supplied configuration for a nested source, lifted from a parent
 /// super-source's `[discover].sources` entry (DSC-59). Resolved by the parent
-/// before recursing; the pin is always applied (DSC-65, authoritative); roots
-/// and hooks are gated (DSC-60) and applied only when the nested source has no
-/// `mind.toml` of its own.
+/// before recursing; the pin is always applied (DSC-65, authoritative); roots,
+/// add-roots, flat-skills, and hooks are gated (DSC-60): applied only while
+/// the nested source's own `mind.toml`, if any, declares no discovery or hooks
+/// ([`crate::mindfile::MindToml::gates_curated_config`]).
 #[derive(Default)]
 pub(crate) struct CuratedConfig {
     /// The curator's `mind-home` for this entry (HOME-10). Not gated: it picks
@@ -189,18 +190,16 @@ pub(crate) struct CuratedConfig {
     /// (DSC-65). NOT included in the DSC-60 gating/warning.
     pub(super) pin: Option<Pin>,
     /// The curator `roots`, if set (an explicit empty list is preserved).
-    /// Gated by DSC-60: only applied when the nested source has no mind.toml.
+    /// Gated by DSC-60.
     pub(super) roots: Option<Vec<String>>,
-    /// The curator `add-roots` (DSC-88), if set. Gated by DSC-60/DSC-88: only
-    /// applied when the nested source has no mind.toml of its own, same as
-    /// `roots` -- an authoritative nested manifest is an export-control
+    /// The curator `add-roots` (DSC-88), if set. Gated by DSC-60/DSC-88, same
+    /// as `roots` -- an authoritative nested manifest is an export-control
     /// decision (DSC-60) and a curator's `add-roots` must not bypass it.
     pub(super) add_roots: Option<Vec<String>>,
-    /// The curator `flat-skills` (DSC-77). Gated by DSC-60: only applied when the
-    /// nested source has no mind.toml of its own.
+    /// The curator `flat-skills` (DSC-77). Gated by DSC-60.
     pub(super) flat_skills: bool,
     /// The curator `[[discover.sources.hooks]]`, resolved in declaration order.
-    /// Gated by DSC-60: only applied when the nested source has no mind.toml.
+    /// Gated by DSC-60.
     pub(super) hooks: Vec<crate::mindfile::ResolvedHook>,
 }
 
@@ -227,10 +226,9 @@ impl CuratedConfig {
 /// directive.
 ///
 /// spec: DSC-88 -- `add-roots` is GATED (DSC-60), same as roots/flat-skills/
-/// hooks: it must not reach into a nested source that ships its own mind.toml
-/// and bypass its authoritative export list (DSC-3). Routed through
-/// `CuratedConfig` (not the consumer `--add-root` slot) so `meld_recursive`
-/// applies it only when the nested source has no `mind.toml` of its own.
+/// hooks: it must not bypass a nested source's authoritative export list
+/// (DSC-3). Routed through `CuratedConfig` (not the consumer `--add-root`
+/// slot) so `meld_recursive` applies it only while the DSC-60 gate is open.
 pub(crate) fn curated_config_for(
     entry: &crate::mindfile::NestedSource,
     toml_path: &std::path::Path,
@@ -285,8 +283,9 @@ pub(crate) struct MeldRequest<'a, 'p> {
     pub(crate) yes: bool,
     /// The curator-supplied configuration from a parent super-source's
     /// `[discover].sources` entry (DSC-59): a pin, scan roots, and lifecycle
-    /// hooks. Applied only when the nested source ships no `mind.toml` of its
-    /// own (DSC-60); when it does, they are ignored with a warning.
+    /// hooks. The gated ones apply only while the nested source's `mind.toml`
+    /// declares no discovery or hooks (DSC-60); otherwise they are ignored
+    /// with a warning.
     pub(crate) curated: Option<CuratedConfig>,
     /// The consumer's or curator's explicit kind for a file link (CLI-239, DSC-100).
     pub(crate) item_kind: Option<ItemKind>,
@@ -604,15 +603,14 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
         .and_then(|m| m.source.description.clone())
         .map(|d| strip_ansi(&d));
 
-    // DSC-60: the curator-supplied roots and hooks apply only when the nested
-    // source ships NO mind.toml of its own. The gate is whole-file: any nested
-    // mind.toml (even one declaring none of the gated fields) suppresses roots
-    // and hooks, since the source has onboarded. `as` (DSC-39) and `install`
-    // (DSC-58) are not gated. DSC-65: the curator's pin directive is NOT gated
-    // -- it is authoritative regardless of whether the nested source has a
-    // mind.toml of its own.
+    // DSC-60: the curator-supplied roots, add-roots, flat-skills, and hooks
+    // apply only while the nested source's own mind.toml (if any) declares
+    // none of its own discovery or hooks. A mind.toml that does suppresses all
+    // four. `as` (DSC-39) and `install` (DSC-58) are not gated. DSC-65: the
+    // curator's pin directive is NOT gated -- it is authoritative regardless
+    // of the nested mind.toml.
     let curated = curated.unwrap_or_default();
-    let apply_curated = mindfile.is_none();
+    let apply_curated = !mindfile.as_ref().is_some_and(|m| m.gates_curated_config());
     // The curator pin is always extracted (DSC-65: authoritative, not gated).
     let curated_pin = curated.pin.clone();
     if !apply_curated && curated.has_gated_values() {
@@ -637,7 +635,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             String::new()
         };
         eprintln!(
-            "warning: {} ships its own mind.toml; curator-supplied roots/add-roots/flat-skills/hooks are ignored{add_root_hint}",
+            "warning: {} declares its own discovery or hooks in its mind.toml; curator-supplied roots/add-roots/flat-skills/hooks are ignored{add_root_hint}",
             source.name
         );
     }
@@ -955,7 +953,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     } else if apply_curated && curated.roots.is_some() {
         // DSC-61: with no consumer --root override, curator-supplied roots govern
         // convention discovery just like a source's own [source].roots (DSC-50).
-        // A gated source has no mind.toml, so it cannot be authoritative.
+        // An open gate means the source is not authoritative.
         source.roots = curated.roots.clone();
     }
 
@@ -977,8 +975,8 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
         }
     } else if apply_curated && curated.flat_skills {
         // spec: DSC-77 / DSC-60 — with no consumer override, curator-supplied
-        // flat-skills governs convention discovery, applied only because the gated
-        // source has no mind.toml of its own (so it cannot be authoritative).
+        // flat-skills governs convention discovery, applied only because the
+        // gate is open (so the source cannot be authoritative).
         source.flat_skills = true;
     }
 
@@ -992,8 +990,8 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     } else if apply_curated && curated.add_roots.is_some() {
         // spec: DSC-88 -- unlike a direct consumer `--add-root`, a CURATOR's
         // `add-roots` (from a `[discover].sources` entry) is gated by DSC-60
-        // exactly like `roots`/`flat-skills`/hooks: it composes only when the
-        // nested source has no `mind.toml` of its own. Without this gate a
+        // exactly like `roots`/`flat-skills`/hooks: it composes only while the
+        // gate is open. Without this gate a
         // curator could reach into a nested source's authoritative export list
         // (DSC-3) and surface everything it deliberately did not export.
         source.add_roots = curated.add_roots.clone();

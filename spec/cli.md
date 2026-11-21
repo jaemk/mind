@@ -94,7 +94,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-11` Accepted repo specs: `owner/repo` and `github:owner/repo` (github.com),
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
-  parses to none of these is an error (`InvalidRepoSpec`).
+  parses to none of these is an error (`InvalidRepoSpec`). Every form strips
+  one trailing `.git` from the repo, so a repo whose name ends in `.git` is
+  spelled with a second one (`owner/repo.git.git`), and the recorded url keeps
+  that second `.git` so it parses back to the same identity.
 - `CLI-204` Each of the `host`, `owner`, and `repo` parts a spec parses to must
   be a single safe path component, or the spec is refused (`UnsafeRepoSpec`,
   naming the offending part). A part is refused when it is empty, is `.` or
@@ -1241,6 +1244,9 @@ only appear at meld or install time. It is read-only and installs nothing.
   `/Users/<user>` path. When the path maps confidently to a token (the item's own
   dir -> `{{self}}`, a sibling tool's entrypoint -> `{{tools:name}}`, another
   sibling -> `{{path:kind:name}}`) the finding names the suggested token. The
+  item name in the path may carry the source's own prefix (`jk:review`, the
+  installed name), and punctuation ending the sentence (`.`, `:`, `!`, `?`) is
+  not part of the path. The
   message reflects what the path resolves to at runtime (CLI-145). Advisory, not
   hard: `--fix` rewrites the confidently-mapped ones, but only in a markdown file
   (CLI-138, NS-54); the identical finding in a non-markdown file is reported and

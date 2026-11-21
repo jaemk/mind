@@ -815,4 +815,212 @@ mod tests {
         assert_eq!(Range::caret_of(&v("2.0.0")).to_string(), "^2.0.0");
         assert!(Range::caret_of(&v("2.0.0")).matches(&v("2.3.0")));
     }
+
+    // ---- properties, against the `semver` crate as the oracle ------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// A numeric component, small or near the `u64` limit.
+    fn gen_num(g: &mut Gen) -> u64 {
+        match g.below(6) {
+            0 => u64::MAX - g.below(3) as u64,
+            1 => g.u64(),
+            _ => g.below(12) as u64,
+        }
+    }
+
+    /// One valid identifier: numeric (no leading zero in a prerelease) or
+    /// alphanumeric with `-`.
+    fn gen_ident(g: &mut Gen, prerelease: bool) -> String {
+        if g.one_in(2) {
+            let n = gen_num(g).to_string();
+            if !prerelease && g.one_in(4) {
+                return format!("0{n}");
+            }
+            return n;
+        }
+        let s = g.string_from(&['a', 'Z', 'r', 'c', '-', '0', '9'], 1, 5);
+        if s.bytes().all(|b| b.is_ascii_digit()) {
+            format!("{s}x")
+        } else {
+            s
+        }
+    }
+
+    fn gen_idents(g: &mut Gen, prerelease: bool) -> Vec<String> {
+        (0..g.range(1, 3))
+            .map(|_| gen_ident(g, prerelease))
+            .collect()
+    }
+
+    fn gen_version(g: &mut Gen) -> Version {
+        Version {
+            major: gen_num(g),
+            minor: gen_num(g),
+            patch: gen_num(g),
+            pre: if g.one_in(2) {
+                gen_idents(g, true)
+            } else {
+                Vec::new()
+            },
+            build: g.one_in(3).then(|| gen_idents(g, false).join(".")),
+        }
+    }
+
+    /// A string near the version grammar: mostly the characters a version is
+    /// made of, so many cases are almost-valid.
+    fn gen_version_like(g: &mut Gen) -> String {
+        if g.one_in(3) {
+            let mut s = gen_version(g).to_string();
+            // One edit: insert, delete, or replace a char.
+            let chars = ['.', '-', '+', '0', '1', 'a', ' ', '^', '=', '*'];
+            let at = g.below(s.len() + 1);
+            match g.below(3) {
+                0 => s.insert(at, *g.pick(&chars)),
+                1 if at < s.len() => {
+                    s.remove(at);
+                }
+                _ if at < s.len() => s.replace_range(at..=at, &g.pick(&chars).to_string()),
+                _ => {}
+            }
+            return s;
+        }
+        g.string_from(&['0', '1', '9', '.', '.', '-', '+', 'a', 'z', '0'], 0, 14)
+    }
+
+    // spec: VER-10
+    #[test]
+    fn version_parse_agrees_with_semver() {
+        cases(0x5e3e_0001, 20_000, |g| {
+            let s = gen_version_like(g);
+            let ours = Version::parse(&s);
+            let theirs = semver::Version::parse(&s).ok();
+            assert_eq!(ours.is_some(), theirs.is_some(), "{s:?}");
+            if let (Some(o), Some(t)) = (ours, theirs) {
+                assert_eq!(o.to_string(), t.to_string(), "{s:?}");
+            }
+        });
+    }
+
+    // spec: VER-10
+    #[test]
+    fn version_display_round_trips() {
+        cases(0x5e3e_0002, 5_000, |g| {
+            let v = gen_version(g);
+            let s = v.to_string();
+            let back = Version::parse(&s).unwrap_or_else(|| panic!("{s:?} must parse"));
+            assert_eq!(back.to_string(), s);
+            assert_eq!(back.build, v.build, "{s:?}");
+        });
+    }
+
+    // spec: VER-11
+    #[test]
+    fn version_order_is_semver_precedence() {
+        cases(0x5e3e_0003, 20_000, |g| {
+            let (a, b) = (gen_version(g), gen_version(g));
+            // Shared cores make the prerelease comparison the deciding one.
+            let b = if g.one_in(2) {
+                Version {
+                    major: a.major,
+                    minor: a.minor,
+                    patch: a.patch,
+                    ..b
+                }
+            } else {
+                b
+            };
+            let sa = semver::Version::parse(&a.to_string()).unwrap();
+            let sb = semver::Version::parse(&b.to_string()).unwrap();
+            assert_eq!(a.cmp(&b), sa.cmp_precedence(&sb), "{a} vs {b}");
+            assert_eq!(a == b, sa.cmp_precedence(&sb).is_eq(), "{a} vs {b}");
+        });
+    }
+
+    fn gen_caret(g: &mut Gen) -> Range {
+        let parts = g.range(1, 3);
+        let small = |g: &mut Gen| g.below(3) as u64;
+        let pre = if parts == 3 && g.one_in(3) {
+            gen_idents(g, true)
+        } else {
+            Vec::new()
+        };
+        Range::Caret {
+            major: small(g),
+            minor: (parts >= 2).then(|| small(g)),
+            patch: (parts == 3).then(|| small(g)),
+            pre,
+        }
+    }
+
+    /// A version close to the small cores [`gen_caret`] makes, so a match is
+    /// as likely as a miss.
+    fn gen_near_version(g: &mut Gen) -> Version {
+        Version {
+            major: g.below(3) as u64,
+            minor: g.below(3) as u64,
+            patch: g.below(3) as u64,
+            pre: if g.one_in(3) {
+                vec![g.pick(&["alpha", "beta", "1", "0", "rc"]).to_string()]
+            } else {
+                Vec::new()
+            },
+            build: None,
+        }
+    }
+
+    // spec: VER-20
+    #[test]
+    fn range_display_round_trips() {
+        cases(0x5e3e_0004, 5_000, |g| {
+            let r = if g.one_in(3) {
+                Range::Exact(gen_version(g))
+            } else {
+                gen_caret(g)
+            };
+            let s = r.to_string();
+            let back = Range::parse(&s).unwrap_or_else(|| panic!("{s:?} must parse"));
+            assert_eq!(back.to_string(), s);
+            assert_eq!(back, r, "{s:?}");
+        });
+    }
+
+    // spec: VER-20 VER-21
+    #[test]
+    fn caret_matching_agrees_with_cargo() {
+        cases(0x5e3e_0005, 20_000, |g| {
+            let r = gen_caret(g);
+            let v = gen_near_version(g);
+            let req = semver::VersionReq::parse(&r.to_string()).unwrap();
+            let sv = semver::Version::parse(&v.to_string()).unwrap();
+            assert_eq!(r.matches(&v), req.matches(&sv), "{r} vs {v}");
+        });
+    }
+
+    // spec: VER-20 VER-22
+    #[test]
+    fn range_parse_never_panics_and_display_is_stable() {
+        cases(0x5e3e_0006, 20_000, |g| {
+            let s = match g.below(3) {
+                0 => format!(
+                    "{}{}",
+                    g.pick(&["^", "=", "~", ">=", "<", ""]),
+                    gen_version_like(g)
+                ),
+                1 => g.string_from(
+                    &[
+                        '^', '~', '=', '<', '>', ',', ' ', '*', '.', '1', '0', '-', 'a', '+',
+                    ],
+                    0,
+                    12,
+                ),
+                _ => g.any_string(0, 8),
+            };
+            if let Some(r) = Range::parse(&s) {
+                let shown = r.to_string();
+                let again = Range::parse(&shown).unwrap_or_else(|| panic!("{s:?} -> {shown:?}"));
+                assert_eq!(again.to_string(), shown, "{s:?}");
+            }
+        });
+    }
 }

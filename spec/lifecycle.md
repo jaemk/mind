@@ -259,7 +259,11 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   skipped with a stderr warning naming the path; it is not removed. `..`
   components in a recorded path are treated as a violation regardless of the
   apparent `starts_with` result. This prevents a doctored manifest from causing
-  `forget` to delete files outside mind's ownership.
+  `forget` to delete files outside mind's ownership. One exception: an absolute
+  link path outside every lobe (its lobe was removed from config after install)
+  is still removed when it is a symlink into a store; a file, directory, or
+  other symlink there is skipped with the same warning. An in-place `upgrade`
+  removing the old links the new copy no longer owns applies the same check.
 
 ## Drift (introspect)
 

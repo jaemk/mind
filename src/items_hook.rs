@@ -169,13 +169,14 @@ pub struct ItemsHook {
 }
 
 /// The items hooks in effect for `source` (HOOK-190): the ones its clone's
-/// `mind.toml` declares, else, for a source with no `mind.toml` (the DSC-60
-/// gate), the curated ones recorded at `meld`. A manifest that does not parse
-/// declares nothing, failing closed as the other source hooks do.
+/// `mind.toml` declares, else, while the DSC-60 gate is open (no `mind.toml`,
+/// or one declaring no discovery or hooks of its own), the curated ones
+/// recorded at `meld`. A manifest that does not parse declares nothing,
+/// failing closed as the other source hooks do.
 pub fn effective_hooks(paths: &Paths, source: &Source) -> Vec<ItemsHook> {
     let dir = source.clone_dir(paths);
     match MindToml::load(&dir) {
-        Ok(Some(mf)) => mf
+        Ok(Some(mf)) if mf.gates_curated_config() => mf
             .resolved_hooks(&dir.join("mind.toml"))
             .unwrap_or_default()
             .into_iter()
@@ -186,7 +187,7 @@ pub fn effective_hooks(paths: &Paths, source: &Source) -> Vec<ItemsHook> {
                 optional: h.optional,
             })
             .collect(),
-        Ok(None) => source
+        Ok(_) => source
             .items_hooks
             .iter()
             .filter(|r| r.origin == Some(HookOrigin::Curated))

@@ -921,7 +921,7 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
             return Ok(source);
         }
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
-        let url = format!("{scheme}://{authority}/{owner}/{repo}");
+        let url = format!("{scheme}://{authority}/{owner}/{}", url_repo(&repo));
         return make_source(spec, host, &owner, &repo, url);
     }
 
@@ -944,7 +944,7 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
              of a remote repo, use './{bare}'"
         );
     }
-    let url = format!("https://github.com/{owner}/{repo}");
+    let url = format!("https://github.com/{owner}/{}", url_repo(&repo));
     make_source(spec, "github.com", &owner, &repo, url)
 }
 
@@ -1171,7 +1171,7 @@ fn parse_item_link(
     };
     let (owner, repo) = split_owner_repo(repo_part).ok_or_else(invalid)?;
     let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
-    let url = format!("{scheme}://{authority}/{owner}/{repo}");
+    let url = format!("{scheme}://{authority}/{owner}/{}", url_repo(&repo));
     let mut source = make_source(spec, host, &owner, &repo, url)?;
     // spec: LNK-4 -- the extended identity keeps instances from the same repo
     // (and a plain meld of it) distinct; the clone path follows the name.
@@ -1179,6 +1179,17 @@ fn parse_item_link(
     source.item_path = Some(item_path);
     source.pin = pin;
     Ok(Some(source))
+}
+
+/// The last url segment for `repo`. Every spec form strips one trailing
+/// `.git`, so a repo whose own name ends in `.git` keeps an extra one, and
+/// the url parses back to the same repo.
+fn url_repo(repo: &str) -> String {
+    if repo.ends_with(".git") {
+        format!("{repo}.git")
+    } else {
+        repo.to_string()
+    }
 }
 
 fn split_owner_repo(path: &str) -> Option<(String, String)> {
@@ -3075,7 +3086,8 @@ mod tests {
             .collect();
         assert_eq!(pending, vec!["still-declared", "curated.sh", "mine.sh"]);
 
-        // The DSC-60 gate closed (the source now ships its own mind.toml): the
+        // The DSC-60 gate closed (the source's mind.toml now declares its own
+        // discovery or hooks): the
         // curated record stops applying, the override does not.
         let pending: Vec<&str> = src
             .pending_install_hooks(Some("bbb"), &declared, false)
@@ -4056,5 +4068,136 @@ mod tests {
             parse_spec_quiet("notaspec").is_err(),
             "the rejection branch must be reachable from the table"
         );
+    }
+
+    // ---- properties ---------------------------------------------------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// An identity part: the characters a forge allows plus a few it does not
+    /// that the parser still accepts. `@` only when `at` (an owner may carry
+    /// one, STO-64). Sometimes a name ending in `.git`, which a spec then
+    /// spells with a second `.git`.
+    fn gen_part(g: &mut Gen, at: bool) -> String {
+        let mut alphabet = vec!['a', 'z', 'Q', '0', '9', '-', '_', '.', '~', 'é', '🦀'];
+        if at {
+            alphabet.push('@');
+        }
+        loop {
+            let mut s = g.string_from(&alphabet, 1, 8);
+            if g.one_in(8) {
+                s.push_str(".git");
+            }
+            if s != "." && s != ".." {
+                return s;
+            }
+        }
+    }
+
+    // spec: CLI-11 STO-13
+    #[test]
+    fn every_spec_form_yields_the_identity_and_a_url_that_reparses_to_it() {
+        cases(0x5bec_0001, 5_000, |g| {
+            let owner = gen_part(g, true);
+            let repo = gen_part(g, false);
+            let dot_git = if repo.ends_with(".git") || g.one_in(2) {
+                ".git"
+            } else {
+                ""
+            };
+            let slash = if g.one_in(3) { "/" } else { "" };
+            let host = g
+                .pick(&["github.com", "gitlab.example.org", "git.local"])
+                .to_string();
+            let (spec, want_host) = match g.below(6) {
+                0 => (format!("{owner}/{repo}{dot_git}"), "github.com".to_string()),
+                1 => (
+                    format!("github:{owner}/{repo}{dot_git}"),
+                    "github.com".to_string(),
+                ),
+                2 => (
+                    format!("https://{host}/{owner}/{repo}{dot_git}{slash}"),
+                    host,
+                ),
+                3 => (format!("ssh://git@{host}/{owner}/{repo}{dot_git}"), host),
+                4 => (format!("git@{host}:{owner}/{repo}{dot_git}"), host),
+                _ => (
+                    format!("/srv/git/{owner}/{repo}{dot_git}{slash}"),
+                    "local".to_string(),
+                ),
+            };
+            let src = parse_spec_quiet(&spec).unwrap_or_else(|e| panic!("{spec:?}: {e}"));
+            assert_eq!(src.name, format!("{want_host}/{owner}/{repo}"), "{spec:?}");
+            assert_eq!(
+                (src.host.as_str(), src.owner.as_str(), src.repo.as_str()),
+                (want_host.as_str(), owner.as_str(), repo.as_str())
+            );
+            let again = parse_spec_quiet(&src.url)
+                .unwrap_or_else(|e| panic!("{spec:?} -> {:?}: {e}", src.url));
+            assert_eq!(again.name, src.name, "{spec:?} -> {:?}", src.url);
+            assert_eq!(again.url, src.url, "{spec:?}");
+        });
+    }
+
+    // spec: CLI-204 STO-64
+    #[test]
+    fn any_accepted_spec_has_safe_identity_parts() {
+        cases(0x5bec_0002, 20_000, |g| {
+            let spec = match g.below(3) {
+                0 => g.any_string(0, 24),
+                1 => {
+                    let parts: Vec<String> =
+                        (0..g.range(1, 5)).map(|_| g.any_string(0, 5)).collect();
+                    format!(
+                        "{}{}",
+                        g.pick(&["", "https://", "git@", "github:", "ssh://", "file://", "/"]),
+                        parts.join(*g.pick(&["/", ":", "@", "#"]))
+                    )
+                }
+                _ => {
+                    let base = format!(
+                        "https://github.com/{}/{}",
+                        gen_part(g, true),
+                        gen_part(g, false)
+                    );
+                    format!(
+                        "{base}{}",
+                        g.pick(&[
+                            "/tree/main/skills/x",
+                            "/blob/v1/a/SKILL.md",
+                            "/tree/",
+                            "/tree/main",
+                            "/../x",
+                            "#x",
+                            "@y"
+                        ])
+                    )
+                }
+            };
+            let Ok(src) = parse_spec_quiet(&spec) else {
+                return;
+            };
+            for (part, v) in [
+                ("host", &src.host),
+                ("owner", &src.owner),
+                ("repo", &src.repo),
+            ] {
+                assert!(
+                    !v.is_empty() && v != "." && v != "..",
+                    "{spec:?}: {part} {v:?}"
+                );
+                assert!(!v.contains(['/', '\\', '#']), "{spec:?}: {part} {v:?}");
+                assert!(!v.contains(char::is_control), "{spec:?}: {part} {v:?}");
+            }
+            assert!(
+                !src.repo.contains('@') && !src.host.contains('@'),
+                "{spec:?}"
+            );
+            let base = format!("{}/{}/{}", src.host, src.owner, src.repo);
+            match &src.item_path {
+                Some(p) => assert_eq!(src.name, format!("{base}#{p}"), "{spec:?}"),
+                None => assert_eq!(src.name, base, "{spec:?}"),
+            }
+        });
     }
 }

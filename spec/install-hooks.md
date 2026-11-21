@@ -123,6 +123,15 @@ CLI-17).
   sanitization rule applies to the hook label shown in multi-hook disclosures
   (HOOK-52). This is consistent with the TUI model-boundary rule (TUI-60) and
   extends it to the CLI consent prompt.
+- `HOOK-199` A hook command shown for approval (the disclosure, HOOK-20/52; the
+  unified plan, HOOK-180; and `review`'s hook findings) is escaped, not
+  stripped: each control character and each invisible code point HOOK-91
+  blocks is written as a visible `\u{..}` escape, and nothing is dropped, so
+  the text shown is every character `sh -c` runs. Stripping would delete a
+  whole escape sequence, its payload included, while the shell still executes
+  those bytes. A tab is shown as is. A newline starts a new line indented to
+  the value column in the disclosure and the plan, and is shown as `\n` in a
+  one-line `review` finding.
 
 ## Execution and recording
 

@@ -418,7 +418,10 @@ code: every token wrapping creates is a token the scan calls prose.
   (`[label]`), collapsed (`[label][]`), or autolink (`<https://x/y>`,
   `<a@b.c>`) link has no text distinct from its label or destination, so its text
   is syntax too. Links are read as CommonMark defines them, so text that no
-  definition resolves is not a link at all and stays ordinary prose.
+  definition resolves is not a link at all and stays ordinary prose. An HTML tag
+  or comment (`<a href="dev">`, `<!-- ... -->`), inline or in an HTML block, is
+  syntax the same way: its attribute values are destinations and identifiers.
+  The text between tags stays prose.
 - `NS-51` Wrapping copies every `{{...}}` brace span verbatim, whatever it
   contains and whether or not it fits on one line, so it never creates a token
   inside an existing one. In particular a token written across a line break is
