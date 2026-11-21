@@ -1256,13 +1256,10 @@ fn apply_upgrade(
                     continue;
                 }
                 let old_path = std::path::Path::new(old_link);
-                // spec: LIFE-59 -- journaled, so a rollback restores the link
-                // along with the old store copy.
-                match install::remove_journaled(
-                    paths,
-                    old_path,
-                    &paths.home_of_item_store(&up.old.store),
-                ) {
+                // spec: LIFE-59 LIFE-44 -- journaled, so a rollback restores
+                // the link along with the old store copy, and confined like
+                // uninstall's removals.
+                match install::remove_recorded_link(paths, &up.old, old_path) {
                     Ok(()) => continue,
                     // spec: LOBE-6 -- a stale link in a lobe that cannot be
                     // written stays recorded, so a run that can write there

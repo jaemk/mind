@@ -2802,6 +2802,112 @@ fn forget_with_hostile_link_outside_agent_homes_warns_without_leaking_escape() {
 }
 
 #[test]
+fn forget_removes_only_a_store_link_outside_every_lobe() {
+    // spec: LIFE-44 -- a recorded link outside every configured lobe is
+    // removed only when it is mind's own symlink into a store (its lobe was
+    // dropped from config after install). A file or directory there is the
+    // user's, whatever the manifest says, and stays.
+    let sb = Sandbox::new("life44-abs");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let review = doc["items"]["skill:review"].clone();
+    let store = review["store"].as_str().unwrap().to_string();
+
+    let victim_file = sb.base.join("victim.txt");
+    std::fs::write(&victim_file, "keep me").unwrap();
+    let victim_dir = sb.base.join("victim-dir");
+    std::fs::create_dir_all(&victim_dir).unwrap();
+    std::fs::write(victim_dir.join("f"), "keep me").unwrap();
+    let old_lobe_link = sb.base.join("old-lobe/skills/review");
+    std::fs::create_dir_all(old_lobe_link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(sb.mind_home.join(&store), &old_lobe_link).unwrap();
+
+    let mut hostile = review.clone();
+    hostile["name"] = serde_json::Value::String("hostile-abs".to_string());
+    hostile["bare_name"] = serde_json::Value::String("hostile-abs".to_string());
+    hostile["store"] = serde_json::Value::String(store.replace("review", "hostile-abs-absent"));
+    hostile["links"] = serde_json::json!([
+        victim_file.to_string_lossy(),
+        victim_dir.to_string_lossy(),
+        old_lobe_link.to_string_lossy(),
+    ]);
+    doc["items"]["skill:hostile-abs"] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let forget = sb.mind(&["forget", "skill:hostile-abs"]);
+    let combined = format!("{}{}", forget.stdout, forget.stderr);
+    assert!(forget.success, "forget failed: {combined}");
+    assert_eq!(
+        std::fs::read_to_string(&victim_file).ok().as_deref(),
+        Some("keep me"),
+        "a regular file outside every lobe must not be removed: {combined}"
+    );
+    assert!(
+        victim_dir.join("f").exists(),
+        "a directory outside every lobe must not be removed: {combined}"
+    );
+    assert!(
+        combined.contains("outside all configured agent homes"),
+        "the skipped paths must be warned about: {combined}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&old_lobe_link).is_err(),
+        "mind's own store link in a dropped lobe is still removed: {combined}"
+    );
+    assert!(sb.claude_home.join("skills/review").exists());
+}
+
+#[test]
+fn upgrade_keeps_a_recorded_old_link_outside_every_lobe_that_is_not_a_store_link() {
+    // spec: LIFE-44 -- an in-place upgrade drops the old links the new copy
+    // no longer owns under the same confinement as uninstall: a recorded path
+    // outside every lobe that is not a symlink into a store is left alone.
+    let sb = Sandbox::new("life44-upgrade");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+
+    let victim = sb.base.join("victim.txt");
+    std::fs::write(&victim, "keep me").unwrap();
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    doc["items"]["skill:review"]["links"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::Value::String(
+            victim.to_string_lossy().into_owned(),
+        ));
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review v2\n",
+    );
+    let up = sb.mind(&["upgrade", "--yes"]);
+    let combined = format!("{}{}", up.stdout, up.stderr);
+    assert!(up.success, "upgrade failed: {combined}");
+    assert!(
+        std::fs::read_to_string(sb.claude_home.join("skills/review/SKILL.md"))
+            .unwrap()
+            .contains("v2"),
+        "the upgrade must apply: {combined}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&victim).ok().as_deref(),
+        Some("keep me"),
+        "a recorded old link outside every lobe must not be removed: {combined}"
+    );
+    assert!(
+        combined.contains("outside all configured agent homes"),
+        "the skipped path must be warned about: {combined}"
+    );
+}
+
+#[test]
 fn forget_with_hostile_store_outside_root_warns_without_leaking_escape() {
     // spec: DSC-95 -- the uninstall confinement warning at a `store` entry
     // that escapes the mind store root must route the recorded path through

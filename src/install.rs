@@ -295,25 +295,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     // spec: HOME-7 -- the store root of the allowed home the copy was
     // installed in.
     let store_root = paths.store_root_of_item(&item.store);
-    // spec: LOBE-3 -- the source's own lobe confines its links too.
-    let mut agent_homes = paths.agent_homes()?;
-    if let Ok(Some(root)) = paths.source_lobe(&item.source) {
-        agent_homes.push(crate::paths::Lobe::all_kinds(root));
-    }
-    if let Some(recorded) = &item.lobe {
-        agent_homes.push(crate::paths::Lobe::all_kinds(PathBuf::from(recorded)));
-    }
-
-    // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
-    // stored as relative paths resolved against the cwd at config-load time,
-    // but the manifest records absolute link paths (resolved at install time).
-    // Canonicalization aligns both sides so a legitimate install-from-other-cwd
-    // is not rejected as out-of-bounds.
-    let canonical_roots: Vec<PathBuf> = agent_homes
-        .iter()
-        .map(|h| h.path.canonicalize().unwrap_or_else(|_| h.path.clone()))
-        .collect();
-    let root_refs: Vec<&Path> = canonical_roots.iter().map(|p| p.as_path()).collect();
+    let roots = link_roots(paths, item)?;
 
     // spec: LIFE-59 -- each removal is recorded in the transaction: a link is
     // removed with its target noted, a store copy (or a non-link entry) moves
@@ -323,24 +305,8 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     let home = paths.home_of_item_store(&item.store);
     for link in &item.links {
         let p = Path::new(link);
-        let canon_p = canonicalize_link_parent(p);
-        if !is_confined_under_any(&canon_p, &root_refs) {
-            // Secondary check: if the stored link IS absolute and contains no
-            // `..` components, allow deletion (the manifest was written by mind
-            // itself and the path is structurally safe even if not under a
-            // currently-configured lobe). This handles the case where a lobe
-            // was removed from config after install.
-            if !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
-                // spec: DSC-95 -- `p` is built from the manifest-recorded link
-                // path, which for an item installed by a pre-DSC-96 binary can
-                // carry an unsanitized name; route it through `display_path`
-                // like every other source-derived path print site.
-                eprintln!(
-                    "mind: warning: skipping removal of '{}' -- path is outside all configured agent homes",
-                    crate::sanitize::display_path(p)
-                );
-                continue;
-            }
+        if !link_removable(paths, p, &roots) {
+            continue;
         }
         // spec: LOBE-6 -- a link in a lobe that cannot be written is left in
         // place with a note rather than failing the removal.
@@ -374,20 +340,7 @@ fn remove_recorded(paths: &Paths, path: &Path, home: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(MindError::io(path, e)),
-        Ok(meta)
-            if meta.file_type().is_symlink()
-                && std::fs::read_link(path).is_ok_and(|t| {
-                    let t = crate::paths::normalize_home(&t);
-                    paths.all_homes().iter().any(|h| {
-                        crate::transaction::lexically_contained(
-                            &t,
-                            &crate::paths::normalize_home(h).join("store"),
-                        )
-                    })
-                }) =>
-        {
-            crate::transaction::remove_link(path)
-        }
+        Ok(_) if is_store_link(paths, path) => crate::transaction::remove_link(path),
         Ok(_) => match crate::transaction::move_aside(path, home) {
             Err(MindError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::CrossesDevices =>
@@ -397,6 +350,78 @@ fn remove_recorded(paths: &Paths, path: &Path, home: &Path) -> Result<()> {
             other => other,
         },
     }
+}
+
+/// The canonicalized lobe roots `item`'s recorded links are confined to
+/// (LIFE-44): every configured lobe, the source's own lobe (LOBE-3), and the
+/// lobe the item recorded. Lobe paths may be stored relative to the cwd at
+/// config-load time while the manifest records absolute link paths;
+/// canonicalizing aligns the two.
+fn link_roots(paths: &Paths, item: &InstalledItem) -> Result<Vec<PathBuf>> {
+    let mut agent_homes = paths.agent_homes()?;
+    if let Ok(Some(root)) = paths.source_lobe(&item.source) {
+        agent_homes.push(crate::paths::Lobe::all_kinds(root));
+    }
+    if let Some(recorded) = &item.lobe {
+        agent_homes.push(crate::paths::Lobe::all_kinds(PathBuf::from(recorded)));
+    }
+    Ok(agent_homes
+        .iter()
+        .map(|h| h.path.canonicalize().unwrap_or_else(|_| h.path.clone()))
+        .collect())
+}
+
+/// Whether the recorded link `p` may be removed (LIFE-44); warns when not.
+/// Under one of `roots`, it may. Outside them (a lobe removed from config
+/// after install leaves mind's own links behind), only an absolute path with
+/// no `..` that is absent or still a symlink into a store: anything else there
+/// is not mind's to delete, whatever the manifest records.
+fn link_removable(paths: &Paths, p: &Path, roots: &[PathBuf]) -> bool {
+    let root_refs: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    if is_confined_under_any(&canonicalize_link_parent(p), &root_refs)
+        || (p.is_absolute()
+            && !p.components().any(|c| c == std::path::Component::ParentDir)
+            && (!path_present(p) || is_store_link(paths, p)))
+    {
+        return true;
+    }
+    // spec: DSC-95 -- `p` is built from the manifest-recorded link path, which
+    // for an item installed by a pre-DSC-96 binary can carry an unsanitized
+    // name; route it through `display_path` like every other source-derived
+    // path print site.
+    eprintln!(
+        "mind: warning: skipping removal of '{}' -- path is outside all configured agent homes",
+        crate::sanitize::display_path(p)
+    );
+    false
+}
+
+/// Remove `item`'s recorded link `link` as one journaled step, confined like
+/// [`uninstall`]'s (LIFE-44). A path that fails the check is left in place
+/// with a warning, and is not an error.
+pub fn remove_recorded_link(paths: &Paths, item: &InstalledItem, link: &Path) -> Result<()> {
+    if !link_removable(paths, link, &link_roots(paths, item)?) {
+        return Ok(());
+    }
+    remove_journaled(paths, link, &paths.home_of_item_store(&item.store))
+}
+
+/// Whether `path` is a symlink whose target is under some allowed home's store.
+fn is_store_link(paths: &Paths, path: &Path) -> bool {
+    std::fs::read_link(path).is_ok_and(|t| {
+        let t = crate::paths::normalize_home(&t);
+        paths.all_homes().iter().any(|h| {
+            crate::transaction::lexically_contained(
+                &t,
+                &crate::paths::normalize_home(h).join("store"),
+            )
+        })
+    })
+}
+
+/// Whether anything (a dangling symlink included) is at `path`.
+fn path_present(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 /// Remove `path` as one journaled step ([`remove_recorded`], LIFE-59), so a
