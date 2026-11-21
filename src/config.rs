@@ -241,6 +241,18 @@ pub struct Config {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub source_homes: Vec<String>,
+
+    /// Source lobes in extra homes that mind linked items into (LIFE-61), as
+    /// absolute paths. Interrupted-transaction recovery trusts these lobes.
+    /// It does not trust a lobe that only an extra home's own files name.
+    // spec: LIFE-61
+    #[serde(
+        rename = "known-lobes",
+        alias = "known_lobes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub known_lobes: Vec<String>,
 }
 
 /// The `hook-log` config value (HOOK-165): on/off, or a directory.

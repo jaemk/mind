@@ -60,6 +60,8 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             // whether the user's own list restricts homes and lobes.
             "source_homes": cfg.source_homes,
             "homes_restricted": paths.homes_restricted(),
+            // spec: LIFE-61 -- the extra-home source lobes recovery trusts.
+            "known_lobes": cfg.known_lobes,
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -134,6 +136,19 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             .collect();
         println!(
             "  {} source-homes = [{}]  ({note})",
+            out.dim("·"),
+            quoted(&recorded)
+        );
+    }
+    // spec: LIFE-61
+    if !cfg.known_lobes.is_empty() {
+        let recorded: Vec<std::path::PathBuf> = cfg
+            .known_lobes
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        println!(
+            "  {} known-lobes = [{}]  (lobes of sources in other homes that mind linked into)",
             out.dim("·"),
             quoted(&recorded)
         );

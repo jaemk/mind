@@ -334,7 +334,15 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   or a known lobe, with no symlinked ancestor escaping that root. A move ends
   in a store or `.tmp` tree, and one out of a lobe only into the trash; a link
   target lies in a store; a manifest destination is a configured home's
-  `manifest.json`. A journal that is invalid, unreadable, oversized, or names
+  `manifest.json`. A known lobe is one of: a configured lobe; the lobe of a
+  default-home source as resolved now (LOBE-3); the lobe recorded on an item in
+  the default home's `manifest.json`; or a lobe listed under the `known-lobes`
+  config key. Before an install journals a link into the lobe of an
+  extra-home source, it records that lobe under `known-lobes`, and `config
+  show` lists the key. Recovery does not read lobes from an extra home's
+  `manifest.json` or `sources.json`, or from its clones' `[source] lobe`.
+  Whoever can write the home can write those files, the same as the journal.
+  A journal that is invalid, unreadable, oversized, or names
   a path outside those roots fails closed with `transaction-journal`, is
   retained for diagnosis, and the error says how to discard it.
 - `LIFE-62` Hooks run inside the transaction are recorded when they start and

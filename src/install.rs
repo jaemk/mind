@@ -186,6 +186,14 @@ pub fn install(
     //    than being deleted, so any failure (or an interruption, on the next
     //    run) moves it back. Dropping `scope` unfinished rolls back exactly
     //    this install's steps (LIFE-4, LIFE-43).
+    // spec: LIFE-61 -- record an extra-home source's lobe in the default
+    // home's config before any link into it is journaled, so that recovery
+    // trusts the lobe without reading the extra home's own files.
+    if let Some(lobe) = &source_lobe
+        && planned_lobes.contains(lobe)
+    {
+        paths.record_known_lobe(&item.source, lobe)?;
+    }
     let scope = crate::transaction::scope();
     let home = paths.home_of(&item.source);
     if let Some(parent) = store.parent() {

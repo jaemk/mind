@@ -595,6 +595,43 @@ impl Paths {
         Ok(())
     }
 
+    /// The lobes recorded under `known-lobes` (LIFE-61), normalized. Only
+    /// absolute entries are read.
+    // spec: LIFE-61
+    pub fn known_lobes(&self) -> Vec<PathBuf> {
+        let cfg = self.settings().config().ok();
+        cfg.map(|c| c.known_lobes)
+            .unwrap_or_default()
+            .iter()
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.is_absolute())
+            .map(|p| normalize_home(&p))
+            .collect()
+    }
+
+    /// Record `lobe`, the lobe of `source`, under `known-lobes` (LIFE-61)
+    /// before an install links into it. This applies only to a source in an
+    /// extra home: recovery reads a default-home source's lobe directly.
+    /// A lobe that is already configured or recorded is left alone.
+    // spec: LIFE-61
+    pub fn record_known_lobe(&self, source: &str, lobe: &Path) -> Result<()> {
+        if normalize_home(&self.home_of(source)) == normalize_home(&self.mind_home) {
+            return Ok(());
+        }
+        let lobe = normalize_home(lobe);
+        if self.known_lobes().contains(&lobe)
+            || self
+                .agent_homes()?
+                .iter()
+                .any(|l| normalize_home(&l.path) == lobe)
+        {
+            return Ok(());
+        }
+        let mut cfg = self.settings().config()?;
+        cfg.known_lobes.push(lobe.display().to_string());
+        self.settings().save_config(&cfg)
+    }
+
     fn restricted_why(&self) -> String {
         format!(
             "with MIND_HOMES or the `mind-homes` config key set, the allowed homes are {} (add it to MIND_HOMES or the `mind-homes` config key)",
