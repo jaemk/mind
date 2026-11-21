@@ -527,6 +527,7 @@ pub fn clone_shallow_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
                     "clone", "--depth", "1", "--branch", tag, "--", url, &dest_str,
                 ],
             )?;
+            settle_on_tag(url, dest, tag)?;
         }
         Pin::Ref(sha) => {
             // spec: DSC-118 -- clone the default branch's tip at depth 1, then
@@ -553,9 +554,36 @@ pub fn clone_shallow_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
                     "clone", "--depth", "1", "--branch", tag, "--", url, &dest_str,
                 ],
             )?;
+            settle_on_tag(url, dest, tag)?;
         }
     }
     Ok(())
+}
+
+/// Make sure a fresh `clone --branch <tag>` at `dir` sits on the tag (CLI-18,
+/// DSC-122). `--branch` prefers a branch of the same name, so when the remote
+/// has both, the clone holds the branch: fetch the tag by its qualified name
+/// and detach onto its commit. The usual case, where the clone already sits on
+/// the tag, fetches nothing.
+// spec: DSC-122
+fn settle_on_tag(url: &str, dir: &Path, tag: &str) -> Result<()> {
+    let object = format!("refs/tags/{tag}^{{commit}}");
+    let head = run(url, Some(dir), &["rev-parse", "HEAD"])?;
+    if run(url, Some(dir), &["rev-parse", "--verify", "-q", &object]).is_ok_and(|s| s == head) {
+        return Ok(());
+    }
+    fetch(
+        url,
+        dir,
+        &[
+            "--force",
+            "origin",
+            "--",
+            &format!("+refs/tags/{tag}:refs/tags/{tag}"),
+        ],
+    )?;
+    let sha = run(url, Some(dir), &["rev-parse", "--verify", &object])?;
+    run(url, Some(dir), &["checkout", "-q", "--detach", &sha]).map(|_| ())
 }
 
 /// The release tag a version pin resolved to. Unresolved is a caller bug, but
@@ -857,7 +885,13 @@ fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             // and NOT preceded by `--` because that form means "paths follow",
             // not "end of options". Injection safety is from `validate_ref_value`
             // at parse time (DSC-66), which rejects any value starting with `-`.
-            run(url, Some(dir), &["reset", "--hard", tag])?;
+            // spec: DSC-122 -- the qualified name, so git's name lookup cannot
+            // pick another ref spelled the same.
+            run(
+                url,
+                Some(dir),
+                &["reset", "--hard", &format!("refs/tags/{tag}^{{commit}}")],
+            )?;
         }
         Pin::Ref(sha) => {
             // spec: DSC-119 -- a sha is immutable, so a clone that already
@@ -881,7 +915,12 @@ fn sync_to_pin_shallow(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
                     &format!("+refs/tags/{tag}:refs/tags/{tag}"),
                 ],
             )?;
-            run(url, Some(dir), &["reset", "--hard", tag])?;
+            // spec: DSC-122
+            run(
+                url,
+                Some(dir),
+                &["reset", "--hard", &format!("refs/tags/{tag}^{{commit}}")],
+            )?;
         }
     }
     Ok(())
@@ -1835,6 +1874,27 @@ mod tests {
         let got = read_head(&dest);
         assert_eq!(got, sha_a, "pin-tag=v1.0 should be at commit A (tagged)");
         assert_eq!(read_file(&dest, "file.txt"), "version A");
+
+        cleanup(&base);
+    }
+
+    // spec: CLI-18 DSC-122 -- a tag pin resolves only as a tag. `git clone
+    // --branch <name>` prefers a branch of the same name, so a remote with a
+    // branch `v1.0` beside the tag `v1.0` used to clone the branch, while a
+    // later sync (which resets by name, tags first) moved to the tag.
+    #[test]
+    fn a_tag_pin_ignores_a_branch_of_the_same_name() {
+        let base = tmpdir("tag-vs-branch");
+        let (remote, sha_a, _b, sha_c) = make_remote(&base);
+        git(&remote, &["branch", "v1.0", &sha_c]);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Tag("v1.0".into())).expect("clone_at tag");
+        assert_eq!(read_head(&dest), sha_a, "the tag, not the branch");
+        assert_eq!(read_file(&dest, "file.txt"), "version A");
+        sync_to_pin(&url, &dest, &Pin::Tag("v1.0".into())).expect("sync tag");
+        assert_eq!(read_head(&dest), sha_a);
 
         cleanup(&base);
     }

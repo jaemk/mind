@@ -662,7 +662,10 @@ tree, not the repo's history.
   error names the `refs/heads/<name>` and `refs/tags/<name>` spellings that
   pin a branch or tag with that name. A `ref` pin that is neither a sha nor a
   plain branch or tag name (e.g. `main~1`) resolves after that same
-  full-history fetch, against the remote's branches and tags only.
+  full-history fetch, against the remote's branches and tags only. A
+  `pin-tag` or `version` pin resolves only as a tag, on the first clone as on
+  a sync: when the remote also has a branch of the same name, the clone still
+  sits on the tag's commit.
 
 ## Scan roots
 
