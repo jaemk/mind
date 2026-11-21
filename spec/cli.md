@@ -115,6 +115,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   there, since the `@<alias>` identity suffix, STO-58, only ever appends to
   `repo`); `repo` refuses both `@` (collides with that alias suffix and with the
   clone-dir leaf, STO-59) and `#` (collides with the item-link marker, LNK-4).
+- `CLI-267` A network spec's (URL or SSH form) `host` must be a hostname:
+  ASCII letters, digits, `.`, `-`, and `_`, optionally followed by `:<port>`
+  digits, or a bracketed IPv6 address. Its `owner` and `repo` must not contain
+  `?`. Otherwise it is refused (`UnsafeRepoSpec`). git reads everything from a
+  `?` on as a query, so without this `https://evil.example?.corp.example/a/b`
+  would carry the identity host `evil.example?.corp.example`, which a POL-10
+  pattern like `*.corp.example/*/*` matches, while git connects to
+  `evil.example`.
 - `CLI-265` A URL-form spec's scheme must be one git clones over its built-in
   transports: `https`, `http`, `ssh`, `git`, `git+ssh`, or `ssh+git`, compared
   case-insensitively (`file://` is the local form, CLI-11). Any other scheme is
@@ -1403,6 +1411,11 @@ only appear at meld or install time. It is read-only and installs nothing.
   working-tree git target only and `--fix` never touches it, exactly as CLI-190.
   A file that does not exist at all is a plain `bad-reference` handled elsewhere,
   not this advisory.
+- `CLI-266` The path remainder of a `{{self}}/...` or `{{path:...}}/...`
+  reference that CLI-191 checks is used only when it is relative and has no
+  `..` component; any other remainder is not resolved, so prose in a reviewed
+  source cannot make `review` report whether an arbitrary file on the machine
+  exists.
 - `CLI-192` `review` reports, as an advisory `ns-tool-reference` finding, a
   `{{ns:name}}` reference (namespacing.md) whose only matching sibling is a `tool`.
   A tool is store-only (tooling.md TOOL-3), reached by `{{tools:name}}` for its

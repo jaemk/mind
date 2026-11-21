@@ -1882,6 +1882,15 @@ fn referenced_source_files<'a>(
         let Some(remainder) = path_remainder(tail) else {
             continue;
         };
+        // spec: CLI-266 -- only a path inside the owning item is resolved.
+        if !Path::new(&remainder).components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
+            continue;
+        }
         // The item that owns the addressed directory: the item itself
         // (`{{self}}`) or a named same-source sibling (`{{path:[kind:]name}}`).
         // Returned alongside the target so the caller can consult *its* ignore
@@ -2101,6 +2110,23 @@ mod tests {
             item_files(&item),
             vec![item_dir.join("SKILL.md"), item_dir.join("sub/real.md")]
         );
+    }
+
+    /// spec: CLI-266
+    #[test]
+    fn referenced_source_files_stays_inside_the_owning_item() {
+        use crate::error::ItemKind;
+        let tmp = TmpDir::new();
+        let item = file_item(ItemKind::Skill, tmp.path().join("skills/s"));
+        let content = "run {{self}}/scripts/ok.sh, \
+                       {{self}}/../../../etc/passwd, \
+                       {{self}}//etc/passwd, \
+                       {{self}}/a/../../x";
+        let got: Vec<PathBuf> = referenced_source_files(content, &item, &[])
+            .into_iter()
+            .map(|(_, p, _)| p)
+            .collect();
+        assert_eq!(got, vec![item.path.join("scripts/ok.sh")]);
     }
 
     // --- target resolution precedence (CLI-130) ---

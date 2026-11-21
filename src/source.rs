@@ -1288,6 +1288,39 @@ fn validate_identity_part(
     Ok(())
 }
 
+/// True when `host` is a hostname with an optional `:<port>`, or a bracketed
+/// IPv6 address with an optional `:<port>` (CLI-267).
+fn is_network_host(host: &str) -> bool {
+    let port_ok =
+        |p: Option<&str>| p.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((ip, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            a => match a.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return false,
+            },
+        };
+        return !ip.is_empty()
+            && ip
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+            && port_ok(port);
+    }
+    let (name, port) = match host.split_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (host, None),
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && port_ok(port)
+}
+
 fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> Result<Source> {
     // spec: CLI-204 STO-64 -- validate before constructing, so no Source with
     // an unsafe identity part is ever built, persisted, or used as a clone
@@ -1295,6 +1328,29 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
     validate_identity_part(spec, "host", host, true, true)?;
     validate_identity_part(spec, "owner", owner, false, true)?;
     validate_identity_part(spec, "repo", repo, true, true)?;
+    // spec: CLI-267 -- a network spec's identity must read the way git reads
+    // the URL: no query smuggled into the host, owner, or repo.
+    if host != "local" {
+        if !is_network_host(host) {
+            return Err(MindError::UnsafeRepoSpec {
+                spec: spec.to_string(),
+                part: "host",
+                value: host.to_string(),
+                reason: "is not a hostname (letters, digits, '.', '-', '_', an optional \
+                         ':<port>', or a bracketed IPv6 address)",
+            });
+        }
+        for (part, value) in [("owner", owner), ("repo", repo)] {
+            if value.contains('?') {
+                return Err(MindError::UnsafeRepoSpec {
+                    spec: spec.to_string(),
+                    part,
+                    value: value.to_string(),
+                    reason: "contains '?' (git would read the rest of the URL as a query)",
+                });
+            }
+        }
+    }
     Ok(Source {
         // Identity is `host/owner/repo` (matching the clone path), so repos that
         // share a basename or even an owner/repo across hosts stay distinct.
@@ -2158,6 +2214,38 @@ mod tests {
     }
 
     // CLI-265: a scheme other than git's network transports is refused, since
+    // spec: CLI-267
+    #[test]
+    fn network_host_must_be_a_hostname() {
+        for bad in [
+            "https://evil.example?.corp.example/acme/repo",
+            "https://evil.example%2f.corp.example/acme/repo",
+            "https://evil example/acme/repo",
+            "https://host:80x/acme/repo",
+            "https://[::1/acme/repo",
+            "git@evil.example?.corp.example:acme/repo",
+            "https://github.com/acme?/repo",
+            "https://github.com/acme/repo?x",
+        ] {
+            match parse_spec(bad) {
+                Err(MindError::UnsafeRepoSpec { .. }) => {}
+                other => panic!("{bad:?} must be refused, got {other:?}"),
+            }
+        }
+        for good in [
+            "https://github.com/acme/repo",
+            "https://git.corp.example:8443/acme/repo",
+            "ssh://git@git_host.corp/acme/repo",
+            "https://[::1]:8080/acme/repo",
+            "https://[fe80::1]/acme/repo",
+            "git@github.com:acme/repo.git",
+        ] {
+            assert!(parse_spec(good).is_ok(), "{good:?} must parse");
+        }
+        // A local path may still name a directory with a `?` in it.
+        assert!(parse_spec("/src/what?/agents").is_ok());
+    }
+
     // `git clone` would run a remote helper (`ext::` runs a shell command).
     // spec: CLI-265
     #[test]
