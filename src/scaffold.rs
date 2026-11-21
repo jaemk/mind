@@ -135,7 +135,7 @@ pub fn patch_source_meta(
             .lines()
             .filter(|l| {
                 if let Some(header) = table_header(l) {
-                    in_source = header == "[source]";
+                    in_source = is_source_header(header);
                 }
                 !(in_source && is_active_key(l, "prefix"))
             })
@@ -161,6 +161,17 @@ fn table_header(line: &str) -> Option<&str> {
     let t = line.trim();
     t.starts_with('[')
         .then(|| t.split_once('#').map_or(t, |(h, _)| h).trim_end())
+}
+
+/// Whether a [`table_header`] opens the `[source]` table, in any spelling TOML
+/// allows for it: `[source]`, `[ source ]`, `["source"]`, `['source']`.
+/// Missing one would append a second `[source]` table, which TOML rejects.
+fn is_source_header(header: &str) -> bool {
+    header
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .filter(|h| !h.starts_with('['))
+        .is_some_and(|h| matches!(h.trim(), "source" | "\"source\"" | "'source'"))
 }
 
 /// Whether `line` is an active (uncommented) `<key> = ...` assignment.
@@ -189,7 +200,7 @@ fn set_key(content: &str, key: &str, value: &str) -> String {
 
     for line in content.lines() {
         if let Some(header) = table_header(line) {
-            in_source = header == "[source]";
+            in_source = is_source_header(header);
             if in_source && source_line_idx.is_none() {
                 source_line_idx = Some(output.len());
             }
@@ -218,10 +229,24 @@ fn set_key(content: &str, key: &str, value: &str) -> String {
     result
 }
 
-/// Produce a TOML double-quoted string value with basic escaping.
+/// A TOML basic string holding `s`, always on one line: `\` and `"` are
+/// escaped, and so is every control character, which TOML refuses raw (a raw
+/// line break would also split the line this module edits by line).
 fn toml_string(s: &str) -> String {
-    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{escaped}\"")
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -570,5 +595,151 @@ mod tests {
         let doc: toml::Value = toml::from_str(&out).expect(&out);
         assert_eq!(doc["source"]["namespace"].as_str(), Some("ns"), "{out}");
         assert_eq!(doc["source"]["description"].as_str(), Some("d"), "{out}");
+    }
+
+    // ---- properties ---------------------------------------------------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// A one-line TOML string value holding arbitrary text.
+    fn gen_toml_string(g: &mut Gen) -> String {
+        let s = g.any_string(0, 10).replace(['\n', '\r'], "");
+        toml::Value::String(s).to_string()
+    }
+
+    /// A `[source]` header in one of the spellings TOML allows.
+    fn gen_source_header(g: &mut Gen) -> String {
+        g.pick(&[
+            "[source]",
+            "[source]  # metadata",
+            "[ source ]",
+            "[\"source\"]",
+            "  [source]",
+            "[source]#x",
+        ])
+        .to_string()
+    }
+
+    /// The lines of a `[source]` table: any of its keys, active or commented.
+    fn gen_source_table(g: &mut Gen) -> Vec<String> {
+        let mut lines = vec![gen_source_header(g)];
+        for key in ["description", "prefix", "namespace", "flat-skills", "lobe"] {
+            match g.below(3) {
+                0 => {}
+                1 => lines.push(format!("# {key} = \"commented\"")),
+                _ if key == "flat-skills" => {
+                    lines.push(format!("{key} = {}", g.pick(&["true", "false"])))
+                }
+                _ => lines.push(format!(
+                    "{key}{}= {}",
+                    g.pick(&[" ", "  ", ""]),
+                    gen_toml_string(g)
+                )),
+            }
+        }
+        lines
+    }
+
+    /// Tables other than `[source]`, several of which spell `[source]`'s keys.
+    /// A plain table (`[discover]`, `[profiles]`) appears at most once; `used`
+    /// tracks them.
+    fn gen_other_table(g: &mut Gen, used: &mut Vec<usize>) -> Vec<String> {
+        let mut pick = g.below(4);
+        if pick >= 2 {
+            if used.contains(&pick) {
+                pick = g.below(2);
+            } else {
+                used.push(pick);
+            }
+        }
+        match pick {
+            0 => vec![
+                "[[discover.sources]]".into(),
+                format!("source = {}", gen_toml_string(g)),
+                format!("namespace = {}", gen_toml_string(g)),
+                format!("prefix = {}", gen_toml_string(g)),
+                "flat-skills = false".into(),
+            ],
+            1 => vec![
+                "[[items]]".into(),
+                "kind = \"skill\"".into(),
+                format!("name = {}", gen_toml_string(g)),
+            ],
+            2 => vec![
+                "[discover]  # globs".into(),
+                format!("skills = [{}]", gen_toml_string(g)),
+            ],
+            _ => vec![
+                "[profiles]".into(),
+                format!("core = [{}]", gen_toml_string(g)),
+            ],
+        }
+    }
+
+    /// A `mind.toml`: a comment preamble, at most one `[source]` table, and
+    /// any number of other tables, in any order.
+    fn gen_mind_toml(g: &mut Gen) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        if g.one_in(2) {
+            lines.push("# a mind.toml".into());
+        }
+        let n = g.below(4);
+        let source_at = (!g.one_in(4)).then(|| g.below(n + 1));
+        let mut used = Vec::new();
+        for i in 0..=n {
+            if source_at == Some(i) {
+                lines.extend(gen_source_table(g));
+            }
+            if i < n {
+                lines.extend(gen_other_table(g, &mut used));
+            }
+            if g.one_in(2) {
+                lines.push(String::new());
+            }
+        }
+        let mut text = lines.join("\n");
+        if !g.one_in(4) {
+            text.push('\n');
+        }
+        text
+    }
+
+    // spec: INIT-12 DSC-82
+    #[test]
+    fn patch_source_meta_sets_only_the_source_keys() {
+        cases(0x5caf_0001, 5_000, |g| {
+            let input = gen_mind_toml(g);
+            let before: toml::Table =
+                toml::from_str(&input).unwrap_or_else(|e| panic!("{input}\n{e}"));
+            let flat = g.one_in(2);
+            let ns = g.one_in(4).then(|| g.any_string(0, 8));
+            let out = patch_source_meta(Some(&input), flat, ns.as_deref());
+            let after: toml::Table = toml::from_str(&out)
+                .unwrap_or_else(|e| panic!("patched output must parse:\n{input}\n---\n{out}\n{e}"));
+
+            let mut want = before.clone();
+            let source = want
+                .entry("source")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+                .as_table_mut()
+                .unwrap();
+            if flat {
+                source.insert("flat-skills".into(), toml::Value::Boolean(true));
+            }
+            if let Some(ns) = &ns {
+                source.insert("namespace".into(), toml::Value::String(ns.clone()));
+                source.remove("prefix");
+            }
+            if !flat && ns.is_none() {
+                want = before;
+            }
+            assert_eq!(after, want, "\n{input}\n---\n{out}");
+            for line in input.lines().filter(|l| l.trim_start().starts_with('#')) {
+                assert!(
+                    out.lines().any(|o| o == line),
+                    "comment {line:?} kept:\n{out}"
+                );
+            }
+        });
     }
 }
