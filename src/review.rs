@@ -532,7 +532,8 @@ fn run_checks(
                     // its neighbors ahead of `Finding`'s own (idempotent)
                     // backstop strip at construction.
                     let label = crate::sanitize::strip_ansi(hook.label());
-                    let run = crate::sanitize::strip_ansi(&hook.run);
+                    // spec: HOOK-199
+                    let run = crate::sanitize::show_command(&hook.run, "\\n");
                     advisory.push(Finding::advisory(
                         "install-hook",
                         format!(
@@ -773,8 +774,9 @@ fn run_checks(
             } else {
                 "required"
             };
-            // spec: CLI-224 -- sanitize before composing.
-            let cmd = crate::sanitize::strip_ansi(&hook.run);
+            // spec: CLI-224 HOOK-199 -- sanitize before composing, escaped
+            // rather than stripped.
+            let cmd = crate::sanitize::show_command(&hook.run, "\\n");
             advisory.push(Finding::advisory(
                 "item-hook",
                 format!(
