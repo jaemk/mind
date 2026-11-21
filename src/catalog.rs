@@ -2418,6 +2418,15 @@ fn scan_marketplace_in_repo_plugins(
             for skill_path in &entry.skills {
                 let skill_dir = plugin_root.join(skill_path);
                 let skill_md = skill_dir.join("SKILL.md");
+                // spec: MKT-14 -- an intermediate symlink can carry the path
+                // out of the clone even though the leaf is a real dir; hold it
+                // to the same containment as the plugin root.
+                let Ok(canon_skill) = skill_dir.canonicalize() else {
+                    continue;
+                };
+                if !canon_skill.starts_with(&canon_clone) {
+                    continue;
+                }
                 // spec: DSC-108 -- no-follow, as in every other scan route.
                 if is_dir_nofollow(&skill_dir)
                     && is_regular_file_nofollow(&skill_md)
@@ -2618,9 +2627,7 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
     // resolved root below and misreported a merely-dangling link as an
     // escaping one, before DSC-108's symlink filter ever got a look at it.
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let joined = canonical_root.join(pattern);
-    let full = joined.to_string_lossy();
-    let paths = glob::glob(&full).map_err(|e| MindError::MindToml {
+    let paths = glob_nofollow(&canonical_root, pattern).map_err(|e| MindError::MindToml {
         path: root.join("mind.toml"),
         msg: format!(
             "bad discover glob '{}': {e}",
@@ -2628,9 +2635,9 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
         ),
     })?;
     let mut out = Vec::new();
-    for entry in paths {
-        match entry {
-            Ok(p) => {
+    for p in paths {
+        {
+            {
                 // spec: DSC-81 -- canonicalize each match and verify it stays
                 // within the clone root. A symlink that points outside the root
                 // would pass a lexical `starts_with` but fail after canonicalization.
@@ -2704,14 +2711,93 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                 // non-canonical form every other scan path carries (DSC-81).
                 out.push(root.join(p.strip_prefix(&canonical_root).unwrap_or(&p)));
             }
-            Err(e) => {
-                let path = e.path().to_path_buf();
-                return Err(MindError::io(path, e.into()));
-            }
         }
     }
     out.sort();
     Ok(out)
+}
+
+/// Every path under `root` that `pattern` matches, found by a walk that does
+/// not descend a symlinked directory and stops at the item depth cap.
+///
+/// `glob::glob` follows directory links while expanding `**` (and while
+/// resolving each literal component), so a source shipping two `x -> .` links
+/// branches the expansion exponentially before any per-match check runs. Here
+/// a symlink is still yielded as a candidate (DSC-81 and DSC-108 judge it
+/// below) but never entered. `*`, `?`, and `[..]` do not cross `/`; `**`
+/// spans directories, as with `glob::glob`.
+// spec: DSC-124
+fn glob_nofollow(
+    root: &Path,
+    pattern: &str,
+) -> std::result::Result<Vec<PathBuf>, glob::PatternError> {
+    // `./` and empty components are no-ops to `glob::glob`; drop them so the
+    // pattern matches the root-relative paths the walk produces.
+    let comps: Vec<&str> = pattern
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    let compiled = glob::Pattern::new(&comps.join("/"))?;
+    let opts = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    // Start the walk at the pattern's literal leading components, so a
+    // narrow pattern (`agents/*.md`) does not walk the whole repo. Each of
+    // those components must be a real directory, not a link.
+    let mut start = root.to_path_buf();
+    let mut literal = 0;
+    for c in &comps[..comps.len().saturating_sub(1)] {
+        if c.contains(['*', '?', '[']) {
+            break;
+        }
+        start.push(c);
+        literal += 1;
+    }
+    if literal > 0 {
+        let mut probe = root.to_path_buf();
+        for c in &comps[..literal] {
+            probe.push(c);
+            if !std::fs::symlink_metadata(&probe).is_ok_and(|m| m.file_type().is_dir()) {
+                return Ok(Vec::new());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    glob_walk(root, &start, &compiled, &opts, 0, &mut out);
+    out.sort();
+    Ok(out)
+}
+
+fn glob_walk(
+    root: &Path,
+    dir: &Path,
+    pattern: &glob::Pattern,
+    opts: &glob::MatchOptions,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > crate::install::MAX_ITEM_TREE_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if let Ok(rel) = path.strip_prefix(root)
+            && pattern.matches_path_with(rel, *opts)
+        {
+            out.push(path.clone());
+        }
+        if ft.is_dir() {
+            glob_walk(root, &path, pattern, opts, depth + 1, out);
+        }
+    }
 }
 
 /// True when `path` is a REGULAR file, classified WITHOUT following a symlink.
@@ -4955,6 +5041,20 @@ mod tests {
         assert!(msg.contains(".."), "error must mention '..': {msg}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn glob_paths_recursive_pattern_does_not_descend_a_symlinked_dir() {
+        // spec: DSC-124
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("pkgs/a/SKILL.md"), "---\ndescription: a\n---\n");
+        // Two self-links branch a following walk 2^40 ways.
+        std::os::unix::fs::symlink(".", root.join("pkgs/loop")).unwrap();
+        std::os::unix::fs::symlink(".", root.join("pkgs/loop2")).unwrap();
+        let matches = glob_paths(root, "pkgs/**/SKILL.md", ItemKind::Skill).unwrap();
+        assert_eq!(matches.len(), 1, "one real skill: {matches:?}");
+    }
+
     #[test]
     fn glob_paths_accepts_normal_relative_pattern() {
         // spec: DSC-81 -- a normal relative glob must be accepted and match files
@@ -6415,6 +6515,55 @@ mod plugin_tests {
         assert!(
             !items.iter().any(|i| i.name == "secret"),
             "skill behind a symlink escaping the clone must NOT be discovered (MKT-14, MKT-9)"
+        );
+    }
+
+    // A `skills` entry is held to the same containment as the plugin root.
+    // `..` and absolute paths are refused by the manifest parser; one that
+    // reaches through a symlinked parent outside the clone is skipped here.
+    #[test]
+    fn marketplace_skills_entry_outside_clone_is_skipped() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+        let outside = base.join("outside-clone");
+        write_file(
+            &outside.join("skills/secret/SKILL.md"),
+            "---\ndescription: secret\n---\n",
+        );
+        write_file(
+            &clone.join("skills/ok/SKILL.md"),
+            "---\ndescription: ok\n---\n",
+        );
+        std::fs::create_dir_all(clone.join("linked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("skills"), clone.join("linked/skills")).unwrap();
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "p", "source": "./", "skills": [
+                        "./skills/ok",
+                        "./linked/skills/secret"
+                    ]}
+                ]
+            }"#,
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        assert!(
+            items.iter().any(|i| i.name == "ok"),
+            "the in-clone skill is still offered"
+        );
+        assert!(
+            !items.iter().any(|i| i.name == "secret"),
+            "a skill path escaping the clone must not be offered: {:?}",
+            items.iter().map(|i| &i.path).collect::<Vec<_>>()
         );
     }
 

@@ -154,6 +154,32 @@ pub fn proxy_hint_lines() -> Vec<String> {
 /// back off so a real passphrase/host-key prompt works on the normal terminal.
 static NONINTERACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the managed policy forbids cleartext transports (POL-70). Set once
+/// by `main` before dispatch; every git child then carries a restricted
+/// `GIT_ALLOW_PROTOCOL` (see [`allowed_protocols`]).
+static FORBID_INSECURE_TRANSPORT: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide cleartext-transport restriction (POL-70).
+pub fn set_forbid_insecure_transport(on: bool) {
+    FORBID_INSECURE_TRANSPORT.store(on, Ordering::Relaxed);
+}
+
+/// The transports a git child may use under POL-70: https, ssh, and local
+/// paths (`file`), narrowed further by a `GIT_ALLOW_PROTOCOL` the environment
+/// already sets, so a stricter value is kept rather than widened.
+// spec: POL-70
+fn allowed_protocols(existing: Option<&str>) -> String {
+    const SAFE: [&str; 3] = ["https", "ssh", "file"];
+    match existing {
+        None => SAFE.join(":"),
+        Some(list) => list
+            .split(':')
+            .filter(|p| SAFE.contains(p))
+            .collect::<Vec<_>>()
+            .join(":"),
+    }
+}
+
 /// Set the process-wide non-interactive git mode (see [`NONINTERACTIVE`]).
 pub fn set_noninteractive(on: bool) {
     NONINTERACTIVE.store(on, Ordering::Relaxed);
@@ -300,20 +326,40 @@ struct ConfigSsh {
     variant: Option<String>,
 }
 
+/// The platform null device, a `GIT_DIR` that is never a repository.
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
 /// [`ConfigSsh`] as a `git` child in `cwd` sees it, in one `git config`
 /// call. With no `cwd` (a clone) it is read outside any repository, so only
 /// the system and global config count, as for the clone itself.
 fn config_ssh(cwd: Option<&Path>) -> ConfigSsh {
-    let dir = cwd.map_or_else(std::env::temp_dir, Path::to_path_buf);
-    let Ok(out) = Command::new("git")
-        .args([
-            "config",
-            "--get-regexp",
-            r"^(core\.sshcommand|ssh\.variant)$",
-        ])
-        .current_dir(dir)
-        .output()
-    else {
+    config_ssh_in(cwd, &std::env::temp_dir())
+}
+
+/// [`config_ssh`] with the no-`cwd` working dir given, so a test can plant a
+/// repository there.
+fn config_ssh_in(cwd: Option<&Path>, outside: &Path) -> ConfigSsh {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "config",
+        "--get-regexp",
+        r"^(core\.sshcommand|ssh\.variant)$",
+    ]);
+    match cwd {
+        Some(dir) => {
+            cmd.current_dir(dir);
+        }
+        // spec: CLI-269 -- the temp dir is shared, so a `.git` planted there
+        // must not supply a `core.sshCommand`; a null `GIT_DIR` stops repo
+        // discovery and leaves the system and global config.
+        None => {
+            cmd.current_dir(outside).env("GIT_DIR", NULL_DEVICE);
+        }
+    }
+    let Ok(out) = cmd.output() else {
         return ConfigSsh::default();
     };
     parse_config_ssh(&String::from_utf8_lossy(&out.stdout))
@@ -427,6 +473,20 @@ fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
     with_prompt_retry(batch, |batch| exec(url, cwd, args, remote, batch))
 }
 
+/// The env pairs that append `core.fsmonitor=false` as config entry `count`
+/// (the `GIT_CONFIG_COUNT` already set), raising the count by one (CLI-268).
+// spec: CLI-268
+fn fsmonitor_off_env(count: usize) -> [(String, String); 3] {
+    [
+        (
+            format!("GIT_CONFIG_KEY_{count}"),
+            "core.fsmonitor".to_string(),
+        ),
+        (format!("GIT_CONFIG_VALUE_{count}"), "false".to_string()),
+        ("GIT_CONFIG_COUNT".to_string(), (count + 1).to_string()),
+    ]
+}
+
 /// One `git <args>` run. A `remote` one gets the non-interactive env when
 /// that mode is on; `batch` applies [`batch_env_pairs`].
 fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool) -> Result<String> {
@@ -435,6 +495,19 @@ fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool)
         cmd.current_dir(dir);
     }
     cmd.args(args);
+    // spec: CLI-268 -- a working tree mind did not create (`review <path>`)
+    // can name a command in its own `.git/config`; `core.fsmonitor` is the one
+    // a read-only call like `ls-files` runs. Set through the environment,
+    // after any pairs already there, so the argv stays `git <args>`.
+    for (k, v) in fsmonitor_off_env(crate::settings::Env.git_config_count()) {
+        cmd.env(k, v);
+    }
+    // spec: POL-70 -- on every git child, not only the remote verbs: a local
+    // checkout can still fetch (submodules, a partial clone's missing blobs).
+    if FORBID_INSECURE_TRANSPORT.load(Ordering::Relaxed) {
+        let existing = crate::settings::Env.git_allow_protocol();
+        cmd.env("GIT_ALLOW_PROTOCOL", allowed_protocols(existing.as_deref()));
+    }
     if remote {
         apply_noninteractive_env(&mut cmd, cwd);
     }
@@ -1114,18 +1187,19 @@ pub fn is_tracked(repo: &Path, file: &Path) -> bool {
     .is_ok()
 }
 
-/// Stage all changes under `dir` (`git add -A`).
-pub fn add_all(dir: &Path) -> Result<()> {
-    run(&dir.to_string_lossy(), Some(dir), &["add", "-A"])?;
-    Ok(())
-}
-
-/// Create a commit in `dir` with `message`. Errors if there is nothing staged.
-pub fn commit(dir: &Path, message: &str) -> Result<()> {
+/// Stage and commit only `path` (relative to `dir`) with `message`, leaving any
+/// other staged or unstaged change in the repo as it was (ABS-13). Errors when
+/// `path` has nothing to commit.
+pub fn commit_path(dir: &Path, path: &Path, message: &str) -> Result<()> {
+    let rel = path.to_string_lossy();
+    let label = dir.to_string_lossy();
+    run(&label, Some(dir), &["add", "-A", "--", &rel])?;
+    // With a pathspec, `git commit` records only those paths (`--only`), so
+    // whatever else the user had staged stays staged and uncommitted.
     run(
-        &dir.to_string_lossy(),
+        &label,
         Some(dir),
-        &["commit", "-m", message],
+        &["commit", "-m", message, "--only", "--", &rel],
     )?;
     Ok(())
 }
@@ -1529,6 +1603,25 @@ mod tests {
             }
         );
         assert_eq!(parse_config_ssh(""), ConfigSsh::default());
+    }
+
+    /// With no `cwd` (a clone), a repository in the shared working dir must
+    /// not supply the ssh command git children are given.
+    // spec: CLI-269
+    #[test]
+    fn config_ssh_without_cwd_ignores_a_repo_in_the_working_dir() {
+        let base = tmpdir("sshplant");
+        git_init(&base).unwrap();
+        git(&base, &["config", "core.sshCommand", "touch /tmp/pwned"]);
+        let sub = base.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            config_ssh_in(Some(&sub), &sub).command.as_deref(),
+            Some("touch /tmp/pwned"),
+            "the fixture repo must be discoverable from `sub`"
+        );
+        assert_eq!(config_ssh_in(None, &sub).command, None);
+        cleanup(&base);
     }
 
     // spec: PRG-6 TUI-45
@@ -2384,6 +2477,48 @@ mod tests {
         cleanup(&base);
     }
 
+    /// A working tree mind did not create (a reviewed or absorbed local repo)
+    /// may carry its own `.git/config`; a command it names there must not run.
+    // spec: CLI-268
+    #[test]
+    fn repo_config_commands_do_not_run_in_a_foreign_working_tree() {
+        let base = tmpdir("fsmon");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+        fs::write(repo.join("f.md"), "x").unwrap();
+        git(&repo, &["add", "f.md"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let marker = base.join("ran");
+        let hook = format!("touch '{}'; false", marker.display());
+        git(&repo, &["config", "core.fsmonitor", &hook]);
+
+        assert!(is_repo(&repo));
+        assert!(!marker.exists(), "is_repo ran a repo-config command");
+        assert!(is_tracked(&repo, &repo.join("f.md")));
+        assert!(!marker.exists(), "is_tracked ran a repo-config command");
+        head_commit(&repo.to_string_lossy(), &repo).unwrap();
+        assert!(!marker.exists(), "head_commit ran a repo-config command");
+        fs::write(repo.join("g.md"), "y").unwrap();
+        commit_path(&repo, Path::new("g.md"), "add g").unwrap();
+        assert!(!marker.exists(), "commit_path ran a repo-config command");
+        cleanup(&base);
+    }
+
+    /// The fsmonitor override goes after config pairs the user already set,
+    /// leaving them in place.
+    // spec: CLI-268
+    #[test]
+    fn fsmonitor_override_appends_after_existing_config_pairs() {
+        let pairs = fsmonitor_off_env(2);
+        assert_eq!(
+            pairs[0],
+            ("GIT_CONFIG_KEY_2".into(), "core.fsmonitor".into())
+        );
+        assert_eq!(pairs[1], ("GIT_CONFIG_VALUE_2".into(), "false".into()));
+        assert_eq!(pairs[2], ("GIT_CONFIG_COUNT".into(), "3".into()));
+        assert_eq!(fsmonitor_off_env(0)[2].1, "1");
+    }
+
     /// `is_repo` is false for a plain directory and true after `git_init`.
     // spec: ABS-5
     #[test]
@@ -2412,20 +2547,31 @@ mod tests {
         cleanup(&base);
     }
 
-    /// `add_all` then `commit` records a commit with the given message, and a
-    /// fresh `git_init`'d repo can commit a newly written file (the absorb flow:
-    /// move file in, add_all, commit "absorb kind:name").
+    // spec: POL-70
+    #[test]
+    fn allowed_protocols_keeps_only_safe_transports() {
+        assert_eq!(allowed_protocols(None), "https:ssh:file");
+        // An existing value only narrows: unsafe entries drop, safe ones stay.
+        assert_eq!(allowed_protocols(Some("http:https:git:ext")), "https");
+        assert_eq!(allowed_protocols(Some("ssh:file")), "ssh:file");
+        // A stricter "allow nothing" stays nothing.
+        assert_eq!(allowed_protocols(Some("")), "");
+        assert_eq!(allowed_protocols(Some("ext:git")), "");
+    }
+
+    /// `commit_path` records a commit with the given message, and a fresh
+    /// `git_init`'d repo can commit a newly written file (the absorb flow: copy
+    /// the item in, commit "absorb kind:name").
     // spec: ABS-5
     #[test]
-    fn add_all_and_commit_records_message() {
+    fn commit_path_records_message() {
         let base = tmpdir("commit");
         let repo = base.join("repo");
         git_init(&repo).unwrap();
 
-        // Write a file (as absorb does after the move) then stage + commit.
+        // Write a file (as absorb does after the copy) then stage + commit.
         fs::write(repo.join("skill.md"), "# absorbed\n").unwrap();
-        add_all(&repo).expect("add_all");
-        commit(&repo, "absorb skill:review").expect("commit");
+        commit_path(&repo, Path::new("skill.md"), "absorb skill:review").expect("commit");
 
         let msg = read_head_subject(&repo);
         assert_eq!(
@@ -2447,19 +2593,72 @@ mod tests {
         cleanup(&base);
     }
 
-    /// `commit` with nothing staged is an error: the absorb flow never commits an
-    /// empty change, and a misuse surfaces as a failure rather than a silent no-op.
+    /// `commit_path` on a path with no change is an error: the absorb flow never
+    /// commits an empty change, and a misuse surfaces as a failure rather than a
+    /// silent no-op.
     // spec: ABS-5
     #[test]
-    fn commit_with_nothing_staged_errors() {
+    fn commit_path_with_nothing_to_commit_errors() {
         let base = tmpdir("commit-empty");
         let repo = base.join("repo");
         git_init(&repo).unwrap();
-        // Nothing written/staged after init.
-        let result = commit(&repo, "absorb skill:nothing");
+        // Nothing written after init.
+        let result = commit_path(&repo, Path::new("skills/nothing"), "absorb skill:nothing");
         assert!(
             result.is_err(),
-            "commit with an empty index must error, not produce an empty commit"
+            "commit with nothing to record must error, not produce an empty commit"
+        );
+        cleanup(&base);
+    }
+
+    /// Other changes in the repo, staged or not, stay out of the commit and keep
+    /// their state.
+    // spec: ABS-13
+    #[test]
+    fn commit_path_leaves_other_changes_uncommitted() {
+        let base = tmpdir("commit-only");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+        fs::write(repo.join("README.md"), "# repo\n").unwrap();
+        commit_path(&repo, Path::new("README.md"), "init").unwrap();
+
+        fs::write(repo.join(".env"), "TOKEN=secret\n").unwrap();
+        fs::write(repo.join("staged.txt"), "wip\n").unwrap();
+        let st = Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        fs::create_dir_all(repo.join("skills/review")).unwrap();
+        fs::write(repo.join("skills/review/SKILL.md"), "# review\n").unwrap();
+
+        commit_path(&repo, Path::new("skills/review"), "absorb skill:review").unwrap();
+
+        let files = Command::new("git")
+            .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let files = String::from_utf8(files.stdout).unwrap();
+        assert_eq!(
+            files.trim(),
+            "skills/review/SKILL.md",
+            "commit held: {files}"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let status = String::from_utf8(status.stdout).unwrap();
+        assert!(
+            status.contains("A  staged.txt"),
+            "staged change kept: {status}"
+        );
+        assert!(
+            status.contains("?? .env"),
+            "untracked file left alone: {status}"
         );
         cleanup(&base);
     }

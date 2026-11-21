@@ -199,6 +199,8 @@ curated super-source, so it reuses that machinery.
   `marketplace.json` is authoritative for its source: when found, convention
   discovery is skipped (same as a `plugin.json` per MKT-2). External entries in the
   marketplace are not scanned by `catalog.rs`; they are sub-melded by `commands/`.
+  A plugin root, and each explicit `skills` path, whose canonical path (symlinks
+  resolved) falls outside the clone is skipped without error.
 
 ## Plugin repos as nested sources
 

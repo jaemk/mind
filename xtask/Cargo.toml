@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-getrandom = { version = "0.3", features = ["std"] }
+getrandom = { version = "0.4", features = ["std"] }
 tempfile = "3"
 # Release archive signatures that `self_update`'s `signatures` feature verifies.
 zipsign-api = { version = "0.2.2", default-features = false, features = ["sign-tar"] }

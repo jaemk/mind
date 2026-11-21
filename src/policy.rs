@@ -76,6 +76,9 @@ pub struct Policy {
     /// permitted under a lock (POL-56/57). Defaults to `true` (preserves
     /// existing behavior).
     allow_local: bool,
+    /// `[sources].allow-insecure-transport`: whether `http://` and `git://`
+    /// sources are permitted (POL-70/71). Defaults to `true`.
+    allow_insecure_transport: bool,
     /// `[sources].allow-version-ranges`: whether a version range counts as
     /// pinned under `pinned` (VER-100). An exact version always does.
     allow_version_ranges: bool,
@@ -172,6 +175,10 @@ struct RawSources {
     /// existing policies without this key continue to work unchanged.
     #[serde(default = "default_true", rename = "allow-local")]
     allow_local: bool,
+    /// `allow-insecure-transport = false` forbids `http://` and `git://` for
+    /// every source (POL-70). Defaults to `true` (POL-71).
+    #[serde(default = "default_true", rename = "allow-insecure-transport")]
+    allow_insecure_transport: bool,
     #[serde(default, rename = "allow-version-ranges")]
     allow_version_ranges: bool,
     #[serde(default, rename = "auto-update")]
@@ -187,6 +194,7 @@ impl Default for RawSources {
             lock: false,
             pinned: false,
             allow_local: true,
+            allow_insecure_transport: true,
             allow_version_ranges: false,
             auto_update: None,
             auto_meld: Vec::new(),
@@ -407,6 +415,11 @@ impl Policy {
     /// `[sources].allow-local` (POL-56/57). Defaults to `true`.
     pub fn allow_local(&self) -> bool {
         self.allow_local
+    }
+
+    /// `[sources].allow-insecure-transport` (POL-70/71). Defaults to `true`.
+    pub fn allow_insecure_transport(&self) -> bool {
+        self.allow_insecure_transport
     }
 
     /// `[sources].pinned` (POL-20).
@@ -659,6 +672,7 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         lock: raw.sources.lock,
         pinned: raw.sources.pinned,
         allow_local: raw.sources.allow_local,
+        allow_insecure_transport: raw.sources.allow_insecure_transport,
         allow_version_ranges: raw.sources.allow_version_ranges,
         auto_update,
         auto_meld,
@@ -1243,6 +1257,22 @@ repo = "acme/baseline"
         // Absent defaults to true.
         let p = parse("[sources]\nlock = true\n").unwrap();
         assert!(p.allow_local());
+    }
+
+    // spec: POL-70 POL-71
+    #[test]
+    fn allow_insecure_transport_parses_and_defaults_to_true() {
+        let p = parse("[sources]\nallow-insecure-transport = false\n").unwrap();
+        assert!(!p.allow_insecure_transport());
+        let p = parse("[sources]\nallow-insecure-transport = true\n").unwrap();
+        assert!(p.allow_insecure_transport());
+        let p = parse("[sources]\nlock = true\n").unwrap();
+        assert!(p.allow_insecure_transport(), "absent must default to true");
+        let p = parse("").unwrap();
+        assert!(
+            p.allow_insecure_transport(),
+            "empty policy must default to true"
+        );
     }
 
     // POL-51/POL-54: [binary].self-update absent or true -> Allowed.

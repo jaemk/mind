@@ -66,6 +66,14 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   in, `absorb` stages and commits it in the destination repo with a default
   message (`absorb <kind>:<name>`) so the source has a clean recorded commit before
   it is melded or synced.
+- `ABS-13` The commit (ABS-5) records only the absorbed item's path. Other
+  changes in the destination repo, staged or not, are neither staged nor
+  committed by `absorb`.
+- `ABS-14` A lobe entry that is itself a symlink (UNM-1) is absorbed by its
+  target's content. A symlink anywhere inside the item's tree is refused (the
+  same rule `learn` applies, LIFE-42) before anything is written to the
+  destination, so `absorb` never copies a link's target into the destination
+  repo or commits it.
 - `ABS-6` When the destination source already contains an item at the same
   convention path (`kind:name` collision), `absorb` errors and changes nothing,
   unless `--force` (`-f`) is given, which overwrites the destination path. A bare
@@ -89,7 +97,8 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   `ConfirmationRequired` (json mode is non-interactive, ABS-7) and writes
   nothing to stdout.
 - `ABS-12` When the `learn` step itself fails, `absorb` restores the original
-  lobe entry from its backup (ABS-10) and additionally unwinds what it can of
+  lobe entry from its backup (ABS-10), exactly as it was (a symlink entry is
+  restored as the same symlink, not a copy of its target), and additionally unwinds what it can of
   the earlier steps: a destination source that was melded by this absorb call
   (rather than already registered) is unregistered again, best-effort. The
   destination commit (ABS-5) is never reverted, because the destination repo

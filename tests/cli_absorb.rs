@@ -2510,11 +2510,13 @@ fn abs12_learn_failure_restores_lobe_and_unregisters_fresh_meld() {
     // An authoritative mind.toml whose [discover] skill glob matches nothing:
     // the absorbed skill is committed into dest but never offered by the
     // catalog, so the learn step fails after the commit and the fresh meld.
-    // absorb's own add_all commits this file alongside the item.
+    // Committed here: absorb commits only the item's own path (ABS-13).
     write_file(
         &sb.dest.join("mind.toml"),
         "[discover.skills]\ninclude = [\"nomatch/*/SKILL.md\"]\n",
     );
+    git(&sb.dest, &["add", "mind.toml"]);
+    git(&sb.dest, &["commit", "-qm", "discover nothing"]);
 
     let r = sb.mind(&["absorb", "skill:probe", "--to", &dest, "--yes"]);
     assert!(
@@ -2553,5 +2555,135 @@ fn abs12_learn_failure_restores_lobe_and_unregisters_fresh_meld() {
     assert!(
         combined.contains("absorb left commit 'absorb skill:probe'"),
         "the residual commit must be named in a warning: {combined}"
+    );
+}
+
+/// Files changed in the commit at `rev` in `dir`, one per line.
+fn commit_files(dir: &Path, rev: &str) -> String {
+    let out = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", rev])
+        .current_dir(dir)
+        .output()
+        .expect("git show");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+// ---- ABS-13: the commit holds only the item ------------------------------------
+
+/// Unrelated changes in the destination repo stay out of absorb's commit.
+// spec: ABS-13
+#[test]
+fn abs13_commit_holds_only_the_absorbed_item() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_skill("review");
+    write_file(&sb.dest.join(".env"), "TOKEN=secret\n");
+    write_file(&sb.dest.join("README.md"), "# personal\nedited\n");
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["absorb", "skill:review", "--to", &dest, "--yes"]);
+    assert!(r.success, "absorb failed: {} {}", r.stdout, r.stderr);
+
+    assert_eq!(commit_files(&sb.dest, "HEAD"), "skills/review/SKILL.md");
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&sb.dest)
+        .output()
+        .unwrap();
+    let status = String::from_utf8(status.stdout).unwrap();
+    assert!(
+        status.contains("?? .env"),
+        "untracked file left alone: {status}"
+    );
+    assert!(
+        status.contains(" M README.md"),
+        "edit left uncommitted: {status}"
+    );
+}
+
+// ---- ABS-14: symlinks ----------------------------------------------------------
+
+/// A symlink inside the item is refused before anything reaches the
+/// destination: no copy of its target, no commit, the lobe entry untouched.
+// spec: ABS-14 ABS-10
+#[test]
+fn abs14_nested_symlink_is_refused_before_any_copy() {
+    let sb = Sandbox::new();
+    let secret_dir = sb.base.join("secrets");
+    write_file(&secret_dir.join("id_rsa"), "PRIVATE KEY\n");
+    let lobe_path = sb.place_unmanaged_skill("leaky");
+    std::os::unix::fs::symlink(&secret_dir, lobe_path.join("data")).unwrap();
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["absorb", "skill:leaky", "--to", &dest, "--yes"]);
+    assert!(!r.success, "absorb must refuse: {} {}", r.stdout, r.stderr);
+    assert!(
+        format!("{}{}", r.stdout, r.stderr).contains("must not contain symlinks"),
+        "the refusal should name the symlink: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !sb.dest.join("skills/leaky").exists(),
+        "nothing may be written to the destination"
+    );
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        "init",
+        "nothing may be committed"
+    );
+    assert!(lobe_path.join("SKILL.md").is_file(), "lobe entry kept");
+    assert!(
+        is_symlink(&lobe_path.join("data")),
+        "lobe entry kept as it was"
+    );
+}
+
+/// A lobe entry that is itself a symlink is absorbed by its target's content.
+// spec: ABS-14
+#[test]
+fn abs14_top_level_symlink_is_absorbed_by_content() {
+    let sb = Sandbox::new();
+    let real = sb.base.join("dev").join("review");
+    write_file(&real.join("SKILL.md"), "# review skill\n");
+    std::fs::create_dir_all(sb.claude_home.join("skills")).unwrap();
+    std::os::unix::fs::symlink(&real, sb.claude_home.join("skills/review")).unwrap();
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["absorb", "skill:review", "--to", &dest, "--yes"]);
+    assert!(r.success, "absorb failed: {} {}", r.stdout, r.stderr);
+    let copied = sb.dest.join("skills/review/SKILL.md");
+    assert!(
+        std::fs::symlink_metadata(&copied).is_ok_and(|m| m.file_type().is_file()),
+        "the target's content is copied in as a real file"
+    );
+    assert_eq!(std::fs::read_to_string(copied).unwrap(), "# review skill\n");
+    assert!(
+        real.join("SKILL.md").is_file(),
+        "the link target is untouched"
+    );
+}
+
+/// A learn failure restores a symlinked lobe entry as the same symlink.
+// spec: ABS-12
+#[test]
+fn abs12_learn_failure_restores_a_symlinked_entry_as_the_symlink() {
+    let sb = Sandbox::new();
+    let real = sb.base.join("dev").join("badref");
+    write_file(
+        &real.join("SKILL.md"),
+        "# badref skill\n\nhand off to {{ns:nonexistent}}\n",
+    );
+    let lobe_path = sb.claude_home.join("skills").join("badref");
+    std::fs::create_dir_all(lobe_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &lobe_path).unwrap();
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["absorb", "skill:badref", "--to", &dest, "--yes"]);
+    assert!(!r.success, "learn must fail: {} {}", r.stdout, r.stderr);
+    assert!(is_symlink(&lobe_path), "restored as a symlink, not a copy");
+    assert_eq!(std::fs::read_link(&lobe_path).unwrap(), real);
+    assert!(
+        real.join("SKILL.md").is_file(),
+        "the link target is untouched"
     );
 }

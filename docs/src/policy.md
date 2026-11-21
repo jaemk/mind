@@ -68,6 +68,10 @@ lock = true
 # Default is true (local-path melds are evaluated against allow like any source).
 allow-local = false
 
+# Forbid the cleartext transports http:// and git:// for every source, with or
+# without lock. Default is true (allowed).
+allow-insecure-transport = false
+
 # Every meld must resolve to a tag, a ref, or an exact release version
 # (`version==1.2.3`); floating branches and version ranges are refused. When
 # pinned, every auto_meld entry below must declare one of those.
@@ -179,6 +183,27 @@ restriction. `allow-local = false` closes that gap for machines where the lock
 is meant to enforce source origin, not just pattern matching. Combine it with
 filesystem permissions on any mirror directory that employees can read but not
 write to.
+
+### Cleartext transports (`allow-insecure-transport`)
+
+```toml
+[sources]
+allow-insecure-transport = false   # default: true
+```
+
+`allow` matches a source's identity, not how it is fetched, so
+`http://github.com/acme/agents` matches the same `github.com/acme/*` pattern as
+the `https://` URL. `allow-insecure-transport = false` refuses `http://` and
+`git://` for every source, whether or not `lock` is set:
+
+- `meld` of such a spec fails before any clone (`InsecureTransportForbidden`).
+- Every git command `mind` runs is limited to https, ssh, and local paths
+  (`GIT_ALLOW_PROTOCOL`), including submodules and http redirects, so a
+  cleartext source registered earlier fails to sync instead of fetching.
+
+Leave it at the default when some sources are served over plain http (an
+internal git server without TLS). Note that a remote rewritten with
+`url.<base>.insteadOf` to another transport or remote helper is refused too.
 
 ### Require pinned
 

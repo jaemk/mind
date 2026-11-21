@@ -144,6 +144,7 @@ and verified.
 | Managed-policy `[binary].self-update` control: disable, pin to a version, or allow | done | POL-51, POL-52, POL-53, POL-54 |
 | Managed-policy `auto_meld` pin reconciliation: pin-bump propagates to already-provisioned machines on next `sync` | done | POL-55 |
 | Managed-policy `[sources].allow-local` knob: forbid local-path and `file://` melds under lock | done | POL-56, POL-57 |
+| Managed-policy `[sources].allow-insecure-transport` knob: forbid `http://` and `git://` for every source | done | POL-70, POL-71 |
 | Managed-policy `auto_meld` `install = true`: headless item install after provisioning; `run-build-hooks` opt-in; per-item soft-fail | done | POL-58, POL-59, POL-60 |
 | Managed-policy `min-mind-version` gate: checked before strict parse; gives a clear error on schema skew instead of an opaque unknown-field error | done | POL-61, POL-62, POL-63 |
 | Managed-policy permission warning: warn when the system policy file or its parent dir is group/world-writable or not root-owned; skipped for `$MIND_POLICY_FILE` | done | POL-64, POL-65 |

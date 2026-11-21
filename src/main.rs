@@ -164,6 +164,9 @@ fn run(cli: Cli) -> Result<()> {
     if !matches!(cli.command, Command::Completions { .. } | Command::Man) {
         install_metadata_limit(&cli, &paths)?;
         configure_hook_log(&cli, &paths);
+        // spec: POL-70 -- read quietly here; the verb's own load reports
+        // permission warnings and parse errors.
+        git::set_forbid_insecure_transport(paths.settings().forbids_insecure_transport());
     }
 
     // spec: STO-40 STO-41 STO-42

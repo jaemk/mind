@@ -6,6 +6,71 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.54.0] - 2026-11-21
+
+### Added
+
+- Managed-policy key `[sources].allow-insecure-transport` (default `true`).
+  `false` refuses an `http://` or `git://` meld before cloning
+  (`insecure-transport-forbidden`) and sets `GIT_ALLOW_PROTOCOL=https:ssh:file`
+  (narrowed by any existing value) on every git child, which also covers sync,
+  `review`, submodules, and redirects.
+
+### Changed
+
+- `config.toml` records `known-lobes`, the lobes of sources in other mind
+  homes that `mind` linked items into. Crash recovery trusts those instead of
+  the lobes an extra home's own config lists.
+- A repo spec whose scheme is not https, http, ssh, git, git+ssh, or ssh+git
+  is refused (`unsupported-repo-scheme`). git reads `<helper>::<address>` as a
+  remote helper call, and `ext::` runs a shell command.
+- A network repo spec whose host is not a hostname (optional `:port`, or
+  bracketed IPv6), or whose owner or repo contains `?`, is refused.
+- Item file walks and `[discover]` globs no longer follow symlinks. A glob
+  through a symlinked directory matches nothing, and a symlink inside an item
+  is not walked.
+- `absorb` commits only the item's path, refuses a symlink inside the item
+  before writing anything, and a failed `learn` restores a symlinked lobe entry
+  as the symlink.
+- A file with an execute bit hashes differently, so `upgrade` picks up an
+  upstream `chmod +x`. Installed items that ship an executable file show as
+  changed once and are re-linked on the next `upgrade`.
+- Hook commands on consent surfaces are shown with control characters escaped
+  instead of stripped.
+- A curator's roots and hooks are gated only when its `mind.toml` declares its
+  own discovery.
+- Updated dependencies.
+
+### Fixed
+
+- Every git child runs with `core.fsmonitor` off (needs git 2.31 or later), so
+  `review <path>` no longer runs a command named in the reviewed repo's
+  `.git/config`.
+- A clone's `core.sshCommand` is read from system and global git config only;
+  a `.git` in the temp dir could supply the command a non-interactive clone was
+  given.
+- A marketplace entry's `skills` path that resolves outside the clone is
+  skipped.
+- `review` resolves a `{{self}}/...` or `{{path:...}}/...` reference only when
+  it stays inside the item, so it cannot report whether an arbitrary file
+  exists.
+- Uninstall and in-place upgrade remove only links into a store when the link
+  is outside every lobe.
+- A tag pin clones the tag when a branch has the same name.
+- A marketplace plugin source's pin keys are applied.
+- `curate` upgrades a repinned source's items in the same run.
+- Frontmatter must be closed, plain-scalar comments are stripped, and a
+  multibyte dedent no longer panics.
+- A workflow template literal ends at its own closing backtick.
+- The unmanaged scan skips dot-entries and wrong-type entries.
+- An ignore entry with a leading `!` is refused.
+- A non-UTF-8 prompt reply asks again.
+- `dump` omits `namespace` for a source's own prefix, and leaves gated add-root
+  items out of `install-items`.
+- `init-source` patches only the `[source]` table, finds a quoted or spaced
+  header, and escapes control characters.
+- A spinner frame is no longer drawn after the erase on Ctrl-C or SIGTERM.
+
 ## [0.53.1] - 2026-11-18
 
 ### Fixed
@@ -2548,7 +2613,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.53.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.54.0...HEAD
+[0.54.0]: https://github.com/jaemk/mind/compare/v0.53.1...v0.54.0
 [0.53.1]: https://github.com/jaemk/mind/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/jaemk/mind/compare/v0.52.0...v0.53.0
 [0.52.0]: https://github.com/jaemk/mind/compare/v0.51.0...v0.52.0

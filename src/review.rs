@@ -1882,6 +1882,15 @@ fn referenced_source_files<'a>(
         let Some(remainder) = path_remainder(tail) else {
             continue;
         };
+        // spec: CLI-266 -- only a path inside the owning item is resolved.
+        if !Path::new(&remainder).components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
+            continue;
+        }
         // The item that owns the addressed directory: the item itself
         // (`{{self}}`) or a named same-source sibling (`{{path:[kind:]name}}`).
         // Returned alongside the target so the caller can consult *its* ignore
@@ -1911,13 +1920,28 @@ fn referenced_source_files<'a>(
 
 /// Recursively collect every file under `dir`.
 pub(crate) fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    collect_files_at(dir, out, 0);
+}
+
+// spec: DSC-124 -- classified no-follow and depth-capped: the tree is the
+// source's, so a link must not loop the walk or reach outside the item.
+fn collect_files_at(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    if depth > crate::install::MAX_ITEM_TREE_DEPTH {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, out);
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
+            collect_files_at(&path, out, depth + 1);
         } else {
             out.push(path);
         }
@@ -2062,6 +2086,47 @@ mod tests {
         // A missing workflow file is not "over the cap".
         let gone = file_item(ItemKind::Workflow, tmp.path().join("gone.js"));
         assert_eq!(review_item_files(&gone).len(), 1);
+    }
+
+    /// spec: DSC-124
+    #[cfg(unix)]
+    #[test]
+    fn item_files_does_not_follow_symlinks_inside_the_item() {
+        use crate::error::ItemKind;
+        let tmp = TmpDir::new();
+        let item_dir = tmp.path().join("skills/s");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(item_dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(item_dir.join("SKILL.md"), "x").unwrap();
+        std::fs::write(item_dir.join("sub/real.md"), "x").unwrap();
+        std::fs::write(outside.join("secret.md"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, item_dir.join("out")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.md"), item_dir.join("f.md")).unwrap();
+        std::os::unix::fs::symlink(".", item_dir.join("loop")).unwrap();
+
+        let item = file_item(ItemKind::Skill, item_dir.clone());
+        assert_eq!(
+            item_files(&item),
+            vec![item_dir.join("SKILL.md"), item_dir.join("sub/real.md")]
+        );
+    }
+
+    /// spec: CLI-266
+    #[test]
+    fn referenced_source_files_stays_inside_the_owning_item() {
+        use crate::error::ItemKind;
+        let tmp = TmpDir::new();
+        let item = file_item(ItemKind::Skill, tmp.path().join("skills/s"));
+        let content = "run {{self}}/scripts/ok.sh, \
+                       {{self}}/../../../etc/passwd, \
+                       {{self}}//etc/passwd, \
+                       {{self}}/a/../../x";
+        let got: Vec<PathBuf> = referenced_source_files(content, &item, &[])
+            .into_iter()
+            .map(|(_, p, _)| p)
+            .collect();
+        assert_eq!(got, vec![item.path.join("scripts/ok.sh")]);
     }
 
     // --- target resolution precedence (CLI-130) ---
