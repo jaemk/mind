@@ -61,6 +61,18 @@ super-source on top of the manifest (MKT-15, MKT-16). See
     resolves outside the repo root remains DSC-81's hard error, which takes
     precedence.
 
+- `DSC-124` The walk over a discovered item's own files (token expansion at
+  scan time, the meld warnings, `review` and `review --fix`, `init-source`, the
+  `probe` preview) does not follow a symlink: a symlinked file or directory
+  inside the item is not listed or descended into, and the descent is
+  depth-capped (LIFE-52). A symlink cycle therefore cannot make the walk
+  unbounded, a link to a directory outside the source cannot make its files
+  read, and `review --fix` cannot write through a link. Install still refuses
+  such a link (LIFE-42). A `[discover]` glob (DSC-80) is expanded by the same
+  kind of walk: a symlinked directory, including one named by the pattern's
+  literal leading components, is not descended, while a symlink entry the
+  pattern matches is still judged by DSC-81 and DSC-108.
+
   A symlinked entry that is therefore not an item is also not counted as a
   mapped plugin component: it is reported among the unmapped entries (MKT-4),
   since what the scan leaves behind must not be described as installed.
