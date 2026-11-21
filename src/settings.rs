@@ -202,6 +202,12 @@ impl Env {
         non_blank("GIT_SSH_VARIANT")
     }
 
+    /// `$GIT_ALLOW_PROTOCOL`, `None` only when unset: git reads an empty value
+    /// as "allow no protocol", so a blank one is kept (POL-70).
+    pub fn git_allow_protocol(self) -> Option<String> {
+        std::env::var_os("GIT_ALLOW_PROTOCOL").map(|v| v.to_string_lossy().into_owned())
+    }
+
     /// The user's home directory (`$HOME`, or the platform lookup).
     pub fn home_dir(self) -> Option<PathBuf> {
         dirs::home_dir()
@@ -289,6 +295,15 @@ impl<'a> Settings<'a> {
             }
             None => Ok(None),
         }
+    }
+
+    /// Whether the policy in effect forbids cleartext transports (POL-70), read
+    /// without printing the POL-64 permission warnings. A policy that will not
+    /// load counts as forbidding them (POL-5 fail closed).
+    pub fn forbids_insecure_transport(self) -> bool {
+        self.policy_path().is_some_and(|path| {
+            crate::policy::load_file(&path).map_or(true, |p| !p.allow_insecure_transport())
+        })
     }
 
     /// The policy file in effect, if any: the system path when it exists, else

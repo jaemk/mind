@@ -2708,3 +2708,111 @@ fn auto_meld_rollback_on_dsc64_validate_failure() {
         r.stderr
     );
 }
+
+// --- allow-insecure-transport policy knob (POL-70/POL-71) -------------------
+
+const NO_CLEARTEXT: &str = "[sources]\nallow-insecure-transport = false\n";
+
+#[test]
+fn insecure_transport_false_refuses_a_cleartext_meld_before_any_clone() {
+    // spec: POL-70 -- refused with or without lock, before any clone, naming
+    // the knob; the hint names the policy file.
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, NO_CLEARTEXT);
+    for spec in [
+        "http://example.com/acme/agents",
+        "git://example.com/acme/agents",
+    ] {
+        let r = sb.mind_env(&["meld", spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+        assert!(!r.success, "{spec} must be refused: {}", r.stdout);
+        assert!(
+            r.stderr.contains("allow-insecure-transport"),
+            "{spec}: error must name the knob: {}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("hint: managed policy at"),
+            "{spec}: the policy path hint must print: {}",
+            r.stderr
+        );
+    }
+    assert_eq!(source_count(&sb), 0, "registry must be unchanged");
+    assert!(
+        !sb.mind_home.join("sources").join("example.com").exists(),
+        "no clone dir may be created"
+    );
+}
+
+#[test]
+fn insecure_transport_false_reports_its_own_error_kind() {
+    // spec: POL-70
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, NO_CLEARTEXT);
+    let r = sb.mind_env(
+        &["--json", "meld", "http://example.com/acme/agents"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(!r.success);
+    let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("json envelope");
+    assert_eq!(
+        v["error"]["kind"], "insecure-transport-forbidden",
+        "{}",
+        r.stdout
+    );
+}
+
+#[test]
+fn insecure_transport_false_limits_every_git_command_mind_runs() {
+    // spec: POL-70 -- the GIT_ALLOW_PROTOCOL backstop: `review` clones without
+    // the meld gate, and git itself refuses the cleartext transport. The
+    // address is loopback; git refuses before connecting either way.
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, NO_CLEARTEXT);
+    let r = sb.mind_env(
+        &["review", "git://127.0.0.1:1/acme/agents"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(!r.success, "review must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("transport 'git' not allowed"),
+        "git must refuse the transport: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn insecure_transport_false_still_clones_a_local_source() {
+    // spec: POL-70 -- local paths stay allowed (`file` is in the list): a
+    // pinned local meld clones a snapshot through git.
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    let policy = write_policy(&sb, NO_CLEARTEXT);
+    let r = sb.mind_env(
+        &["meld", &spec, "--pin", "HEAD"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "pinned local meld must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(source_count(&sb), 1);
+}
+
+#[test]
+fn insecure_transport_default_does_not_restrict() {
+    // spec: POL-71 -- absent, git gets no protocol restriction: the same
+    // review reaches the connection attempt instead of a transport refusal.
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, "[sources]\nlock = false\n");
+    let r = sb.mind_env(
+        &["review", "git://127.0.0.1:1/acme/agents"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(!r.success, "nothing listens on port 1: {}", r.stdout);
+    assert!(
+        !r.stderr.contains("not allowed"),
+        "no transport restriction may apply by default: {}",
+        r.stderr
+    );
+}

@@ -464,6 +464,19 @@ impl Source {
         self.host == "local"
     }
 
+    /// The URL's scheme when it is a cleartext transport (`http`, `git`), as
+    /// written. `None` for https, ssh (either form), and local paths (POL-70).
+    pub fn insecure_scheme(&self) -> Option<&str> {
+        if self.is_local() {
+            return None;
+        }
+        let (scheme, _) = self.url.split_once("://")?;
+        ["http", "git"]
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(scheme))
+            .then_some(scheme)
+    }
+
     /// The base repo identity `host/owner/repo`, without an item-link `#path`
     /// or consumer-alias `@alias` suffix. Equal to `name` for an ordinary,
     /// unaliased source. This is what managed policy allowlists match against
@@ -2169,6 +2182,31 @@ mod tests {
                 }
                 other => panic!("{spec}: expected UnsupportedRepoScheme, got {other:?}"),
             }
+        }
+    }
+
+    // spec: POL-70
+    #[test]
+    fn insecure_scheme_names_only_cleartext_transports() {
+        let scheme = |spec: &str| {
+            parse_spec(spec)
+                .unwrap()
+                .insecure_scheme()
+                .map(str::to_string)
+        };
+        assert_eq!(scheme("http://example.com/o/r").as_deref(), Some("http"));
+        assert_eq!(scheme("HTTP://example.com/o/r").as_deref(), Some("HTTP"));
+        assert_eq!(scheme("git://example.com/o/r").as_deref(), Some("git"));
+        for safe in [
+            "https://example.com/o/r",
+            "ssh://git@example.com/o/r",
+            "git+ssh://example.com/o/r",
+            "git@example.com:o/r",
+            "acme/agents",
+            "/srv/mirrors/agents",
+            "file:///srv/mirrors/agents",
+        ] {
+            assert_eq!(scheme(safe), None, "{safe}");
         }
     }
 

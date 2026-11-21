@@ -1120,6 +1120,14 @@ pub enum MindError {
     )]
     LocalMeldForbidden { identity: String },
 
+    /// POL-70: a cleartext (`http://`, `git://`) source under a policy with
+    /// `allow-insecure-transport = false`.
+    #[error(
+        "source '{identity}' uses the cleartext transport '{scheme}', which the managed policy \
+         forbids ([sources].allow-insecure-transport = false); use https or ssh"
+    )]
+    InsecureTransportForbidden { identity: String, scheme: String },
+
     #[error(
         "source '{identity}' must be pinned to a tag, ref, or exact version: the managed policy forbids a floating pin"
     )]
@@ -2014,6 +2022,7 @@ impl MindError {
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",
             MindError::LocalMeldForbidden { .. } => "local-meld-forbidden",
+            MindError::InsecureTransportForbidden { .. } => "insecure-transport-forbidden",
             MindError::UnpinnedSourceForbidden { .. } => "unpinned-source-forbidden",
             MindError::InvalidPolicy { .. } => "invalid-policy",
             MindError::LobesLocked { .. } => "lobes-locked",

@@ -154,6 +154,32 @@ pub fn proxy_hint_lines() -> Vec<String> {
 /// back off so a real passphrase/host-key prompt works on the normal terminal.
 static NONINTERACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the managed policy forbids cleartext transports (POL-70). Set once
+/// by `main` before dispatch; every git child then carries a restricted
+/// `GIT_ALLOW_PROTOCOL` (see [`allowed_protocols`]).
+static FORBID_INSECURE_TRANSPORT: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide cleartext-transport restriction (POL-70).
+pub fn set_forbid_insecure_transport(on: bool) {
+    FORBID_INSECURE_TRANSPORT.store(on, Ordering::Relaxed);
+}
+
+/// The transports a git child may use under POL-70: https, ssh, and local
+/// paths (`file`), narrowed further by a `GIT_ALLOW_PROTOCOL` the environment
+/// already sets, so a stricter value is kept rather than widened.
+// spec: POL-70
+fn allowed_protocols(existing: Option<&str>) -> String {
+    const SAFE: [&str; 3] = ["https", "ssh", "file"];
+    match existing {
+        None => SAFE.join(":"),
+        Some(list) => list
+            .split(':')
+            .filter(|p| SAFE.contains(p))
+            .collect::<Vec<_>>()
+            .join(":"),
+    }
+}
+
 /// Set the process-wide non-interactive git mode (see [`NONINTERACTIVE`]).
 pub fn set_noninteractive(on: bool) {
     NONINTERACTIVE.store(on, Ordering::Relaxed);
@@ -435,6 +461,12 @@ fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool)
         cmd.current_dir(dir);
     }
     cmd.args(args);
+    // spec: POL-70 -- on every git child, not only the remote verbs: a local
+    // checkout can still fetch (submodules, a partial clone's missing blobs).
+    if FORBID_INSECURE_TRANSPORT.load(Ordering::Relaxed) {
+        let existing = crate::settings::Env.git_allow_protocol();
+        cmd.env("GIT_ALLOW_PROTOCOL", allowed_protocols(existing.as_deref()));
+    }
     if remote {
         apply_noninteractive_env(&mut cmd, cwd);
     }
@@ -2411,6 +2443,18 @@ mod tests {
             "a non-existent path must not report as a git repo"
         );
         cleanup(&base);
+    }
+
+    // spec: POL-70
+    #[test]
+    fn allowed_protocols_keeps_only_safe_transports() {
+        assert_eq!(allowed_protocols(None), "https:ssh:file");
+        // An existing value only narrows: unsafe entries drop, safe ones stay.
+        assert_eq!(allowed_protocols(Some("http:https:git:ext")), "https");
+        assert_eq!(allowed_protocols(Some("ssh:file")), "ssh:file");
+        // A stricter "allow nothing" stays nothing.
+        assert_eq!(allowed_protocols(Some("")), "");
+        assert_eq!(allowed_protocols(Some("ext:git")), "");
     }
 
     /// `commit_path` records a commit with the given message, and a fresh
