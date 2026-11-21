@@ -141,6 +141,14 @@ fn is_control(c: char) -> bool {
 /// text (see [`strip_ansi`]'s doc comment) without closing an invisibility
 /// vector.
 ///
+/// The set is every Unicode `Default_Ignorable_Code_Point` (DerivedCoreProperties:
+/// the code points a renderer shows as nothing), plus the line/paragraph
+/// separators and the interlinear annotation characters (NS-75). That
+/// includes ZWNJ/ZWJ (U+200C/U+200D): an item named `review` + ZWJ would
+/// otherwise pass [`has_blocked_chars`] and display identically to `review`.
+/// The cost is display-only: an emoji ZWJ sequence in a curator message
+/// splits into its component emoji, the same trade already made for U+FE0F.
+///
 /// M5 (NS-73) broadened this from the original bidi/zero-width/separator set;
 /// every code point blocked before that change is still blocked (a superset),
 /// so DSC-96-era callers that only exercise the older set keep working.
@@ -157,36 +165,43 @@ fn is_blocked_unicode(c: char) -> bool {
         // defense-in-depth (the overrides are the primary threat and are
         // already blocked above).
         | '\u{200E}' | '\u{200F}' | '\u{061C}'
-        // Zero-width characters: invisible, so a hostile source can use them
-        // to defeat a visual/substring comparison of a sanitized string.
-        | '\u{200B}' | '\u{2060}' | '\u{FEFF}'
+        // Zero-width characters (ZWSP, ZWNJ, ZWJ; U+200E/U+200F are the marks
+        // above): invisible, so a hostile source can use them to defeat a
+        // visual/substring comparison of a sanitized string.
+        | '\u{200B}'..='\u{200D}' | '\u{FEFF}'
         // Soft hyphen: renders as nothing unless a line break falls there.
         | '\u{00AD}'
-        // Mongolian vowel separator: a zero-width format character.
-        | '\u{180E}'
-        // Invisible mathematical operators (function application, invisible
-        // times/separator/plus): U+2060 (word joiner) is listed above; these
-        // fill out the rest of the same Cf run.
-        | '\u{2061}'..='\u{2064}'
-        // Deprecated Cf format characters (inhibit/activate symmetric
-        // swapping, national digit shapes, nominal digit shapes): invisible
-        // layout-affecting code points, same rationale as the bidi marks.
+        // Combining grapheme joiner: a mark with no glyph.
+        | '\u{034F}'
+        // Mongolian free variation selectors and vowel separator.
+        | '\u{180B}'..='\u{180F}'
+        // Khmer inherent vowels: default-ignorable, render as nothing.
+        | '\u{17B4}' | '\u{17B5}'
+        // Word joiner, invisible math operators, the reserved U+2065, and the
+        // deprecated Cf format characters (inhibit/activate symmetric
+        // swapping, national/nominal digit shapes). The isolates U+2066-U+2069
+        // in the middle of this run are listed with the bidi overrides above.
+        | '\u{2060}'..='\u{2065}'
         | '\u{206A}'..='\u{206F}'
         // Variation selectors: modify the glyph of the preceding character
         // and are themselves invisible, so one can be smuggled between two
         // characters to defeat a substring comparison.
-        | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'
-        // Interlinear annotation characters: invisible markup, never meant to
-        // reach a plain-text display.
-        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{FE00}'..='\u{FE0F}'
+        // Reserved default-ignorable code points, and interlinear annotation
+        // characters (invisible markup, never meant to reach a plain-text
+        // display).
+        | '\u{FFF0}'..='\u{FFFB}'
         // Hangul fillers: assigned code points that render as blank.
-        | '\u{115F}' | '\u{3164}'
-        // The Unicode tag block: nominally deprecated, but the standard
-        // "invisible ASCII smuggling" vector -- a payload hidden here renders
-        // as nothing to a human at a terminal, yet is plain text to a parser
-        // or an AI agent reading the same string. The most important addition
-        // in this broadening (M5): this text is read by both.
-        | '\u{E0000}'..='\u{E007F}'
+        | '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}'
+        // Shorthand format controls and musical symbol format controls.
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        // The Unicode tag block (U+E0000-U+E007F), the supplementary variation
+        // selectors (U+E0100-U+E01EF), and the reserved default-ignorable rest
+        // of plane 14. The tag block is the standard "invisible ASCII
+        // smuggling" vector -- a payload hidden here renders as nothing to a
+        // human at a terminal, yet is plain text to a parser or an AI agent
+        // reading the same string.
+        | '\u{E0000}'..='\u{E0FFF}'
     )
 }
 
@@ -434,6 +449,50 @@ mod tests {
         );
     }
 
+    // spec: NS-75
+    #[test]
+    fn default_ignorable_code_points_are_blocked() {
+        // Every Default_Ignorable_Code_Point renders as nothing, so a name
+        // carrying one displays identically to the name without it. Each must
+        // be flagged by `has_blocked_chars` (the identity gate) and dropped by
+        // `strip_ansi` with no space substituted.
+        let invisible = [
+            ('\u{200C}', "ZWNJ"),
+            ('\u{200D}', "ZWJ"),
+            ('\u{034F}', "combining grapheme joiner"),
+            ('\u{1160}', "Hangul jungseong filler"),
+            ('\u{FFA0}', "halfwidth Hangul filler"),
+            ('\u{17B4}', "Khmer vowel inherent AQ"),
+            ('\u{17B5}', "Khmer vowel inherent AA"),
+            ('\u{180B}', "Mongolian free variation selector one"),
+            ('\u{180F}', "Mongolian free variation selector four"),
+            ('\u{2065}', "reserved, isolate-adjacent"),
+            ('\u{FFF0}', "reserved specials"),
+            ('\u{1BCA0}', "shorthand format letter overlap"),
+            ('\u{1D173}', "musical symbol begin beam"),
+            ('\u{E0080}', "reserved, past the tag block"),
+            ('\u{E0FFF}', "reserved, end of plane-14 ignorables"),
+        ];
+        for (c, label) in invisible {
+            let s = format!("review{c}");
+            assert!(has_blocked_chars(&s), "{label} must be flagged");
+            assert_eq!(strip_ansi(&s), "review", "{label} must be dropped");
+        }
+        // Visible neighbors of the new ranges pass through.
+        for c in [
+            '\u{17B6}',
+            '\u{1810}',
+            '\u{FFFC}',
+            '\u{1BCA4}',
+            '\u{1D17B}',
+            '\u{E1000}',
+        ] {
+            let s = format!("a{c}b");
+            assert!(!has_blocked_chars(&s), "{c:?} must not be flagged");
+            assert_eq!(strip_ansi(&s), s, "{c:?} must pass through");
+        }
+    }
+
     // spec: TUI-60
     #[test]
     fn strip_ansi_empty_string() {
@@ -666,11 +725,12 @@ mod tests {
             "a\u{202F}b",
             "U+202F must pass through (above the bidi-override block)"
         );
-        // U+2065 sits just below the U+2066-2069 isolate block.
+        // U+2065, just below the U+2066-2069 isolate block, is a reserved
+        // default-ignorable code point and is dropped (NS-75).
         assert_eq!(
             strip_ansi("a\u{2065}b"),
-            "a\u{2065}b",
-            "U+2065 must pass through (below the isolate block)"
+            "ab",
+            "U+2065 is default-ignorable and must be dropped (NS-75)"
         );
         // U+206A-206F (the deprecated format controls) are themselves blocked by
         // NS-73, so the first pass-through code point above the isolate block is

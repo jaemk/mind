@@ -270,6 +270,7 @@ and verified.
 | An unprefixed source whose bare item name contains `:` (the spelling a prefixed source produces) is warned about by `meld` and `learn` and reported by `review` as a `forged-namespace` advisory; the catalog scan itself stays silent, so the read-only surfaces and the `probe` TUI's poll tick never print it | done | DSC-99, DSC-101 |
 | The scan's remaining degraded-state warnings (dead linked source, unparseable item manifest, unsafe item name, revalidation-dropped registry entry) are muted while the TUI owns the terminal and restored when it gives it back, so a persistent condition is not redrawn into the alternate screen every poll tick | done | DSC-102 |
 | Blocked-character set extended to the Unicode format class (tag block, variation selectors, U+00AD, U+180E, U+2061-2064, U+206A-206F, U+FFF9-FFFB, U+3164, U+115F) | done | NS-73 |
+| Blocked-character set covers every Unicode default-ignorable code point (ZWNJ/ZWJ, U+034F, Hangul/Khmer/Mongolian invisibles, reserved ignorables) | done | NS-75 |
 | Broken-symlink diagnosis is substituted only for an `AlreadyExists` mkdir failure whose offending component is a `NotFound` symlink | done | HARN-23 |
 | Resolved `evolve` target version is validated as a plausible release tag (which may carry a semver prerelease/build suffix) before any URL is built | done | STO-76 |
 | TUI: staleness flag is memoized against a fingerprint of a stat-derived hash | done | TUI-72 |
