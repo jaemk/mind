@@ -883,6 +883,16 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
 
     // URL form: scheme://authority/owner/repo(.git)
     if let Some((scheme, rest)) = spec.split_once("://") {
+        // spec: CLI-265 -- only git's built-in network transports. Anything
+        // else before `://` (`ext::sh -c ...`, `<helper>::...`) would make
+        // `git clone` run a remote helper with a spec-controlled address.
+        const SCHEMES: [&str; 6] = ["https", "http", "ssh", "git", "git+ssh", "ssh+git"];
+        if !SCHEMES.iter().any(|s| s.eq_ignore_ascii_case(scheme)) {
+            return Err(MindError::UnsupportedRepoScheme {
+                spec: spec.to_string(),
+                scheme: scheme.to_string(),
+            });
+        }
         let (authority, path) = rest.split_once('/').ok_or_else(invalid)?;
         // spec: STO-67 -- an `ssh://` authority may carry a userinfo prefix
         // (`user@host`, e.g. `ssh://git@github.com/...`). Split on the LAST
@@ -2131,6 +2141,52 @@ mod tests {
                 }
                 other => panic!("{spec}: expected UnsafeRepoSpec on {part}, got {other:?}"),
             }
+        }
+    }
+
+    // CLI-265: a scheme other than git's network transports is refused, since
+    // `git clone` would run a remote helper (`ext::` runs a shell command).
+    // spec: CLI-265
+    #[test]
+    fn rejects_a_scheme_git_would_run_as_a_remote_helper() {
+        let cases = [
+            (
+                "ext::sh -c 'touch pwned'://h/o/r",
+                "ext::sh -c 'touch pwned'",
+            ),
+            ("foo::bar://h/o/r", "foo::bar"),
+            ("ftp://h/o/r", "ftp"),
+            ("fd::3://h/o/r", "fd::3"),
+        ];
+        for (spec, want) in cases {
+            match parse_spec(spec) {
+                Err(e @ MindError::UnsupportedRepoScheme { .. }) => {
+                    let MindError::UnsupportedRepoScheme { scheme, .. } = &e else {
+                        unreachable!()
+                    };
+                    assert_eq!(scheme, want, "{spec}");
+                    assert_eq!(e.kind(), "unsupported-repo-scheme");
+                }
+                other => panic!("{spec}: expected UnsupportedRepoScheme, got {other:?}"),
+            }
+        }
+    }
+
+    // spec: CLI-265
+    #[test]
+    fn accepts_git_network_transport_schemes() {
+        for spec in [
+            "https://github.com/o/r",
+            "HTTPS://github.com/o/r",
+            "http://example.com/o/r",
+            "ssh://git@github.com/o/r",
+            "git://example.com/o/r",
+            "git+ssh://example.com/o/r",
+            "ssh+git://example.com/o/r",
+        ] {
+            let s = parse_spec(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert_eq!(s.owner, "o", "{spec}");
+            assert_eq!(s.repo, "r", "{spec}");
         }
     }
 

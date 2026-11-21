@@ -115,6 +115,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   there, since the `@<alias>` identity suffix, STO-58, only ever appends to
   `repo`); `repo` refuses both `@` (collides with that alias suffix and with the
   clone-dir leaf, STO-59) and `#` (collides with the item-link marker, LNK-4).
+- `CLI-265` A URL-form spec's scheme must be one git clones over its built-in
+  transports: `https`, `http`, `ssh`, `git`, `git+ssh`, or `ssh+git`, compared
+  case-insensitively (`file://` is the local form, CLI-11). Any other scheme is
+  refused (`UnsafeRepoSpec`, naming the scheme) before anything is cloned or
+  recorded. Git reads `<helper>::<address>` as a call to an installed
+  `git-remote-<helper>` program with an address the spec controls (`ext::`
+  runs a shell command), and the text before `://` would otherwise be passed
+  through as the scheme, so a spec like `ext::sh -c '...'://h/o/r` from a
+  curator's `[discover].sources` list, which `curate --yes` registers, would
+  reach `git clone`.
 - `CLI-12` Re-melding a repo whose source identity is already registered is not
   an error and does not re-clone or re-register. The identity includes the
   consumer alias (STO-58), so a re-meld is `meld` of a `(repo, alias)` that

@@ -597,6 +597,15 @@ pub enum MindError {
         reason: &'static str,
     },
 
+    /// CLI-265: a URL repo spec whose scheme is not one of git's built-in
+    /// network transports. git treats `<helper>::<address>` as a remote helper
+    /// invocation (and `ext::` runs a shell command), so mind refuses any other
+    /// scheme before it reaches `git clone`.
+    #[error(
+        "'{spec}' is not a usable repo spec: scheme '{scheme}' is not one of https, http, ssh, git, git+ssh, ssh+git"
+    )]
+    UnsupportedRepoScheme { spec: String, scheme: String },
+
     /// LNK-1/LNK-2: a URL that carries a `tree`/`blob` link marker (so it is
     /// unambiguously an attempted item link, not a plain repo spec) but whose
     /// tail fails to parse as one. Kept distinct from [`MindError::InvalidRepoSpec`]
@@ -1953,6 +1962,7 @@ impl MindError {
             MindError::BadMetadataSize { .. } => "bad-metadata-size",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
             MindError::UnsafeRepoSpec { .. } => "unsafe-repo-spec",
+            MindError::UnsupportedRepoScheme { .. } => "unsupported-repo-scheme",
             MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",

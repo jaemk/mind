@@ -1023,6 +1023,49 @@ fn an_unreadable_curator_does_not_sweep_its_sources_into_unlist() {
 }
 
 #[test]
+fn a_curator_entry_with_a_remote_helper_scheme_is_refused_before_any_clone() {
+    // spec: CLI-265 CUR-15
+    // A curator's list is upstream-controlled. An `ext::` entry would make
+    // `git clone` run its address as a shell command, so it must be refused
+    // at parse time and reported, while the curator's other entries apply.
+    let env = Env::new();
+    let ok_lib = env.repo("ok-lib");
+    ok_lib.write_and_commit("skills/ok/SKILL.md", "---\ndescription: Ok\n---\n# ok\n");
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true }}",
+        ok_lib.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let marker = env.base.join("pwned");
+    let hostile = format!("ext::sh -c 'touch {}'://h/o/r", marker.display());
+    let other = env.repo("other-lib");
+    other.write_and_commit(
+        "skills/other/SKILL.md",
+        "---\ndescription: Other\n---\n# other\n",
+    );
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", ok_lib.spec()),
+        format!("{{ source = \"{hostile}\", install = true }}"),
+        format!("{{ source = \"{}\", install = true }}", other.spec()),
+    ]);
+
+    let run = env.mind(&["curate", "--yes"]);
+    let out = format!("{}{}", run.stdout, run.stderr);
+    assert!(!marker.exists(), "the ext:: command ran: {out}");
+    assert!(
+        out.contains("is not one of https"),
+        "the refused scheme should be reported: {out}"
+    );
+    assert!(
+        env.claude_home.join("skills/other").exists(),
+        "the curator's other entries should still apply: {out}"
+    );
+}
+
+#[test]
 fn one_entrys_invalid_pin_directive_does_not_abort_the_whole_plan() {
     // spec: CUR-15
     let env = Env::new();
