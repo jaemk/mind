@@ -102,11 +102,25 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   spaces (a blank line is a paragraph break); a literal scalar preserves its line
   breaks; the chomping indicator (`-` strip, `+` keep, none clip) governs trailing
   newlines. The result is trimmed for display in `recall`/`probe`. Other nested
-  structures and flow collections remain uninterpreted.
+  structures and flow collections remain uninterpreted. Dedenting removes only
+  leading spaces and tabs, so a whitespace-only line made of other Unicode
+  whitespace (U+3000, U+00A0) is read like any other line and never fails the
+  scan.
 - `DSC-23` The frontmatter reader strips a leading UTF-8 BOM (`\xEF\xBB\xBF`,
   U+FEFF) from the file text before checking for the `---` opening delimiter.
   A file authored on Windows or by an editor that emits a BOM still has its
   frontmatter read correctly.
+- `DSC-24` A frontmatter block must be closed: an opening `---` with no later
+  `---` line is not frontmatter, and no key (description, `name`, a lifecycle
+  hook, `requires`, ...) is read from the file. Without this, an unindented
+  `key:` line in the markdown body would be read as that key.
+- `DSC-25` A plain (unquoted) value ends at a YAML comment: a `#` at the start
+  of the value or after a space or tab. `description: Review the diff # wip`
+  reads `Review the diff`, and `install: make build # cached` runs
+  `make build`. A `#` inside a word (`C#`, `a#b`) is text. A continuation line
+  that holds a comment ends the value after its text; a continuation line that
+  is only a comment ends it before. A quoted value keeps a `#` inside its quotes
+  (DSC-21).
 - `DSC-94` An item's description (DSC-20, from frontmatter, or a `[[items]]`
   override, DSC-32) has ANSI escape sequences, control characters, and
   security-blocked Unicode code points (bidi overrides, directional marks,

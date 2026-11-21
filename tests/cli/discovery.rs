@@ -2,6 +2,25 @@
 
 use super::*;
 
+/// A block-scalar description with a whitespace-only line of multi-byte
+/// whitespace once panicked the frontmatter dedent, aborting every verb that
+/// scans the source. `meld` and `probe` must instead read it.
+#[test]
+fn multibyte_whitespace_in_a_block_description_does_not_abort_the_scan() {
+    // spec: DSC-22
+    let sb = Sandbox::bare("ideographic-space");
+    sb.write_and_commit(
+        "skills/wide/SKILL.md",
+        "---\nname: wide\ndescription: |-\n  first\n \u{3000}\n  second\n---\n# wide\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(probe.stdout.contains("wide"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("first"), "{}", probe.stdout);
+}
+
 /// A SKILL.md `description:` carrying an ANSI color escape and a bidi-override
 /// code point (U+202E) must reach every display surface sanitized: raw ESC and
 /// the bidi override must not survive to `probe --no-tui`, `recall`, or

