@@ -1169,10 +1169,10 @@ fn dump_multiple_sources_each_with_distinct_directive() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dump_emits_alias_from_source_own_prefix_when_no_consumer_alias() {
-    // spec: DUMP-4 — the emitted `as` comes from the source's own
-    // [source].prefix when the consumer did not pass --as. (The alias path is
-    // covered separately; this covers the [source].prefix fallback.)
+fn dump_omits_namespace_for_the_source_own_prefix() {
+    // spec: DUMP-4 — the source's own [source].prefix is not emitted as
+    // `namespace`: a re-meld reads it from the source again, and a `namespace`
+    // would re-meld as an identity alias (STO-58).
     let sb = Sandbox::bare("prefixed-src");
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"sp\"\n");
     sb.write_and_commit(
@@ -1186,9 +1186,55 @@ fn dump_emits_alias_from_source_own_prefix_when_no_consumer_alias() {
     let r = sb.mind(&["dump"]);
     assert!(r.success, "dump failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("namespace = \"sp\""),
-        "dump must emit namespace = \"sp\" from the source's own [source].prefix (DSC-78): {}",
+        !r.stdout.contains("namespace"),
+        "dump must not emit the source's own prefix as namespace: {}",
         r.stdout
+    );
+}
+
+#[test]
+fn dump_roundtrip_keeps_a_display_prefix_out_of_the_identity() {
+    // spec: DUMP-4 STO-58 -- a prefix decided after the clone (the source's own
+    // `[source].prefix`) is a display prefix, not an identity alias, so the
+    // reproduced source keeps the original's identity (no `@sp`) and still
+    // installs under the prefix.
+    let sb = Sandbox::bare("display-prefix-src");
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"sp\"\n");
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\nname: widget\ndescription: Widget skill\n---\n# widget\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(meld.success, "meld failed: {} {}", meld.stdout, meld.stderr);
+    let names = |home: &Path| -> Vec<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join("sources.json")).unwrap())
+                .unwrap();
+        v["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let orig_names = names(&sb.mind_home);
+
+    let fresh_home = remeld_dump(&sb, "display-prefix");
+    let fresh_names = names(&fresh_home);
+    let (_, fresh_items) = recorded(&fresh_home);
+    for name in &orig_names {
+        assert!(
+            fresh_names.contains(name),
+            "reproduced registry must keep identity {name}: {fresh_names:?}"
+        );
+    }
+    assert!(
+        !fresh_names.iter().any(|n| n.ends_with("@sp")),
+        "a display prefix must not become an identity alias: {fresh_names:?}"
+    );
+    assert!(
+        fresh_items.iter().any(|k| k == "skill:sp:widget"),
+        "the item still installs under the prefix: {fresh_items:?}"
     );
 }
 

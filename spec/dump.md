@@ -21,9 +21,13 @@ and the manifest are defined in [storage.md](storage.md).
   (DSC-65), overriding each source's own `[source]` pin, so melding the output
   reproduces the same source set at the same revisions.
 - `DUMP-4` Each emitted entry carries the meld-time settings in effect for its
-  source so the reproduction matches: the prefix (`namespace`, from the consumer alias or
-  the source's `[source].prefix`, namespacing.md), the scan `roots` (STO-17), and
-  the pin resolved to the current commit (DUMP-1). `dump` references each source
+  source so the reproduction matches: the prefix (`namespace`, namespacing.md),
+  the scan `roots` (STO-17), and the pin resolved to the current commit
+  (DUMP-1). A `namespace` re-melds as an identity alias (STO-58, DSC-78), so it
+  is emitted for an identity alias, and for a display prefix only when it
+  differs from the source's own `[source].prefix`. A source whose only prefix is
+  its own `[source].prefix` emits no `namespace`: the re-meld reads the prefix
+  from the source again and keeps the original identity. `dump` references each source
   and does not inline its `[[items]]`, discovery globs, or hooks: those are read
   from each source's own `mind.toml` when the output is melded.
 - `DUMP-10` When a source carries the consumer `--flat-skills` override (STO-44),
