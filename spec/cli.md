@@ -1421,6 +1421,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   make a read-only call such as `ls-files` run a command named in that repo's
   own `.git/config`. The override is passed as a `GIT_CONFIG_COUNT` entry
   appended after any the environment already sets (git 2.31 or later).
+- `CLI-269` When `mind` reads `core.sshCommand` / `ssh.variant` for a `git`
+  child with no working tree (a clone), it reads only the system and global
+  config, so a repository in the shared temp dir it runs that read from cannot
+  supply the ssh command a non-interactive clone is given.
 - `CLI-192` `review` reports, as an advisory `ns-tool-reference` finding, a
   `{{ns:name}}` reference (namespacing.md) whose only matching sibling is a `tool`.
   A tool is store-only (tooling.md TOOL-3), reached by `{{tools:name}}` for its

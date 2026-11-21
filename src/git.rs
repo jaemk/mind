@@ -326,20 +326,40 @@ struct ConfigSsh {
     variant: Option<String>,
 }
 
+/// The platform null device, a `GIT_DIR` that is never a repository.
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
+
 /// [`ConfigSsh`] as a `git` child in `cwd` sees it, in one `git config`
 /// call. With no `cwd` (a clone) it is read outside any repository, so only
 /// the system and global config count, as for the clone itself.
 fn config_ssh(cwd: Option<&Path>) -> ConfigSsh {
-    let dir = cwd.map_or_else(std::env::temp_dir, Path::to_path_buf);
-    let Ok(out) = Command::new("git")
-        .args([
-            "config",
-            "--get-regexp",
-            r"^(core\.sshcommand|ssh\.variant)$",
-        ])
-        .current_dir(dir)
-        .output()
-    else {
+    config_ssh_in(cwd, &std::env::temp_dir())
+}
+
+/// [`config_ssh`] with the no-`cwd` working dir given, so a test can plant a
+/// repository there.
+fn config_ssh_in(cwd: Option<&Path>, outside: &Path) -> ConfigSsh {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "config",
+        "--get-regexp",
+        r"^(core\.sshcommand|ssh\.variant)$",
+    ]);
+    match cwd {
+        Some(dir) => {
+            cmd.current_dir(dir);
+        }
+        // spec: CLI-269 -- the temp dir is shared, so a `.git` planted there
+        // must not supply a `core.sshCommand`; a null `GIT_DIR` stops repo
+        // discovery and leaves the system and global config.
+        None => {
+            cmd.current_dir(outside).env("GIT_DIR", NULL_DEVICE);
+        }
+    }
+    let Ok(out) = cmd.output() else {
         return ConfigSsh::default();
     };
     parse_config_ssh(&String::from_utf8_lossy(&out.stdout))
@@ -1583,6 +1603,25 @@ mod tests {
             }
         );
         assert_eq!(parse_config_ssh(""), ConfigSsh::default());
+    }
+
+    /// With no `cwd` (a clone), a repository in the shared working dir must
+    /// not supply the ssh command git children are given.
+    // spec: CLI-269
+    #[test]
+    fn config_ssh_without_cwd_ignores_a_repo_in_the_working_dir() {
+        let base = tmpdir("sshplant");
+        git_init(&base).unwrap();
+        git(&base, &["config", "core.sshCommand", "touch /tmp/pwned"]);
+        let sub = base.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(
+            config_ssh_in(Some(&sub), &sub).command.as_deref(),
+            Some("touch /tmp/pwned"),
+            "the fixture repo must be discoverable from `sub`"
+        );
+        assert_eq!(config_ssh_in(None, &sub).command, None);
+        cleanup(&base);
     }
 
     // spec: PRG-6 TUI-45
