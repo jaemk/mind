@@ -45,16 +45,19 @@ pub fn ask_from<T: Copy, R: BufRead, W: Write>(
     loop {
         write!(output, "{prompt}").map_err(|e| MindError::io("<stdout>", e))?;
         output.flush().map_err(|e| MindError::io("<stdout>", e))?;
-        let mut line = String::new();
+        // Read bytes, not a `String`: `read_line` fails the whole command on a
+        // reply that is not UTF-8, where CLI-257 asks again. Lossy decoding
+        // turns such a reply into one that matches no choice.
+        let mut line = Vec::new();
         let read = input
-            .read_line(&mut line)
+            .read_until(b'\n', &mut line)
             .map_err(|e| MindError::io("<stdin>", e))?;
         if read == 0 {
             // spec: CLI-258 -- EOF is the default, exactly as a bare Enter.
             writeln!(output).map_err(|e| MindError::io("<stdout>", e))?;
             return Ok(default);
         }
-        let reply = line.trim().to_ascii_lowercase();
+        let reply = String::from_utf8_lossy(&line).trim().to_ascii_lowercase();
         if reply.is_empty() {
             return Ok(default);
         }
@@ -174,6 +177,18 @@ mod tests {
         let (v, out) = run("maybe\nn\n", true);
         assert!(!v, "the second, valid reply decides");
         assert_eq!(out.matches("go? [Y/n] ").count(), 2, "{out}");
+        assert!(out.contains("please answer y or n"), "{out}");
+    }
+
+    #[test]
+    fn a_reply_that_is_not_utf8_is_asked_again() {
+        // spec: CLI-257 -- an invalid byte is an unrecognized reply, not an
+        // I/O error that ends the command.
+        let mut reader = std::io::Cursor::new(b"\xff\xfe\ny\n".to_vec());
+        let mut out: Vec<u8> = Vec::new();
+        let v = ask_from(&mut reader, &mut out, "go? [y/N] ", &YES_NO, false).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(v, "the second, valid reply decides");
         assert!(out.contains("please answer y or n"), "{out}");
     }
 
