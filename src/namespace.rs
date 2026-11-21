@@ -1415,6 +1415,22 @@ impl Structure {
                     fill(&mut cells, range, Cell::Prose);
                 }
                 pulldown_cmark::Event::Code(_) => fill(&mut cells, range, Cell::Span),
+                // An HTML tag (or comment) is markup, not prose: an attribute
+                // value is a destination or an identifier, like link syntax
+                // (NS-52). Text between tags stays prose.
+                pulldown_cmark::Event::Html(_) | pulldown_cmark::Event::InlineHtml(_) => {
+                    let bytes = content.as_bytes();
+                    let mut i = range.start;
+                    while let Some(open) = bytes[i..range.end].iter().position(|&b| b == b'<') {
+                        let start = i + open;
+                        let end = bytes[start..range.end]
+                            .iter()
+                            .position(|&b| b == b'>')
+                            .map_or(range.end, |close| start + close + 1);
+                        fill(&mut cells, start..end, Cell::LinkSyntax);
+                        i = end;
+                    }
+                }
                 _ => {}
             }
         }
@@ -5634,6 +5650,41 @@ mod tests {
         assert!(
             expanded.contains("run.sh"),
             "expand_paths must still resolve the spaced tools: token: {expanded}"
+        );
+    }
+
+    #[test]
+    fn templatize_leaves_an_html_tag_alone() {
+        // spec: NS-52
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("See <a href=\"dev\" title=\"dev\">the dev doc</a>.\n", &s);
+        assert_eq!(
+            (out.as_str(), n),
+            (
+                "See <a href=\"dev\" title=\"dev\">the {{ns:dev}} doc</a>.\n",
+                1
+            )
+        );
+        assert_eq!(
+            unguarded_refs("See <img alt=\"dev\" src=\"x.png\">.\n", &s),
+            Vec::<String>::new()
+        );
+        // An HTML block: the tag and a comment are syntax, the text is prose.
+        let (out, n) = templatize(
+            "<div id=\"dev\">\nHand off to dev.\n<!-- dev -->\n</div>\n",
+            &s,
+        );
+        assert_eq!(
+            (out.as_str(), n),
+            (
+                "<div id=\"dev\">\nHand off to {{ns:dev}}.\n<!-- dev -->\n</div>\n",
+                1
+            )
+        );
+        // A token in an attribute is misplaced, like one in a link destination.
+        assert_eq!(
+            contexts("See <a href=\"{{ns:dev}}\">x</a>.\n"),
+            vec![("dev".into(), NsContext::Path)]
         );
     }
 
