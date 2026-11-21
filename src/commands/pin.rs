@@ -144,8 +144,12 @@ pub(super) fn version_pin_hint(paths: &Paths, source: &crate::source::Source) ->
         .release_template(&dir.join("mind.toml"))
         .ok()??;
     let version = template.match_tag(tag)?;
+    // spec: VER-82 -- built as a `Range`, not by formatting the version, so a
+    // tag's build metadata (`v1.2.3+b`), which a range refuses (VER-20), is
+    // dropped and the suggested command parses.
+    let range = crate::version::Range::caret_of(&version);
     Some(format!(
-        "hint: {} follows release tag {}; to take compatible releases, run `mind meld {} --pin version=^{version}`",
+        "hint: {} follows release tag {}; to take compatible releases, run `mind meld {} --pin version={range}`",
         strip_ansi(&source.name),
         strip_ansi(tag),
         crate::error::shell_quote(&strip_ansi(&source.name))

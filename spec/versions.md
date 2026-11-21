@@ -245,7 +245,9 @@ nudge is a hint only. Taking it still requires the consumer's consent.
   `release-tags` and checks out the item's path at the selected release.
 - `VER-82` `recall` adds a one-line suggestion for a source with a `tag` pin
   whose tag is a release under its declared `release-tags`:
-  `mind meld <source> --pin version=^<version>`. `recall` does not fetch, so
+  `mind meld <source> --pin version=^<version>`. The tag's build metadata is
+  dropped (`v1.2.3+b` suggests `^1.2.3`), since a range refuses it (VER-20).
+  `recall` does not fetch, so
   the template is read from the clone's checkout (the tagged release) rather
   than the default-branch tip (VER-3). It shows in `recall --sources` and under
   the source in the status view.

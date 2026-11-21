@@ -1818,6 +1818,32 @@ fn recall_suggests_a_version_pin_for_a_release_tag_pin() {
 }
 
 #[test]
+fn the_version_pin_hint_for_a_tag_with_build_metadata_is_a_valid_range() {
+    // spec: VER-82 VER-20 -- a range refuses build metadata, so the hint for
+    // `v1.3.0+build.7` suggests `^1.3.0`, and that command succeeds.
+    let (sb, _) = released("ver-hint-build", RELEASE_TAGS);
+    let built = sb.commit("one-three", RELEASE_TAGS);
+    sb.tag("v1.3.0+build.7", &built);
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "tag=v1.3.0+build.7", "--yes"]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["recall", "--sources"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("--pin version=^1.3.0`"),
+        "the hint must drop the build metadata: {}",
+        r.stdout
+    );
+    assert!(!r.stdout.contains("+build.7`"), "{}", r.stdout);
+
+    let r = sb.mind(&["meld", &sb.spec(), "--pin", "version=^1.3.0", "--yes"]);
+    assert!(r.success, "the suggested pin must apply: {}", r.stderr);
+    let (pin, commit) = sb.pin();
+    assert_eq!(pin["value"]["range"], "^1.3.0", "{pin}");
+    assert_eq!(pin["value"]["tag"], "v1.3.0+build.7", "{pin}");
+    assert_eq!(commit, built);
+}
+
+#[test]
 fn the_version_pin_hint_strips_control_bytes_from_the_source_name() {
     // spec: VER-82 DSC-95 -- the suggested command quotes a sanitized name.
     // A repo spec refuses control characters, but not a bidi override.
