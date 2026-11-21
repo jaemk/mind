@@ -130,7 +130,9 @@ install model. The generated file is an input to Claude's plugin system and to
   INIT-3 otherwise) or inserting the key if it is missing, or updating it if it is
   already present, without altering other content. The `[source]` table is
   found under any header spelling TOML allows (`[ source ]`, `["source"]`), and
-  keys of other tables are never touched. A written `namespace` value escapes
+  keys of other tables are never touched. A line inside a multi-line string
+  (`"""`, `'''`) is part of its value, never a header or key, and a replaced
+  key's multi-line value is replaced whole. A written `namespace` value escapes
   every control character, so the result always parses. This is the only `mind.toml`
   mutation `--flat-skills` makes; discovery (INIT-2) and the reference analysis
   (INIT-4) then proceed using the flat-skill layout (DSC-74..76). When `--flat-skills`
