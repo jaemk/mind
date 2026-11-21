@@ -106,6 +106,19 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   existing behavior: local-path and `file://` melds still require an `allow`
   pattern match when `lock = true` (POL-11 applies). Absent `allow-local` is
   equivalent to `allow-local = true`.
+- `POL-70` `[sources].allow-insecure-transport = false` forbids the cleartext
+  transports `http://` and `git://` for every source, whether or not `lock` is
+  set. `meld` refuses such a spec before any clone (`InsecureTransportForbidden`,
+  naming the scheme and printing the POL-37 policy path hint). Every git command
+  `mind` runs (clone, fetch, ls-remote, and the submodule fetches and http
+  redirects they make) is limited to https, ssh, and local paths through
+  `GIT_ALLOW_PROTOCOL`, intersected with any value already in the environment,
+  so a cleartext source registered before the policy fails to sync or upgrade
+  rather than fetching. A policy that cannot be loaded is treated as forbidding
+  cleartext for this restriction (POL-5). A git remote rewritten
+  (`url.<base>.insteadOf`) to any other transport is refused too.
+- `POL-71` `allow-insecure-transport = true` is the default: absent, `http://`
+  and `git://` sources behave as they do with no policy.
 - `POL-67` `allow`/`lock` matching (POL-10..13) is always performed on the base
   `host/owner/repo` identity, never on an extended instance identity carrying an
   item-link `#path` and/or consumer `@alias` suffix (composed as

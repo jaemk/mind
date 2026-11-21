@@ -115,6 +115,24 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   there, since the `@<alias>` identity suffix, STO-58, only ever appends to
   `repo`); `repo` refuses both `@` (collides with that alias suffix and with the
   clone-dir leaf, STO-59) and `#` (collides with the item-link marker, LNK-4).
+- `CLI-267` A network spec's (URL or SSH form) `host` must be a hostname:
+  ASCII letters, digits, `.`, `-`, and `_`, optionally followed by `:<port>`
+  digits, or a bracketed IPv6 address. Its `owner` and `repo` must not contain
+  `?`. Otherwise it is refused (`UnsafeRepoSpec`). git reads everything from a
+  `?` on as a query, so without this `https://evil.example?.corp.example/a/b`
+  would carry the identity host `evil.example?.corp.example`, which a POL-10
+  pattern like `*.corp.example/*/*` matches, while git connects to
+  `evil.example`.
+- `CLI-265` A URL-form spec's scheme must be one git clones over its built-in
+  transports: `https`, `http`, `ssh`, `git`, `git+ssh`, or `ssh+git`, compared
+  case-insensitively (`file://` is the local form, CLI-11). Any other scheme is
+  refused (`UnsafeRepoSpec`, naming the scheme) before anything is cloned or
+  recorded. Git reads `<helper>::<address>` as a call to an installed
+  `git-remote-<helper>` program with an address the spec controls (`ext::`
+  runs a shell command), and the text before `://` would otherwise be passed
+  through as the scheme, so a spec like `ext::sh -c '...'://h/o/r` from a
+  curator's `[discover].sources` list, which `curate --yes` registers, would
+  reach `git clone`.
 - `CLI-12` Re-melding a repo whose source identity is already registered is not
   an error and does not re-clone or re-register. The identity includes the
   consumer alias (STO-58), so a re-meld is `meld` of a `(repo, alias)` that
@@ -1393,6 +1411,20 @@ only appear at meld or install time. It is read-only and installs nothing.
   working-tree git target only and `--fix` never touches it, exactly as CLI-190.
   A file that does not exist at all is a plain `bad-reference` handled elsewhere,
   not this advisory.
+- `CLI-266` The path remainder of a `{{self}}/...` or `{{path:...}}/...`
+  reference that CLI-191 checks is used only when it is relative and has no
+  `..` component; any other remainder is not resolved, so prose in a reviewed
+  source cannot make `review` report whether an arbitrary file on the machine
+  exists.
+- `CLI-268` Every `git` child `mind` runs has `core.fsmonitor` turned off, so a
+  local working tree given to `review` (or any repo `mind` runs git in) cannot
+  make a read-only call such as `ls-files` run a command named in that repo's
+  own `.git/config`. The override is passed as a `GIT_CONFIG_COUNT` entry
+  appended after any the environment already sets (git 2.31 or later).
+- `CLI-269` When `mind` reads `core.sshCommand` / `ssh.variant` for a `git`
+  child with no working tree (a clone), it reads only the system and global
+  config, so a repository in the shared temp dir it runs that read from cannot
+  supply the ssh command a non-interactive clone is given.
 - `CLI-192` `review` reports, as an advisory `ns-tool-reference` finding, a
   `{{ns:name}}` reference (namespacing.md) whose only matching sibling is a `tool`.
   A tool is store-only (tooling.md TOOL-3), reached by `{{tools:name}}` for its

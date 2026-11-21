@@ -597,6 +597,15 @@ pub enum MindError {
         reason: &'static str,
     },
 
+    /// CLI-265: a URL repo spec whose scheme is not one of git's built-in
+    /// network transports. git treats `<helper>::<address>` as a remote helper
+    /// invocation (and `ext::` runs a shell command), so mind refuses any other
+    /// scheme before it reaches `git clone`.
+    #[error(
+        "'{spec}' is not a usable repo spec: scheme '{scheme}' is not one of https, http, ssh, git, git+ssh, ssh+git"
+    )]
+    UnsupportedRepoScheme { spec: String, scheme: String },
+
     /// LNK-1/LNK-2: a URL that carries a `tree`/`blob` link marker (so it is
     /// unambiguously an attempted item link, not a plain repo spec) but whose
     /// tail fails to parse as one. Kept distinct from [`MindError::InvalidRepoSpec`]
@@ -1110,6 +1119,14 @@ pub enum MindError {
          ([sources].allow-local = false)"
     )]
     LocalMeldForbidden { identity: String },
+
+    /// POL-70: a cleartext (`http://`, `git://`) source under a policy with
+    /// `allow-insecure-transport = false`.
+    #[error(
+        "source '{identity}' uses the cleartext transport '{scheme}', which the managed policy \
+         forbids ([sources].allow-insecure-transport = false); use https or ssh"
+    )]
+    InsecureTransportForbidden { identity: String, scheme: String },
 
     #[error(
         "source '{identity}' must be pinned to a tag, ref, or exact version: the managed policy forbids a floating pin"
@@ -1953,6 +1970,7 @@ impl MindError {
             MindError::BadMetadataSize { .. } => "bad-metadata-size",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
             MindError::UnsafeRepoSpec { .. } => "unsafe-repo-spec",
+            MindError::UnsupportedRepoScheme { .. } => "unsupported-repo-scheme",
             MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",
@@ -2004,6 +2022,7 @@ impl MindError {
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",
             MindError::LocalMeldForbidden { .. } => "local-meld-forbidden",
+            MindError::InsecureTransportForbidden { .. } => "insecure-transport-forbidden",
             MindError::UnpinnedSourceForbidden { .. } => "unpinned-source-forbidden",
             MindError::InvalidPolicy { .. } => "invalid-policy",
             MindError::LobesLocked { .. } => "lobes-locked",

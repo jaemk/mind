@@ -491,6 +491,21 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             return Err(MindError::LocalMeldForbidden { identity });
         }
 
+        // spec: POL-70 -- a cleartext transport is refused before any clone,
+        // with or without `lock`.
+        if !policy.allow_insecure_transport()
+            && let Some(scheme) = source.insecure_scheme()
+        {
+            if let Some(path) = paths.settings().policy_path() {
+                // spec: POL-37
+                eprintln!("hint: managed policy at {}", path.display());
+            }
+            return Err(MindError::InsecureTransportForbidden {
+                identity,
+                scheme: scheme.to_string(),
+            });
+        }
+
         let allowed = policy.allow_matches(&identity);
         if policy.lock() && !allowed {
             // spec: POL-11, POL-36 -- refused before any clone or dir creation.

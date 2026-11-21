@@ -1317,7 +1317,13 @@ fn collect_files_at(dir: &Path, out: &mut Vec<std::path::PathBuf>, depth: usize)
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
         let path = entry.path();
-        if path.is_dir() {
+        let ft = entry.file_type().map_err(|e| MindError::io(&path, e))?;
+        // spec: DSC-124 -- a link is not followed: two self-links would
+        // otherwise branch the walk exponentially well inside the depth cap.
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_dir() {
             collect_files_at(&path, out, depth + 1)?;
         } else {
             out.push(path);
@@ -2672,6 +2678,28 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_files_does_not_follow_symlinks() {
+        // spec: DSC-124
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-collect-nf-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let item = base.join("item");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&item).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(item.join("a.md"), "x").unwrap();
+        std::fs::write(outside.join("b.md"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, item.join("out")).unwrap();
+        std::os::unix::fs::symlink(".", item.join("loop")).unwrap();
+
+        let mut files = Vec::new();
+        collect_files(&item, &mut files).unwrap();
+        assert_eq!(files, vec![item.join("a.md")]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ---- IGN-10: copy/hash agreement on symlink classification ---------------

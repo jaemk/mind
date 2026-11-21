@@ -464,6 +464,19 @@ impl Source {
         self.host == "local"
     }
 
+    /// The URL's scheme when it is a cleartext transport (`http`, `git`), as
+    /// written. `None` for https, ssh (either form), and local paths (POL-70).
+    pub fn insecure_scheme(&self) -> Option<&str> {
+        if self.is_local() {
+            return None;
+        }
+        let (scheme, _) = self.url.split_once("://")?;
+        ["http", "git"]
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(scheme))
+            .then_some(scheme)
+    }
+
     /// The base repo identity `host/owner/repo`, without an item-link `#path`
     /// or consumer-alias `@alias` suffix. Equal to `name` for an ordinary,
     /// unaliased source. This is what managed policy allowlists match against
@@ -883,6 +896,16 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
 
     // URL form: scheme://authority/owner/repo(.git)
     if let Some((scheme, rest)) = spec.split_once("://") {
+        // spec: CLI-265 -- only git's built-in network transports. Anything
+        // else before `://` (`ext::sh -c ...`, `<helper>::...`) would make
+        // `git clone` run a remote helper with a spec-controlled address.
+        const SCHEMES: [&str; 6] = ["https", "http", "ssh", "git", "git+ssh", "ssh+git"];
+        if !SCHEMES.iter().any(|s| s.eq_ignore_ascii_case(scheme)) {
+            return Err(MindError::UnsupportedRepoScheme {
+                spec: spec.to_string(),
+                scheme: scheme.to_string(),
+            });
+        }
         let (authority, path) = rest.split_once('/').ok_or_else(invalid)?;
         // spec: STO-67 -- an `ssh://` authority may carry a userinfo prefix
         // (`user@host`, e.g. `ssh://git@github.com/...`). Split on the LAST
@@ -1265,6 +1288,39 @@ fn validate_identity_part(
     Ok(())
 }
 
+/// True when `host` is a hostname with an optional `:<port>`, or a bracketed
+/// IPv6 address with an optional `:<port>` (CLI-267).
+fn is_network_host(host: &str) -> bool {
+    let port_ok =
+        |p: Option<&str>| p.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((ip, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            a => match a.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return false,
+            },
+        };
+        return !ip.is_empty()
+            && ip
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+            && port_ok(port);
+    }
+    let (name, port) = match host.split_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (host, None),
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && port_ok(port)
+}
+
 fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> Result<Source> {
     // spec: CLI-204 STO-64 -- validate before constructing, so no Source with
     // an unsafe identity part is ever built, persisted, or used as a clone
@@ -1272,6 +1328,29 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
     validate_identity_part(spec, "host", host, true, true)?;
     validate_identity_part(spec, "owner", owner, false, true)?;
     validate_identity_part(spec, "repo", repo, true, true)?;
+    // spec: CLI-267 -- a network spec's identity must read the way git reads
+    // the URL: no query smuggled into the host, owner, or repo.
+    if host != "local" {
+        if !is_network_host(host) {
+            return Err(MindError::UnsafeRepoSpec {
+                spec: spec.to_string(),
+                part: "host",
+                value: host.to_string(),
+                reason: "is not a hostname (letters, digits, '.', '-', '_', an optional \
+                         ':<port>', or a bracketed IPv6 address)",
+            });
+        }
+        for (part, value) in [("owner", owner), ("repo", repo)] {
+            if value.contains('?') {
+                return Err(MindError::UnsafeRepoSpec {
+                    spec: spec.to_string(),
+                    part,
+                    value: value.to_string(),
+                    reason: "contains '?' (git would read the rest of the URL as a query)",
+                });
+            }
+        }
+    }
     Ok(Source {
         // Identity is `host/owner/repo` (matching the clone path), so repos that
         // share a basename or even an owner/repo across hosts stay distinct.
@@ -2131,6 +2210,109 @@ mod tests {
                 }
                 other => panic!("{spec}: expected UnsafeRepoSpec on {part}, got {other:?}"),
             }
+        }
+    }
+
+    // CLI-265: a scheme other than git's network transports is refused, since
+    // spec: CLI-267
+    #[test]
+    fn network_host_must_be_a_hostname() {
+        for bad in [
+            "https://evil.example?.corp.example/acme/repo",
+            "https://evil.example%2f.corp.example/acme/repo",
+            "https://evil example/acme/repo",
+            "https://host:80x/acme/repo",
+            "https://[::1/acme/repo",
+            "git@evil.example?.corp.example:acme/repo",
+            "https://github.com/acme?/repo",
+            "https://github.com/acme/repo?x",
+        ] {
+            match parse_spec(bad) {
+                Err(MindError::UnsafeRepoSpec { .. }) => {}
+                other => panic!("{bad:?} must be refused, got {other:?}"),
+            }
+        }
+        for good in [
+            "https://github.com/acme/repo",
+            "https://git.corp.example:8443/acme/repo",
+            "ssh://git@git_host.corp/acme/repo",
+            "https://[::1]:8080/acme/repo",
+            "https://[fe80::1]/acme/repo",
+            "git@github.com:acme/repo.git",
+        ] {
+            assert!(parse_spec(good).is_ok(), "{good:?} must parse");
+        }
+        // A local path may still name a directory with a `?` in it.
+        assert!(parse_spec("/src/what?/agents").is_ok());
+    }
+
+    // `git clone` would run a remote helper (`ext::` runs a shell command).
+    // spec: CLI-265
+    #[test]
+    fn rejects_a_scheme_git_would_run_as_a_remote_helper() {
+        let cases = [
+            (
+                "ext::sh -c 'touch pwned'://h/o/r",
+                "ext::sh -c 'touch pwned'",
+            ),
+            ("foo::bar://h/o/r", "foo::bar"),
+            ("ftp://h/o/r", "ftp"),
+            ("fd::3://h/o/r", "fd::3"),
+        ];
+        for (spec, want) in cases {
+            match parse_spec(spec) {
+                Err(e @ MindError::UnsupportedRepoScheme { .. }) => {
+                    let MindError::UnsupportedRepoScheme { scheme, .. } = &e else {
+                        unreachable!()
+                    };
+                    assert_eq!(scheme, want, "{spec}");
+                    assert_eq!(e.kind(), "unsupported-repo-scheme");
+                }
+                other => panic!("{spec}: expected UnsupportedRepoScheme, got {other:?}"),
+            }
+        }
+    }
+
+    // spec: POL-70
+    #[test]
+    fn insecure_scheme_names_only_cleartext_transports() {
+        let scheme = |spec: &str| {
+            parse_spec(spec)
+                .unwrap()
+                .insecure_scheme()
+                .map(str::to_string)
+        };
+        assert_eq!(scheme("http://example.com/o/r").as_deref(), Some("http"));
+        assert_eq!(scheme("HTTP://example.com/o/r").as_deref(), Some("HTTP"));
+        assert_eq!(scheme("git://example.com/o/r").as_deref(), Some("git"));
+        for safe in [
+            "https://example.com/o/r",
+            "ssh://git@example.com/o/r",
+            "git+ssh://example.com/o/r",
+            "git@example.com:o/r",
+            "acme/agents",
+            "/srv/mirrors/agents",
+            "file:///srv/mirrors/agents",
+        ] {
+            assert_eq!(scheme(safe), None, "{safe}");
+        }
+    }
+
+    // spec: CLI-265
+    #[test]
+    fn accepts_git_network_transport_schemes() {
+        for spec in [
+            "https://github.com/o/r",
+            "HTTPS://github.com/o/r",
+            "http://example.com/o/r",
+            "ssh://git@github.com/o/r",
+            "git://example.com/o/r",
+            "git+ssh://example.com/o/r",
+            "ssh+git://example.com/o/r",
+        ] {
+            let s = parse_spec(spec).unwrap_or_else(|e| panic!("{spec}: {e}"));
+            assert_eq!(s.owner, "o", "{spec}");
+            assert_eq!(s.repo, "r", "{spec}");
         }
     }
 

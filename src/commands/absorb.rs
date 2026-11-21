@@ -282,13 +282,32 @@ pub fn absorb(
         // --force: remove existing dest content first so copy is clean.
         crate::install::remove_path(&dest_item_path)?;
     }
-    copy_path_recursive(&source_lobe_path, &dest_item_path)?;
+    // spec: ABS-14 -- a symlinked lobe entry (UNM-1) is absorbed by its
+    // target's content, but nothing inside the tree is followed: the LIFE-42
+    // copier refuses a nested symlink, so a link to `~` or a cycle never
+    // reaches the destination repo or its commit.
+    let content_root = std::fs::canonicalize(&source_lobe_path)
+        .map_err(|e| MindError::io(&source_lobe_path, e))?;
+    if let Err(e) = crate::install::copy_recursive(&content_root, &dest_item_path) {
+        let _ = crate::install::remove_path(&dest_item_path);
+        return Err(e);
+    }
 
     // 2. ABS-5: stage and commit in the destination repo.
+    // spec: ABS-13 -- only the item's own path, never the rest of the repo.
     let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
     let git_err = (|| {
-        crate::git::add_all(&dest_path)?;
-        crate::git::commit(&dest_path, &commit_msg)
+        let canon_dest =
+            std::fs::canonicalize(&dest_path).map_err(|e| MindError::io(&dest_path, e))?;
+        let canon_item = std::fs::canonicalize(&dest_item_path)
+            .map_err(|e| MindError::io(&dest_item_path, e))?;
+        let rel = canon_item
+            .strip_prefix(&canon_dest)
+            .map_err(|_| MindError::InvalidRoot {
+                source_name: dest_path.to_string_lossy().into_owned(),
+                root: dest_item_path.to_string_lossy().into_owned(),
+            })?;
+        crate::git::commit_path(&dest_path, rel, &commit_msg)
     })();
     if let Err(e) = git_err {
         // Restore: remove the dest copy we just made; source lobe is still intact.
@@ -339,7 +358,9 @@ pub fn absorb(
     if let Some(p) = backup.parent() {
         std::fs::create_dir_all(p).map_err(|e| MindError::io(p, e))?;
     }
-    copy_path_recursive(&source_lobe_path, &backup)?;
+    // spec: ABS-12 -- kept exactly as it was: a symlinked lobe entry is backed
+    // up (and restored) as that symlink, not as a copy of its target.
+    crate::install::copy_tree_keeping_links(&source_lobe_path, &backup)?;
 
     // 5. Remove the original lobe entry so learn can place its symlink there.
     if let Err(e) = crate::install::remove_path(&source_lobe_path) {
@@ -377,7 +398,7 @@ pub fn absorb(
         if let Some(parent) = source_lobe_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = copy_path_recursive(&backup, &source_lobe_path);
+        let _ = crate::install::copy_tree_keeping_links(&backup, &source_lobe_path);
         let _ = crate::install::remove_path(&backup);
         // spec: ABS-12 -- unwind a registration this call made (best-effort;
         // nothing was installed from it, learn failed) and name the dest
@@ -515,22 +536,6 @@ fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Res
         paths.ensure_layout()?;
         paths.settings().save_config(&config)?;
         println!("Saved absorb_to = '{}'", dest.display());
-    }
-    Ok(())
-}
-
-/// Recursively copy `src` to `dst` (file or directory).
-fn copy_path_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    if src.is_dir() {
-        std::fs::create_dir_all(dst).map_err(|e| MindError::io(dst, e))?;
-        let rd = std::fs::read_dir(src).map_err(|e| MindError::io(src, e))?;
-        for entry in rd.flatten() {
-            let from = entry.path();
-            let to = dst.join(entry.file_name());
-            copy_path_recursive(&from, &to)?;
-        }
-    } else {
-        std::fs::copy(src, dst).map_err(|e| MindError::io(src, e))?;
     }
     Ok(())
 }
