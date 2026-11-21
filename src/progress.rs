@@ -21,6 +21,11 @@ const SHOW_DELAY: Duration = Duration::from_millis(200);
 /// Redraw interval of the background ticker.
 const TICK: Duration = Duration::from_millis(80);
 
+/// How many spins [`Progress::stop`] waits for an in-flight draw: far longer
+/// than one short write takes, and short enough (tens of milliseconds at
+/// most) that a stop on the drawing thread itself still exits promptly.
+const STOP_SPIN: u32 = 10_000_000;
+
 const UNICODE_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const ASCII_FRAMES: &[&str] = &["|", "/", "-", "\\"];
 
@@ -113,6 +118,9 @@ pub(crate) struct Progress {
     on_screen: AtomicBool,
     /// Set for good once the process is going down ([`Progress::stop`]).
     stopped: AtomicBool,
+    /// Set around a draw, from before its `stopped` check until its write is
+    /// done, so [`Progress::stop`] can wait out a draw already past the check.
+    drawing: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -123,6 +131,7 @@ impl Progress {
             hidden: AtomicBool::new(false),
             on_screen: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
+            drawing: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 steps: Vec::new(),
                 next_id: 0,
@@ -226,6 +235,16 @@ impl Progress {
     // spec: PRG-10
     fn stop(&self) -> bool {
         self.stopped.store(true, Ordering::SeqCst);
+        // A draw on another thread that passed its `stopped` check before the
+        // store above would land after the caller's erase; let it finish
+        // first. Bounded, since the draw may be on this thread (a signal that
+        // interrupted it), where it cannot finish until this returns.
+        for _ in 0..STOP_SPIN {
+            if !self.drawing.load(Ordering::SeqCst) {
+                break;
+            }
+            std::hint::spin_loop();
+        }
         self.on_screen.swap(false, Ordering::SeqCst)
     }
 
@@ -249,16 +268,23 @@ impl Progress {
             return;
         };
         let due = g.since.is_some_and(|t| t.elapsed() >= self.cfg.delay);
-        if !due || g.held > 0 || self.is_hidden() || self.stopped.load(Ordering::SeqCst) {
+        if !due || g.held > 0 || self.is_hidden() {
             return;
         }
-        // One write, so the SIGINT handler's clear (PRG-10) cannot land
-        // between the clear and the line.
         let line = format!("{CLEAR}{}", self.compose(label, g.frame));
-        let _ = g.out.write_all(line.as_bytes());
-        let _ = g.out.flush();
-        g.drawn = true;
-        self.on_screen.store(true, Ordering::SeqCst);
+        // spec: PRG-10 -- `drawing` is set before the `stopped` check, so
+        // either this sees the stop and draws nothing, or `stop` waits for the
+        // write below and sees `on_screen`.
+        self.drawing.store(true, Ordering::SeqCst);
+        if !self.stopped.load(Ordering::SeqCst) {
+            // One write, so the signal handler's clear cannot land between
+            // the clear and the line.
+            let _ = g.out.write_all(line.as_bytes());
+            let _ = g.out.flush();
+            g.drawn = true;
+            self.on_screen.store(true, Ordering::SeqCst);
+        }
+        self.drawing.store(false, Ordering::SeqCst);
     }
 
     fn clear(&self, g: &mut Inner) {
@@ -753,6 +779,36 @@ mod tests {
         assert!(p.on_screen.load(Ordering::SeqCst), "redrawn after suspend");
         drop(s);
         assert!(!p.on_screen.load(Ordering::SeqCst));
+    }
+
+    /// A draw already past its `stopped` check when `stop` runs finishes
+    /// before `stop` answers, so the line it puts up is the one erased.
+    // spec: PRG-10
+    #[test]
+    fn stop_waits_for_a_draw_in_flight() {
+        let (p, _buf) = progress(Duration::ZERO, false, 80);
+        p.drawing.store(true, Ordering::SeqCst);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(1));
+                p.on_screen.store(true, Ordering::SeqCst);
+                p.drawing.store(false, Ordering::SeqCst);
+            });
+            assert!(p.stop(), "the in-flight line is reported for erasing");
+        });
+    }
+
+    /// A draw after `stop` writes nothing.
+    // spec: PRG-10
+    #[test]
+    fn no_draw_after_stop() {
+        let (p, buf) = progress(Duration::ZERO, false, 80);
+        let _s = p.step("x");
+        let before = buf.text();
+        assert!(p.stop());
+        p.tick();
+        assert_eq!(buf.text(), before);
+        assert!(!p.drawing.load(Ordering::SeqCst));
     }
 
     // spec: PRG-10
