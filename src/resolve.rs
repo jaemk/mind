@@ -126,19 +126,24 @@ fn split_kind(raw: &str) -> Result<(Option<ItemKind>, String)> {
 /// `repo`, `owner/repo`, and `host/owner/repo` all select it. A selector resolves
 /// uniquely only when one source carries that suffix.
 pub fn source_matches(full_name: &str, selector: &str) -> bool {
-    full_name == selector || full_name.ends_with(&format!("/{selector}"))
+    source_suffix_forms(full_name).contains(&selector)
 }
 
 /// The full source identity plus each of its trailing-suffix forms at a component
 /// boundary (e.g. `host/owner/repo`, `owner/repo`, `repo`). The candidates a
 /// selector is matched against in both [`source_matches`] and
 /// [`source_matches_glob`].
+///
+/// spec: CLI-5 LNK-4 -- only the `host/owner/repo` part is split: an item-link
+/// identity's `#<path>` stays on every form (`repo#skills/x`), so a tail of the
+/// path (`x`) never selects the link.
 fn source_suffix_forms(full_name: &str) -> Vec<&str> {
+    let base_len = full_name.find('#').unwrap_or(full_name.len());
     let mut forms = vec![full_name];
-    let mut rest = full_name;
-    while let Some(idx) = rest.find('/') {
-        rest = &rest[idx + 1..];
-        forms.push(rest);
+    let mut start = 0;
+    while let Some(idx) = full_name[start..base_len].find('/') {
+        start += idx + 1;
+        forms.push(&full_name[start..]);
     }
     forms
 }
@@ -401,6 +406,39 @@ mod tests {
     // spec: CLI-1, CLI-2, CLI-3, CLI-4, CLI-5, CLI-31 (item ref parsing, resolution, selection)
     use super::*;
     use std::path::PathBuf;
+
+    // ---- source suffix forms ----
+
+    // spec: CLI-5 LNK-4 -- the suffix forms of an item-link identity end at
+    // its `#<path>`: `repo#<path>`, `owner/repo#<path>`, and the full identity
+    // select it, but a tail of the path does not. Before, `review` (meant for
+    // a repo named `review`) also selected `host/o/lib#skills/review`, so
+    // `forget 'review#*'` removed the link's item too.
+    #[test]
+    fn a_suffix_inside_a_link_path_does_not_select_the_link() {
+        let link = "github.com/o/lib#skills/review";
+        for sel in [link, "o/lib#skills/review", "lib#skills/review"] {
+            assert!(source_matches(link, sel), "{sel}");
+            assert!(source_matches_glob(link, sel), "{sel}");
+        }
+        for sel in ["review", "skills/review"] {
+            assert!(!source_matches(link, sel), "{sel}");
+            assert!(!source_matches_glob(link, sel), "{sel}");
+        }
+        // A glob still matches the whole identity, and an aliased link keeps
+        // its alias in every form.
+        assert!(source_matches_glob(link, "*review"));
+        assert!(!source_matches_glob(link, "rev*"));
+        let aliased = "github.com/o/lib#skills/review@jk";
+        assert!(source_matches(aliased, "lib#skills/review@jk"));
+        assert!(!source_matches(aliased, "review@jk"));
+        // A plain identity is unchanged.
+        let plain = "github.com/acme/review";
+        for sel in [plain, "acme/review", "review"] {
+            assert!(source_matches(plain, sel), "{sel}");
+        }
+        assert!(!source_matches(plain, "eview"));
+    }
 
     // ---- parse_hook_target ----
 

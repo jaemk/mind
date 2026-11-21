@@ -49,7 +49,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `unmeld`-style ref requiring the SOURCE itself to resolve uniquely:
   `source_matches` (`resolve.rs`) tests each candidate source's full
   `host/owner/repo` identity or any trailing component suffix (`repo`,
-  `owner/repo`, `host/owner/repo`) independently, with no uniqueness check of
+  `owner/repo`, `host/owner/repo`; an item-link identity's `#<path>` stays on
+  each form, LNK-4, so `repo#skills/x` selects it and `x` does not)
+  independently, with no uniqueness check of
   its own -- a suffix shared by more than one melded source (e.g. two sources
   both ending in `/tools`) matches all of them. What `resolve()`/
   `resolve_installed()`/`select()` actually require unique is the resulting
