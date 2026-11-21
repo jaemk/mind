@@ -884,4 +884,245 @@ mod tests {
         assert!(text.is_empty());
         assert_eq!(field(&text, "description"), None);
     }
+
+    // ---- properties ---------------------------------------------------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// A line of text with no line break: [`str::lines`] splits on `\n` and
+    /// drops a trailing `\r`, so neither can sit inside one line's value.
+    fn gen_line_text(g: &mut Gen) -> String {
+        g.any_string(0, 16).replace(['\n', '\r'], "")
+    }
+
+    /// A plain-scalar word: no `:`, no quote or indicator to start it, and no
+    /// leading `#`, so it is never read as a comment or a different form.
+    fn gen_word(g: &mut Gen) -> String {
+        let alphabet = [
+            'a',
+            'b',
+            'Z',
+            '0',
+            '9',
+            '.',
+            ',',
+            '(',
+            ')',
+            '-',
+            '_',
+            '/',
+            '#',
+            '#',
+            'é',
+            '\u{1F600}',
+        ];
+        loop {
+            let w = g.string_from(&alphabet, 1, 6);
+            if !w.starts_with(['#', '-']) {
+                return w;
+            }
+        }
+    }
+
+    fn gen_words(g: &mut Gen) -> Vec<String> {
+        (0..g.range(1, 4)).map(|_| gen_word(g)).collect()
+    }
+
+    /// A key that is not `k` but may share its spelling's prefix.
+    fn gen_other_key(g: &mut Gen) -> String {
+        g.pick(&["kk", "k2", "k_x", "name", "description", "install", "K"])
+            .to_string()
+    }
+
+    // spec: DSC-21
+    #[test]
+    fn a_single_quoted_value_reads_back_exactly() {
+        cases(0xf00d_0001, 10_000, |g| {
+            let s = gen_line_text(g);
+            let line = format!("k: '{}'", s.replace('\'', "''"));
+            let comment = if g.one_in(3) { " # note" } else { "" };
+            let text = format!("---\n{line}{comment}\n---\nbody\n");
+            assert_eq!(field(&text, "k").as_deref(), Some(s.as_str()), "{text:?}");
+        });
+    }
+
+    // spec: DSC-21
+    #[test]
+    fn a_double_quoted_value_reads_back_exactly() {
+        cases(0xf00d_0002, 10_000, |g| {
+            // Line breaks and tabs go through their escapes; a bare `\r` has
+            // no escape this reader resolves, so it is left out.
+            let s = g.any_string(0, 16).replace('\r', "");
+            let mut quoted = String::new();
+            for c in s.chars() {
+                match c {
+                    '\\' => quoted.push_str("\\\\"),
+                    '"' => quoted.push_str("\\\""),
+                    '\n' => quoted.push_str("\\n"),
+                    '\t' if g.one_in(2) => quoted.push_str("\\t"),
+                    '/' if g.one_in(2) => quoted.push_str("\\/"),
+                    ' ' if g.one_in(4) => quoted.push_str("\\ "),
+                    c => quoted.push(c),
+                }
+            }
+            let text = format!("---\nk: \"{quoted}\"\n---\n");
+            assert_eq!(field(&text, "k").as_deref(), Some(s.as_str()), "{text:?}");
+        });
+    }
+
+    // spec: DSC-21 DSC-25
+    #[test]
+    fn a_plain_value_folds_its_lines_and_ends_at_a_comment() {
+        cases(0xf00d_0003, 10_000, |g| {
+            let lines: Vec<Vec<String>> = (0..g.range(1, 3)).map(|_| gen_words(g)).collect();
+            // A comment, if any, ends the value after the line it sits on.
+            let comment_at = g.one_in(2).then(|| g.below(lines.len()));
+            let mut text = String::from("---\n");
+            let mut want: Vec<String> = Vec::new();
+            for (i, words) in lines.iter().enumerate() {
+                let sep = if g.one_in(3) { "  " } else { " " };
+                let joined = words.join(sep);
+                let indent = if i == 0 {
+                    "k: ".to_string()
+                } else {
+                    " ".repeat(g.range(1, 4))
+                };
+                text.push_str(&indent);
+                text.push_str(&joined);
+                if comment_at == Some(i) {
+                    text.push_str(g.pick(&[" # c", "\t# c: x", " #"]));
+                }
+                text.push('\n');
+                if comment_at.is_none_or(|c| i <= c) {
+                    want.push(joined);
+                }
+            }
+            text.push_str("---\n");
+            assert_eq!(field(&text, "k"), Some(want.join(" ")), "{text:?}");
+        });
+    }
+
+    // spec: DSC-22
+    #[test]
+    fn a_block_value_reads_its_lines() {
+        cases(0xf00d_0004, 10_000, |g| {
+            let n = g.range(1, 5);
+            // Blank lines only between text lines: a leading or trailing one
+            // is trimmed off the displayed value.
+            let lines: Vec<Option<String>> = (0..n)
+                .map(|i| (i == 0 || i == n - 1 || !g.one_in(3)).then(|| gen_words(g).join(" ")))
+                .collect();
+            let base = g.range(1, 4);
+            let literal = g.one_in(2);
+            let mut text = format!(
+                "---\nk: {}{}\n",
+                if literal { "|" } else { ">" },
+                g.pick(&["", "-", "+"])
+            );
+            let mut want_lines: Vec<String> = Vec::new();
+            for line in &lines {
+                match line {
+                    Some(l) => {
+                        // A literal block keeps extra indentation past the
+                        // block's own, except on its first line, which sets
+                        // the trimmed value's start.
+                        let extra = if literal && !want_lines.is_empty() {
+                            g.below(3)
+                        } else {
+                            0
+                        };
+                        text.push_str(&" ".repeat(base + extra));
+                        text.push_str(l);
+                        want_lines.push(format!("{}{l}", " ".repeat(extra)));
+                    }
+                    None => want_lines.push(String::new()),
+                }
+                text.push('\n');
+            }
+            text.push_str(g.pick(&["other: x\n", ""]));
+            text.push_str("---\n");
+            // YAML folding: adjacent text lines join with a space, and each
+            // blank line is one line break.
+            let want = if literal {
+                want_lines.join("\n")
+            } else {
+                let mut out = String::new();
+                let mut after_text = false;
+                for l in &want_lines {
+                    if l.is_empty() {
+                        out.push('\n');
+                        after_text = false;
+                    } else {
+                        if after_text {
+                            out.push(' ');
+                        }
+                        out.push_str(l);
+                        after_text = true;
+                    }
+                }
+                out
+            };
+            assert_eq!(field(&text, "k"), Some(want), "{text:?}");
+        });
+    }
+
+    // spec: DSC-20 DSC-24
+    #[test]
+    fn only_a_column_zero_key_inside_the_closed_block_is_read() {
+        cases(0xf00d_0005, 10_000, |g| {
+            let mut text = String::from(if g.one_in(4) {
+                "\u{FEFF}---\n"
+            } else {
+                "---\n"
+            });
+            let mut want = None;
+            for _ in 0..g.range(0, 5) {
+                match g.below(4) {
+                    0 if want.is_none() => {
+                        let v = gen_words(g).join(" ");
+                        text.push_str(&format!("k: {v}\n"));
+                        want = Some(v);
+                    }
+                    // A nested `k:` is not a top-level key.
+                    1 => text.push_str(&format!("{}:\n  k: nested\n", gen_other_key(g))),
+                    _ => text.push_str(&format!(
+                        "{}: {}\n",
+                        gen_other_key(g),
+                        gen_words(g).join(" ")
+                    )),
+                }
+            }
+            let closed = !g.one_in(4);
+            if closed {
+                text.push_str("---\n");
+            }
+            // The body may spell the key too.
+            text.push_str(g.pick(&["", "k: from the body\n", "# T\n\nk: x\n"]));
+            let want = if closed { want } else { None };
+            assert_eq!(field(&text, "k"), want, "{text:?}");
+        });
+    }
+
+    #[test]
+    fn arbitrary_text_never_panics_the_reader() {
+        cases(0xf00d_0006, 20_000, |g| {
+            let mut text = String::new();
+            for _ in 0..g.range(0, 8) {
+                let line = match g.below(6) {
+                    0 => "---".to_string(),
+                    1 => format!("k: {}", g.any_string(0, 10)),
+                    2 => format!(
+                        "k: {}{}",
+                        g.pick(&["|", ">", "'", "\"", "|-", ">+"]),
+                        g.any_string(0, 6)
+                    ),
+                    3 => format!("{}{}", " ".repeat(g.below(4)), g.any_string(0, 10)),
+                    _ => g.any_string(0, 12),
+                };
+                text.push_str(&line);
+                text.push_str(g.pick(&["\n", "\r\n", "\n\n"]));
+            }
+            let _ = field(&text, "k");
+        });
+    }
 }

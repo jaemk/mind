@@ -4057,4 +4057,127 @@ mod tests {
             "the rejection branch must be reachable from the table"
         );
     }
+
+    // ---- properties ---------------------------------------------------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// An identity part: the characters a forge allows plus a few it does not
+    /// that the parser still accepts. `@` only when `at` (an owner may carry
+    /// one, STO-64). Never a trailing `.git`, which every form strips.
+    fn gen_part(g: &mut Gen, at: bool) -> String {
+        let mut alphabet = vec!['a', 'z', 'Q', '0', '9', '-', '_', '.', '~', 'é', '🦀'];
+        if at {
+            alphabet.push('@');
+        }
+        loop {
+            let s = g.string_from(&alphabet, 1, 8);
+            if s != "." && s != ".." && !s.ends_with(".git") {
+                return s;
+            }
+        }
+    }
+
+    // spec: CLI-11 STO-13
+    #[test]
+    fn every_spec_form_yields_the_identity_and_a_url_that_reparses_to_it() {
+        cases(0x5bec_0001, 5_000, |g| {
+            let owner = gen_part(g, true);
+            let repo = gen_part(g, false);
+            let dot_git = if g.one_in(2) { ".git" } else { "" };
+            let slash = if g.one_in(3) { "/" } else { "" };
+            let host = g
+                .pick(&["github.com", "gitlab.example.org", "git.local"])
+                .to_string();
+            let (spec, want_host) = match g.below(6) {
+                0 => (format!("{owner}/{repo}{dot_git}"), "github.com".to_string()),
+                1 => (
+                    format!("github:{owner}/{repo}{dot_git}"),
+                    "github.com".to_string(),
+                ),
+                2 => (
+                    format!("https://{host}/{owner}/{repo}{dot_git}{slash}"),
+                    host,
+                ),
+                3 => (format!("ssh://git@{host}/{owner}/{repo}{dot_git}"), host),
+                4 => (format!("git@{host}:{owner}/{repo}{dot_git}"), host),
+                _ => (
+                    format!("/srv/git/{owner}/{repo}{dot_git}{slash}"),
+                    "local".to_string(),
+                ),
+            };
+            let src = parse_spec_quiet(&spec).unwrap_or_else(|e| panic!("{spec:?}: {e}"));
+            assert_eq!(src.name, format!("{want_host}/{owner}/{repo}"), "{spec:?}");
+            assert_eq!(
+                (src.host.as_str(), src.owner.as_str(), src.repo.as_str()),
+                (want_host.as_str(), owner.as_str(), repo.as_str())
+            );
+            let again = parse_spec_quiet(&src.url)
+                .unwrap_or_else(|e| panic!("{spec:?} -> {:?}: {e}", src.url));
+            assert_eq!(again.name, src.name, "{spec:?} -> {:?}", src.url);
+            assert_eq!(again.url, src.url, "{spec:?}");
+        });
+    }
+
+    // spec: CLI-204 STO-64
+    #[test]
+    fn any_accepted_spec_has_safe_identity_parts() {
+        cases(0x5bec_0002, 20_000, |g| {
+            let spec = match g.below(3) {
+                0 => g.any_string(0, 24),
+                1 => {
+                    let parts: Vec<String> =
+                        (0..g.range(1, 5)).map(|_| g.any_string(0, 5)).collect();
+                    format!(
+                        "{}{}",
+                        g.pick(&["", "https://", "git@", "github:", "ssh://", "file://", "/"]),
+                        parts.join(*g.pick(&["/", ":", "@", "#"]))
+                    )
+                }
+                _ => {
+                    let base = format!(
+                        "https://github.com/{}/{}",
+                        gen_part(g, true),
+                        gen_part(g, false)
+                    );
+                    format!(
+                        "{base}{}",
+                        g.pick(&[
+                            "/tree/main/skills/x",
+                            "/blob/v1/a/SKILL.md",
+                            "/tree/",
+                            "/tree/main",
+                            "/../x",
+                            "#x",
+                            "@y"
+                        ])
+                    )
+                }
+            };
+            let Ok(src) = parse_spec_quiet(&spec) else {
+                return;
+            };
+            for (part, v) in [
+                ("host", &src.host),
+                ("owner", &src.owner),
+                ("repo", &src.repo),
+            ] {
+                assert!(
+                    !v.is_empty() && v != "." && v != "..",
+                    "{spec:?}: {part} {v:?}"
+                );
+                assert!(!v.contains(['/', '\\', '#']), "{spec:?}: {part} {v:?}");
+                assert!(!v.contains(char::is_control), "{spec:?}: {part} {v:?}");
+            }
+            assert!(
+                !src.repo.contains('@') && !src.host.contains('@'),
+                "{spec:?}"
+            );
+            let base = format!("{}/{}/{}", src.host, src.owner, src.repo);
+            match &src.item_path {
+                Some(p) => assert_eq!(src.name, format!("{base}#{p}"), "{spec:?}"),
+                None => assert_eq!(src.name, base, "{spec:?}"),
+            }
+        });
+    }
 }

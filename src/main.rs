@@ -36,6 +36,8 @@ mod scaffold;
 mod selfupdate;
 mod settings;
 mod source;
+#[cfg(test)]
+mod test_gen;
 mod transaction;
 mod tui;
 mod unmanaged;

@@ -2018,4 +2018,127 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
         let m = run_bounded("a deeply nested value", 20, move || parse(&text));
         assert!(m.is_empty(), "the open bracket swallows the rest: {m:?}");
     }
+
+    // ---- properties ---------------------------------------------------------
+
+    use crate::test_gen::{Gen, cases};
+
+    /// `s` as a JavaScript string literal in `quote`, each character written
+    /// raw or through one of the escapes WF-5 lists, chosen at random. A raw
+    /// line continuation may fall between characters.
+    fn js_literal(g: &mut Gen, s: &str, quote: char) -> String {
+        let mut out = String::from(quote);
+        for c in s.chars() {
+            if g.one_in(12) {
+                out.push_str(g.pick(&["\\\n", "\\\r\n", "\\\u{2028}"]));
+            }
+            // A template keeps a raw line feed; JavaScript would turn a raw
+            // carriage return there into a line feed, so it is escaped.
+            let must_escape = c == quote
+                || c == '\\'
+                || c == '\r'
+                || (c == '\n' && quote != '`')
+                || (c == '$' && quote == '`');
+            let pick = if must_escape {
+                1 + g.below(4)
+            } else {
+                g.below(5)
+            };
+            let cp = c as u32;
+            match pick {
+                0 => out.push(c),
+                1 if cp < 0x100 => out.push_str(&format!("\\x{cp:02x}")),
+                2 if cp < 0x1_0000 => out.push_str(&format!("\\u{cp:04X}")),
+                2 => {
+                    let v = cp - 0x1_0000;
+                    let (hi, lo) = (0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF));
+                    out.push_str(&format!("\\u{hi:04x}\\u{lo:04X}"));
+                }
+                3 => out.push_str(&format!("\\u{{{cp:x}}}")),
+                _ => match c {
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    // Any other escaped character stands for itself, except
+                    // the letters and digits that start an escape of their own.
+                    c if "nrtbfvxu0123456789\n\r\u{2028}\u{2029}".contains(c) => {
+                        out.push_str(&format!("\\u{{{cp:x}}}"))
+                    }
+                    c => {
+                        out.push('\\');
+                        out.push(c);
+                    }
+                },
+            }
+        }
+        out.push(quote);
+        out
+    }
+
+    // spec: WF-5
+    #[test]
+    fn string_values_read_back_through_any_escape_and_any_decoy() {
+        const DECOYS: [&str; 8] = [
+            "phases: [{ name: 'n1', description: \"d1\" }, { whenToUse: `w` }]",
+            "count: 42",
+            "fn: call(1, ')', \"}\")",
+            "tpl: `a ${ \"`\" } b ${ { name: 'x' } }`",
+            "nested: { name: 'inner', description: 'inner' }",
+            "re: /name: 'x'[}]/g",
+            "arrow: () => ({ name: 'z' })",
+            "'quoted-key': 'v'",
+        ];
+        cases(0x3f1e_0001, 5_000, |g| {
+            let mut want = WorkflowMeta::default();
+            let mut entries: Vec<String> = Vec::new();
+            for key in ["name", "description", "whenToUse"] {
+                if g.one_in(4) {
+                    continue;
+                }
+                let s = g.any_string(0, 12);
+                let quote = *g.pick(&['\'', '"', '`']);
+                let k = match g.below(3) {
+                    0 => key.to_string(),
+                    1 => format!("'{key}'"),
+                    _ => format!("\"{key}\""),
+                };
+                entries.push(format!("{k}: {}", js_literal(g, &s, quote)));
+                match key {
+                    "name" => want.name = Some(s),
+                    "description" => want.description = Some(s),
+                    _ => want.when_to_use = Some(s),
+                }
+            }
+            for _ in 0..g.below(4) {
+                let at = g.below(entries.len() + 1);
+                entries.insert(at, g.pick(&DECOYS).to_string());
+            }
+            let mut body = String::new();
+            for (i, e) in entries.iter().enumerate() {
+                if i > 0 {
+                    body.push_str(g.pick(&[
+                        ",",
+                        ",\n  ",
+                        ", // name: 'decoy'\n",
+                        " /* , name: 'c' */ ,",
+                    ]));
+                }
+                body.push_str(e);
+            }
+            if g.one_in(2) {
+                body.push(',');
+            }
+            let prelude = g.pick(&[
+                "",
+                "\u{FEFF}",
+                "// export const meta = { name: 'decoy' }\n",
+                "const s = \"export const meta = { name: 'decoy' }\";\n",
+                "import x from 'y'\n",
+            ]);
+            let text = format!(
+                "{prelude}export const meta = {{ {body} }}\n\nexport default async function() {{}}\n"
+            );
+            assert_eq!(parse(&text), want, "{text:?}");
+        });
+    }
 }
