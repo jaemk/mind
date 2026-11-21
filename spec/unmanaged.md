@@ -17,7 +17,10 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
   managed link, i.e. not recorded in any manifest item's `links` (storage.md
   STO-21). Its kind is the directory's kind and its name is the entry name
   (the basename, with a trailing `.md` stripped for an agent, rule, or
-  command, or `.js` for a workflow). A managed link occupies its path, so a
+  command, or `.js` for a workflow). A skill entry must be a directory (or a
+  link resolving to one), and a workflow entry a file. A dot-entry (`.git`,
+  `.DS_Store`, `.draft.md`) is not an item, as in the catalog scan, so `forget
+  --unmanaged` never removes one. A managed link occupies its path, so a
   given path is either managed or unmanaged, never both. Tools are never
   linked into an agent home (tooling.md TOOL-3), so unmanaged detection covers
   every linked kind: skills, agents, rules, commands, and workflows
