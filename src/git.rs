@@ -1114,18 +1114,19 @@ pub fn is_tracked(repo: &Path, file: &Path) -> bool {
     .is_ok()
 }
 
-/// Stage all changes under `dir` (`git add -A`).
-pub fn add_all(dir: &Path) -> Result<()> {
-    run(&dir.to_string_lossy(), Some(dir), &["add", "-A"])?;
-    Ok(())
-}
-
-/// Create a commit in `dir` with `message`. Errors if there is nothing staged.
-pub fn commit(dir: &Path, message: &str) -> Result<()> {
+/// Stage and commit only `path` (relative to `dir`) with `message`, leaving any
+/// other staged or unstaged change in the repo as it was (ABS-13). Errors when
+/// `path` has nothing to commit.
+pub fn commit_path(dir: &Path, path: &Path, message: &str) -> Result<()> {
+    let rel = path.to_string_lossy();
+    let label = dir.to_string_lossy();
+    run(&label, Some(dir), &["add", "-A", "--", &rel])?;
+    // With a pathspec, `git commit` records only those paths (`--only`), so
+    // whatever else the user had staged stays staged and uncommitted.
     run(
-        &dir.to_string_lossy(),
+        &label,
         Some(dir),
-        &["commit", "-m", message],
+        &["commit", "-m", message, "--only", "--", &rel],
     )?;
     Ok(())
 }
@@ -2412,20 +2413,19 @@ mod tests {
         cleanup(&base);
     }
 
-    /// `add_all` then `commit` records a commit with the given message, and a
-    /// fresh `git_init`'d repo can commit a newly written file (the absorb flow:
-    /// move file in, add_all, commit "absorb kind:name").
+    /// `commit_path` records a commit with the given message, and a fresh
+    /// `git_init`'d repo can commit a newly written file (the absorb flow: copy
+    /// the item in, commit "absorb kind:name").
     // spec: ABS-5
     #[test]
-    fn add_all_and_commit_records_message() {
+    fn commit_path_records_message() {
         let base = tmpdir("commit");
         let repo = base.join("repo");
         git_init(&repo).unwrap();
 
-        // Write a file (as absorb does after the move) then stage + commit.
+        // Write a file (as absorb does after the copy) then stage + commit.
         fs::write(repo.join("skill.md"), "# absorbed\n").unwrap();
-        add_all(&repo).expect("add_all");
-        commit(&repo, "absorb skill:review").expect("commit");
+        commit_path(&repo, Path::new("skill.md"), "absorb skill:review").expect("commit");
 
         let msg = read_head_subject(&repo);
         assert_eq!(
@@ -2447,19 +2447,72 @@ mod tests {
         cleanup(&base);
     }
 
-    /// `commit` with nothing staged is an error: the absorb flow never commits an
-    /// empty change, and a misuse surfaces as a failure rather than a silent no-op.
+    /// `commit_path` on a path with no change is an error: the absorb flow never
+    /// commits an empty change, and a misuse surfaces as a failure rather than a
+    /// silent no-op.
     // spec: ABS-5
     #[test]
-    fn commit_with_nothing_staged_errors() {
+    fn commit_path_with_nothing_to_commit_errors() {
         let base = tmpdir("commit-empty");
         let repo = base.join("repo");
         git_init(&repo).unwrap();
-        // Nothing written/staged after init.
-        let result = commit(&repo, "absorb skill:nothing");
+        // Nothing written after init.
+        let result = commit_path(&repo, Path::new("skills/nothing"), "absorb skill:nothing");
         assert!(
             result.is_err(),
-            "commit with an empty index must error, not produce an empty commit"
+            "commit with nothing to record must error, not produce an empty commit"
+        );
+        cleanup(&base);
+    }
+
+    /// Other changes in the repo, staged or not, stay out of the commit and keep
+    /// their state.
+    // spec: ABS-13
+    #[test]
+    fn commit_path_leaves_other_changes_uncommitted() {
+        let base = tmpdir("commit-only");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+        fs::write(repo.join("README.md"), "# repo\n").unwrap();
+        commit_path(&repo, Path::new("README.md"), "init").unwrap();
+
+        fs::write(repo.join(".env"), "TOKEN=secret\n").unwrap();
+        fs::write(repo.join("staged.txt"), "wip\n").unwrap();
+        let st = Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        fs::create_dir_all(repo.join("skills/review")).unwrap();
+        fs::write(repo.join("skills/review/SKILL.md"), "# review\n").unwrap();
+
+        commit_path(&repo, Path::new("skills/review"), "absorb skill:review").unwrap();
+
+        let files = Command::new("git")
+            .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let files = String::from_utf8(files.stdout).unwrap();
+        assert_eq!(
+            files.trim(),
+            "skills/review/SKILL.md",
+            "commit held: {files}"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let status = String::from_utf8(status.stdout).unwrap();
+        assert!(
+            status.contains("A  staged.txt"),
+            "staged change kept: {status}"
+        );
+        assert!(
+            status.contains("?? .env"),
+            "untracked file left alone: {status}"
         );
         cleanup(&base);
     }
