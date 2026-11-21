@@ -2418,6 +2418,15 @@ fn scan_marketplace_in_repo_plugins(
             for skill_path in &entry.skills {
                 let skill_dir = plugin_root.join(skill_path);
                 let skill_md = skill_dir.join("SKILL.md");
+                // spec: MKT-14 -- an intermediate symlink can carry the path
+                // out of the clone even though the leaf is a real dir; hold it
+                // to the same containment as the plugin root.
+                let Ok(canon_skill) = skill_dir.canonicalize() else {
+                    continue;
+                };
+                if !canon_skill.starts_with(&canon_clone) {
+                    continue;
+                }
                 // spec: DSC-108 -- no-follow, as in every other scan route.
                 if is_dir_nofollow(&skill_dir)
                     && is_regular_file_nofollow(&skill_md)
@@ -6415,6 +6424,55 @@ mod plugin_tests {
         assert!(
             !items.iter().any(|i| i.name == "secret"),
             "skill behind a symlink escaping the clone must NOT be discovered (MKT-14, MKT-9)"
+        );
+    }
+
+    // A `skills` entry is held to the same containment as the plugin root.
+    // `..` and absolute paths are refused by the manifest parser; one that
+    // reaches through a symlinked parent outside the clone is skipped here.
+    #[test]
+    fn marketplace_skills_entry_outside_clone_is_skipped() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+        let outside = base.join("outside-clone");
+        write_file(
+            &outside.join("skills/secret/SKILL.md"),
+            "---\ndescription: secret\n---\n",
+        );
+        write_file(
+            &clone.join("skills/ok/SKILL.md"),
+            "---\ndescription: ok\n---\n",
+        );
+        std::fs::create_dir_all(clone.join("linked")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("skills"), clone.join("linked/skills")).unwrap();
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "p", "source": "./", "skills": [
+                        "./skills/ok",
+                        "./linked/skills/secret"
+                    ]}
+                ]
+            }"#,
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        assert!(
+            items.iter().any(|i| i.name == "ok"),
+            "the in-clone skill is still offered"
+        );
+        assert!(
+            !items.iter().any(|i| i.name == "secret"),
+            "a skill path escaping the clone must not be offered: {:?}",
+            items.iter().map(|i| &i.path).collect::<Vec<_>>()
         );
     }
 
