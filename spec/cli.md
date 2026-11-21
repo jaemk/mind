@@ -1244,6 +1244,9 @@ only appear at meld or install time. It is read-only and installs nothing.
   `/Users/<user>` path. When the path maps confidently to a token (the item's own
   dir -> `{{self}}`, a sibling tool's entrypoint -> `{{tools:name}}`, another
   sibling -> `{{path:kind:name}}`) the finding names the suggested token. The
+  item name in the path may carry the source's own prefix (`jk:review`, the
+  installed name), and punctuation ending the sentence (`.`, `:`, `!`, `?`) is
+  not part of the path. The
   message reflects what the path resolves to at runtime (CLI-145). Advisory, not
   hard: `--fix` rewrites the confidently-mapped ones, but only in a markdown file
   (CLI-138, NS-54); the identical finding in a non-markdown file is reported and
