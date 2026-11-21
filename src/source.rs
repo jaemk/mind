@@ -921,7 +921,7 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
             return Ok(source);
         }
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
-        let url = format!("{scheme}://{authority}/{owner}/{repo}");
+        let url = format!("{scheme}://{authority}/{owner}/{}", url_repo(&repo));
         return make_source(spec, host, &owner, &repo, url);
     }
 
@@ -944,7 +944,7 @@ fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
              of a remote repo, use './{bare}'"
         );
     }
-    let url = format!("https://github.com/{owner}/{repo}");
+    let url = format!("https://github.com/{owner}/{}", url_repo(&repo));
     make_source(spec, "github.com", &owner, &repo, url)
 }
 
@@ -1171,7 +1171,7 @@ fn parse_item_link(
     };
     let (owner, repo) = split_owner_repo(repo_part).ok_or_else(invalid)?;
     let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
-    let url = format!("{scheme}://{authority}/{owner}/{repo}");
+    let url = format!("{scheme}://{authority}/{owner}/{}", url_repo(&repo));
     let mut source = make_source(spec, host, &owner, &repo, url)?;
     // spec: LNK-4 -- the extended identity keeps instances from the same repo
     // (and a plain meld of it) distinct; the clone path follows the name.
@@ -1179,6 +1179,17 @@ fn parse_item_link(
     source.item_path = Some(item_path);
     source.pin = pin;
     Ok(Some(source))
+}
+
+/// The last url segment for `repo`. Every spec form strips one trailing
+/// `.git`, so a repo whose own name ends in `.git` keeps an extra one, and
+/// the url parses back to the same repo.
+fn url_repo(repo: &str) -> String {
+    if repo.ends_with(".git") {
+        format!("{repo}.git")
+    } else {
+        repo.to_string()
+    }
 }
 
 fn split_owner_repo(path: &str) -> Option<(String, String)> {
@@ -4064,15 +4075,19 @@ mod tests {
 
     /// An identity part: the characters a forge allows plus a few it does not
     /// that the parser still accepts. `@` only when `at` (an owner may carry
-    /// one, STO-64). Never a trailing `.git`, which every form strips.
+    /// one, STO-64). Sometimes a name ending in `.git`, which a spec then
+    /// spells with a second `.git`.
     fn gen_part(g: &mut Gen, at: bool) -> String {
         let mut alphabet = vec!['a', 'z', 'Q', '0', '9', '-', '_', '.', '~', 'é', '🦀'];
         if at {
             alphabet.push('@');
         }
         loop {
-            let s = g.string_from(&alphabet, 1, 8);
-            if s != "." && s != ".." && !s.ends_with(".git") {
+            let mut s = g.string_from(&alphabet, 1, 8);
+            if g.one_in(8) {
+                s.push_str(".git");
+            }
+            if s != "." && s != ".." {
                 return s;
             }
         }
@@ -4084,7 +4099,11 @@ mod tests {
         cases(0x5bec_0001, 5_000, |g| {
             let owner = gen_part(g, true);
             let repo = gen_part(g, false);
-            let dot_git = if g.one_in(2) { ".git" } else { "" };
+            let dot_git = if repo.ends_with(".git") || g.one_in(2) {
+                ".git"
+            } else {
+                ""
+            };
             let slash = if g.one_in(3) { "/" } else { "" };
             let host = g
                 .pick(&["github.com", "gitlab.example.org", "git.local"])

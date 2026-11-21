@@ -94,7 +94,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-11` Accepted repo specs: `owner/repo` and `github:owner/repo` (github.com),
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
-  parses to none of these is an error (`InvalidRepoSpec`).
+  parses to none of these is an error (`InvalidRepoSpec`). Every form strips
+  one trailing `.git` from the repo, so a repo whose name ends in `.git` is
+  spelled with a second one (`owner/repo.git.git`), and the recorded url keeps
+  that second `.git` so it parses back to the same identity.
 - `CLI-204` Each of the `host`, `owner`, and `repo` parts a spec parses to must
   be a single safe path component, or the spec is refused (`UnsafeRepoSpec`,
   naming the offending part). A part is refused when it is empty, is `.` or
