@@ -727,6 +727,12 @@ fn apply(
             }
             Action::Repin { source, pin } => {
                 commands::repin_source(paths, source, PinRequest::Follow(pin.clone()))?;
+                // spec: CUR-10 -- the repin moved the clone, so the source's
+                // installed items join the upgrade pass even when they were
+                // current at plan time and no `upgrade` change was planned.
+                if !upgrade_scope.contains(source) {
+                    upgrade_scope.push(source.clone());
+                }
                 applied.push(format!("repin:{source}"));
             }
             Action::Upgrade { source } => {

@@ -126,7 +126,9 @@ A *curator* is a registered source that declares `[discover].sources` in its
   of reporting a bare total.
 - `CUR-10` Changes apply in a fixed order: `register`, `install`, `repin`,
   `upgrade`, then `unlist`. A newly registered entry's items therefore install in
-  the same run, a repin lands before the upgrade pass compares content, and a
+  the same run, a repin lands before the upgrade pass compares content (a
+  repinned source joins that pass even when no `upgrade` change was planned
+  for it, so its installed items follow the new pin in the same run), and a
   removal never precedes work on the sources that remain. A failure applying one
   change is reported against that change and stops the run; the changes already
   applied stay applied (each is an ordinary meld/learn/upgrade/unmeld, each
