@@ -243,7 +243,11 @@ held to the same guards as `mind.toml`.
   is rejected, so a melded marketplace cannot read host files outside its clone or
   place a symlink outside a lobe. An external plugin `source` is parsed and pinned
   through the same path as a `[discover].sources` spec, including pin-value
-  validation (DSC-66). Names and descriptions taken from a manifest have ANSI
+  validation (DSC-66). A source object's pin key pins the sub-source as a
+  curator pin does (DSC-65): `sha`, `ref` or `pin-ref` is a `pin-ref` (`sha`
+  wins when paired with `ref`), `pin-tag` is a `pin-tag`, and `follow-branch`
+  or `branch` is a `follow-branch`. A non-string pin value, or pin keys of two
+  different kinds, rejects the manifest. Names and descriptions taken from a manifest have ANSI
   escapes and control characters stripped before display (DSC-69 rule), preventing
   terminal injection from catalog-controlled text. This runs through the one
   shared `crate::sanitize::strip_ansi` (also backing CLI-224/CLI-186), not a

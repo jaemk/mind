@@ -256,8 +256,12 @@ pub enum PluginSource {
     /// `is_safe_manifest_path`). Fed to catalog as a scan root.
     InRepo { path: String },
     /// A repo spec to hand to `source::parse_spec`. Validated at load time;
-    /// the raw spec string is stored for the consumer to re-parse.
-    External { spec: String },
+    /// the raw spec string is stored for the consumer to re-parse. `pin` is
+    /// the source object's pin key, if any (MKT-9); a string source has none.
+    External {
+        spec: String,
+        pin: Option<crate::source::Pin>,
+    },
 }
 
 /// One entry in a marketplace catalog, resolved and validated.
@@ -402,9 +406,9 @@ fn resolve_source(raw: RawSource, manifest_path: &Path) -> Result<PluginSource> 
         RawSource::Str(s) => resolve_string_source(s, manifest_path),
         RawSource::Obj(obj) => {
             let spec = extract_external_spec(&obj, manifest_path)?;
-            validate_object_pins(&obj)?;
+            let pin = object_pin(&obj, manifest_path)?;
             crate::source::parse_spec(&spec)?;
-            Ok(PluginSource::External { spec })
+            Ok(PluginSource::External { spec, pin })
         }
     }
 }
@@ -422,7 +426,7 @@ fn resolve_string_source(s: String, manifest_path: &Path) -> Result<PluginSource
     if is_external_string(&s) {
         // Validate through parse_spec (bubbles InvalidRepoSpec on garbage).
         crate::source::parse_spec(&s)?;
-        return Ok(PluginSource::External { spec: s });
+        return Ok(PluginSource::External { spec: s, pin: None });
     }
 
     // In-repo relative path: validate with the safe-path rule (MKT-9).
@@ -490,14 +494,54 @@ fn extract_external_spec(obj: &HashMap<String, Value>, manifest_path: &Path) -> 
     })
 }
 
-/// Validate any pin/ref fields embedded in a source object (MKT-9, DSC-66).
-fn validate_object_pins(obj: &HashMap<String, Value>) -> Result<()> {
-    for key in &["ref", "pin-ref", "pin-tag", "follow-branch", "branch"] {
-        if let Some(Value::String(val)) = obj.get(*key) {
-            crate::git::validate_ref_value(val)?;
-        }
+/// Read the pin a source object declares (MKT-9), validating each value
+/// (DSC-66). `sha`, `ref` and `pin-ref` pin a commit, branch or tag
+/// (`Pin::Ref`), with `sha` winning over the other two since Claude's format
+/// pairs it with `ref`; `pin-tag` pins a tag; `follow-branch` and `branch`
+/// follow a branch. A non-string value, or keys of two different pin kinds,
+/// is a manifest error.
+fn object_pin(
+    obj: &HashMap<String, Value>,
+    manifest_path: &Path,
+) -> Result<Option<crate::source::Pin>> {
+    use crate::source::Pin;
+    let bad = |msg: String| MindError::Manifest {
+        path: manifest_path.to_path_buf(),
+        msg: format!("marketplace.json: {msg}"),
+    };
+    let mut found: Vec<(&str, Pin)> = Vec::new();
+    for key in [
+        "sha",
+        "ref",
+        "pin-ref",
+        "pin-tag",
+        "follow-branch",
+        "branch",
+    ] {
+        let Some(value) = obj.get(key) else { continue };
+        let Value::String(val) = value else {
+            return Err(bad(format!("source '{key}' must be a string")));
+        };
+        crate::git::validate_ref_value(val)?;
+        let pin = match key {
+            "pin-tag" => Pin::Tag(val.clone()),
+            "follow-branch" | "branch" => Pin::FollowBranch(val.clone()),
+            _ => Pin::Ref(val.clone()),
+        };
+        found.push((key, pin));
     }
-    Ok(())
+    let kinds: Vec<std::mem::Discriminant<Pin>> = found
+        .iter()
+        .map(|(_, p)| std::mem::discriminant(p))
+        .collect();
+    if kinds.iter().any(|k| *k != kinds[0]) {
+        let names: Vec<&str> = found.iter().map(|(k, _)| *k).collect();
+        return Err(bad(format!(
+            "conflicting source pins: {}",
+            names.join(", ")
+        )));
+    }
+    Ok(found.into_iter().next().map(|(_, p)| p))
 }
 
 // ---------------------------------------------------------------------------
@@ -864,7 +908,7 @@ mod tests {
         assert!(
             matches!(
                 &m.entries()[0].source,
-                PluginSource::External { spec } if spec == "https://github.com/owner/plugin"
+                PluginSource::External { spec, .. } if spec == "https://github.com/owner/plugin"
             ),
             "URL source must be External, got {:?}",
             m.entries()[0].source
@@ -880,7 +924,7 @@ mod tests {
         assert!(
             matches!(
                 &m.entries()[0].source,
-                PluginSource::External { spec } if spec == "owner/plugin-repo"
+                PluginSource::External { spec, .. } if spec == "owner/plugin-repo"
             ),
             "owner/repo must be External, got {:?}",
             m.entries()[0].source
@@ -897,7 +941,7 @@ mod tests {
         assert!(
             matches!(
                 &m.entries()[0].source,
-                PluginSource::External { spec } if spec == "https://github.com/owner/repo"
+                PluginSource::External { spec, .. } if spec == "https://github.com/owner/repo"
             ),
             "object with url must be External, got {:?}",
             m.entries()[0].source
@@ -915,7 +959,7 @@ mod tests {
         assert!(
             matches!(
                 &m.entries()[0].source,
-                PluginSource::External { spec } if spec == "owner/plugin"
+                PluginSource::External { spec, .. } if spec == "owner/plugin"
             ),
             "object with repo must be External via owner/repo, got {:?}",
             m.entries()[0].source
@@ -1052,15 +1096,65 @@ mod tests {
         );
         let path = write_temp(&json, "mkt-obj-goodref");
         let m = load_marketplace_manifest(&path).expect("a valid ref must parse");
-        assert!(
-            matches!(
-                &m.entries()[0].source,
-                PluginSource::External { spec } if spec == "https://github.com/owner/repo"
-            ),
-            "object with url + valid ref must be External, got {:?}",
-            m.entries()[0].source
+        assert_eq!(
+            m.entries()[0].source,
+            PluginSource::External {
+                spec: "https://github.com/owner/repo".into(),
+                pin: Some(crate::source::Pin::Ref("v1.2.3".into())),
+            },
+            "the ref is carried as the entry's pin, not dropped"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn marketplace_object_source_pin_keys_map_to_pins() {
+        // spec: MKT-9
+        use crate::source::Pin;
+        let cases: &[(&str, Option<Pin>)] = &[
+            (r#""pin-tag":"v2""#, Some(Pin::Tag("v2".into()))),
+            (r#""branch":"dev""#, Some(Pin::FollowBranch("dev".into()))),
+            (
+                r#""follow-branch":"dev""#,
+                Some(Pin::FollowBranch("dev".into())),
+            ),
+            (r#""pin-ref":"abc1234""#, Some(Pin::Ref("abc1234".into()))),
+            (
+                r#""ref":"main","sha":"abc1234""#,
+                Some(Pin::Ref("abc1234".into())),
+            ),
+            ("", None),
+        ];
+        for (i, (keys, want)) in cases.iter().enumerate() {
+            let sep = if keys.is_empty() { "" } else { "," };
+            let json = make_marketplace(&format!(
+                r#"{{"name":"p","source":{{"repo":"owner/plugin"{sep}{keys}}}}}"#
+            ));
+            let path = write_temp(&json, &format!("mkt-obj-pinkeys-{i}"));
+            let m = load_marketplace_manifest(&path).expect("parse");
+            match &m.entries()[0].source {
+                PluginSource::External { pin, .. } => assert_eq!(pin, want, "{keys}"),
+                other => panic!("expected External, got {other:?}"),
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    fn marketplace_object_source_conflicting_or_non_string_pin_is_error() {
+        // spec: MKT-9
+        for (i, keys) in [r#""ref":"main","pin-tag":"v1""#, r#""ref":5"#]
+            .iter()
+            .enumerate()
+        {
+            let json = make_marketplace(&format!(
+                r#"{{"name":"p","source":{{"repo":"owner/plugin",{keys}}}}}"#
+            ));
+            let path = write_temp(&json, &format!("mkt-obj-badpin-{i}"));
+            let err = load_marketplace_manifest(&path).unwrap_err();
+            assert!(matches!(err, MindError::Manifest { .. }), "{keys}: {err:?}");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     #[test]
