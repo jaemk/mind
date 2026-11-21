@@ -208,6 +208,15 @@ impl Env {
         std::env::var_os("GIT_ALLOW_PROTOCOL").map(|v| v.to_string_lossy().into_owned())
     }
 
+    /// `$GIT_CONFIG_COUNT` as a number, `0` when unset or not a number: the
+    /// count of `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` pairs already set.
+    pub fn git_config_count(self) -> usize {
+        std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
     /// The user's home directory (`$HOME`, or the platform lookup).
     pub fn home_dir(self) -> Option<PathBuf> {
         dirs::home_dir()

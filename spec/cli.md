@@ -1416,6 +1416,11 @@ only appear at meld or install time. It is read-only and installs nothing.
   `..` component; any other remainder is not resolved, so prose in a reviewed
   source cannot make `review` report whether an arbitrary file on the machine
   exists.
+- `CLI-268` Every `git` child `mind` runs has `core.fsmonitor` turned off, so a
+  local working tree given to `review` (or any repo `mind` runs git in) cannot
+  make a read-only call such as `ls-files` run a command named in that repo's
+  own `.git/config`. The override is passed as a `GIT_CONFIG_COUNT` entry
+  appended after any the environment already sets (git 2.31 or later).
 - `CLI-192` `review` reports, as an advisory `ns-tool-reference` finding, a
   `{{ns:name}}` reference (namespacing.md) whose only matching sibling is a `tool`.
   A tool is store-only (tooling.md TOOL-3), reached by `{{tools:name}}` for its

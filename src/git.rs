@@ -453,6 +453,20 @@ fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
     with_prompt_retry(batch, |batch| exec(url, cwd, args, remote, batch))
 }
 
+/// The env pairs that append `core.fsmonitor=false` as config entry `count`
+/// (the `GIT_CONFIG_COUNT` already set), raising the count by one (CLI-268).
+// spec: CLI-268
+fn fsmonitor_off_env(count: usize) -> [(String, String); 3] {
+    [
+        (
+            format!("GIT_CONFIG_KEY_{count}"),
+            "core.fsmonitor".to_string(),
+        ),
+        (format!("GIT_CONFIG_VALUE_{count}"), "false".to_string()),
+        ("GIT_CONFIG_COUNT".to_string(), (count + 1).to_string()),
+    ]
+}
+
 /// One `git <args>` run. A `remote` one gets the non-interactive env when
 /// that mode is on; `batch` applies [`batch_env_pairs`].
 fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool) -> Result<String> {
@@ -461,6 +475,13 @@ fn exec(url: &str, cwd: Option<&Path>, args: &[&str], remote: bool, batch: bool)
         cmd.current_dir(dir);
     }
     cmd.args(args);
+    // spec: CLI-268 -- a working tree mind did not create (`review <path>`)
+    // can name a command in its own `.git/config`; `core.fsmonitor` is the one
+    // a read-only call like `ls-files` runs. Set through the environment,
+    // after any pairs already there, so the argv stays `git <args>`.
+    for (k, v) in fsmonitor_off_env(crate::settings::Env.git_config_count()) {
+        cmd.env(k, v);
+    }
     // spec: POL-70 -- on every git child, not only the remote verbs: a local
     // checkout can still fetch (submodules, a partial clone's missing blobs).
     if FORBID_INSECURE_TRANSPORT.load(Ordering::Relaxed) {
@@ -2415,6 +2436,48 @@ mod tests {
         assert!(is_repo(&repo), "git_init must produce a git repo");
 
         cleanup(&base);
+    }
+
+    /// A working tree mind did not create (a reviewed or absorbed local repo)
+    /// may carry its own `.git/config`; a command it names there must not run.
+    // spec: CLI-268
+    #[test]
+    fn repo_config_commands_do_not_run_in_a_foreign_working_tree() {
+        let base = tmpdir("fsmon");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+        fs::write(repo.join("f.md"), "x").unwrap();
+        git(&repo, &["add", "f.md"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let marker = base.join("ran");
+        let hook = format!("touch '{}'; false", marker.display());
+        git(&repo, &["config", "core.fsmonitor", &hook]);
+
+        assert!(is_repo(&repo));
+        assert!(!marker.exists(), "is_repo ran a repo-config command");
+        assert!(is_tracked(&repo, &repo.join("f.md")));
+        assert!(!marker.exists(), "is_tracked ran a repo-config command");
+        head_commit(&repo.to_string_lossy(), &repo).unwrap();
+        assert!(!marker.exists(), "head_commit ran a repo-config command");
+        fs::write(repo.join("g.md"), "y").unwrap();
+        commit_path(&repo, Path::new("g.md"), "add g").unwrap();
+        assert!(!marker.exists(), "commit_path ran a repo-config command");
+        cleanup(&base);
+    }
+
+    /// The fsmonitor override goes after config pairs the user already set,
+    /// leaving them in place.
+    // spec: CLI-268
+    #[test]
+    fn fsmonitor_override_appends_after_existing_config_pairs() {
+        let pairs = fsmonitor_off_env(2);
+        assert_eq!(
+            pairs[0],
+            ("GIT_CONFIG_KEY_2".into(), "core.fsmonitor".into())
+        );
+        assert_eq!(pairs[1], ("GIT_CONFIG_VALUE_2".into(), "false".into()));
+        assert_eq!(pairs[2], ("GIT_CONFIG_COUNT".into(), "3".into()));
+        assert_eq!(fsmonitor_off_env(0)[2].1, "1");
     }
 
     /// `is_repo` is false for a plain directory and true after `git_init`.
