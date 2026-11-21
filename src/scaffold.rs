@@ -129,11 +129,15 @@ pub fn patch_source_meta(
         // spec: DSC-82 -- strip any active `prefix =` line that may remain
         // (the deprecated alias key). This prevents a file from ending up with
         // both `namespace =` and `prefix =`.
+        // Only `[source]` is touched: a nested entry's keys are its own.
+        let mut in_source = false;
         result = result
             .lines()
             .filter(|l| {
-                let t = l.trim_start();
-                t.starts_with('#') || (!t.starts_with("prefix =") && !t.starts_with("prefix="))
+                if let Some(header) = table_header(l) {
+                    in_source = header == "[source]";
+                }
+                !(in_source && is_active_key(l, "prefix"))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -151,8 +155,25 @@ pub fn with_release_tags(content: &str) -> String {
     set_key(content, "release-tags", &toml_string(RELEASE_TAGS))
 }
 
-/// Replace the active `<key> = ...` line in `content`, or insert it after
-/// the `[source]` header. Non-active (commented) lines are left untouched.
+/// The table header a line opens (`[source]`, `[[discover.sources]]`), with
+/// any trailing comment dropped; `None` for any other line.
+fn table_header(line: &str) -> Option<&str> {
+    let t = line.trim();
+    t.starts_with('[')
+        .then(|| t.split_once('#').map_or(t, |(h, _)| h).trim_end())
+}
+
+/// Whether `line` is an active (uncommented) `<key> = ...` assignment.
+fn is_active_key(line: &str, key: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// Replace the active `<key> = ...` line in the `[source]` table, or insert it
+/// after the `[source]` header. Commented lines, and lines in any other table
+/// (a `[[discover.sources]]` entry has its own `namespace`), are left
+/// untouched.
 ///
 /// When no `[source]` section exists, appends one at the end of the file
 /// before inserting the key.
@@ -160,22 +181,21 @@ pub fn with_release_tags(content: &str) -> String {
 /// Always emits a trailing newline; normalizes content that lacks one.
 fn set_key(content: &str, key: &str, value: &str) -> String {
     let new_line = format!("{key} = {value}");
-    let key_eq = format!("{key} =");
-    let key_eq_nospace = format!("{key}=");
 
     let mut output: Vec<String> = Vec::new();
     let mut replaced = false;
     let mut source_line_idx: Option<usize> = None;
+    let mut in_source = false;
 
     for line in content.lines() {
-        if line.trim() == "[source]" && source_line_idx.is_none() {
-            source_line_idx = Some(output.len());
+        if let Some(header) = table_header(line) {
+            in_source = header == "[source]";
+            if in_source && source_line_idx.is_none() {
+                source_line_idx = Some(output.len());
+            }
         }
-        let trimmed = line.trim_start();
-        let is_active_key = !trimmed.starts_with('#')
-            && (trimmed.starts_with(&key_eq) || trimmed.starts_with(&key_eq_nospace));
 
-        if is_active_key {
+        if in_source && is_active_key(line, key) {
             output.push(new_line.clone());
             replaced = true;
         } else {
@@ -522,5 +542,33 @@ mod tests {
             out.contains("description = \"\""),
             "must preserve existing lines: {out}"
         );
+    }
+
+    #[test]
+    fn patch_source_meta_touches_only_the_source_table() {
+        // spec: INIT-12 -- a `[[discover.sources]]` entry's own `namespace`,
+        // `flat-skills` and `prefix`-like keys are not the `[source]` keys.
+        let content = "[source]\ndescription = \"d\"\nprefix = \"old\"\n\n\
+                       [[discover.sources]]\nsource = \"a/b\"\nnamespace = \"keep\"\n\
+                       flat-skills = false\n";
+        let out = patch_source_meta(Some(content), true, Some("new"));
+        let doc: toml::Value = toml::from_str(&out).expect(&out);
+        assert_eq!(doc["source"]["namespace"].as_str(), Some("new"), "{out}");
+        assert_eq!(doc["source"]["flat-skills"].as_bool(), Some(true), "{out}");
+        assert!(doc["source"].get("prefix").is_none(), "{out}");
+        let entry = &doc["discover"]["sources"][0];
+        assert_eq!(entry["namespace"].as_str(), Some("keep"), "{out}");
+        assert_eq!(entry["flat-skills"].as_bool(), Some(false), "{out}");
+    }
+
+    #[test]
+    fn patch_source_meta_finds_a_source_header_with_a_comment() {
+        // spec: INIT-12 -- `[source]  # note` is the `[source]` header; no
+        // second table is appended.
+        let content = "[source]  # metadata\ndescription = \"d\"\n";
+        let out = patch_source_meta(Some(content), false, Some("ns"));
+        let doc: toml::Value = toml::from_str(&out).expect(&out);
+        assert_eq!(doc["source"]["namespace"].as_str(), Some("ns"), "{out}");
+        assert_eq!(doc["source"]["description"].as_str(), Some("d"), "{out}");
     }
 }
