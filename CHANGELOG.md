@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reading an item's content as text (token expansion, the reference scans,
+  `review`, the `probe` preview) is capped at 16 MiB per file, so a source
+  cannot exhaust memory with a file that compresses well in git. A larger file
+  is skipped like a non-UTF-8 one.
 - `resources/install.sh` refuses a `MIND_VERSION` (or latest-release tag) that
   is not a release-tag shape, so it cannot add a path segment to the download
   URL or move the archive path out of the temp dir.

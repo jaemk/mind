@@ -659,7 +659,11 @@ fn read_expanding_text(item: &CatalogItem) -> String {
         if !is_regular_file_nofollow(&file) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(&file) {
+        // DSC-125: the item's total text is bounded too, not just each file.
+        if buf.len() as u64 > crate::error::CONTENT_SIZE_LIMIT {
+            break;
+        }
+        if let Ok(content) = crate::error::read_text_capped(&file) {
             buf.push_str(&content);
             buf.push('\n');
         }

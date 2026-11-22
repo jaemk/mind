@@ -65,19 +65,17 @@ meld a source you do not control:
   `unlimited`. Lowering it tightens the bound; `unlimited` removes it, which
   puts metadata reads back under the accepted risk below. The bounded-read
   guarantee holds at every other setting. Recorded as `DSC-103`..`DSC-107`.
-- **Item content reads are not size-capped, with one exception.** Beyond the
-  metadata cap above, no other read of source-controlled content has a size or
-  nesting-depth limit: every file in an item tree during `{{ns:}}` expansion at
-  install, the reference scan, `review`, the TUI preview, and content hashing.
-  A source could ship an oversized or deeply nested file to make `mind`
-  allocate heavily while scanning or installing it. This is self-inflicted
-  (you chose to meld that source) and bounded to the current invocation; the
-  reasoning is recorded as `DSC-90` in
+- **Item content text reads are capped at 16 MiB per file** (`DSC-125`): token
+  expansion, the reference scans, `review`, and the TUI preview skip a larger
+  file. Content hashing and copying, and TOML nesting depth, have no limit. A
+  source could ship an oversized file or a deeply nested table to make `mind`
+  spend time or disk while installing it. This is self-inflicted (you chose to
+  meld that source) and bounded to the current invocation; the reasoning is
+  recorded as `DSC-90` in
   [spec/discovery.md](spec/discovery.md#accepted-risks). Reports on this are
-  welcome but will likely be closed as accepted risk. The workflow kind is the
-  one exception: its content read IS the capped metadata read above (a
-  workflow has no separate frontmatter to read), so it is size-capped like any
-  other discovery metadata, not uncapped like the other kinds' content.
+  welcome but will likely be closed as accepted risk. The workflow kind's
+  content read is also the capped metadata read above (a workflow has no
+  separate frontmatter to read).
 
 ## Supported versions
 
