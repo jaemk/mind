@@ -74,6 +74,16 @@ if [ -z "$version" ]; then
 	version="${tag#v}"
 fi
 
+# The version becomes part of a download URL and of the local archive path, so
+# it is a release-tag shape and nothing else (STO-89): a `/`, `..`, `?`, or `#`
+# would send the request to another path or write outside the temp dir.
+# Same rule as `evolve --to`.
+case "$version" in
+"" | *[!0-9A-Za-z.+-]* | .* | *..* | -*)
+	err "invalid version: ${version} (expected e.g. 1.2.3 or 1.2.3-rc1)"
+	;;
+esac
+
 asset="mind-${version}-${target}.tar.gz"
 url="https://github.com/${REPO}/releases/download/v${version}/${asset}"
 

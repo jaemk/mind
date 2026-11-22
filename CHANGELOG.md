@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `resources/install.sh` refuses a `MIND_VERSION` (or latest-release tag) that
+  is not a release-tag shape, so it cannot add a path segment to the download
+  URL or move the archive path out of the temp dir.
+
 ## [0.54.0] - 2026-11-21
 
 ### Added

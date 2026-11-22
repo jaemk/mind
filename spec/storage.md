@@ -780,6 +780,12 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   refuse pending recovery without changing state. Such a save spanning
   multiple homes is not atomic: interruption can leave later homes unchanged.
   Inside a command transaction, a save commits every home at once (LIFE-60).
+- `STO-89` `resources/install.sh` accepts a version (`MIND_VERSION`, or the tag
+  the `releases/latest` lookup returned) only if it is non-empty, made of
+  `[0-9A-Za-z.+-]`, does not start with `.` or `-`, and has no `..`. Anything
+  else exits non-zero with `invalid version` before any download, so the
+  version cannot add a path segment or query to the release URL or move the
+  local archive path out of the temp dir.
 
 ## Errors
 

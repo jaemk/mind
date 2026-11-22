@@ -1395,3 +1395,75 @@ fn install_sh_reachable_targets_are_all_published_by_the_release_matrix() {
          install.sh's requests silently diverging)"
     );
 }
+
+#[test]
+// spec: STO-89
+fn install_sh_refuses_a_version_that_is_not_a_release_tag_before_any_download() {
+    for bad in [
+        "1.0.0/../../x",
+        "../x",
+        "1.0.0?a=b",
+        "1.0.0#frag",
+        "1..0",
+        ".1.0",
+        "-1.0",
+        "1.0 0",
+    ] {
+        let fx = Fixture::new("bad-pinned-version", "1.0.0");
+        write_fake_uname_linux_x86_64(&fx.bin_dir);
+        write_fake_gh_always_fails(&fx.bin_dir);
+        write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+
+        let out = run_install_sh_pinned(&fx.bin_dir, &fx.install_dir, bad);
+        assert!(!out.status.success(), "{bad:?} must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid version"),
+            "{bad:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fx.requested(), "", "{bad:?}: no request may be made");
+        assert!(!fx.install_dir.join("mind").exists());
+    }
+}
+
+#[test]
+// spec: STO-89
+fn install_sh_refuses_a_latest_release_tag_that_is_not_a_release_tag() {
+    let fx = Fixture::new("bad-latest-tag", "1.0.0");
+    std::fs::write(
+        fx.dir.join("release.json"),
+        r#"{"tag_name": "v1.0.0/../../evil"}"#,
+    )
+    .unwrap();
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid version"));
+    let log = fx.requested();
+    assert!(
+        !log.contains("/download/"),
+        "only the lookup may be requested: {log:?}"
+    );
+}
+
+#[test]
+// spec: STO-89
+fn install_sh_accepts_a_prerelease_and_build_version() {
+    let fx = Fixture::new("ok-prerelease-version", "1.2.3-rc.1+b5");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"RC");
+    fx.publish_sums(&[&musl]);
+
+    let out = run_install_sh_pinned(&fx.bin_dir, &fx.install_dir, "1.2.3-rc.1+b5");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(fx.install_dir.join("mind")).unwrap(), b"RC");
+}
