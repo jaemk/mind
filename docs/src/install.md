@@ -17,8 +17,15 @@ Downloads the release binary for your platform (x86_64 or aarch64 Linux or
 macOS) and installs it to `~/.local/bin`. On Linux it fetches the
 `musl` build, which is statically linked and runs on any glibc version (Ubuntu
 22.04, Debian 12, RHEL 9, Amazon Linux 2, and newer). The script verifies the
-download against the published `SHA256SUMS` asset before extracting. Override
-the target dir with `MIND_INSTALL_DIR` or pin a version with `MIND_VERSION`:
+download against the published `SHA256SUMS` asset before extracting.
+
+Options, set as environment variables on the `sh` side of the pipe:
+
+| Variable | Effect |
+|----------|--------|
+| `MIND_INSTALL_DIR` | Install here instead of `~/.local/bin`. |
+| `MIND_VERSION` | Install this version (e.g. `0.12.0`) instead of the latest release. |
+| `MIND_REQUIRE_ATTESTATION` | Set to `1` to require a valid build-provenance check (below). |
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
@@ -27,10 +34,27 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mi
 
 If `~/.local/bin` is not on your `PATH`, the script prints the line to add.
 
-When `gh` is installed, the script also checks the archive's build provenance
-(`gh attestation verify`) and reports the result, without failing the install.
-Set `MIND_REQUIRE_ATTESTATION=1` to make it mandatory: the install stops if `gh`
-is missing or the check fails.
+### Verifying the download
+
+`SHA256SUMS` is published on the same release as the archive, so it shows the
+download is intact but not where it was built. When the
+[GitHub CLI](https://cli.github.com/) (`gh`) is installed, the script also runs
+`gh attestation verify`, which checks that the archive was built by this repo's
+release workflow, and reports the result. By default a failed or skipped check
+does not stop the install.
+
+To make the check mandatory, set `MIND_REQUIRE_ATTESTATION=1`. The install then
+stops before extracting anything if `gh` is not on your `PATH` or the
+verification fails:
+
+```
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
+  | MIND_REQUIRE_ATTESTATION=1 sh
+```
+
+Note that the script itself is fetched from `main`, so this protects against a
+tampered release archive, not a tampered script. After installing, `mind evolve`
+verifies every later update against a signature built into the binary.
 
 ## Homebrew (macOS and Linux)
 

@@ -6,6 +6,8 @@
 # Honors:
 #   MIND_VERSION       version to install (e.g. 0.2.0); default: latest release
 #   MIND_INSTALL_DIR   install directory; default: ~/.local/bin
+#   MIND_REQUIRE_ATTESTATION
+#                      1 requires a valid gh build-provenance check; default: soft
 set -eu
 
 REPO="jaemk/mind"
