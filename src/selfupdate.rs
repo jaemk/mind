@@ -1787,7 +1787,7 @@ mod tests {
         let wget_lines: Vec<&str> = script
             .lines()
             .map(|l| l.trim())
-            .filter(|l| l.starts_with("wget "))
+            .filter(|l| l.starts_with("wget_deadline "))
             .collect();
         assert_eq!(
             wget_lines.len(),
@@ -1808,11 +1808,13 @@ mod tests {
         // install.sh's wget calls must also carry an explicit --timeout so a stalled
         // connect cannot hang the installer (STO-52; the fixed 15 s CONNECT_TIMEOUT).
         let script = install_sh();
-        for line in script
+        let calls: Vec<_> = script
             .lines()
             .map(|l| l.trim())
-            .filter(|l| l.starts_with("wget "))
-        {
+            .filter(|l| l.starts_with("wget_deadline "))
+            .collect();
+        assert_eq!(calls.len(), 2, "expected both wget download paths");
+        for line in calls {
             assert!(
                 line.contains("--timeout="),
                 "every wget invocation in install.sh must pass --timeout=: {line:?}"

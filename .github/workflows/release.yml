@@ -4,12 +4,13 @@ name: release
 # `decide`, which releases only when Cargo.toml carries a stable version that
 # has no GitHub release yet: a `-dev` version (main between releases) and an
 # already-released version both skip, so ordinary merges cost one short job.
-# The workflow creates the `v<version>` tag itself, through `gh release create`.
+# The release is created as a draft and published once its assets check out;
+# publishing creates the `v<version>` tag (resources/publish-release.sh).
 #
 # `workflow_dispatch` re-runs a release that failed partway. Every publishing
-# step below is idempotent: an existing GitHub release gets its assets
-# re-uploaded, a version already on crates.io is not published again, and an
-# up-to-date formula is not re-committed.
+# step below is idempotent: a draft release gets its assets re-uploaded, a
+# published one is verified and left as it is, a version already on crates.io
+# is not published again, and an up-to-date formula is not re-committed.
 on:
   push:
     branches: [main]
@@ -271,26 +272,14 @@ jobs:
         with:
           name: signed
           path: dist
-      - name: generate SHA256SUMS
-        run: |
-          cd dist
-          sha256sum *.tar.gz > ../SHA256SUMS
-          cd ..
-      - name: create the tag and release
+      - name: publish or recover release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        # `--target` creates the `v<version>` tag on the released commit. The
-        # "Protected release" tag ruleset must list GitHub Actions as a bypass
-        # actor, or this tag creation is refused.
-        run: |
-          tag="v${VERSION}"
-          if gh release view "$tag" --json tagName >/dev/null 2>&1; then
-            echo "$tag exists; re-uploading its assets"
-            gh release upload "$tag" dist/*.tar.gz SHA256SUMS --clobber
-          else
-            bash resources/changelog-section.sh "$VERSION" > notes.md
-            gh release create "$tag" dist/*.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "$tag" --notes-file notes.md
-          fi
+        run: bash resources/publish-release.sh dist published
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-release
+          path: published/
 
   publish:
     needs: [decide, release]
@@ -344,7 +333,7 @@ jobs:
         run: cargo publish --locked --no-verify
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: signed
+          name: published-release
           path: dist
       - name: commit the formula and the next dev version
         # Pushes straight to main with the job's default GITHUB_TOKEN. If branch

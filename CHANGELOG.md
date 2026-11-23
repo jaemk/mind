@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `resources/install.sh` replaces `mind` atomically (staged in the install
+  directory, then renamed), refuses a directory at the executable path, ends a
+  wget download at the same 600 s deadline curl has, and no longer reads a
+  version from a failed `releases/latest` transfer.
 - A version pin's resolved release tag, which comes from the remote's tag list,
   gets the same checks as a typed pin (no leading `-`, no `:` or `*`) before it
   is used in a fetch refspec.

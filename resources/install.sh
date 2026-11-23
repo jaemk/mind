@@ -21,6 +21,31 @@ err() {
 CONNECT_TIMEOUT=15
 MAX_TIME=600
 
+# wget has no total-transfer timeout. A watchdog enforces the same wall-clock
+# limit as curl, including transfers that keep making slow progress.
+wget_deadline() {
+	wget "$@" &
+	download_pid=$!
+	(
+		sleeper=
+		trap '[ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null || :; exit' TERM
+		sleep "$MAX_TIME" &
+		sleeper=$!
+		wait "$sleeper" && kill -KILL "$download_pid" 2>/dev/null || :
+	) </dev/null >/dev/null 2>&1 &
+	watchdog_pid=$!
+	trap 'kill "$download_pid" "$watchdog_pid" 2>/dev/null || :; wait "$download_pid" "$watchdog_pid" 2>/dev/null || :; exit 1' HUP INT TERM
+	if wait "$download_pid"; then
+		status=0
+	else
+		status=$?
+	fi
+	kill "$watchdog_pid" 2>/dev/null || :
+	wait "$watchdog_pid" 2>/dev/null || :
+	trap - HUP INT TERM
+	return "$status"
+}
+
 # A downloader: curl or wget, whichever exists.
 fetch() {
 	# fetch <url> -> stdout
@@ -28,7 +53,7 @@ fetch() {
 		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
 			--connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$1"
 	elif command -v wget >/dev/null 2>&1; then
-		wget --https-only --tries=1 --timeout="$CONNECT_TIMEOUT" -qO- "$1"
+		wget_deadline --https-only --tries=1 --timeout="$CONNECT_TIMEOUT" -qO- "$1"
 	else
 		err "need curl or wget on PATH"
 	fi
@@ -40,7 +65,7 @@ fetch_to() {
 		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
 			--connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$1" -o "$2"
 	elif command -v wget >/dev/null 2>&1; then
-		wget --https-only --tries=1 --timeout="$CONNECT_TIMEOUT" -qO "$2" "$1"
+		wget_deadline --https-only --tries=1 --timeout="$CONNECT_TIMEOUT" -qO "$2" "$1"
 	else
 		err "need curl or wget on PATH"
 	fi
@@ -67,8 +92,8 @@ target="${arch_part}-${os_part}"
 # Resolve the version: explicit MIND_VERSION, else the latest release tag.
 version="${MIND_VERSION:-}"
 if [ -z "$version" ]; then
-	tag="$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
-		| sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
+	metadata="$(fetch "https://api.github.com/repos/${REPO}/releases/latest")" || err "could not download latest release metadata"
+	tag="$(printf '%s\n' "$metadata" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
 		| head -n 1)"
 	[ -n "$tag" ] || err "could not determine the latest release; set MIND_VERSION"
 	version="${tag#v}"
@@ -149,13 +174,15 @@ tar -xzf "$tmp/$asset" -C "$tmp" || err "could not extract $asset"
 [ -f "$tmp/mind" ] || err "archive did not contain a 'mind' binary"
 
 mkdir -p "$INSTALL_DIR" || err "could not create install directory: ${INSTALL_DIR}"
-if command -v install >/dev/null 2>&1 && install -m 0755 "$tmp/mind" "$INSTALL_DIR/mind" 2>/dev/null; then
-	:
-elif cp "$tmp/mind" "$INSTALL_DIR/mind" 2>/dev/null && chmod 0755 "$INSTALL_DIR/mind" 2>/dev/null; then
-	:
-else
-	err "could not write to ${INSTALL_DIR}; check permissions or set MIND_INSTALL_DIR to a writable directory"
+[ ! -d "$INSTALL_DIR/mind" ] || err "executable path is a directory: ${INSTALL_DIR}/mind"
+staged="$(mktemp "$INSTALL_DIR/.mind.XXXXXXXX")" || err "could not stage binary in ${INSTALL_DIR}"
+trap 'rm -f "$staged"; rm -rf "$tmp"' EXIT
+if ! cp "$tmp/mind" "$staged" || ! chmod 0755 "$staged"; then
+	err "could not stage binary in ${INSTALL_DIR}; check permissions"
 fi
+# -f alone can move into a directory; recheck before the atomic rename.
+[ ! -d "$INSTALL_DIR/mind" ] || err "executable path is a directory: ${INSTALL_DIR}/mind"
+mv -f "$staged" "$INSTALL_DIR/mind" || err "could not replace ${INSTALL_DIR}/mind"
 
 echo "mind-install: installed mind ${version} to ${INSTALL_DIR}/mind"
 case ":${PATH}:" in

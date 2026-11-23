@@ -555,18 +555,9 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 - `STO-74` `resources/install.sh`'s `fetch_to` (the downloader used for the
   release asset and `SHA256SUMS`) requires curl or wget on `PATH`, matching
   `fetch` (the downloader used for the `releases/latest` lookup): both run the
-  same `command -v curl || command -v wget || err ...` check and both end the
-  script with the same non-zero exit and the same `need curl or wget on PATH`
-  message. The *output* is not identical, because of where each is called:
-  `fetch_to` is invoked directly in a top-level `if`, so its `err` exits the
-  script immediately with that one line on stderr. `fetch` is invoked inside a
-  pipeline within a command substitution
-  (`tag="$(fetch ... | sed ... | head -n 1)"`), and in `sh`/`dash` each
-  pipeline stage runs in its own subshell, so `err`'s `exit 1` there kills only
-  that subshell; the script falls through to
-  `[ -n "$tag" ] || err "could not determine the latest release; set
-  MIND_VERSION"`, so stderr shows that message too, after the real cause. The
-  true cause always prints first and is never masked. This matters because
+  same downloader check and report `need curl or wget on PATH` when neither is
+  available. Latest-release metadata is parsed only after its transfer succeeds;
+  partial output from a failed transfer cannot select a version. This matters because
   `fetch_to` can be the *first* downloader call: when `MIND_VERSION` is set,
   the `releases/latest` lookup that goes through `fetch` is skipped entirely,
   so `fetch_to`'s own missing-downloader check is the only thing standing
@@ -626,7 +617,7 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   knob asks for more room and not less. A missing, non-numeric, or zero value
   falls back to 15; zero is treated as missing rather than as "no limit", which
   would defeat the purpose of the knob. `resources/install.sh` applies an
-  equivalent 15 s connect timeout and 600 s max-time to its own curl/wget calls;
+  15 s network timeout and a 600 s whole-transfer deadline to both curl and wget;
   it does not read `MIND_HTTP_TIMEOUT_SECS`, because it runs before `mind` is
   installed.
 - `STO-53` All wget invocations in `resources/install.sh` pass `--tries=1`. wget
@@ -786,6 +777,20 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   else exits non-zero with `invalid version` before any download, so the
   version cannot add a path segment or query to the release URL or move the
   local archive path out of the temp dir.
+- `STO-90` `resources/install.sh` rejects a directory at the executable path.
+  It stages the executable in the install directory, sets its mode, and renames
+  it into place only after staging succeeds, preserving an existing executable
+  if copying or setting permissions fails.
+- `STO-91` `resources/publish-release.sh` verifies that the version tag, when
+  it exists, resolves (peeling an annotated tag) to the selected commit. A new
+  release is created as a draft, its assets are downloaded back and checked
+  for a complete set that matches `SHA256SUMS`, and only then is it published,
+  which creates the tag. A draft left by a run that failed partway is
+  re-uploaded and published the same way. A published release is never changed:
+  its asset set and checksums are verified, each archive must carry valid build
+  provenance (`gh attestation verify`), and those archives are what the
+  Homebrew formula pins. An inconsistent release, a missing tag, a tag on
+  another commit, or a lookup failure fails with a diagnostic before any write.
 
 ## Errors
 

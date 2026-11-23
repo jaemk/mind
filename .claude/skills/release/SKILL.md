@@ -146,8 +146,11 @@ A run can be waiting on the `release` environment's approval gate before
    `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu`, and the musl legs
    `aarch64-unknown-linux-musl` and `x86_64-unknown-linux-musl` (static, used
    by `install.sh`), attesting build provenance for each tarball.
-4. `release`: generates `SHA256SUMS` and runs `gh release create --target`
-   with every tarball, which creates the `v<version>` tag.
+4. `release`: `resources/publish-release.sh` generates `SHA256SUMS`, creates
+   the release as a draft with every tarball, downloads the assets back and
+   checks them, then publishes it, which creates the `v<version>` tag. A
+   published release is only verified (asset set, checksums, build
+   provenance) and reused.
 5. `publish`: publishes to crates.io via trusted publishing (skipped when the
    version is already there), then commits the regenerated `Formula/mind.rb`
    and the next patch's `-dev` version to `main` as `github-actions[bot]`.
@@ -172,11 +175,14 @@ git pull                                # pick up the bot's formula + dev commit
   allowed deployment refs (the `v*` tag entry is from the tag-triggered
   releases) and waits for a required reviewer's approval.
 - A run that fails partway is re-run with `gh workflow run release.yml --ref
-  main` (`workflow_dispatch`). Every publishing step is idempotent: an existing
-  GitHub Release gets its assets re-uploaded, a version already on crates.io is
-  not published again, and an up-to-date formula is not re-committed. Fix the
-  cause on `main` first if the failure was in the tree; since `main` is then
-  past the release commit, the re-run releases that newer commit.
+  main` (`workflow_dispatch`). Every publishing step is idempotent: a release
+  still in draft gets its assets re-uploaded and is published, a published one
+  is never changed (its assets are verified and reused), a version already on
+  crates.io is not published again, and an up-to-date formula is not
+  re-committed. A re-run on a commit other than the one the tag points at
+  fails with a diagnostic. Fix the cause on `main` first if the failure was in
+  the tree, then delete the draft release if one is left, so the re-run starts
+  from the newer commit.
 - Known flake: `ci-macos` can fail the timing-based lock test
   `tui::action::tests::execute_lock_is_exclusive_not_shared` under a loaded
   runner. If that single test is the only failure, re-run the failed jobs.
