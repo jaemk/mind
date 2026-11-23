@@ -6,11 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-11-22
+
 ### Added
 
 - `MIND_REQUIRE_ATTESTATION=1` makes `resources/install.sh` require a valid
   build-provenance check: the install stops if `gh` is missing or the check
   fails. The check now also pins the release workflow as the signer.
+
+### Changed
+
+- The release workflow creates a release as a draft, checks the uploaded
+  assets, then publishes it. A draft left by a failed run is re-uploaded; a
+  published release is verified (asset set, checksums, build provenance) and
+  never changed.
 
 ### Fixed
 
@@ -2636,7 +2645,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.54.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.55.0...HEAD
+[0.55.0]: https://github.com/jaemk/mind/compare/v0.54.0...v0.55.0
 [0.54.0]: https://github.com/jaemk/mind/compare/v0.53.1...v0.54.0
 [0.53.1]: https://github.com/jaemk/mind/compare/v0.53.0...v0.53.1
 [0.53.0]: https://github.com/jaemk/mind/compare/v0.52.0...v0.53.0
