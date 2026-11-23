@@ -661,14 +661,24 @@ fn settle_on_tag(url: &str, dir: &Path, tag: &str) -> Result<()> {
 
 /// The release tag a version pin resolved to. Unresolved is a caller bug, but
 /// it surfaces as an error rather than a panic.
+///
+/// The tag name came from the remote's own ref list (or a saved registry), so it
+/// gets the checks a typed pin gets (DSC-66, DSC-122) before it is formatted
+/// into a refspec: no leading `-`, no control or whitespace character, no `:`
+/// or `*`.
+// spec: DSC-66 DSC-122
 fn resolved_tag<'a>(url: &str, v: &'a crate::source::VersionPin) -> Result<&'a str> {
-    v.tag
+    let tag = v
+        .tag
         .as_deref()
         .ok_or_else(|| MindError::NoMatchingRelease {
             source_name: url.to_string(),
             range: v.range.clone(),
             highest: v.highest.clone(),
-        })
+        })?;
+    validate_ref_value(tag)?;
+    reject_refspec_syntax(tag)?;
+    Ok(tag)
 }
 
 /// Clone `url` into `dest` at the default branch, the same as `clone_at` with
@@ -1215,6 +1225,25 @@ mod tests {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     // ---- DSC-66: validate_ref_value ----------------------------------------
+
+    #[test]
+    fn a_resolved_version_tag_gets_the_pin_checks_before_it_is_used() {
+        // spec: DSC-66 DSC-122 -- the tag a version pin resolved to is read back
+        // from the remote's ref list or a saved registry, so a name that looks
+        // like an option or refspec syntax is refused, not passed to git.
+        let pin = |tag: &str| -> crate::source::VersionPin {
+            serde_json::from_value(serde_json::json!({ "range": "^1", "tag": tag })).unwrap()
+        };
+        for bad in ["-x", "v1:refs/heads/x", "v1.*", "v1 0", "v1\n", ""] {
+            let p = pin(bad);
+            assert!(resolved_tag("u", &p).is_err(), "{bad:?} must be refused");
+        }
+        let p = pin("v1.2.3-rc.1");
+        assert_eq!(resolved_tag("u", &p).unwrap(), "v1.2.3-rc.1");
+        let none: crate::source::VersionPin =
+            serde_json::from_value(serde_json::json!({ "range": "^1" })).unwrap();
+        assert!(resolved_tag("u", &none).is_err());
+    }
 
     #[test]
     fn validate_ref_value_accepts_normal_refs() {

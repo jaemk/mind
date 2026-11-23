@@ -8,6 +8,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A version pin's resolved release tag, which comes from the remote's tag list,
+  gets the same checks as a typed pin (no leading `-`, no `:` or `*`) before it
+  is used in a fetch refspec.
 - Reading an item's content as text (token expansion, the reference scans,
   `review`, the `probe` preview) is capped at 16 MiB per file, so a source
   cannot exhaust memory with a file that compresses well in git. A larger file
