@@ -900,7 +900,7 @@ fn run_checks(
 
     for item in &items {
         for file in review_item_files(item) {
-            let content = match std::fs::read_to_string(&file) {
+            let content = match crate::error::read_text_capped(&file) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -1015,7 +1015,7 @@ fn run_checks(
         for item in &items {
             let mut refs: Vec<String> = Vec::new();
             for file in review_item_files(item) {
-                let Ok(content) = std::fs::read_to_string(&file) else {
+                let Ok(content) = crate::error::read_text_capped(&file) else {
                     continue;
                 };
                 for r in crate::namespace::unguarded_refs(&content, &siblings) {
@@ -1072,7 +1072,7 @@ fn run_checks(
         };
         let mut bare_tools: Vec<String> = Vec::new();
         for file in review_item_files(item) {
-            let Ok(content) = std::fs::read_to_string(&file) else {
+            let Ok(content) = crate::error::read_text_capped(&file) else {
                 continue;
             };
             // A non-markdown item file (a script, data) is entirely code: any
@@ -1406,7 +1406,7 @@ fn run_checks(
         let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
         for item in &items {
             for file in review_item_files(item) {
-                let Ok(content) = std::fs::read_to_string(&file) else {
+                let Ok(content) = crate::error::read_text_capped(&file) else {
                     continue;
                 };
                 for (token, target, owner) in referenced_source_files(&content, item, &source_items)
@@ -1465,7 +1465,7 @@ fn run_checks(
         for item in &items {
             let mut flagged: HashSet<String> = HashSet::new();
             for file in review_item_files(item) {
-                let Ok(content) = std::fs::read_to_string(&file) else {
+                let Ok(content) = crate::error::read_text_capped(&file) else {
                     continue;
                 };
                 for name in crate::namespace::referenced_names(&content) {
@@ -1631,7 +1631,7 @@ fn run_checks(
                     if !crate::namespace::is_markdown(&file) {
                         continue;
                     }
-                    let Ok(content) = std::fs::read_to_string(&file) else {
+                    let Ok(content) = crate::error::read_text_capped(&file) else {
                         continue;
                     };
                     // Hardcoded install paths -> tokens.

@@ -358,6 +358,7 @@ fn write_fake_wget(bin_dir: &Path, fixture_dir: &Path, log_path: &Path) {
 const REAL_TOOLS: &[&str] = &[
     "sed", "head", "mktemp", "awk", "tar", "mkdir", "cp", "chmod", "rm", "cat", "install",
     // `tar -xzf` forks gzip.
+    "sleep", "mv",
     "gzip", // The fake curl script's asset-matching arm shells out to `basename`.
     "basename",
 ];
@@ -1394,4 +1395,278 @@ fn install_sh_reachable_targets_are_all_published_by_the_release_matrix() {
          is exactly the C30/P1 class of drift (the release asset set and \
          install.sh's requests silently diverging)"
     );
+}
+
+#[test]
+// spec: STO-89
+fn install_sh_refuses_a_version_that_is_not_a_release_tag_before_any_download() {
+    for bad in [
+        "1.0.0/../../x",
+        "../x",
+        "1.0.0?a=b",
+        "1.0.0#frag",
+        "1..0",
+        ".1.0",
+        "-1.0",
+        "1.0 0",
+    ] {
+        let fx = Fixture::new("bad-pinned-version", "1.0.0");
+        write_fake_uname_linux_x86_64(&fx.bin_dir);
+        write_fake_gh_always_fails(&fx.bin_dir);
+        write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+
+        let out = run_install_sh_pinned(&fx.bin_dir, &fx.install_dir, bad);
+        assert!(!out.status.success(), "{bad:?} must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid version"),
+            "{bad:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fx.requested(), "", "{bad:?}: no request may be made");
+        assert!(!fx.install_dir.join("mind").exists());
+    }
+}
+
+#[test]
+// spec: STO-89
+fn install_sh_refuses_a_latest_release_tag_that_is_not_a_release_tag() {
+    let fx = Fixture::new("bad-latest-tag", "1.0.0");
+    std::fs::write(
+        fx.dir.join("release.json"),
+        r#"{"tag_name": "v1.0.0/../../evil"}"#,
+    )
+    .unwrap();
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid version"));
+    let log = fx.requested();
+    assert!(
+        !log.contains("/download/"),
+        "only the lookup may be requested: {log:?}"
+    );
+}
+
+#[test]
+// spec: STO-89
+fn install_sh_accepts_a_prerelease_and_build_version() {
+    let fx = Fixture::new("ok-prerelease-version", "1.2.3-rc.1+b5");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"RC");
+    fx.publish_sums(&[&musl]);
+
+    let out = run_install_sh_pinned(&fx.bin_dir, &fx.install_dir, "1.2.3-rc.1+b5");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read(fx.install_dir.join("mind")).unwrap(), b"RC");
+}
+
+#[test]
+// spec: STO-90
+fn install_sh_rejects_directory_at_executable_path() {
+    let fx = Fixture::new("directory-collision", "9.9.9");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    let asset = fx.publish("x86_64-unknown-linux-musl", b"NEW");
+    fx.publish_sums(&[&asset]);
+    std::fs::create_dir_all(fx.install_dir.join("mind")).unwrap();
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("directory"));
+    assert!(!fx.install_dir.join("mind/mind").exists());
+}
+
+#[test]
+// spec: STO-90
+fn install_sh_preserves_existing_binary_after_partial_copy_and_replaces_on_success() {
+    let fx = Fixture::new("partial-copy", "9.9.9");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    let asset = fx.publish("x86_64-unknown-linux-musl", b"NEW CONTENT");
+    fx.publish_sums(&[&asset]);
+    std::fs::create_dir_all(&fx.install_dir).unwrap();
+    std::fs::write(fx.install_dir.join("mind"), b"WORKING OLD BINARY").unwrap();
+    let real_cp = which("cp").unwrap();
+    write_exec(
+        &fx.bin_dir.join("cp"),
+        &format!(
+            "#!/bin/sh\ncase \"$2\" in\n*/.mind.*) printf broken > \"$2\"; exit 1 ;;\nesac\nexec {real_cp:?} \"$@\"\n"
+        ),
+    );
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(!out.status.success());
+    assert_eq!(
+        std::fs::read(fx.install_dir.join("mind")).unwrap(),
+        b"WORKING OLD BINARY"
+    );
+    assert_eq!(std::fs::read_dir(&fx.install_dir).unwrap().count(), 1);
+    std::fs::remove_file(fx.bin_dir.join("cp")).unwrap();
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(fx.install_dir.join("mind")).unwrap(),
+        b"NEW CONTENT"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(fx.install_dir.join("mind"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[test]
+// spec: STO-74
+fn install_sh_rejects_partial_latest_metadata_transfer() {
+    let fx = Fixture::new("partial-metadata", "9.9.9");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_exec(
+        &fx.bin_dir.join("curl"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\nprintf '{{\"tag_name\": \"v9.9.9\"}}\\n'\nexit 18\n",
+            fx.log_path
+        ),
+    );
+    let out = run_install_sh(&fx.bin_dir, &fx.install_dir);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("metadata"));
+    assert_eq!(fx.requested().lines().count(), 1);
+    assert!(!fx.install_dir.exists());
+}
+
+#[test]
+// spec: STO-52
+fn install_sh_terminates_wget_at_wall_clock_deadline() {
+    let fx = Fixture::new("wget-deadline", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    // Accelerate only the watchdog's 600-second sleep; the fake transfer
+    // continues producing bytes throughout that interval.
+    std::fs::remove_file(fx.bin_dir.join("sleep")).unwrap();
+    write_exec(
+        &fx.bin_dir.join("sleep"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" > {:?}\nexec /bin/sleep 0.2\n",
+            fx.dir.join("sleep-args")
+        ),
+    );
+    write_exec(
+        &fx.bin_dir.join("wget"),
+        "#!/bin/sh\nwhile :; do printf x; /bin/sleep 0.02; done\n",
+    );
+    let out = Command::new(which("sh").unwrap())
+        .arg(install_sh_path())
+        .env("PATH", &fx.bin_dir)
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env_remove("MIND_VERSION")
+        .locked_output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("metadata"));
+    assert_eq!(
+        std::fs::read_to_string(fx.dir.join("sleep-args"))
+            .unwrap()
+            .trim(),
+        "600"
+    );
+    assert!(!fx.install_dir.exists());
+}
+
+/// A fixture with a `gh` stub that exits `gh_exit` (or no `gh` at all), run with
+/// `MIND_REQUIRE_ATTESTATION=1`.
+fn run_strict(tag: &str, gh_exit: Option<i32>) -> (Fixture, PathBuf, std::process::Output) {
+    let fx = Fixture::new(tag, "9.9.9");
+    let gh_log = fx.dir.join("gh.log");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    if let Some(code) = gh_exit {
+        write_fake_gh_logging(&fx.bin_dir, &gh_log, code);
+    }
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"MUSL");
+    fx.publish_sums(&[&musl]);
+    let out = Command::new("sh")
+        .arg(install_sh_path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fx.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env("MIND_REQUIRE_ATTESTATION", "1")
+        .env_remove("MIND_VERSION")
+        .locked_output()
+        .expect("spawn sh resources/install.sh");
+    (fx, gh_log, out)
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_pins_the_signer_workflow_when_it_checks_provenance() {
+    let (_fx, gh_log, out) = run_strict("strict-ok", Some(0));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let recorded = std::fs::read_to_string(gh_log).unwrap();
+    assert!(
+        recorded.contains("--signer-workflow jaemk/mind/.github/workflows/release.yml"),
+        "{recorded:?}"
+    );
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_required_attestation_stops_a_failed_check_before_install() {
+    let (fx, _log, out) = run_strict("strict-fails", Some(1));
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("MIND_REQUIRE_ATTESTATION=1"), "{stderr}");
+    assert!(!fx.install_dir.join("mind").exists());
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_required_attestation_needs_gh() {
+    // A PATH of only the stubs and the tools install.sh needs, so no real `gh`
+    // can be found.
+    let fx = Fixture::new("strict-no-gh", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    link_real_tools(&fx.bin_dir, &[checksum_tool()]);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"MUSL");
+    fx.publish_sums(&[&musl]);
+    let out = Command::new(which("sh").unwrap())
+        .arg(install_sh_path())
+        .env("PATH", &fx.bin_dir)
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env("MIND_REQUIRE_ATTESTATION", "1")
+        .env_remove("MIND_VERSION")
+        .locked_output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs gh on PATH"), "{stderr}");
+    assert!(!fx.install_dir.join("mind").exists());
 }

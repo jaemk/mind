@@ -234,6 +234,10 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 `MIND_VERSION` is unset; pinning it downloads the release asset from `github.com`
 directly. `mind evolve --to <v>` is the same: the version bypasses the API.
 
+`MIND_REQUIRE_ATTESTATION=1` (see [Install](install.md)) needs `gh` and a
+reachable `api.github.com`, so leave it unset where the API is blocked: the
+install would stop instead of skipping the check.
+
 For fully air-gapped mirrors, meld from a local path or a `file://` remote
 pointing at an internal clone. Source melding accepts any git remote git can
 reach, including internal hosts.

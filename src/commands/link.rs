@@ -338,7 +338,7 @@ pub(super) fn link_reconciled<'a>(
     // A token naming anything but the linked skill is a hard stop. Scan exactly
     // the files install expands (markdown plus `expand:`-listed, NS-53/NS-57).
     for file in expandable_files(item)? {
-        let Ok(text) = std::fs::read_to_string(&file) else {
+        let Ok(text) = crate::error::read_text_capped(&file) else {
             continue;
         };
         for r in crate::namespace::sibling_reference_tokens(&text) {

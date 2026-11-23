@@ -21,9 +21,9 @@ pub type Result<T> = std::result::Result<T, MindError>;
 /// generous ceiling that sits orders of magnitude above any real metadata file
 /// while still bounding how much memory a single melded source can force `mind`
 /// to allocate while scanning or installing it. This cap covers metadata reads
-/// ONLY -- item content (an item tree's `{{ns:}}` expansion at install, the
-/// unguarded-reference scan, `review`, the TUI preview, and content hashing)
-/// stays uncapped (see spec/discovery.md DSC-90).
+/// ONLY. Item content text reads have their own fixed limit
+/// ([`CONTENT_SIZE_LIMIT`], DSC-125); hashing and copying stay uncapped (see
+/// spec/discovery.md DSC-90).
 ///
 /// It is a *default*, not a constant of the format: an operator who has a
 /// legitimate metadata file past it raises (or lowers, or removes) the ceiling
@@ -217,6 +217,37 @@ pub(crate) fn read_capped_metadata_with(path: &Path, limit: u64) -> Result<Strin
             std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         )
     })
+}
+
+/// The most of one item content file `mind` reads as text (DSC-125). Fixed, not
+/// the metadata knob (DSC-103): a lowered metadata cap must not hide a
+/// workflow's `{{ns:}}` edge, and 16 MiB is far above any real skill file.
+pub const CONTENT_SIZE_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Read an item's own content file as text, at most [`CONTENT_SIZE_LIMIT`].
+///
+/// `read_to_string` allocates the file's whole size, and a git repo packs a
+/// multi-GB file of repeated bytes into a few MB, so a scan, expansion, or
+/// review of a hostile source could exhaust memory. An oversized file, like a
+/// non-UTF-8 one, is an `Err` the caller skips as "not text mind reads".
+pub fn read_text_capped(path: &Path) -> std::io::Result<String> {
+    read_text_capped_with(path, CONTENT_SIZE_LIMIT)
+}
+
+pub(crate) fn read_text_capped_with(path: &Path, limit: u64) -> std::io::Result<String> {
+    use std::io::Read as _;
+
+    let mut buf = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds the size cap",
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// The item kinds `mind` knows how to install.
@@ -4056,6 +4087,44 @@ mod tests {
         );
         assert_eq!(err.kind(), "metadata-too-large", "kind slug must be stable");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_text_capped_skips_an_oversized_or_non_utf8_file_and_reads_the_rest() {
+        // spec: DSC-125
+        let ok = cap_tmp("text-ok");
+        std::fs::write(&ok, "a {{ns:b}} c").unwrap();
+        assert_eq!(read_text_capped(&ok).unwrap(), "a {{ns:b}} c");
+
+        // Exactly at the limit passes; one byte over is refused, without the
+        // whole file being read (the sparse file is never materialized).
+        let at = cap_tmp("text-at");
+        let f = std::fs::File::create(&at).unwrap();
+        f.set_len(CONTENT_SIZE_LIMIT).unwrap();
+        drop(f);
+        assert_eq!(
+            read_text_capped(&at).unwrap().len() as u64,
+            CONTENT_SIZE_LIMIT
+        );
+        let over = cap_tmp("text-over");
+        let f = std::fs::File::create(&over).unwrap();
+        f.set_len(CONTENT_SIZE_LIMIT + 1).unwrap();
+        drop(f);
+        let e = read_text_capped(&over).expect_err("over the limit");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+        // A small limit through the same reader, for the boundary itself.
+        let small = cap_tmp("text-small");
+        std::fs::write(&small, "12345").unwrap();
+        assert_eq!(read_text_capped_with(&small, 5).unwrap(), "12345");
+        assert!(read_text_capped_with(&small, 4).is_err());
+
+        let bin = cap_tmp("text-bin");
+        std::fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(read_text_capped(&bin).is_err());
+        assert!(read_text_capped(&cap_tmp("text-missing")).is_err());
+        for p in [ok, at, over, small, bin] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]

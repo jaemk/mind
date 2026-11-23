@@ -191,7 +191,8 @@ and verified.
 | A curator's `add-roots` on a `[discover].sources` entry is gated like `roots`, so it cannot override a nested source's authoritative export control | done | DSC-88 |
 | Add-root de-duplication keys on (kind, path), so one directory can still contribute both a tool and a skill | done | DSC-89 |
 | `hooks run`/`hooks list` error on a target that matches both a registered source and an installed item, with escapes for each reading | done | HOOK-105 |
-| Accepted risk: item content read from a source tree, beyond the capped metadata, is not size-capped | done | DSC-90 |
+| Accepted risk: item content hashing and copying, beyond the capped metadata and content text reads, is not size-capped | done | DSC-90 |
+| Item content read as text (expansion, reference scans, `review`, preview) is capped at 16 MiB per file | done | DSC-125 |
 | Managed-policy allowlist matching derives the base identity structurally from the source's fields, never by scanning an identity string for a `#`/`@` marker | done | POL-68 |
 | Managed-policy `allow`/`lock` matching is always performed on the base `host/owner/repo` identity, never on an extended instance identity carrying an item-link `#path` and/or consumer `@alias` suffix | done | POL-67 |
 | `ssh://user@host/owner/repo` parses: the identity host strips a userinfo prefix (split on the last `@`), the full authority is preserved in the clone url for the ssh scheme; userinfo is refused for `http`/`https` so a credential is never persisted into `sources.json` or emitted by `dump` | done | STO-67 |

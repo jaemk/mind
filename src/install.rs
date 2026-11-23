@@ -847,7 +847,7 @@ fn expand_references(
             continue;
         }
         // Skip anything that is not valid UTF-8 text.
-        let Ok(content) = std::fs::read_to_string(&file) else {
+        let Ok(content) = crate::error::read_text_capped(&file) else {
             continue;
         };
         if !content.contains("{{") {

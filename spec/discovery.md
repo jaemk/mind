@@ -982,6 +982,17 @@ field lets the curator opt in to named handling.
   narrow enough to matter, wide enough that no real-world metadata file is
   expected to ever approach it.
 
+- `DSC-125` Reading an item's own content file as text (token expansion at
+  install and at scan time, the meld warnings, `review`, the `learn` item-link
+  check, the `probe` preview) is capped at 16 MiB per file
+  (`error::CONTENT_SIZE_LIMIT`, via `error::read_text_capped`). It is a fixed
+  limit, not the metadata knob (DSC-103): a lowered metadata cap does not hide a
+  token. A file over it is skipped like a non-UTF-8 file: install copies it
+  unexpanded, the reference scans see no tokens in it, and `review` does not
+  scan it. The item's scan-time text (RES-3) stops growing past the same limit
+  in total. A source cannot make `mind` allocate more than that per file by
+  shipping a file that compresses well in git.
+
 ## Configuring the metadata cap
 
 - `DSC-103` The DSC-91 cap is a default, not a fixed property of the format. An
@@ -1081,14 +1092,12 @@ field lets the curator opt in to named handling.
 
 ## Accepted risks
 
-- `DSC-90` Beyond the metadata cap (DSC-91), no other read of source-controlled
-  content is size-capped, and TOML nesting depth is not bounded. This covers
-  every read of an item's own *content* (as opposed to the metadata describing
-  it): every file in an item tree during `{{ns:}}` expansion at install; the
-  unguarded-reference scan; `review`; the TUI preview; and content hashing. A
-  source author could ship a multi-gigabyte file inside a skill's directory, or
-  a deeply nested `mind.toml` table structure, to make `mind` allocate heavily
-  while installing or reviewing that source.
+- `DSC-90` Beyond the metadata cap (DSC-91) and the content text-read cap
+  (DSC-125), no other read of source-controlled content is size-capped, and
+  TOML nesting depth is not bounded. This covers content hashing and copying,
+  and a deeply nested `mind.toml` table structure. A source author could ship a
+  multi-gigabyte file inside a skill's directory, or such a table structure, to
+  make `mind` spend time and disk while installing that source.
 
   This is a self-inflicted denial of service: the operator chose to meld that
   source, no privilege boundary is crossed, and the exposure is a crash of the
@@ -1099,8 +1108,8 @@ field lets the curator opt in to named handling.
   risk and revisit if melding untrusted third-party sources at scale becomes
   common.
 
-  Normative content: `mind` does not cap these reads, and does not bound TOML
-  nesting depth. A change that adds a cap to any of them is a behavior change
+  Normative content: `mind` does not cap hashing or copying, and does not
+  bound TOML nesting depth. A change that adds a cap to any of them is a behavior change
   and must update this entry (and, if it narrows the scope further, split out
   another `DSC-9x` the way DSC-91 was split out of this one). Recorded with an
   ID, indexed from the feature table, and referenced from `SECURITY.md`,

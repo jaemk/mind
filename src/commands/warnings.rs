@@ -60,12 +60,13 @@ pub(super) fn warn_unguarded_references(items: &[CatalogItem]) {
     for item in items {
         let mut refs: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
-            // spec: DSC-90 DSC-108 -- full, uncapped content (the same file
-            // install copies), behind the no-follow regular-file guard.
+            // spec: DSC-90 DSC-108 DSC-125 -- the file's full content (the same
+            // file install copies) up to the size cap, behind the no-follow
+            // regular-file guard.
             if !is_regular_file_nofollow(&file) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&file) else {
+            let Ok(content) = crate::error::read_text_capped(&file) else {
                 continue; // skip non-UTF-8 / unreadable files
             };
             for r in crate::namespace::unguarded_refs(&content, &siblings) {

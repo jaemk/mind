@@ -599,7 +599,7 @@ fn read_item_text(item: &catalog::CatalogItem) -> String {
         if !crate::namespace::item_expands_tokens(item, &item.path, &file) {
             continue;
         }
-        if let Ok(content) = std::fs::read_to_string(&file) {
+        if let Ok(content) = crate::error::read_text_capped(&file) {
             buf.push_str(&content);
             buf.push('\n');
         }

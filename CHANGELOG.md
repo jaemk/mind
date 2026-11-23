@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `MIND_REQUIRE_ATTESTATION=1` makes `resources/install.sh` require a valid
+  build-provenance check: the install stops if `gh` is missing or the check
+  fails. The check now also pins the release workflow as the signer.
+
+### Fixed
+
+- `resources/install.sh` replaces `mind` atomically (staged in the install
+  directory, then renamed), refuses a directory at the executable path, ends a
+  wget download at the same 600 s deadline curl has, and no longer reads a
+  version from a failed `releases/latest` transfer.
+- A version pin's resolved release tag, which comes from the remote's tag list,
+  gets the same checks as a typed pin (no leading `-`, no `:` or `*`) before it
+  is used in a fetch refspec.
+- Reading an item's content as text (token expansion, the reference scans,
+  `review`, the `probe` preview) is capped at 16 MiB per file, so a source
+  cannot exhaust memory with a file that compresses well in git. A larger file
+  is skipped like a non-UTF-8 one.
+- `resources/install.sh` refuses a `MIND_VERSION` (or latest-release tag) that
+  is not a release-tag shape, so it cannot add a path segment to the download
+  URL or move the archive path out of the temp dir.
+
 ## [0.54.0] - 2026-11-21
 
 ### Added
