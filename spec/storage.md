@@ -781,6 +781,12 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   It stages the executable in the install directory, sets its mode, and renames
   it into place only after staging succeeds, preserving an existing executable
   if copying or setting permissions fails.
+- `STO-92` `resources/install.sh` checks the archive's build provenance with
+  `gh attestation verify --repo <repo> --signer-workflow <repo>/.github/workflows/release.yml`
+  when `gh` is on `PATH`. By default the check is soft: a failure prints a note
+  and the install continues, and an absent `gh` skips it. With
+  `MIND_REQUIRE_ATTESTATION=1`, an absent `gh` or a failed check exits non-zero
+  before the archive is extracted.
 - `STO-91` `resources/publish-release.sh` verifies that the version tag, when
   it exists, resolves (peeling an annotated tag) to the selected commit. A new
   release is created as a draft, its assets are downloaded back and checked

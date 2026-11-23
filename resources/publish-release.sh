@@ -108,7 +108,8 @@ download_and_validate "$published"
 # release workflow built: the checksums above only show the release agrees with
 # itself.
 for archive in "$published"/mind-*.tar.gz; do
-  gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" >/dev/null || {
+  gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY" \
+    --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" >/dev/null || {
     echo "no valid build provenance for $archive" >&2
     exit 1
   }

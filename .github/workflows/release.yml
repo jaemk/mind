@@ -264,6 +264,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      # `gh attestation verify` in publish-release.sh reads the attestations.
+      attestations: read
     env:
       VERSION: ${{ needs.decide.outputs.version }}
     steps:

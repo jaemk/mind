@@ -27,6 +27,11 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mi
 
 If `~/.local/bin` is not on your `PATH`, the script prints the line to add.
 
+When `gh` is installed, the script also checks the archive's build provenance
+(`gh attestation verify`) and reports the result, without failing the install.
+Set `MIND_REQUIRE_ATTESTATION=1` to make it mandatory: the install stops if `gh`
+is missing or the check fails.
+
 ## Homebrew (macOS and Linux)
 
 ```

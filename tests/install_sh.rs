@@ -1588,3 +1588,85 @@ fn install_sh_terminates_wget_at_wall_clock_deadline() {
     );
     assert!(!fx.install_dir.exists());
 }
+
+/// A fixture with a `gh` stub that exits `gh_exit` (or no `gh` at all), run with
+/// `MIND_REQUIRE_ATTESTATION=1`.
+fn run_strict(tag: &str, gh_exit: Option<i32>) -> (Fixture, PathBuf, std::process::Output) {
+    let fx = Fixture::new(tag, "9.9.9");
+    let gh_log = fx.dir.join("gh.log");
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    if let Some(code) = gh_exit {
+        write_fake_gh_logging(&fx.bin_dir, &gh_log, code);
+    }
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"MUSL");
+    fx.publish_sums(&[&musl]);
+    let out = Command::new("sh")
+        .arg(install_sh_path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fx.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env("MIND_REQUIRE_ATTESTATION", "1")
+        .env_remove("MIND_VERSION")
+        .locked_output()
+        .expect("spawn sh resources/install.sh");
+    (fx, gh_log, out)
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_pins_the_signer_workflow_when_it_checks_provenance() {
+    let (_fx, gh_log, out) = run_strict("strict-ok", Some(0));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let recorded = std::fs::read_to_string(gh_log).unwrap();
+    assert!(
+        recorded.contains("--signer-workflow jaemk/mind/.github/workflows/release.yml"),
+        "{recorded:?}"
+    );
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_required_attestation_stops_a_failed_check_before_install() {
+    let (fx, _log, out) = run_strict("strict-fails", Some(1));
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("MIND_REQUIRE_ATTESTATION=1"), "{stderr}");
+    assert!(!fx.install_dir.join("mind").exists());
+}
+
+#[test]
+// spec: STO-92
+fn install_sh_required_attestation_needs_gh() {
+    // A PATH of only the stubs and the tools install.sh needs, so no real `gh`
+    // can be found.
+    let fx = Fixture::new("strict-no-gh", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    link_real_tools(&fx.bin_dir, &[checksum_tool()]);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"MUSL");
+    fx.publish_sums(&[&musl]);
+    let out = Command::new(which("sh").unwrap())
+        .arg(install_sh_path())
+        .env("PATH", &fx.bin_dir)
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env("MIND_REQUIRE_ATTESTATION", "1")
+        .env_remove("MIND_VERSION")
+        .locked_output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs gh on PATH"), "{stderr}");
+    assert!(!fx.install_dir.join("mind").exists());
+}

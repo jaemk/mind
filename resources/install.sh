@@ -158,16 +158,27 @@ fi
 [ "$expected" = "$actual" ] || err "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
 echo "mind-install: checksum OK"
 
-# Soft-verify GitHub build provenance attestation when `gh` is available. This
-# confirms the artifact was built by the release workflow (not just that it is
-# byte-identical to a possibly-substituted SHA256SUMS entry); it never fails
-# the install when `gh` is absent or the check itself errors.
+# Verify GitHub build provenance when `gh` is available. This confirms the
+# artifact was built by this repo's release workflow (not just that it is
+# byte-identical to a possibly-substituted SHA256SUMS entry). By default it is
+# soft: it never fails the install when `gh` is absent or the check errors.
+# MIND_REQUIRE_ATTESTATION=1 makes it mandatory (STO-92): no `gh`, or a failed
+# check, stops the install before anything is extracted.
+require_attestation=0
+if [ "${MIND_REQUIRE_ATTESTATION:-}" = "1" ]; then
+	require_attestation=1
+fi
 if command -v gh >/dev/null 2>&1; then
-	if gh attestation verify "$tmp/$asset" --repo "$REPO" >/dev/null 2>&1; then
+	if gh attestation verify "$tmp/$asset" --repo "$REPO" \
+		--signer-workflow "${REPO}/.github/workflows/release.yml" >/dev/null 2>&1; then
 		echo "mind-install: build provenance verified"
+	elif [ "$require_attestation" = "1" ]; then
+		err "build provenance could not be verified for ${asset} (MIND_REQUIRE_ATTESTATION=1)"
 	else
 		echo "mind-install: build provenance could not be verified (continuing)" >&2
 	fi
+elif [ "$require_attestation" = "1" ]; then
+	err "MIND_REQUIRE_ATTESTATION=1 needs gh on PATH to verify build provenance"
 fi
 
 tar -xzf "$tmp/$asset" -C "$tmp" || err "could not extract $asset"

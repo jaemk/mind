@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `MIND_REQUIRE_ATTESTATION=1` makes `resources/install.sh` require a valid
+  build-provenance check: the install stops if `gh` is missing or the check
+  fails. The check now also pins the release workflow as the signer.
+
 ### Fixed
 
 - `resources/install.sh` replaces `mind` atomically (staged in the install
