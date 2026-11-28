@@ -162,7 +162,11 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     };
 
     for s in &registry.sources {
-        if !s.clone_dir(paths).join(".git").is_dir() {
+        let dir = s.clone_dir(paths);
+        let git_metadata = dir.join(".git");
+        // Git worktrees use a .git file pointing to their metadata directory.
+        let has_clone = git_metadata.is_dir() || (git_metadata.is_file() && git::is_repo(&dir));
+        if !has_clone {
             issues.push(Issue {
                 kind: "no-clone",
                 target: s.name.clone(),

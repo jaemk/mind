@@ -13,6 +13,37 @@ fn introspect_is_clean_after_learn() {
 }
 
 #[test]
+fn introspect_recognizes_a_linked_git_worktree() {
+    // spec: CLI-90 CLI-92
+    let sb = Sandbox::new();
+    let worktree = sb.base.join("linked-worktree");
+    let path = worktree.to_str().unwrap();
+    git(&sb.source, &["worktree", "add", "--detach", path]);
+    assert!(worktree.join(".git").is_file());
+    let meld = sb.mind(&["meld", path, "--yes"]);
+    assert!(meld.success, "{} {}", meld.stdout, meld.stderr);
+
+    let clean = sb.mind(&["introspect", "--json"]);
+    assert!(clean.success, "{}", clean.stderr);
+    let report: serde_json::Value = serde_json::from_str(&clean.stdout).unwrap();
+    assert_eq!(report["issues"], serde_json::json!([]), "{}", clean.stdout);
+
+    write(&worktree.join(".git"), "gitdir: missing\n");
+    let broken = sb.mind(&["introspect", "--json"]);
+    assert!(broken.success, "{}", broken.stderr);
+    let report: serde_json::Value = serde_json::from_str(&broken.stdout).unwrap();
+    assert!(
+        report["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["kind"] == "no-clone"),
+        "{}",
+        broken.stdout
+    );
+}
+
+#[test]
 fn introspect_fix_relinks_missing_symlink() {
     // spec: CLI-91
     let sb = melded();
