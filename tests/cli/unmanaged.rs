@@ -131,6 +131,43 @@ fn recall_excludes_managed_links_from_unmanaged() {
 }
 
 #[test]
+fn forget_unmanaged_preserves_directories_with_markdown_names() {
+    // spec: UNM-1 UNM-3 UNM-7
+    let sb = melded();
+    let mut notes = Vec::new();
+    for dir in ["agents", "rules", "commands"] {
+        let note = sb.claude_home.join(dir).join("notes.md/keep.txt");
+        write(&note, "keep this");
+        notes.push(note);
+    }
+    let file = sb.claude_home.join("agents/handwritten.md");
+    write(&file, "# Agent");
+    let external = sb.base.join("external.md");
+    write(&external, "# Rule");
+    let link = sb.claude_home.join("rules/linked.md");
+    std::os::unix::fs::symlink(&external, &link).unwrap();
+
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "{}", probe.stderr);
+    let forget = sb.mind(&["forget", "--unmanaged", "--yes"]);
+    assert!(forget.success, "{}", forget.stderr);
+
+    for note in notes {
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), "keep this");
+    }
+    assert!(!probe.stdout.contains(":notes"), "{}", probe.stdout);
+    assert!(
+        probe.stdout.contains("agent:handwritten"),
+        "{}",
+        probe.stdout
+    );
+    assert!(probe.stdout.contains("rule:linked"), "{}", probe.stdout);
+    assert!(!file.exists());
+    assert!(std::fs::symlink_metadata(&link).is_err());
+    assert_eq!(std::fs::read_to_string(&external).unwrap(), "# Rule");
+}
+
+#[test]
 fn probe_lists_and_searches_unmanaged_items() {
     // spec: UNM-3
     let sb = melded();

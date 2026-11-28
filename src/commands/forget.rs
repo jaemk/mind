@@ -659,9 +659,7 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
             return Ok(());
         }
     }
-    for p in &item.paths {
-        crate::install::remove_path(p)?;
-    }
+    item.remove()?;
     if out.json {
         let mut result = MutationResult::new("forget", &item.display_key(), "removed");
         result.removed = vec![item.display_key()];
@@ -729,9 +727,7 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
     // Remove each matched item's paths. The manifest is NOT mutated (UNM-4).
     let mut removed: Vec<String> = Vec::new();
     for item in &matched {
-        for p in &item.paths {
-            crate::install::remove_path(p)?;
-        }
+        item.remove()?;
         removed.push(item.display_key());
         if !out.json {
             println!("{} forgot {} (unmanaged)", out.ok(), item.display_key());

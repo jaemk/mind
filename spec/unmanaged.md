@@ -18,7 +18,8 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
   STO-21). Its kind is the directory's kind and its name is the entry name
   (the basename, with a trailing `.md` stripped for an agent, rule, or
   command, or `.js` for a workflow). A skill entry must be a directory (or a
-  link resolving to one), and a workflow entry a file. A dot-entry (`.git`,
+  link resolving to one). An agent, rule, command, or workflow entry must
+  be a regular file or a link resolving to one. A dot-entry (`.git`,
   `.DS_Store`, `.draft.md`) is not an item, as in the catalog scan, so `forget
   --unmanaged` never removes one. A managed link occupies its path, so a
   given path is either managed or unmanaged, never both. Tools are never
@@ -83,8 +84,9 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
 
 - `UNM-4` `forget <ref>` whose ref resolves to an unmanaged item removes the lobe
   entry itself (the directory, file, or foreign link); there is no store copy or
-  manifest entry to remove, and the manifest is left unchanged. An unmanaged item
-  is matched only by an exact ref (its `kind:name`), never by a glob: a broad
+  manifest entry to remove, and the manifest is left unchanged. Removal of a
+  file-based item refuses a directory that replaced the file after discovery.
+  An unmanaged item is matched only by an exact ref (its `kind:name`), never by a glob: a broad
   `forget '*'` removes managed items only and never deletes a user's own files.
   When a bare name matches both a managed and an unmanaged item, the managed
   `forget` ambiguity rules apply (CLI-40): a kind prefix disambiguates.
