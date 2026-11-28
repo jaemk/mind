@@ -34,7 +34,20 @@ pub fn recall(
         // spec: DEP-61
         let manifest = Manifest::load(paths)?;
         let registry = Registry::load(paths)?;
-        let catalog = catalog::scan(paths, &registry).unwrap_or_default();
+        let catalog = {
+            let _step = crate::progress::step_if_idle(|| "scanning melded sources".to_string());
+            let mut catalog = Vec::new();
+            for source in &registry.sources {
+                match catalog::scan_one(paths, source) {
+                    Ok(items) => catalog.extend(items),
+                    Err(e) => crate::render::scan_warn(strip_ansi(&format!(
+                        "warning: could not scan source '{}': {e}",
+                        source.name
+                    ))),
+                }
+            }
+            catalog
+        };
         // Match by stable identity (source as well as key), so two sources
         // both offering an unprefixed name do not render duplicate nodes.
         let graph = crate::deps::installed_graph(
@@ -47,6 +60,14 @@ pub fn recall(
             },
             read_item_text,
         );
+        // The manifest still knows what is installed when an item is absent
+        // from its source's current catalog.
+        let missing_items = || {
+            manifest
+                .items
+                .values()
+                .filter(|item| !graph.contains_key(item.key().as_str()))
+        };
 
         if json {
             // spec: DEP-63 -- structured JSON output instead of the human rendering.
@@ -66,7 +87,12 @@ pub fn recall(
                 return print_json(&node);
             } else {
                 // Full forest: emit a JSON array of root nodes.
-                return print_json(&graph.forest_nodes());
+                let mut roots = graph.forest_nodes();
+                roots.extend(
+                    missing_items()
+                        .map(|item| crate::deps::DepNode::normal(item.display_key(), vec![])),
+                );
+                return print_json(&roots);
             }
         }
 
@@ -83,10 +109,14 @@ pub fn recall(
         } else {
             // Full forest.
             let forest = graph.render_forest();
-            if forest.is_empty() {
+            let mut missing = missing_items().peekable();
+            if forest.is_empty() && missing.peek().is_none() {
                 println!("no installed items");
             } else {
                 print!("{forest}");
+                for item in missing {
+                    println!("- {}", item.display_key());
+                }
             }
         }
         return Ok(());

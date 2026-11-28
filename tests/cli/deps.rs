@@ -1361,6 +1361,37 @@ fn probe_json_resolves_dependency_to_prefixed_effective_key() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn recall_tree_keeps_installed_items_when_one_catalog_is_invalid() {
+    // spec: DEP-61 DEP-63
+    let sb = dep61_fixture();
+    let broken = Sandbox::bare("broken-catalog");
+    broken.write_and_commit("rules/style.md", "---\ndescription: Style\n---\n# Style\n");
+    let meld = sb.mind(&["meld", &broken.source_spec(), "--yes"]);
+    assert!(meld.success, "{}", meld.stderr);
+    broken.write_and_commit("mind.toml", "[invalid");
+
+    let json = sb.mind(&["recall", "--tree", "--json"]);
+    assert!(json.success, "{}", json.stderr);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json.stdout).unwrap(),
+        serde_json::json!([
+            {"key": "skill:review", "dependencies": [
+                {"key": "agent:reviewer", "dependencies": []}
+            ]},
+            {"key": "rule:style", "dependencies": []}
+        ])
+    );
+    assert!(json.stderr.contains("broken-catalog"), "{}", json.stderr);
+
+    let text = sb.mind(&["recall", "--tree"]);
+    assert!(text.success, "{}", text.stderr);
+    assert_eq!(
+        text.stdout,
+        "- skill:review\n  - agent:reviewer\n- rule:style\n"
+    );
+}
+
+#[test]
 fn recall_tree_json_emits_json_array_with_dependency_nested() {
     // spec: DEP-63
     // `recall --tree --json` emits a JSON array of root nodes.

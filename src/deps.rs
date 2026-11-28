@@ -726,6 +726,11 @@ pub fn installed_graph(
 // Consuming shards wire up the callers; allow dead_code until they land.
 #[allow(dead_code)]
 impl InstalledGraph {
+    /// Whether the graph contains the installed item with this effective key.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.key_to_idx.contains_key(key)
+    }
+
     /// Return the `kind:effective_name` keys of installed items that directly
     /// depend on `target_key` (i.e. items whose dependency set includes the
     /// target). This is the "who would break if I remove this?" query for

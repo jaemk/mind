@@ -174,6 +174,9 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   as well as its `kind:effective-name` key), so when two melded sources both
   offer the same unprefixed name and one copy is installed, the uninstalled twin
   is not a node: the item appears once, with edges from the installed source.
+  A source whose catalog cannot be scanned produces a warning on stderr.
+  The forest keeps edges from readable catalogs and includes manifest items
+  absent from the graph as individual roots with no recorded dependencies.
 
 ## Non-interactive probe shows the tree
 
@@ -197,6 +200,8 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   item already on the current path (a cycle, DEP-22) is emitted as a leaf
   `{"key": "...", "cycle": true}` and not expanded again. `recall <item> --tree
   --json` emits the single subtree node for that item (an object, not an array).
+  Manifest-only roots use the same object shape with an empty `dependencies`
+  array. Catalog scan warnings stay on stderr.
   This is the nested-tree counterpart of the human `recall --tree` (DEP-61); the
   flat-adjacency form stays `probe --json` (DEP-62).
 
