@@ -1515,7 +1515,8 @@ only appear at meld or install time. It is read-only and installs nothing.
 - `CLI-90` `introspect` reports: sources with no clone or never synced, installed
   items whose links are missing, items no longer present upstream, items whose
   namespace changed, and items whose source content drifted. It reports a clean
-  summary when there are no issues.
+  summary when there are no issues. A working tree whose `.git` file points to
+  a valid Git directory counts as present.
 - `CLI-91` `introspect --fix` repairs what it can without changing versions: it
   recreates missing link(s) for installed items from their file registry
   (re-linking the existing store copy). If the store copy itself is gone the link
