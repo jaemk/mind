@@ -317,9 +317,23 @@ impl<'a, 'p> MeldRequest<'a, 'p> {
     }
 }
 
+fn curated_identity(repo: &str, alias: Option<String>) -> Option<String> {
+    let mut source = parse_spec_quiet(repo).ok()?;
+    source.apply_alias(alias);
+    Some(source.name)
+}
+
 /// Meld one source and then its nested sources. Returns how many sources were
 /// newly added to the registry.
 pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -> Result<usize> {
+    meld_with_direct_sources(st, req, &HashSet::new())
+}
+
+fn meld_with_direct_sources(
+    st: &mut MeldState<'_>,
+    req: MeldRequest<'_, '_>,
+    direct_sources: &HashSet<String>,
+) -> Result<usize> {
     let paths = st.paths;
     let policy = st.policy;
     let accept = st.accept;
@@ -1357,12 +1371,22 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
     // so the curator-empty guard below can distinguish "curator with all nested
     // sources gone" from an ordinary curator that simply has nothing nested.
     let mut nested_clone_failures = 0usize;
-    if let Some(nested) = mindfile
+    let nested = mindfile
         .as_ref()
         .filter(|_| !is_link) // spec: LNK-8
         .and_then(|m| m.discover.as_ref())
-        .map(|d| &d.sources)
-    {
+        .map(|d| &d.sources);
+    // The install walk already handles direct entries before descendants.
+    // Reserve the same identities here so their registration uses the same
+    // entries, including any pins recorded by `dump` (DSC-38).
+    let top_level_sources: Option<HashSet<String>> = nested.filter(|_| top_level).map(|entries| {
+        entries
+            .iter()
+            .filter_map(|entry| curated_identity(&entry.source, entry.effective_alias()))
+            .collect()
+    });
+    let direct_sources = top_level_sources.as_ref().unwrap_or(direct_sources);
+    if let Some(nested) = nested {
         for entry in nested {
             // DSC-64: install = true and a non-empty install-items list are
             // mutually exclusive; error before we register anything.
@@ -1403,6 +1427,13 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
                 });
                 continue;
             }
+            if !top_level
+                && !direct_sources.is_empty()
+                && curated_identity(&entry.source, entry.effective_alias())
+                    .is_some_and(|name| direct_sources.contains(&name))
+            {
+                continue;
+            }
 
             // DSC-59 DSC-65: lift this entry's curator-supplied configuration.
             // The pin directive is authoritative (DSC-65). Hooks and roots are
@@ -1420,7 +1451,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             // No consumer roots, add-roots (DSC-88: the curator's is gated),
             // flat-skills, pin, install hook, or --yes for a nested source; it
             // inherits the walk's SSH preference and DSC-116 answer.
-            match meld_recursive(
+            match meld_with_direct_sources(
                 st,
                 MeldRequest {
                     alias: entry.effective_alias(), // spec: DSC-78 -- prefer `namespace`, fall back to `as`
@@ -1432,6 +1463,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
                     // spec: HOOK-142
                     ..MeldRequest::new(&entry.source, &mut MeldProfiles::Curated(entry))
                 },
+                direct_sources,
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1588,6 +1620,12 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             }
             let repo_spec = marketplace_entry_spec(&entry, &dir);
             let entry_name = entry.name.clone();
+            if !direct_sources.is_empty()
+                && curated_identity(&repo_spec, Some(entry_name.clone()))
+                    .is_some_and(|name| direct_sources.contains(&name))
+            {
+                continue;
+            }
             let entry_version = entry.version;
             let entry_description = entry.description;
             // spec: MKT-9 -- the entry's pin applies like a curator pin
@@ -1598,7 +1636,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
             };
             // Recurse exactly like [discover].sources: cycle-safe
             // via visited, no consumer pin or roots, no install hook.
-            match meld_recursive(
+            match meld_with_direct_sources(
                 st,
                 MeldRequest {
                     alias: Some(entry_name.clone()),
@@ -1610,6 +1648,7 @@ pub(crate) fn meld_recursive(st: &mut MeldState<'_>, req: MeldRequest<'_, '_>) -
                     curated_by: Some(super_source_name.clone()),
                     ..MeldRequest::new(&repo_spec, &mut MeldProfiles::None)
                 },
+                direct_sources,
             ) {
                 Ok(n) => {
                     added += n;

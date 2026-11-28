@@ -427,6 +427,10 @@ run = "make build"
   seen is skipped, matched both by URL within the run and by `host/owner/repo`
   identity against the registry (so two spellings of the same repo do not slip
   past). Each source in the transitive set is therefore processed at most once.
+  When the top-level super-source lists a source directly, its entry governs
+  registration and installation for that identity, including any namespace
+  alias. A transitive entry for the same identity is skipped even when the
+  traversal encounters it first.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
 - `DSC-100` A `[discover].sources` entry whose `source` is an item link

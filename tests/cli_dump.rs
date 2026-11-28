@@ -2661,6 +2661,38 @@ fn installed_keys(mind_home: &Path) -> Vec<String> {
 }
 
 #[test]
+fn dump_roundtrip_prefers_its_direct_pin_over_a_transitive_branch() {
+    // spec: DUMP-1 DUMP-2 DSC-38 DSC-65
+    let curator = Sandbox::bare("absolute-curator");
+    let child = Sandbox::new("branch-child");
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = {:?}\nfollow-branch = \"main\"\ninstall = true\n",
+            child.source_spec()
+        ),
+    );
+    let meld = curator.mind(&["meld", &curator.source_spec(), "--yes"]);
+    assert!(meld.success, "{} {}", meld.stdout, meld.stderr);
+    let forget = curator.mind(&["forget", "agent:dev", "--yes"]);
+    assert!(forget.success, "{} {}", forget.stdout, forget.stderr);
+
+    let original_sources = source_state(&curator.mind_home);
+    let original_items = installed_keys(&curator.mind_home);
+    child.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Updated skill\n---\n# updated\n",
+    );
+
+    let fresh = remeld_dump(&curator, "direct-pin");
+    let restored_sources = source_state(&fresh);
+    for (name, state) in original_sources {
+        assert_eq!(restored_sources.get(&name), Some(&state), "{name}");
+    }
+    assert_eq!(installed_keys(&fresh), original_items);
+}
+
+#[test]
 fn dump_then_meld_reproduces_sources_and_installed_items() {
     // spec: DUMP-1 DUMP-2 DUMP-4 DUMP-5 DUMP-7 DUMP-11 DSC-60 -- over a spread of meld
     // settings (own prefix or none, an identity alias or none, `--root` or
