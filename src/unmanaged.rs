@@ -42,6 +42,22 @@ impl UnmanagedItem {
     pub fn display_key(&self) -> String {
         self.key().display()
     }
+
+    /// Remove the entries selected by the scan without following symlinks.
+    pub fn remove(&self) -> Result<()> {
+        for path in &self.paths {
+            if self.kind == ItemKind::Skill {
+                crate::install::remove_path(path)?;
+            } else {
+                match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(MindError::io(path, e)),
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Scan every configured agent home for unmanaged items (UNM-1): kind-dir entries
@@ -146,9 +162,10 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Result<Option<String>
         // spec: UNM-1 -- a skill is a directory (or a link resolving to one);
         // a plain file under `skills/` is not one the harness loads.
         ItemKind::Skill => entry.path().is_dir().then(|| name.to_string()),
-        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
-            name.strip_suffix(".md").map(str::to_string)
-        }
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => name
+            .strip_suffix(".md")
+            .filter(|_| entry.path().is_file())
+            .map(str::to_string),
         // spec: WF-50 -- a workflow is the file `<name>.js`, and only the
         // immediate children of `workflows/` are scanned, matching the flat
         // convention scan (WF-2).
@@ -247,6 +264,29 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn removal_refuses_a_directory_that_replaced_a_file() {
+        // spec: UNM-4
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("mind-unm-replaced-{}-{n}", std::process::id()));
+        let path = root.join("notes.md");
+        std::fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("keep.txt");
+        std::fs::write(&sentinel, b"keep this").unwrap();
+        let item = UnmanagedItem {
+            kind: ItemKind::Agent,
+            name: "notes".into(),
+            paths: vec![path],
+        };
+
+        let result = item.remove();
+        let contents = std::fs::read(sentinel);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(matches!(result, Err(MindError::Io { .. })));
+        assert_eq!(contents.unwrap(), b"keep this");
+    }
 
     fn make_items() -> Vec<UnmanagedItem> {
         vec![
